@@ -1,0 +1,2565 @@
+// ============================================================================
+// ZigZag Corridors (ZZC)
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2025-10-11 20:19:00
+// ============================================================================
+// Advanced ZigZag indicator with Keltner/Donchian Channels and BB/KC Squeeze detection
+//
+// Features:
+//   ✓ Non-repainting ZigZag with ATR/Percent/Deviation modes
+//   ✓ Keltner Channel - Adaptive volatility envelope
+//   ✓ Donchian Channel - Objective range detection
+//   ✓ BB/KC Squeeze Detection - Compression/Expansion timing
+//   ✓ Corridor Logic - Interesting zones between channels
+//   ✓ Sliding Window Flow (SWF) - Fair value window + state machine
+//   ✓ AVWAP Reset - Anchored VWAP shifts with ZigZag legs
+//   ✓ Flow States - Expansion/Pullback/Continuation/Reversal detection
+//   ✓ ARRA Rebuild Zones - Action/Reaction-Analysis with quality gate
+//   ✓ Last-Leg Fibonacci - Horizontal 38.2%/50%/61.8% retracements
+//   ✓ CPM Signal Engine - Mode-based adaptive thresholds (Strong/Moderate/Loose)
+//   ✓ Bidirectional Scoring - Separate bull/bear composite scores
+//   ✓ Divergence Boost - Threshold relaxation on confirmed divergence
+//   ✓ Diamond Gating - Pivot-confirmed exhaustion zone filtering
+//   ✓ RZ Proximity Boost - Enhanced signals near reversal zones
+//   ✓ Repainting Protection - HTF confirmation in Strong mode
+//   ✓ Signal Strength Classification - Strong/Moderate/Weak quality levels
+//   ✓ Live Leg Info Table - Real-time statistics
+//   ✓ Smart Alerts - Zone touches and squeeze breaks
+//   ✓ Customizable Visualization - Colors, labels, fills
+//
+// Indicators Used:
+//   • ZigZag (ATR/Percent/Deviation based)
+//   • Keltner Channels (EMA + ATR)
+//   • Donchian Channels (Highest/Lowest)
+//   • Bollinger Bands (for squeeze detection)
+//   • ATR (Average True Range)
+//   • EMA (Exponential Moving Average)
+//
+// ============================================================================
+
+//@version=6
+strategy("ZigZag Corridors (ZZC) [WavesUnchained] [STRATEGY]",
+         overlay=true, 
+         max_labels_count=500, 
+         max_lines_count=500)
+
+
+// ===========================================================================
+// MODULE: modules/inputs.pine
+// ===========================================================================
+
+// ============================================================================
+// INPUTS - User Configuration
+// ============================================================================
+
+// === ZigZag Configuration ===
+groupZig   = "ZigZag"
+mode       = input.string("ATR", "ZigZag Mode", options=["ATR","PCT","DEV"], group=groupZig, tooltip="ATR: Volatility-based, PCT: Percent, DEV: Standard Deviation")
+pivotLen   = input.int(5, "Pivot Width (L/R)", minval=2, group=groupZig, tooltip="Number of bars left/right for pivot detection")
+minBarsLeg = input.int(3, "Min. Bars per Leg", minval=1, group=groupZig, tooltip="Minimum duration of a ZigZag leg")
+mergeTicks = input.int(0, "Merge Tolerance (Ticks)", minval=0, group=groupZig, tooltip="Merge close pivots (0=disabled)")
+
+// Mode-specific thresholds
+pctTh      = input.float(2.0, "PCT Threshold (%)", minval=0.1, step=0.1, group=groupZig)
+atrLen     = input.int(14, "ATR Length (ZigZag)", minval=1, group=groupZig)
+atrK       = input.float(2.0, "ATR Factor (ZigZag)", minval=0.1, step=0.1, group=groupZig)
+devLen     = input.int(20, "StdDev Length (DEV)", minval=2, group=groupZig)
+devK       = input.float(1.5, "StdDev Factor (DEV)", minval=0.1, step=0.1, group=groupZig)
+
+// === Envelopes / Corridors ===
+groupEnv   = "Envelopes / Corridor"
+
+// Keltner Channel (NatGas optimized: mult 1.6-1.8)
+useKC      = input.bool(true, "Keltner Channel Active", group=groupEnv, tooltip="Adaptive volatility channel (EMA + ATR)")
+emaLenKC   = input.int(20, "KC EMA Length", minval=1, group=groupEnv)
+atrLenKC   = input.int(20, "KC ATR Length", minval=1, group=groupEnv)
+kcMult     = input.float(1.7, "KC Multiplier", minval=0.1, step=0.1, group=groupEnv, tooltip="NatGas default: 1.6-1.8")
+
+// Donchian Channel (NatGas optimized: 55)
+useDC      = input.bool(true, "Donchian Channel Active", group=groupEnv, tooltip="Objective range via Highest High / Lowest Low")
+donLen     = input.int(55, "Donchian Length (HH/LL)", minval=2, group=groupEnv, tooltip="NatGas default: 55")
+
+// BB/KC Squeeze (NatGas optimized: BB len 20, mult 2.0)
+useBBKC    = input.bool(true, "BB/KC Squeeze Active", group=groupEnv, tooltip="Detects compression/expansion phases")
+bbLen      = input.int(20, "BB Length", minval=2, group=groupEnv)
+bbMult     = input.float(2.0, "BB Multiplier", minval=0.1, step=0.1, group=groupEnv, tooltip="NatGas default: 2.0")
+
+// === HTF Corridor Context ===
+groupHTF     = "HTF Context"
+useHTF       = input.bool(true, "Show HTF Corridor", group=groupHTF, tooltip="Higher timeframe Keltner bands for context")
+tfHTF        = input.timeframe("240", "HTF Timeframe", group=groupHTF, tooltip="NatGas default: 4H (240)")
+
+// === Dot Engine (3-Tier Quality Signals) ===
+groupDots     = "Dot Engine"
+showDots      = input.bool(true, "Show Quality Dots", group=groupDots, tooltip="3-tier system: Watch/Confirm/HighConf")
+minSpacing    = input.int(6, "Min Bars Between Dots", minval=1, maxval=20, group=groupDots, tooltip="Reduce visual density")
+useHTFBias    = input.bool(true, "Use HTF Bias Filter", group=groupDots, tooltip="Require HTF trend alignment")
+r2LenMin      = input.int(5, "R² Min Leg Length", minval=3, maxval=50, group=groupDots)
+hiConfThresh  = input.float(0.70, "High-Conf Threshold (0-1)", minval=0.0, maxval=1.0, step=0.05, group=groupDots, tooltip="Score needed for large dots")
+
+// === Visual & Alerts ===
+groupViz     = "Visual & Alerts"
+showTable    = input.bool(true, "Show Leg Info Table", group=groupViz)
+showMarkers  = input.bool(true, "Mark Legacy Zones", group=groupViz, tooltip="Old 2-of-3 circles (use Dot Engine instead)")
+enableAlerts = input.bool(true, "Enable Alerts", group=groupViz)
+alertCooldown = input.int(10, "Alert Cooldown (bars)", minval=1, maxval=50, group=groupViz, tooltip="Minimum bars between alerts")
+
+// === Sliding Window Flow (SWF) ===
+groupSWF      = "Sliding Window Flow"
+useSWF        = input.bool(true, "Enable SWF (Fair Value Window)", group=groupSWF, tooltip="Verschiebbares Kursfenster mit Zustandsautomat")
+swfCenterMode = input.string("AVWAP", "Fair Value Center", options=["EMA","VWAP","AVWAP"], group=groupSWF, 
+  tooltip="EMA: schnell | VWAP: Session | AVWAP: verschiebt sich mit ZigZag-Legs")
+swfEmaLen     = input.int(34, "EMA Length (if EMA mode)", minval=2, group=groupSWF)
+swfAtrLen     = input.int(14, "SWF ATR Length", minval=1, group=groupSWF)
+swfAtrK       = input.float(2.0, "SWF ATR Multiplier", minval=0.1, step=0.1, group=groupSWF)
+swfBbLen      = input.int(20, "SWF BB Length", minval=2, group=groupSWF)
+swfBbK        = input.float(2.0, "SWF BB Multiplier", minval=0.1, step=0.1, group=groupSWF)
+swfZ1         = input.float(0.8, "z1 (Outer Band)", minval=0.1, step=0.1, group=groupSWF, 
+  tooltip="Schwelle für Pullback-Watch")
+swfZ2         = input.float(1.4, "z2 (Extreme)", minval=0.1, step=0.1, group=groupSWF, 
+  tooltip="Schwelle für Expansion (Überdehnung)")
+swfHys        = input.float(0.2, "Hysterese", minval=0.0, step=0.05, group=groupSWF, 
+  tooltip="Verhindert Flackern zwischen States")
+swfUseADX     = input.bool(true, "Use ADX Boost", group=groupSWF)
+swfAdxLen     = input.int(14, "ADX Length", minval=1, group=groupSWF)
+swfUseVol     = input.bool(true, "Use OBV Slope", group=groupSWF)
+swfObvLen     = input.int(20, "OBV Slope Length", minval=1, group=groupSWF)
+showSWFBands  = input.bool(true, "Show SWF Window Bands", group=groupSWF)
+showSWFMarkers = input.bool(true, "Show SWF State Markers", group=groupSWF)
+showSWFFill   = input.bool(true, "Show SWF Gradient Fill", group=groupSWF)
+
+// === ARRA Rebuild Zones & Last-Leg Fibs ===
+groupARRA        = "ARRA & Last-Leg Fibs"
+showLastLegFibs  = input.bool(true,  "Last Leg: Fibo 38/50/61 (Horizontal)", group=groupARRA, 
+  tooltip="Show horizontal Fib retracements of last completed ZigZag leg")
+showARRAZones    = input.bool(true,  "ARRA Rebuild Zones (50% / 50–61.8)", group=groupARRA,
+  tooltip="Show Action/Reaction rebuild zones with quality gate")
+barsAhead        = input.int(400,    "Horizontal Extension (Bars)", group=groupARRA, minval=100, maxval=1000)
+fibOpacity       = input.int(78,     "Fib Lines Opacity (0–100)", group=groupARRA, minval=0, maxval=100)
+boxOpacity       = input.int(90,     "Zone Box Opacity (0–100)", group=groupARRA, minval=0, maxval=100)
+widthATRlen      = input.int(14, "Leg ATR Length", group=groupARRA, minval=1)
+widthK           = input.float(1.2, "ARRA Width Factor (W = ATR̄ × k)", step=0.1, group=groupARRA, minval=0.5, maxval=3.0)
+useMomentumGate  = input.bool(true, "Quality Gate (Momentum/Squeeze Required)", group=groupARRA,
+  tooltip="Only show zones when momentum decays or squeeze occurs")
+
+// === Reversal Precision (CPM-Style Precision Gating) ===
+grpRZ        = "Reversal Precision"
+useRZ        = input.bool(true, "Enable Precise Edge & Retest Gating", group=grpRZ, tooltip="ATR-based edge proximity + retest logic for better reversal entries")
+rzAtr        = input.float(0.60, "Edge Proximity (ATR)", step=0.05, minval=0.1, maxval=2.0, group=grpRZ, tooltip="How close (in ATR) price must be to KC/Donchian edge. Lower = stricter. NatGas: 0.40-0.70")
+rtestN       = input.int(3, "Retest Window (bars)", minval=1, maxval=5, group=grpRZ, tooltip="Bars after squeeze/release to allow retest entry. NatGas: 2-3")
+hiCut        = input.float(6.5, "High-Conf Score in Zone", step=0.5, minval=0.0, maxval=15.0, group=grpRZ, tooltip="Reduced score threshold when in precise edge zone. NatGas: 6.0-7.5")
+modCut       = input.float(3.5, "Moderate Score in Zone", step=0.5, minval=0.0, maxval=10.0, group=grpRZ, tooltip="Moderate entry threshold in zone. NatGas: 3.0-4.0")
+r2MinRZ      = input.int(14, "Min Leg R² Length", minval=5, maxval=50, group=grpRZ, tooltip="Minimum bars for R² quality calc. Higher = more reliable but fewer signals. NatGas: 14-21")
+volBoost     = input.bool(true, "Volume Boost Allowed", group=grpRZ, tooltip="Lower thresholds slightly when volume > 110% of 20-bar average")
+showRZViz    = input.bool(true, "Show CPM-Style Markers", group=grpRZ, tooltip="Small circles for filtered signals, triangles for high-confidence entries")
+rzDebug      = input.bool(true, "Console Debug (RZ Triggers)", group=grpRZ, tooltip="Log edge proximity, retests, and entry decisions to console")
+
+// === CPM Signal Mode Configuration ===
+grpMode         = "CPM Signal Mode"
+signalMode      = input.string("Moderate", "Signal Mode", options=["Strong","Moderate","Loose"], group=grpMode, 
+  tooltip="Strong: High confidence, fewer signals | Moderate: Balanced | Loose: More signals, lower threshold")
+thStrong        = input.float(8.0, "Strong Threshold", minval=1.0, step=0.5, group=grpMode, 
+  tooltip="Score threshold for Strong mode (default 8.0)")
+thModerate      = input.float(5.5, "Moderate Threshold", minval=1.0, step=0.5, group=grpMode, 
+  tooltip="Score threshold for Moderate mode (default 5.5)")
+thLoose         = input.float(4.5, "Loose Threshold", minval=1.0, step=0.5, group=grpMode, 
+  tooltip="Score threshold for Loose mode (default 4.5)")
+mStrong         = input.float(1.2, "Strong Multiplier", minval=0.5, maxval=2.0, step=0.05, group=grpMode, 
+  tooltip="Mode multiplier for Strong mode (default 1.2 = +20%)")
+mModerate       = input.float(1.0, "Moderate Multiplier", minval=0.5, maxval=2.0, step=0.05, group=grpMode, 
+  tooltip="Mode multiplier for Moderate mode (default 1.0)")
+mLoose          = input.float(0.85, "Loose Multiplier", minval=0.5, maxval=2.0, step=0.05, group=grpMode, 
+  tooltip="Mode multiplier for Loose mode (default 0.85 = -15%)")
+
+// === CPM Enhancement Features ===
+grpEnhance      = "CPM Enhancements"
+useDivBoost     = input.bool(true, "Enable Divergence Boost", group=grpEnhance, 
+  tooltip="Reduce threshold when divergence confirms signal direction")
+divBoostAmount  = input.float(1.5, "Divergence Boost Amount", minval=0.0, maxval=5.0, step=0.5, group=grpEnhance, 
+  tooltip="How much to reduce threshold when divergence present (default 1.5)")
+useDiamondGate  = input.bool(false, "Enable Diamond Gating", group=grpEnhance, 
+  tooltip="Only allow signals within window after Diamond setup (Pivot + RSI/MFI exhaustion)")
+diamondWindow   = input.int(3, "Diamond Window (bars)", minval=0, maxval=10, group=grpEnhance, 
+  tooltip="Bars after Diamond to allow signals (0 = same bar only, default 3)")
+rsiThLong       = input.float(38.0, "Diamond RSI Long", minval=10.0, maxval=50.0, step=1.0, group=grpEnhance, 
+  tooltip="RSI threshold for long Diamond detection (default 38)")
+rsiThShort      = input.float(62.0, "Diamond RSI Short", minval=50.0, maxval=90.0, step=1.0, group=grpEnhance, 
+  tooltip="RSI threshold for short Diamond detection (default 62)")
+mfiThLong       = input.float(25.0, "Diamond MFI Long", minval=10.0, maxval=50.0, step=1.0, group=grpEnhance, 
+  tooltip="MFI threshold for long Diamond detection (default 25)")
+mfiThShort      = input.float(75.0, "Diamond MFI Short", minval=50.0, maxval=90.0, step=1.0, group=grpEnhance, 
+  tooltip="MFI threshold for short Diamond detection (default 75)")
+useRZBoost      = input.bool(true, "Enable RZ Proximity Boost", group=grpEnhance, 
+  tooltip="Reduce threshold when near Reversal Zone edges")
+rzBoostAmount   = input.float(1.0, "RZ Boost Amount", minval=0.0, maxval=3.0, step=0.5, group=grpEnhance, 
+  tooltip="How much to reduce threshold near RZ zones (default 1.0)")
+
+// Colors
+colBull      = color.new(color.lime, 0)
+colBear      = color.new(color.red, 0)
+colAct       = color.new(color.yellow, 0)
+
+
+// ===========================================================================
+// MODULE: modules/types.pine
+// ===========================================================================
+
+// ============================================================================
+// TYPES - Data Structures
+// ============================================================================
+
+// === Pivot Point ===
+type Pivot
+    int barIndex
+    float price
+    bool isHigh  // true=high, false=low
+
+// === ZigZag Leg ===
+type ZigZagLeg
+    int startIdx
+    float startPrice
+    int endIdx
+    float endPrice
+    bool isUp
+    float moveAbs
+    float movePct
+    bool isValid
+
+// === Envelope State ===
+type EnvelopeState
+    float kcUp
+    float kcDn
+    float kcBasis
+    float dcUp
+    float dcDn
+    float bbUp
+    float bbDn
+    float bbBasis
+    float squeeze        // <1=compressed, >1=expanded
+    bool squeezeActive
+
+// === Corridor Signal ===
+type CorridorSignal
+    bool touchUpKC
+    bool touchDnKC
+    bool dcBreakUp       // Re-entry from above
+    bool dcBreakDown     // Re-entry from below
+    bool squeezeBreakUp
+    bool squeezeBreakDn
+    bool interesting     // Combined signal
+    int activeDir        // 1=up, -1=down, 0=neutral
+    float depthKC        // 0-1, depth within KC range
+
+
+// ===========================================================================
+// MODULE: modules/helpers.pine
+// ===========================================================================
+
+// ============================================================================
+// HELPERS - Utility Functions
+// ============================================================================
+
+// === Safe null handling ===
+nzf(float x, float repl=0.0) =>
+    na(x) ? repl : x
+
+// === Percentage calculation ===
+pct(float a, float b) =>
+    b != 0.0 ? (a/b)*100.0 : 0.0
+
+// === Absolute value ===
+abs(float x) =>
+    x < 0 ? -x : x
+
+// === Distance in ticks ===
+tickDistance(float a, float b) =>
+    math.abs(a - b) / syminfo.mintick
+
+// === Direction detection ===
+getDirection(float a, float b) =>
+    b > a ? 1 : b < a ? -1 : 0
+
+// === Normalize value to 0-1 range ===
+normalize(float val, float min, float max) =>
+    float span = max - min
+    span > 0 ? (val - min) / span : 0.5
+
+// ============================================================================
+// TECHNICAL INDICATORS - Centralized Calculations (Refactoring Phase 1)
+// ============================================================================
+
+// === EMA (Exponential Moving Average) ===
+getEMA(simple int length) =>
+    ta.ema(close, length)
+
+// === EMA with HTF (Higher Timeframe) ===
+getEMA_HTF(simple int length, simple string timeframe) =>
+    request.security(syminfo.tickerid, timeframe, ta.ema(close, length), 
+                     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+// === ATR (Average True Range) ===
+getATR(simple int length, simple float multiplier = 1.0) =>
+    ta.atr(length) * multiplier
+
+// === ATR for a specific leg (range of bars) ===
+calcLegATR(int startIdx, int endIdx) =>
+    float atrSum = 0.0
+    int nBars = math.max(1, endIdx - startIdx + 1)
+    int lookback = bar_index - startIdx
+    for i = 0 to nBars - 1
+        atrSum += ta.tr(true)[lookback - i]
+    atrSum / nBars
+
+// === RSI (Relative Strength Index) ===
+getRSI(simple int length) =>
+    ta.rsi(close, length)
+
+// === ADX (Average Directional Index) ===
+getADX(simple int length) =>
+    [_, _, adx] = ta.dmi(length, length)
+    adx
+
+// === Generic HTF Value Wrapper ===
+getHTFValue(series float value, simple string timeframe) =>
+    request.security(syminfo.tickerid, timeframe, value, 
+                     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+
+// ===========================================================================
+// MODULE: modules/pivot_detection.pine
+// ===========================================================================
+
+// ============================================================================
+// PIVOT DETECTION - Confirmed Pivot Highs/Lows
+// ============================================================================
+
+// === Pivot Detection ===
+// Returns confirmed pivot high/low (no repainting after confirmation)
+detectPivots(int pivotLen) =>
+    float pivotH = ta.pivothigh(high, pivotLen, pivotLen)
+    float pivotL = ta.pivotlow (low,  pivotLen, pivotLen)
+    
+    bool isPH = not na(pivotH)
+    bool isPL = not na(pivotL)
+    
+    // Return: [isPivotHigh, isPivotLow, pivotPrice, pivotIndex]
+    [isPH, isPL, isPH ? pivotH : isPL ? pivotL : na, bar_index - pivotLen]
+
+// === Pivot Detection (Flexible L/R) - Refactored Phase 3 ===
+// Allows different left/right bars for asymmetric pivot detection
+detectPivotsFlexible(int leftBars, int rightBars) =>
+    float pivotH = ta.pivothigh(high, leftBars, rightBars)
+    float pivotL = ta.pivotlow(low, leftBars, rightBars)
+    
+    bool isPH = not na(pivotH)
+    bool isPL = not na(pivotL)
+    
+    // Return: [isPivotHigh, isPivotLow, pivotPrice, pivotIndex]
+    [isPH, isPL, isPH ? pivotH : isPL ? pivotL : na, bar_index - rightBars]
+
+// === Pivot Storage ===
+// Maintains arrays of confirmed pivots with optional merge tolerance
+storePivot(array<int> arrIdx, array<float> arrPx, int _idx, float _px, int mergeTicks) =>
+    // Merge nearby pivots if tolerance set
+    if mergeTicks > 0 and array.size(arrIdx) > 0
+        float lastPx = array.get(arrPx, array.size(arrPx)-1)
+        float tick   = syminfo.mintick
+        
+        if math.abs(_px - lastPx) <= mergeTicks * tick
+            // Replace last pivot with current (merge)
+            array.set(arrIdx, array.size(arrIdx)-1, _idx)
+            array.set(arrPx,  array.size(arrPx)-1, _px)
+            true  // merged
+        else
+            // Add new pivot
+            array.push(arrIdx, _idx)
+            array.push(arrPx,  _px)
+            false  // new pivot
+    else
+        // Add new pivot
+        array.push(arrIdx, _idx)
+        array.push(arrPx,  _px)
+        false  // new pivot
+
+// === Get Last Pivot ===
+getLastPivot(array<int> arrIdx, array<float> arrPx) =>
+    int sz = array.size(arrIdx)
+    if sz > 0
+        [array.get(arrIdx, sz-1), array.get(arrPx, sz-1)]
+    else
+        [int(na), float(na)]
+
+// === Get Pivot Count ===
+getPivotCount(array<int> arrIdx) =>
+    array.size(arrIdx)
+
+
+// ===========================================================================
+// MODULE: modules/zigzag_engine.pine
+// ===========================================================================
+
+// ============================================================================
+// ZIGZAG ENGINE - Leg Validation & Drawing
+// ============================================================================
+
+// === Leg Validation ===
+// Validates if a leg meets threshold criteria based on selected mode
+isLegValid(string mode, float startPx, float endPx, float pctThreshold, float atrK, int atrLen, float devK, int devLen) =>
+    float moveAbs = math.abs(endPx - startPx)
+    float movePct = startPx != 0.0 ? (moveAbs / startPx) * 100.0 : 0.0
+    
+    // Mode-specific validation
+    bool validPct = movePct >= pctThreshold
+    bool validAtr = moveAbs >= atrK * ta.atr(atrLen)
+    float dev     = ta.stdev(close, devLen)
+    bool validDev = dev > 0 ? moveAbs >= devK * dev : false
+    
+    mode == "PCT" ? validPct : mode == "ATR" ? validAtr : validDev
+
+// === Check Minimum Bar Length ===
+hasMinBars(int startIdx, int endIdx, int minBars) =>
+    (endIdx - startIdx) >= minBars
+
+// Note: Drawing functions moved to global scope in calculations.pine
+
+// === Calculate Leg Metrics ===
+getLegMetrics(float startPx, float endPx) =>
+    float moveAbs = math.abs(endPx - startPx)
+    float movePct = startPx != 0.0 ? (moveAbs / startPx) * 100.0 : 0.0
+    bool isUp = endPx > startPx
+    [moveAbs, movePct, isUp]
+
+// === Active Leg Direction ===
+// Determines direction of current (unconfirmed) leg
+getActiveLegDirection(array<int> arrIdx, array<float> arrPx) =>
+    int sz = array.size(arrIdx)
+    
+    if sz >= 2
+        // Get last two confirmed pivots
+        float lastPx = array.get(arrPx, sz-1)
+        float prevPx = array.get(arrPx, sz-2)
+        
+        // Direction of last confirmed leg
+        int lastLegDir = lastPx > prevPx ? 1 : -1
+        
+        // Current price vs last pivot
+        int currentDir = close > lastPx ? 1 : close < lastPx ? -1 : 0
+        
+        // If current direction differs from last leg, we're in new direction
+        currentDir != 0 ? currentDir : lastLegDir
+    else
+        0  // neutral
+
+// Note: renderZigZag moved to global scope in calculations.pine to comply with Pine Script v6 restrictions
+
+
+// ===========================================================================
+// MODULE: modules/dot_engine.pine
+// ===========================================================================
+
+// ============================================================================
+// DOT ENGINE - 3-Tier Quality Signals (Watch/Confirm/HighConf)
+// ============================================================================
+// Unified dot system with quality filtering
+
+// === Calculate Leg Quality (R²) ===
+calcLegQuality(int r2LenMin) =>
+    // Auto-detect leg length or use minimum
+    int lenLeg = math.max(r2LenMin, 5)
+    float lin = ta.linreg(close, lenLeg, 0)
+    float resid = close - lin
+    float varResid = ta.variance(resid, lenLeg)
+    float varClose = ta.variance(close, lenLeg)
+    float r2 = varClose > 0 ? 1.0 - (varResid / varClose) : 0.0
+    math.max(0.0, math.min(1.0, r2))
+
+// === Calculate Edge Proximity (0-1, higher = closer to KC edge) ===
+calcEdgeProximity(float kcUp, float kcDn) =>
+    float distKC = math.min(math.abs(close - kcUp), math.abs(close - kcDn)) / close
+    1.0 - math.max(0.0, math.min(1.0, distKC / 0.006))  // 0.6% reference for NatGas
+
+// === Calculate Quality Score ===
+calcQualityScore(float r2, float edgeProx, bool biasOK) =>
+    (r2 * 0.5 + edgeProx * 0.5) * (biasOK ? 1.0 : 0.5)
+
+// === Detect Signal Tiers ===
+detectSignalTiers(bool inZone, bool sqRelUp, bool sqRelDn, bool dirUpLeg, bool dirDnLeg, float hiConfThresh, float qualityScore) =>
+    // Watch: 2-of-3 zone + squeeze release in direction
+    bool watchLong = inZone and sqRelUp and dirUpLeg
+    bool watchShort = inZone and sqRelDn and dirDnLeg
+    
+    // Confirm: Watch + candle confirmation
+    bool confirmLong = watchLong and close > open
+    bool confirmShort = watchShort and close < open
+    
+    // High-Confidence: Confirm + quality threshold
+    bool hiLong = confirmLong and qualityScore >= hiConfThresh
+    bool hiShort = confirmShort and qualityScore >= hiConfThresh
+    
+    [watchLong, watchShort, confirmLong, confirmShort, hiLong, hiShort]
+
+// === Debounce Logic ===
+// Note: This function is not used - spacing logic is inline in calculations.pine
+
+
+// ===========================================================================
+// MODULE: modules/keltner_channel.pine
+// ===========================================================================
+
+// ============================================================================
+// KELTNER CHANNEL - Adaptive Volatility Envelope
+// ============================================================================
+
+// === Calculate Keltner Channel ===
+calcKeltner(int emaLen, int atrLen, float mult) =>
+    float basis = ta.ema(close, emaLen)
+    float atr   = ta.atr(atrLen)
+    float upper = basis + mult * atr
+    float lower = basis - mult * atr
+    
+    [upper, lower, basis, atr]
+
+// === Check KC Touch ===
+checkKCTouch(float upper, float lower) =>
+    bool touchUp = high >= upper
+    bool touchDn = low <= lower
+    
+    [touchUp, touchDn]
+
+// === Calculate Depth within KC ===
+// Returns 0-1 value indicating how deep price is within the channel
+getKCDepth(float basis, float upper, float lower) =>
+    float span = math.max(1e-6, upper - lower)
+    float depth = math.abs(close - basis) / span
+    depth
+
+// === KC Breakout Detection ===
+checkKCBreakout(float upper, float lower) =>
+    bool breakUp = close > upper
+    bool breakDn = close < lower
+    
+    [breakUp, breakDn]
+
+
+// ===========================================================================
+// MODULE: modules/donchian_channel.pine
+// ===========================================================================
+
+// ============================================================================
+// DONCHIAN CHANNEL - Objective Range Detection
+// ============================================================================
+
+// === Calculate Donchian Channel ===
+calcDonchian(int length) =>
+    float upper = ta.highest(high, length)
+    float lower = ta.lowest(low, length)
+    float mid   = (upper + lower) / 2.0
+    
+    [upper, lower, mid]
+
+// === Check DC Re-Entry ===
+// Detects when price breaks out and then re-enters the channel
+checkDCReentry(int length, float upper, float lower) =>
+    // Re-entry from above: was above upper[1], now below upper
+    bool reentryDown = close[1] > upper[1] and close < upper
+    
+    // Re-entry from below: was below lower[1], now above lower
+    bool reentryUp = close[1] < lower[1] and close > lower
+    
+    [reentryUp, reentryDown]
+
+// === DC Breakout Detection ===
+checkDCBreakout(float upper, float lower) =>
+    bool breakUp = close > upper
+    bool breakDn = close < lower
+    
+    [breakUp, breakDn]
+
+// === DC Width (Volatility proxy) ===
+getDCWidth(float upper, float lower) =>
+    upper - lower
+
+
+// ===========================================================================
+// MODULE: modules/bbkc_squeeze.pine
+// ===========================================================================
+
+// ============================================================================
+// BB/KC SQUEEZE - Compression/Expansion Detection
+// ============================================================================
+
+// === REFACTORED: Simplified Bollinger Bands (Phase 2) ===
+// Short-form helper for inline usage
+calcBB(simple int length, simple float mult) =>
+    float mid = ta.sma(close, length)
+    float std = ta.stdev(close, length)
+    [mid + std * mult, mid - std * mult, mid, std]
+
+// === REFACTORED: Simplified Keltner Channels (Phase 2) ===
+// Short-form helper for inline usage
+calcKC(simple int emaLen, simple int atrLen, simple float mult) =>
+    float basis = getEMA(emaLen)
+    float atrVal = getATR(atrLen)
+    [basis + atrVal * mult, basis - atrVal * mult, basis, atrVal]
+
+// === Calculate Bollinger Bands (Legacy - Full Return) ===
+calcBollinger(int length, float mult) =>
+    float basis = ta.sma(close, length)
+    float dev   = ta.stdev(close, length)
+    float upper = basis + mult * dev
+    float lower = basis - mult * dev
+    
+    [upper, lower, basis, dev]
+
+// === Calculate Squeeze Ratio ===
+// <1 = Squeeze (compression), >1 = Expansion
+calcSqueezeRatio(float bbDev, float kcMult, float atr) =>
+    float bbWidth = 2.0 * bbDev
+    float kcWidth = 2.0 * kcMult * atr
+    
+    kcWidth > 0 ? bbWidth / kcWidth : 1.0
+
+// === Detect Squeeze State ===
+detectSqueeze(float squeezeRatio) =>
+    bool isSqueezed = squeezeRatio < 1.0
+    bool isExpanded = squeezeRatio >= 1.0
+    
+    [isSqueezed, isExpanded]
+
+// === Detect Squeeze Break ===
+// Detects transition from squeeze to expansion with directional bias
+detectSqueezeBreak(float squeezeRatio, float kcUp, float kcDn) =>
+    bool wasSqueezeRatio = squeezeRatio[1] < 1.0
+    bool isExpandedNow = squeezeRatio >= 1.0
+    
+    bool breakUp = wasSqueezeRatio and isExpandedNow and close > kcUp
+    bool breakDn = wasSqueezeRatio and isExpandedNow and close < kcDn
+    
+    [breakUp, breakDn]
+
+// === Get Squeeze History ===
+// Checks if squeeze was active in recent bars
+wasRecentlySqueezed(float squeezeRatio, int lookback) =>
+    float minSqueeze = ta.lowest(squeezeRatio, lookback)
+    minSqueeze < 1.0
+
+// === Squeeze Intensity ===
+// 0-1 scale, where 0=very tight, 1=very expanded
+getSqueezeIntensity(float squeezeRatio) =>
+    // Normalize: 0.5 = squeeze, 1.5 = expansion threshold
+    // Return 0-1 where lower = tighter
+    squeezeRatio < 0.5 ? 0.0 : squeezeRatio > 1.5 ? 1.0 : (squeezeRatio - 0.5)
+
+
+// ===========================================================================
+// MODULE: modules/swf_engine.pine
+// ===========================================================================
+
+// ============================================================================
+// SWF ENGINE - Sliding Window Flow (Fair Value Window + State Machine)
+// ============================================================================
+// Verschiebbares Kursfenster mit adaptiver Volatilität und Zustandsautomat:
+// Expansion → Pullback → Continuation/Reversal
+
+// === Calculate Fair Value Center ===
+calcFairValueCenter(simple string centerMode, simple int emaLen, bool zzReversed) =>
+    float emaC = getEMA(emaLen)  // Refactored: Use centralized helper
+    float vwapC = ta.vwap(close)
+    
+    // Anchored VWAP (reset bei ZigZag-Reversal)
+    var float cumPV = 0.0
+    var float cumV = 0.0
+    var float basePV = na
+    var float baseV = na
+    
+    cumPV += close * volume
+    cumV += volume
+    
+    // Bei ZigZag-Reversal: Basis neu setzen
+    if zzReversed
+        basePV := cumPV
+        baseV := cumV
+    
+    // Berechne AVWAP seit letztem Reset
+    float avwapC = na(basePV) or na(baseV) or (cumV - baseV) <= 0 
+      ? vwapC 
+      : (cumPV - basePV) / (cumV - baseV)
+    
+    // Wähle Center je nach Modus
+    float C = centerMode == "EMA" ? emaC : centerMode == "VWAP" ? vwapC : avwapC
+    C
+
+// === Calculate Adaptive Window Width ===
+calcWindowWidth(simple int atrLen, simple float atrK, simple int bbLen, simple float bbK) =>
+    // ATR Width (Refactored Phase 1: Use centralized helper)
+    float atrW = getATR(atrLen, atrK)
+    
+    // BB Width (Refactored Phase 2: Use calcBB helper)
+    [bbU, bbL, _, _] = calcBB(bbLen, bbK)
+    float bbW = (bbU - bbL) / 2.0
+    
+    // Hybrid: nimm das Maximum (robuster)
+    float W = math.max(atrW, bbW)
+    W := W == 0 ? nz(W[1], 1e-6) : W  // Verhindere Division durch Null
+    W
+
+// === Calculate Z-Score ===
+calcZ(float C, float W) =>
+    // Standardisierte Entfernung (Z-Score-artig)
+    (close - C) / W
+
+// === Calculate Z-Slope ===
+calcDZ(float z) =>
+    z - nz(z[1], z)
+
+// === Calculate Energy (Momentum + Volume) ===
+calcEnergy(float z, bool useADX, simple int adxLen, bool useVol, simple int obvLen) =>
+    // ADX Boost (Refactored: Use centralized helper)
+    float adx = getADX(adxLen)
+    float adxBoost = useADX ? (adx / 50.0) : 1.0
+    
+    // OBV Slope Boost (using built-in ta.obv for proper initialization)
+    float obvVal = ta.obv
+    float obvSlope = ta.linreg(obvVal, obvLen, 0) - ta.linreg(obvVal, obvLen, 1)
+    float obvNorm = math.max(-1.0, math.min(1.0, obvSlope / 1e9))
+    float volBoost = useVol ? (1.0 + obvNorm * 0.25) : 1.0
+    
+    // Energie: |z| * Boost
+    float E = math.abs(z) * adxBoost * volBoost
+    E
+
+// === Get HTF EMA 20 (Refactored: Use centralized helpers) ===
+getHTFEma20(bool useHTF, simple string tfHTF) =>
+    useHTF ? getEMA_HTF(20, tfHTF) : getEMA(20)
+
+// === Get HTF EMA 50 (Refactored: Use centralized helpers) ===
+getHTFEma50(bool useHTF, simple string tfHTF) =>
+    useHTF ? getEMA_HTF(50, tfHTF) : getEMA(50)
+
+// === Update SWF State (Expansion → Pullback → Continuation/Reversal) ===
+updateSWFState(string prevState, float z, float dz, float C, float W, 
+                       simple float z1, simple float z2, simple float hys,
+                       bool biasUp, bool biasDn) =>
+    
+    // ── Expansion (starke Überdehnung) ──
+    bool expUp = z >= (z2 + (prevState == "PullbackUp" ? hys : 0.0)) and dz >= 0
+    bool expDn = z <= -(z2 + (prevState == "PullbackDn" ? hys : 0.0)) and dz <= 0
+    
+    // ── Pullback Watch (Rücklauf zur Mitte) ──
+    bool pbUp = (prevState == "ExpUp" or prevState == "ContUp") and z <= z1
+    bool pbDn = (prevState == "ExpDn" or prevState == "ContDn") and z >= -z1
+    
+    // ── Continuation (Pullback hält am Fensterrand, HTF bestätigt) ──
+    bool contUp = (prevState == "PullbackUp" or pbUp) and close >= C + 0.5 * W and biasUp
+    bool contDn = (prevState == "PullbackDn" or pbDn) and close <= C - 0.5 * W and biasDn
+    
+    // ── Reversal (Durchbruch durch Mitte + HTF-Flip) ──
+    bool crossUp = ta.cross(close, C)
+    bool crossDn = ta.cross(C, close)
+    bool revUp = (prevState == "ExpDn" or prevState == "PullbackDn" or prevState == "ContDn") and crossUp and biasUp
+    bool revDn = (prevState == "ExpUp" or prevState == "PullbackUp" or prevState == "ContUp") and crossDn and biasDn
+    
+    // ── State Update (Order matters!) ──
+    string newState = prevState
+    if expUp
+        newState := "ExpUp"
+    else if expDn
+        newState := "ExpDn"
+    else if revUp
+        newState := "RevUp"
+    else if revDn
+        newState := "RevDn"
+    else if contUp
+        newState := "ContUp"
+    else if contDn
+        newState := "ContDn"
+    else if pbUp
+        newState := "PullbackUp"
+    else if pbDn
+        newState := "PullbackDn"
+    
+    // Return state + signals
+    [newState, expUp, expDn, pbUp, pbDn, contUp, contDn, revUp, revDn]
+
+
+
+// ===========================================================================
+// MODULE: modules/corridor_logic.pine
+// ===========================================================================
+
+// ============================================================================
+// CORRIDOR LOGIC - Quality Zone Detection (2-of-3 Criteria)
+// ============================================================================
+
+// === 2-of-3 Quality Zone Detection ===
+// Reduces false signals by requiring multiple confirmations
+// Criteria: 1) KC touch, 2) Donchian touch, 3) Squeeze release in direction
+
+detectQualityZones(bool useKC, bool touchUpKC, bool touchDnKC, bool useDC, bool dcBreakUp, bool dcBreakDown, bool useBBKC, bool squeezeBreakUp, bool squeezeBreakDn, float ema20) =>
+    // Criteria 1: KC outer band touch
+    bool atKC_up = useKC and touchUpKC
+    bool atKC_dn = useKC and touchDnKC
+    
+    // Criteria 2: Donchian edge touch
+    bool atDon_up = useDC and dcBreakUp
+    bool atDon_dn = useDC and dcBreakDown
+    
+    // Criteria 3: Squeeze release in leg direction
+    bool sqRelUp = useBBKC and squeezeBreakUp and close > ema20
+    bool sqRelDn = useBBKC and squeezeBreakDn and close < ema20
+    
+    // Count criteria for long zones (need 2 of 3)
+    int countLong = 0
+    countLong += atKC_up ? 1 : 0
+    countLong += atDon_up ? 1 : 0
+    countLong += sqRelUp ? 1 : 0
+    
+    // Count criteria for short zones (need 2 of 3)
+    int countShort = 0
+    countShort += atKC_dn ? 1 : 0
+    countShort += atDon_dn ? 1 : 0
+    countShort += sqRelDn ? 1 : 0
+    
+    bool zoneLong = countLong >= 2
+    bool zoneShort = countShort >= 2
+    
+    [zoneLong, zoneShort, countLong, countShort]
+
+// === Legacy: Combined Interesting Zone Detection (kept for compatibility) ===
+detectInterestingZone(int activeDir, bool useKC, bool touchUpKC, bool touchDnKC, bool useDC, bool dcBreakUp, bool dcBreakDown, bool useBBKC, bool squeezeBreakUp, bool squeezeBreakDn) =>
+    bool isUpLeg = activeDir == 1
+    bool isDnLeg = activeDir == -1
+    
+    bool interestingUp = (useKC and touchUpKC) or (useDC and dcBreakUp) or (useBBKC and squeezeBreakUp)
+    bool interestingDn = (useKC and touchDnKC) or (useDC and dcBreakDown) or (useBBKC and squeezeBreakDn)
+    
+    bool interesting = (isUpLeg and interestingUp) or (isDnLeg and interestingDn)
+    
+    interesting
+
+// === Build Signal Description ===
+getSignalText(bool touchUpKC, bool touchDnKC, bool dcBreakUp, bool dcBreakDown, bool squeezeBreakUp, bool squeezeBreakDn) =>
+    string signals = ""
+    
+    if touchUpKC
+        signals += "KC↑ "
+    if touchDnKC
+        signals += "KC↓ "
+    if dcBreakUp
+        signals += "DC↘ "
+    if dcBreakDown
+        signals += "DC↗ "
+    if squeezeBreakUp
+        signals += "SQ↑ "
+    if squeezeBreakDn
+        signals += "SQ↓ "
+    
+    signals != "" ? signals : "-"
+
+
+// ===========================================================================
+// MODULE: modules/visual_engine.pine
+// ===========================================================================
+
+// ============================================================================
+// VISUAL ENGINE - Chart Plotting & Markers
+// ============================================================================
+
+// Note: All plot(), line.new(), label.new() calls moved to global scope in calculations.pine
+// Pine Script v6 does not allow these functions to be called from within user-defined functions
+
+
+// ===========================================================================
+// MODULE: modules/leg_table.pine
+// ===========================================================================
+
+// ============================================================================
+// LEG TABLE - Live Information Display
+// ============================================================================
+
+// === Create & Update Leg Info Table ===
+updateLegTable(bool showTable, int activeDir, float depthKC, string signalText, bool interesting) =>
+    var table t = na
+    
+    if showTable
+        // Initialize table once on first bar
+        if barstate.isfirst
+            t := table.new(position.top_right, 4, 2, border_width=1)
+        
+        // Update content only on last bar (performance optimization)
+        if barstate.islast and not na(t)
+            // Clear and rebuild
+            table.clear(t, 0, 0, 3, 1)
+            
+            // Headers
+            table.cell(t, 0, 0, "Leg", bgcolor=color.new(color.gray, 0), text_color=color.white)
+            table.cell(t, 1, 0, "Dir", bgcolor=color.new(color.gray, 0), text_color=color.white)
+            table.cell(t, 2, 0, "KC Depth", bgcolor=color.new(color.gray, 0), text_color=color.white)
+            table.cell(t, 3, 0, "Signals", bgcolor=color.new(color.gray, 0), text_color=color.white)
+            
+            // Update content
+            string dirStr = activeDir == 1 ? "UP ▲" : activeDir == -1 ? "DOWN ▼" : "-"
+            color dirColor = activeDir == 1 ? color.new(color.lime, 0) : activeDir == -1 ? color.new(color.red, 0) : color.gray
+            
+            table.cell(t, 0, 1, "Active", bgcolor=color.new(color.white, 0), text_color=color.black)
+            table.cell(t, 1, 1, dirStr, bgcolor=color.new(color.white, 0), text_color=dirColor)
+            table.cell(t, 2, 1, str.tostring(depthKC, "#.00"), bgcolor=color.new(color.white, 0), text_color=color.black)
+            table.cell(t, 3, 1, signalText, bgcolor=interesting ? color.new(color.yellow, 20) : color.new(color.white, 0), text_color=color.black)
+    
+    t
+
+
+// ===========================================================================
+// MODULE: modules/alerts.pine
+// ===========================================================================
+
+// ============================================================================
+// ALERTS - Alert Conditions (Debounce handled in main script)
+// ============================================================================
+
+// Note: Alert debounce logic must be in global scope, not in functions.
+// This module only provides alertcondition() declarations for the UI.
+
+// === Create Alert Conditions (for UI) ===
+// These are shown in TradingView's alert creation dialog
+alertcondition(true, title="Corridor: Interesting Zone", message="ZigZag Corridors - Active leg touches corridor/squeeze signal")
+alertcondition(true, title="Squeeze Break Up", message="ZigZag Corridors - Squeeze breakout UP")
+alertcondition(true, title="Squeeze Break Down", message="ZigZag Corridors - Squeeze breakout DOWN")
+
+
+// ===========================================================================
+// MODULE: modules/calculations.pine
+// ===========================================================================
+
+// ============================================================================
+// CALCULATIONS - Main Orchestrator
+// ============================================================================
+
+// === Pivot Arrays (persistent state) ===
+var arrIdx = array.new<int>()
+var arrPx  = array.new<float>()
+
+// === Threshold ZigZag State (Non-Repainting) ===
+var float zzExtremumPrice = close
+var int   zzExtremumIndex = bar_index
+var int   zzLegDir        = 1  // 1=up, -1=down
+var int   zzBarsInLeg     = 0
+var int   zzLastPivotIndex = na
+var float zzLastPivotPrice = na
+var line  zzPreviewLine = na
+
+// === Last Completed Leg (for ARRA hook) ===
+var int   zzLegStartIdx = na
+var float zzLegStartPrice = na
+var int   zzLegEndIdx = na
+var float zzLegEndPrice = na
+
+// === Alert Debounce State ===
+var int lastInterestingAlert = na
+var int lastSqueezeUpAlert = na
+var int lastSqueezeDnAlert = na
+var int lastZoneLongAlert = na
+var int lastZoneShortAlert = na
+// alertCooldown now from inputs (default 10 bars)
+
+// Active Leg Line: Persistent var line updated each bar
+// Prevents accumulation of hundreds of lines
+var line activeLegLine = na
+
+// === STEP 1: Threshold ZigZag Update (Non-Repainting) ===
+// Initialize on first bar
+if barstate.isfirst
+    zzExtremumPrice := close
+    zzExtremumIndex := bar_index
+    zzLegDir := 1
+    zzBarsInLeg := 1
+    zzLastPivotIndex := bar_index
+    zzLastPivotPrice := close
+
+// Update extremum based on direction
+if zzLegDir == 1  // Up leg
+    if high > zzExtremumPrice
+        zzExtremumPrice := high
+        zzExtremumIndex := bar_index
+else  // Down leg
+    if low < zzExtremumPrice
+        zzExtremumPrice := low
+        zzExtremumIndex := bar_index
+
+zzBarsInLeg += 1
+
+// Check reversal threshold
+float atr = getATR(atrLen)  // Refactored: Use centralized helper
+float need = mode == "ATR" ? atrK * atr : zzExtremumPrice * (pctTh/100.0)
+bool zzReversed = zzLegDir == 1 ? (zzExtremumPrice - low >= need and zzBarsInLeg >= minBarsLeg) : (high - zzExtremumPrice >= need and zzBarsInLeg >= minBarsLeg)
+
+// On reversal: draw confirmed segment, flip direction
+if zzReversed
+    color segCol = zzLegDir == 1 ? colBull : colBear
+    line.new(zzLastPivotIndex, zzLastPivotPrice, zzExtremumIndex, zzExtremumPrice, color=segCol, width=2)
+    
+    // Store completed leg for ARRA hook
+    zzLegStartIdx := zzLastPivotIndex
+    zzLegStartPrice := zzLastPivotPrice
+    zzLegEndIdx := zzExtremumIndex
+    zzLegEndPrice := zzExtremumPrice
+    
+    // Update pivot
+    zzLastPivotIndex := zzExtremumIndex
+    zzLastPivotPrice := zzExtremumPrice
+    
+    // Flip direction
+    zzLegDir := zzLegDir == 1 ? -1 : 1
+    zzBarsInLeg := 1
+    zzExtremumPrice := close
+    zzExtremumIndex := bar_index
+else
+    // Delete and recreate preview line (CPM pattern for proper scaling)
+    color previewCol = zzLegDir == 1 ? colBull : colBear
+    if not na(zzPreviewLine)
+        line.delete(zzPreviewLine)
+    zzPreviewLine := line.new(zzLastPivotIndex, zzLastPivotPrice, bar_index, close, color=color.new(previewCol, 60), width=2, style=line.style_dotted)
+
+// === STEP 1b: Legacy Pivot Detection (kept for compatibility) ===
+[isPH, isPL, pivotPrice, pivotIdx] = detectPivots(pivotLen)
+
+if barstate.isconfirmed and (isPH or isPL)
+    storePivot(arrIdx, arrPx, pivotIdx, pivotPrice, mergeTicks)
+
+// === STEP 2: Calculate Envelopes ===
+[kcUp, kcDn, kcBasis, kcAtr] = calcKeltner(emaLenKC, atrLenKC, kcMult)
+[dcUp, dcDn, dcMid] = calcDonchian(donLen)
+[bbUp, bbDn, bbBasis, bbDev] = calcBollinger(bbLen, bbMult)
+
+// HTF Corridor Context
+var float kcUp_HTF = na
+var float kcDn_HTF = na
+if useHTF
+    [_kcUp, _kcDn] = request.security(syminfo.tickerid, tfHTF, [kcUp, kcDn], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+    kcUp_HTF := _kcUp
+    kcDn_HTF := _kcDn
+
+// === STEP 3: Squeeze Detection ===
+float squeeze = calcSqueezeRatio(bbDev, kcMult, kcAtr)
+[isSqueezed, isExpanded] = detectSqueeze(squeeze)
+[squeezeBreakUp, squeezeBreakDn] = detectSqueezeBreak(squeeze, kcUp, kcDn)
+
+// === STEP 3b: Sliding Window Flow (SWF) ===
+var float swfC = na
+var float swfW = na
+var float swfZ = na
+var float swfDz = na
+var float swfE = na
+var bool swfBiasUp = false
+var bool swfBiasDn = false
+var string swfState = "Neutral"
+var bool swfExpUp = false
+var bool swfExpDn = false
+var bool swfPbUp = false
+var bool swfPbDn = false
+var bool swfContUp = false
+var bool swfContDn = false
+var bool swfRevUp = false
+var bool swfRevDn = false
+
+if useSWF
+    // 1) Fair Value Center
+    swfC := calcFairValueCenter(swfCenterMode, swfEmaLen, zzReversed)
+    
+    // 2) Adaptive Width
+    swfW := calcWindowWidth(swfAtrLen, swfAtrK, swfBbLen, swfBbK)
+    
+    // 3) Z-Score
+    swfZ := calcZ(swfC, swfW)
+    swfDz := calcDZ(swfZ)
+    
+    // 4) Energy
+    swfE := calcEnergy(swfZ, swfUseADX, swfAdxLen, swfUseVol, swfObvLen)
+    
+    // 5) HTF Bias
+    float ema20H_swf = getHTFEma20(useHTF, tfHTF)
+    float ema50H_swf = getHTFEma50(useHTF, tfHTF)
+    swfBiasUp := ema20H_swf > ema50H_swf
+    swfBiasDn := ema20H_swf < ema50H_swf
+    
+    // 6) State Machine
+    [_state, _expUp, _expDn, _pbUp, _pbDn, _contUp, _contDn, _revUp, _revDn] = updateSWFState(swfState, swfZ, swfDz, swfC, swfW, swfZ1, swfZ2, swfHys, swfBiasUp, swfBiasDn)
+    
+    swfState := _state
+    swfExpUp := _expUp
+    swfExpDn := _expDn
+    swfPbUp := _pbUp
+    swfPbDn := _pbDn
+    swfContUp := _contUp
+    swfContDn := _contDn
+    swfRevUp := _revUp
+    swfRevDn := _revDn
+
+// === STEP 4: KC Touch & Depth ===
+[touchUpKC, touchDnKC] = checkKCTouch(kcUp, kcDn)
+float depthKC = getKCDepth(kcBasis, kcUp, kcDn)
+
+// === STEP 5: DC Re-Entry ===
+[dcBreakUp, dcBreakDown] = checkDCReentry(donLen, dcUp, dcDn)
+
+// === STEP 6: Active Leg Direction ===
+int activeDir = getActiveLegDirection(arrIdx, arrPx)
+
+// === STEP 6b: Calculate Technical Indicators (needed for signals) ===
+float ema20 = getEMA(20)  // Refactored: Use centralized helper
+float rsi = getRSI(14)    // RSI for momentum gate and diamond detection
+float mfi = ta.mfi(hlc3, 14)  // MFI for diamond detection
+
+// === STEP 6c: Calculate ZigZag Leg State ===
+// Calculate pullback percentage from current extremum
+float legRange = math.abs(zzExtremumPrice - zzLastPivotPrice)
+float zzPullbackPct = legRange > 0 ? 
+    (zzLegDir == 1 ? (zzExtremumPrice - close) / legRange : (close - zzExtremumPrice) / legRange) * 100.0 : 0.0
+
+// Detect turn signals (when price moves against current leg direction)
+bool zzTurnUp = zzLegDir == -1 and close > zzExtremumPrice * 1.02
+bool zzTurnDn = zzLegDir == 1 and close < zzExtremumPrice * 0.98
+
+// === STEP 6d: HTF Trend Context (Multi-Timeframe) ===
+// Simple trend detection: count aligned timeframes
+float ema20_htf = getEMA_HTF(20, tfHTF)
+float ema50_htf = getEMA_HTF(50, tfHTF)
+float ema200_htf = getEMA_HTF(200, tfHTF)
+
+bool htf_up = ema20_htf > ema50_htf and ema50_htf > ema200_htf
+bool htf_dn = ema20_htf < ema50_htf and ema50_htf < ema200_htf
+
+int bullTFs = (close > ema20 ? 1 : 0) + (htf_up ? 1 : 0)
+int bearTFs = (close < ema20 ? 1 : 0) + (htf_dn ? 1 : 0)
+
+// === STEP 6e: Divergence Detection (Placeholder) ===
+// TODO: Implement proper divergence detection module
+bool divBull = false  // Placeholder: Will be implemented in future version
+bool divBear = false  // Placeholder: Will be implemented in future version
+
+// === STEP 6f: Pivot Detection for Diamond Gating ===
+float pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+float pivotLow = ta.pivotlow(low, pivotLen, pivotLen)
+
+// === STEP 7: Quality Zone Detection (2-of-3 criteria) ===
+[zoneLong, zoneShort, countLong, countShort] = detectQualityZones(useKC, touchUpKC, touchDnKC, useDC, dcBreakUp, dcBreakDown, useBBKC, squeezeBreakUp, squeezeBreakDn, ema20)
+
+// Legacy interesting flag for compatibility
+bool interesting = detectInterestingZone(activeDir, useKC, touchUpKC, touchDnKC, useDC, dcBreakUp, dcBreakDown, useBBKC, squeezeBreakUp, squeezeBreakDn)
+
+// === STEP 8: Signal Text ===
+string signalText = getSignalText(touchUpKC, touchDnKC, dcBreakUp, dcBreakDown, squeezeBreakUp, squeezeBreakDn)
+
+// === STEP 9: Render ZigZag Legs ===
+// Note: ZigZag line drawing disabled due to Pine Script v6 strict scoping
+// Lines can only be drawn if TradingView recognizes 'line' namespace properly
+
+// === STEP 10: Draw Active Leg Line (Persistent, updated each bar) ===
+int szActive = array.size(arrIdx)
+int lastIdx = szActive >= 1 ? array.get(arrIdx, szActive-1) : na
+float lastPx = szActive >= 1 ? array.get(arrPx, szActive-1) : na
+
+// Calculate line color
+color lineCol = interesting ? colAct : activeDir == 1 ? color.new(color.lime, 40) : activeDir == -1 ? color.new(color.red, 40) : color.new(color.gray, 70)
+
+// Update active leg line (persistent to avoid accumulation)
+if szActive >= 1 and not na(lastIdx) and not na(lastPx)
+    if na(activeLegLine)
+        activeLegLine := line.new(lastIdx, lastPx, bar_index, close, color=lineCol, width=2, style=line.style_dotted)
+    else
+        line.set_xy1(activeLegLine, lastIdx, lastPx)
+        line.set_xy2(activeLegLine, bar_index, close)
+        line.set_color(activeLegLine, lineCol)
+        line.set_style(activeLegLine, line.style_dotted)
+        line.set_width(activeLegLine, 2)
+
+// === STEP 11: Place Corridor Markers (CPM pattern: NO xloc, yloc.abovebar/belowbar) ===
+if showMarkers and interesting
+    bool isUpLeg = activeDir == 1
+    color markerColor = isUpLeg ? color.new(#00aa00, 0) : color.new(color.red, 0)
+    
+    // Use CPM's exact pattern: no xloc, yloc.abovebar/belowbar with high/low reference
+    if isUpLeg
+        label.new(bar_index, low, "●", style=label.style_none, textcolor=markerColor, size=size.tiny, yloc=yloc.belowbar)
+    else
+        label.new(bar_index, high, "●", style=label.style_none, textcolor=markerColor, size=size.tiny, yloc=yloc.abovebar)
+
+// === STEP 12: Dot Engine (3-Tier Quality Signals) ===
+// Calculate leg quality and edge proximity
+float r2 = calcLegQuality(r2LenMin)
+float edgeProx = calcEdgeProximity(kcUp, kcDn)
+
+// HTF Bias check (Refactored: Use centralized helpers)
+var float ema20H = na
+var float ema50H = na
+if useHTFBias
+    ema20H := getEMA_HTF(20, tfHTF)
+    ema50H := getEMA_HTF(50, tfHTF)
+
+bool htfBiasUp = useHTFBias ? ema20H > ema50H : true
+bool htfBiasDown = useHTFBias ? ema20H < ema50H : true
+
+// Calculate quality scores
+bool biasOK_L = not useHTFBias or htfBiasUp
+bool biasOK_S = not useHTFBias or htfBiasDown
+float scoreLong = calcQualityScore(r2, edgeProx, biasOK_L)
+float scoreShort = calcQualityScore(r2, edgeProx, biasOK_S)
+
+// Detect signal tiers
+bool inZone = (useKC and (touchUpKC or touchDnKC)) or (useDC and (dcBreakUp or dcBreakDown))
+bool sqRelUp = useBBKC and squeezeBreakUp
+bool sqRelDn = useBBKC and squeezeBreakDn
+bool dirUpLeg = close >= ema20
+bool dirDnLeg = close < ema20
+
+[watchLong, watchShort, confirmLong, confirmShort, hiLong, hiShort] = detectSignalTiers(inZone, sqRelUp, sqRelDn, dirUpLeg, dirDnLeg, hiConfThresh, math.max(scoreLong, scoreShort))
+
+// Export dot signal variables for signals.pine
+bool dotHighConfLong = hiLong
+bool dotHighConfShort = hiShort
+bool dotConfirmLong = confirmLong
+bool dotConfirmShort = confirmShort
+float dotQualityScore = math.max(scoreLong, scoreShort)
+
+// Export squeeze and corridor variables for signals.pine
+bool sqzActive = isSqueezed
+bool sqzReleaseUp = squeezeBreakUp
+bool sqzReleaseDn = squeezeBreakDn
+bool legDirUp = activeDir == 1
+bool legDirDown = activeDir == -1
+float kcMid = kcBasis
+float donMid = dcMid
+float donHigh = dcUp
+float donLow = dcDn
+
+// === STEP 13: Update Table ===
+updateLegTable(showTable, activeDir, depthKC, signalText, interesting)
+
+// === STEP 13: Plot Channels (SCALE-SAFE) ===
+// CRITICAL: Always-visible price reference (prevents scale issues)
+plot(ema20, "EMA 20", color=color.new(color.white, 70), linewidth=1)
+
+// HTF Corridor (context bands with high transparency)
+plot(useHTF ? kcUp_HTF : na, "HTF KC Up", color=color.new(color.gray, 70), linewidth=1, style=plot.style_circles)
+plot(useHTF ? kcDn_HTF : na, "HTF KC Dn", color=color.new(color.gray, 70), linewidth=1, style=plot.style_circles)
+
+// Channel plots (all price-based, conditionally visible)
+plot(useKC ? kcUp : na, "KC Up", color=color.new(color.teal, 0))
+plot(useKC ? kcDn : na, "KC Dn", color=color.new(color.teal, 0))
+plot(useDC ? dcUp : na, "DC Up", color=color.new(color.orange, 0))
+plot(useDC ? dcDn : na, "DC Dn", color=color.new(color.orange, 0))
+plot(useBBKC ? bbUp : na, "BB Up", color=color.new(color.gray, 80))
+plot(useBBKC ? bbDn : na, "BB Dn", color=color.new(color.gray, 80))
+
+// === STEP 13b: 3-Tier Dot System (Watch/Confirm/HighConf) ===
+var int lastDot = na
+bool okSpace = na(lastDot) or (bar_index - lastDot) >= minSpacing
+bool showDotsNow = showDots and okSpace and (watchLong or watchShort or confirmLong or confirmShort or hiLong or hiShort)
+
+if showDotsNow
+    lastDot := bar_index
+
+// Watch = tiny, hollow circle (global scope)
+plotshape(showDotsNow and watchLong and not confirmLong, title="Watch Long", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="W")
+plotshape(showDotsNow and watchShort and not confirmShort, title="Watch Short", style=shape.circle, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="W")
+
+// Confirm = small, filled circle
+plotshape(showDotsNow and confirmLong and not hiLong, title="Confirm Long", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), size=size.small, text="C")
+plotshape(showDotsNow and confirmShort and not hiShort, title="Confirm Short", style=shape.circle, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="C")
+
+// High-Confidence = large, bold circle
+plotshape(showDotsNow and hiLong, title="High-Conf Long", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), size=size.large, text="HC")
+plotshape(showDotsNow and hiShort, title="High-Conf Short", style=shape.circle, location=location.abovebar, color=color.new(color.red, 0), size=size.large, text="HC")
+
+// Legacy quality zone markers (optional, for comparison)
+plotshape(showMarkers and zoneLong, style=shape.xcross, location=location.belowbar, color=color.new(color.lime, 60), size=size.tiny, title="Legacy Zone Long")
+plotshape(showMarkers and zoneShort, style=shape.xcross, location=location.abovebar, color=color.new(color.red, 60), size=size.tiny, title="Legacy Zone Short")
+
+// === STEP 14: Alerts with Debounce & Candle Confirmation ===
+if enableAlerts
+    // Quality Zone Alerts (with candle body confirmation)
+    bool alertConfirmLong = zoneLong and close > open
+    bool alertConfirmShort = zoneShort and close < open
+    
+    bool canAlertLong = na(lastZoneLongAlert) or (bar_index - lastZoneLongAlert) > alertCooldown
+    bool canAlertShort = na(lastZoneShortAlert) or (bar_index - lastZoneShortAlert) > alertCooldown
+    
+    if alertConfirmLong and canAlertLong
+        alert("ZZC Quality Zone LONG Confirmed (2-of-3)", alert.freq_once_per_bar_close)
+        lastZoneLongAlert := bar_index
+    
+    if alertConfirmShort and canAlertShort
+        alert("ZZC Quality Zone SHORT Confirmed (2-of-3)", alert.freq_once_per_bar_close)
+        lastZoneShortAlert := bar_index
+    
+    // Legacy alerts (kept for compatibility)
+    bool canAlertInteresting = na(lastInterestingAlert) or (bar_index - lastInterestingAlert) > alertCooldown
+    if interesting and canAlertInteresting
+        alert("ZigZag Corridors - Active leg touches corridor/squeeze signal", alert.freq_once_per_bar_close)
+        lastInterestingAlert := bar_index
+    
+    bool canAlertSqueezeUp = na(lastSqueezeUpAlert) or (bar_index - lastSqueezeUpAlert) > alertCooldown
+    if squeezeBreakUp and canAlertSqueezeUp
+        alert("ZigZag Corridors - Squeeze breakout UP", alert.freq_once_per_bar_close)
+        lastSqueezeUpAlert := bar_index
+    
+    bool canAlertSqueezeDn = na(lastSqueezeDnAlert) or (bar_index - lastSqueezeDnAlert) > alertCooldown
+    if squeezeBreakDn and canAlertSqueezeDn
+        alert("ZigZag Corridors - Squeeze breakout DOWN", alert.freq_once_per_bar_close)
+        lastSqueezeDnAlert := bar_index
+
+// === SWF Visualization (Sliding Window Flow) ===
+// Fair Value Center
+plot(useSWF and showSWFBands ? swfC : na, "SWF Center", color=color.new(color.gray, 0), linewidth=2)
+
+// Window Bands (store plot handles for fill)
+swfPlotUp = plot(useSWF and showSWFBands ? swfC + swfW : na, "SWF Upper", color=color.new(color.blue, 0), linewidth=1)
+swfPlotDn = plot(useSWF and showSWFFill ? swfC - swfW : na, "SWF Lower", color=color.new(color.blue, 0), linewidth=1)
+
+// Gradient Fill (calculate color in global scope)
+int swfSaturation = useSWF and showSWFFill ? 90 - int(math.min(80, math.abs(swfZ) * 40)) : 90
+color swfFillColor = useSWF and showSWFFill and not na(swfZ) ? (swfZ >= 0 ? color.new(color.lime, swfSaturation) : color.new(color.red, swfSaturation)) : color.new(color.white, 100)
+fill(swfPlotUp, swfPlotDn, color=swfFillColor)
+
+// State Markers (plotshape is allowed in global scope with conditions)
+plotshape(useSWF and showSWFMarkers and swfExpUp, title="SWF Expansion Up", style=shape.triangleup, color=color.new(color.lime, 0), 
+  location=location.belowbar, size=size.tiny, text="EXP↑")
+plotshape(useSWF and showSWFMarkers and swfExpDn, title="SWF Expansion Dn", style=shape.triangledown, color=color.new(color.red, 0), 
+  location=location.abovebar, size=size.tiny, text="EXP↓")
+
+plotshape(useSWF and showSWFMarkers and swfPbUp, title="SWF Pullback Up", style=shape.circle, color=color.new(color.lime, 0), 
+  location=location.belowbar, size=size.tiny, text="PB↑")
+plotshape(useSWF and showSWFMarkers and swfPbDn, title="SWF Pullback Dn", style=shape.circle, color=color.new(color.red, 0), 
+  location=location.abovebar, size=size.tiny, text="PB↓")
+
+plotshape(useSWF and showSWFMarkers and swfContUp, title="SWF Continuation Up", style=shape.diamond, color=color.new(color.lime, 0), 
+  location=location.belowbar, size=size.tiny, text="CONT↑")
+plotshape(useSWF and showSWFMarkers and swfContDn, title="SWF Continuation Dn", style=shape.diamond, color=color.new(color.red, 0), 
+  location=location.abovebar, size=size.tiny, text="CONT↓")
+
+plotshape(useSWF and showSWFMarkers and swfRevUp, title="SWF Reversal Up", style=shape.xcross, color=color.new(color.lime, 0), 
+  location=location.belowbar, size=size.tiny, text="REV↑")
+plotshape(useSWF and showSWFMarkers and swfRevDn, title="SWF Reversal Dn", style=shape.xcross, color=color.new(color.red, 0), 
+  location=location.abovebar, size=size.tiny, text="REV↓")
+
+
+// ===========================================================================
+// MODULE: modules/reversal_precision.pine
+// ===========================================================================
+
+// ============================================================================
+// REVERSAL PRECISION - CPM-Style Precision Gating
+// ============================================================================
+// ATR-based edge proximity + retest logic for precise reversal entries
+// Reduces false signals by requiring:
+// 1. Precise proximity to KC/Donchian edges (ATR-normalized)
+// 2. Squeeze release OR retest confirmation
+// 3. Dynamic score thresholds (lower in precise zones)
+// 4. Optional volume boost
+
+// ========================= EDGE PROXIMITY (ATR-Based) =========================
+
+// Helper: Calculate ATR-normalized distance from a level
+atrEdgeDist(float level) =>
+    float _atr = ta.atr(14)
+    _atr > 0 ? math.abs(close - level) / _atr : 10.0
+
+// Calculate distance to nearest edge (KC or Donchian, whichever is closer)
+float dUp = math.min(atrEdgeDist(kcUp), atrEdgeDist(donHigh))
+float dDown = math.min(atrEdgeDist(kcDn), atrEdgeDist(donLow))
+
+// Near edge flags (within rzAtr threshold)
+bool nearUpEdge = dUp <= rzAtr
+bool nearDownEdge = dDown <= rzAtr
+
+// ========================= RETEST LOGIC =========================
+
+// Retest condition: After squeeze release or dot confirm, price pulls back to mid/edge
+// Bull retest: After release up, price retraces to KC/Donchian mid or edge
+bool retestBull = ta.barssince(sqzReleaseUp or dotConfirmLong) <= rtestN and 
+                  (close >= kcMid or close >= donMid)
+
+// Bear retest: After release down, price rallies to KC/Donchian mid or edge
+bool retestBear = ta.barssince(sqzReleaseDn or dotConfirmShort) <= rtestN and 
+                  (close <= kcMid or close <= donMid)
+
+// ========================= DYNAMIC SCORE THRESHOLDS =========================
+
+// Effective thresholds (lower in precise edge zones)
+float effHiCut = hiCut
+float effModCut = modCut
+
+if nearUpEdge or nearDownEdge
+    // In precise zone: reduce threshold by 1.0 point
+    effHiCut := math.max(0.0, hiCut - 1.0)
+    effModCut := math.max(0.0, modCut - 1.0)
+
+// Volume boost: If volume > 110% of 20-bar average, reduce threshold slightly
+if volBoost and volume > ta.sma(volume, 20) * 1.10
+    effHiCut -= 0.5
+    effModCut -= 0.5
+
+// ========================= REVERSAL ZONE SIGNALS =========================
+
+// RZ Buy: Near bottom edge + (squeeze release OR retest) + score above threshold
+bool rzBuy = useRZ and nearDownEdge and (sqzReleaseUp or retestBull) and 
+             overallScore >= effModCut
+
+// RZ Sell: Near top edge + (squeeze release OR retest) + score below negative threshold
+bool rzSell = useRZ and nearUpEdge and (sqzReleaseDn or retestBear) and 
+              overallScore <= -effModCut
+
+// High-confidence flags (for visual differentiation)
+bool rzBuyHigh = rzBuy and overallScore >= effHiCut
+bool rzSellHigh = rzSell and overallScore <= -effHiCut
+
+// ========================= CPM-STYLE VISUAL MARKERS =========================
+
+if showRZViz
+    // Small circles: All RZ signals (filtered)
+    plotshape(rzBuy, title="RZ Buy (Filtered)", 
+             style=shape.circle, size=size.tiny, 
+             location=location.belowbar, color=color.new(color.lime, 0))
+    
+    plotshape(rzSell, title="RZ Sell (Filtered)", 
+             style=shape.circle, size=size.tiny, 
+             location=location.abovebar, color=color.new(color.red, 0))
+    
+    // Small triangles: High-confidence entries
+    plotshape(rzBuyHigh, title="RZ High Buy", 
+             style=shape.triangleup, size=shape.small, 
+             location=location.belowbar, color=color.new(color.lime, 0))
+    
+    plotshape(rzSellHigh, title="RZ High Sell", 
+             style=shape.triangledown, size=size.small, 
+             location=location.abovebar, color=color.new(color.red, 0))
+
+// ========================= CONSOLE DIAGNOSTICS =========================
+
+if rzDebug and barstate.isconfirmed and (rzBuy or rzSell)
+    string direction = rzBuy ? "BUY" : "SELL"
+    string edge = rzBuy ? "DOWN" : "UP"
+    bool retest = rzBuy ? retestBull : retestBear
+    float dist = rzBuy ? dDown : dUp
+    
+    log.info("RZ " + direction + 
+            " | time=" + str.format("{0,date,yyyy-MM-dd HH:mm}", time) +
+            " | nearEdge=" + edge + 
+            " | retest=" + str.tostring(retest) +
+            " | score=" + str.tostring(overallScore, "#.##") +
+            " | effCuts=(" + str.tostring(effModCut, "#.#") + "," + str.tostring(effHiCut, "#.#") + ")" +
+            " | distATR=" + str.tostring(dist, "#.##") +
+            " | dUp=" + str.tostring(dUp, "#.##") + " dDown=" + str.tostring(dDown, "#.##"))
+
+
+// ===========================================================================
+// MODULE: modules/signal_scoring.pine
+// ===========================================================================
+
+// ============================================================================
+// SIGNAL SCORING SYSTEM - Weighted Decision Making
+// ============================================================================
+// Phase 3A-3C: Score-based signals, Lonely-Rule, Zone-exit confirmation
+
+// ============================================================================
+// LONELY-RULE (3A)
+// ============================================================================
+// Prevents signal clustering by enforcing minimum bar distance
+
+var int lastSignalIdx = na
+
+// Check if enough bars have passed since last signal
+// @param minBars: Minimum bars between signals
+f_lonely_ok(int minBars) =>
+    na(lastSignalIdx) or (bar_index - lastSignalIdx >= minBars)
+
+// Update last signal index
+updateLastSignal() =>
+    lastSignalIdx := bar_index
+
+// ============================================================================
+// SIGNAL SCORE CALCULATION (3B)
+// ============================================================================
+// Weighted scoring system: -10 to +10 range
+
+// Calculate composite signal score (CPM-style: bidirectional)
+// @param inRZ: Inside reversal zone (±3)
+// @param pullOk: Pullback acceptable (±2)
+// @param momGate: Momentum gate passed (±2)
+// @param htfGate: HTF filter passed (±2)
+// @param squeezeBreak: Squeeze breakout (±1)
+// @param zzDivergence: ZigZag divergence (±1)
+// @returns: [bullScore, bearScore, totalScore]
+f_calcSignalScore(bool inRZLong, bool inRZShort, 
+                         bool pullOk, 
+                         bool momGate, 
+                         bool htfGate, 
+                         bool squeezeBreak, 
+                         bool zzDivergence) =>
+    // CPM-Konzept: Separate bull/bear scores für klare Trennung
+    float bullScore = 0.0
+    float bearScore = 0.0
+    
+    // Reversal Zone (strongest signal)
+    if inRZLong
+        bullScore += 3.0
+    if inRZShort
+        bearScore += 3.0
+    
+    // Pullback quality
+    if pullOk
+        if inRZLong
+            bullScore += 2.0
+        if inRZShort
+            bearScore += 2.0
+    else
+        // Penalty für bad pullback
+        bullScore -= 1.0
+        bearScore -= 1.0
+    
+    // Momentum confirmation
+    if momGate
+        if inRZLong
+            bullScore += 2.0
+        if inRZShort
+            bearScore += 2.0
+    
+    // HTF alignment
+    if htfGate
+        if inRZLong
+            bullScore += 2.0
+        if inRZShort
+            bearScore += 2.0
+    
+    // Squeeze breakout bonus
+    if squeezeBreak
+        if inRZLong
+            bullScore += 1.0
+        if inRZShort
+            bearScore += 1.0
+    
+    // Divergence bonus
+    if zzDivergence
+        if inRZLong
+            bullScore += 1.0
+        if inRZShort
+            bearScore += 1.0
+    
+    // Total score (für Kompatibilität)
+    float totalScore = bullScore - bearScore
+    
+    [bullScore, bearScore, totalScore]
+
+// Classify signal strength from score (CPM-style: excessPct)
+// @param score: Active score (bullScore or bearScore)
+// @param threshold: Active threshold
+// @returns: String ('Strong'/'Moderate'/'Weak'/'None')
+f_classifySignalStrength(float score, float threshold) =>
+    string strength = "None"
+    
+    if score >= threshold
+        // CPM-Konzept: excessPct berechnen
+        float excessPct = (score - threshold) / threshold
+        
+        if excessPct > 0.5
+            strength := "Strong"      // Exceeds by 50%+
+        else if excessPct > 0.2
+            strength := "Moderate"    // Exceeds by 20-50%
+        else
+            strength := "Weak"        // Barely exceeds
+    
+    strength
+
+// ============================================================================
+// MODE SYSTEM (CPM-STYLE)
+// ============================================================================
+// Three modes with different thresholds and multipliers
+
+// Get threshold based on mode
+// @param mode: "Strong"/"Moderate"/"Loose"
+// @param thStrong: Strong threshold (default 8.0)
+// @param thModerate: Moderate threshold (default 5.5)
+// @param thLoose: Loose threshold (default 4.5)
+f_getModeThreshold(string mode, float thStrong, float thModerate, float thLoose) =>
+    mode == "Strong" ? thStrong : mode == "Moderate" ? thModerate : thLoose
+
+// Get mode multiplier
+// @param mode: "Strong"/"Moderate"/"Loose"
+// @param mStrong: Strong multiplier (default 1.2)
+// @param mModerate: Moderate multiplier (default 1.0)
+// @param mLoose: Loose multiplier (default 0.85)
+f_getModeMultiplier(string mode, float mStrong, float mModerate, float mLoose) =>
+    mode == "Strong" ? mStrong : mode == "Moderate" ? mModerate : mLoose
+
+// ============================================================================
+// DIVERGENCE BOOST (CPM-STYLE)
+// ============================================================================
+// Relax threshold when divergence confirms signal
+
+// Apply divergence boost to threshold
+// @param threshold: Base threshold
+// @param divBull: Bullish divergence detected
+// @param divBear: Bearish divergence detected
+// @param useDivBoost: Enable divergence boost
+// @param divBoostAmount: Amount to reduce threshold (default 1.5)
+// @param isLong: True for long signal, false for short
+// @returns: Adjusted threshold
+f_applyDivergenceBoost(float threshold, bool divBull, bool divBear, 
+                              bool useDivBoost, float divBoostAmount, bool isLong) =>
+    float adjustedThreshold = threshold
+    
+    if useDivBoost
+        if isLong and divBull
+            adjustedThreshold -= divBoostAmount
+        else if not isLong and divBear
+            adjustedThreshold -= divBoostAmount
+    
+    // Never go below 1.0
+    math.max(1.0, adjustedThreshold)
+
+// ============================================================================
+// DIAMOND GATING (CPM-STYLE)
+// ============================================================================
+// Pivot-confirmed exhaustion zones
+
+// Detect diamond zones (oversold/overbought + pivot)
+// @param rsi: RSI value
+// @param mfi: MFI value  
+// @param pivotLow: Pivot low detected (not na)
+// @param pivotHigh: Pivot high detected (not na)
+// @param rsiThLong: RSI threshold for long diamonds (default 38)
+// @param rsiThShort: RSI threshold for short diamonds (default 62)
+// @param mfiThLong: MFI threshold for long diamonds (default 25)
+// @param mfiThShort: MFI threshold for short diamonds (default 75)
+// @returns: [diamondLong, diamondShort]
+f_detectDiamonds(float rsi, float mfi, 
+                        float pivotLow, float pivotHigh,
+                        float rsiThLong = 38.0, float rsiThShort = 62.0,
+                        float mfiThLong = 25.0, float mfiThShort = 75.0) =>
+    
+    // Diamond Long: Oversold + Pivot Low
+    bool diamondLong = (rsi < rsiThLong or mfi < mfiThLong) and not na(pivotLow)
+    
+    // Diamond Short: Overbought + Pivot High
+    bool diamondShort = (rsi > rsiThShort or mfi > mfiThShort) and not na(pivotHigh)
+    
+    [diamondLong, diamondShort]
+
+// Apply Diamond Gating to signals
+// @param longSignal: Raw long signal
+// @param shortSignal: Raw short signal
+// @param diamondLong: Diamond long detected
+// @param diamondShort: Diamond short detected
+// @param diamondWindow: Bars to wait after diamond (0 = same bar only, default 3)
+// @param useDiamondGating: Enable diamond gating
+// @returns: [longSignalGated, shortSignalGated]
+f_applyDiamondGating(bool longSignal, bool shortSignal,
+                            bool diamondLong, bool diamondShort,
+                            int diamondWindow = 3, bool useDiamondGating = false) =>
+    
+    if not useDiamondGating
+        [longSignal, shortSignal]
+    else
+        // Within Diamond Window?
+        bool withinDL = diamondWindow == 0 ? diamondLong : ta.barssince(diamondLong) <= diamondWindow
+        bool withinDS = diamondWindow == 0 ? diamondShort : ta.barssince(diamondShort) <= diamondWindow
+        
+        // Gated Signals
+        bool longGated = longSignal and withinDL
+        bool shortGated = shortSignal and withinDS
+        
+        [longGated, shortGated]
+
+// ============================================================================
+// REPAINTING PROTECTION (CPM-STYLE)
+// ============================================================================
+// Wait for HTF confirmation in Strong mode
+
+// Confirm signals with repainting protection
+// @param longSignal: Raw long signal
+// @param shortSignal: Raw short signal
+// @param mode: Signal mode ("Strong"/"Moderate"/"Loose")
+// @returns: [longConfirmed, shortConfirmed]
+f_confirmSignals(bool longSignal, bool shortSignal, string mode = "Moderate") =>
+    
+    // Daily bar closed flag (for Strong mode)
+    bool isDailyClosed = ta.change(request.security(syminfo.tickerid, "D", time_close, 
+                                   barmerge.gaps_off, barmerge.lookahead_off)) != 0
+    
+    // Strong mode waits for daily close (prevents intraday flips)
+    bool longConfirmed = longSignal and 
+                        (timeframe.isdaily or isDailyClosed or mode != "Strong")
+    
+    bool shortConfirmed = shortSignal and 
+                         (timeframe.isdaily or isDailyClosed or mode != "Strong")
+    
+    // Final: Only on confirmed bar
+    bool longFinal = longConfirmed and barstate.isconfirmed
+    bool shortFinal = shortConfirmed and barstate.isconfirmed
+    
+    [longFinal, shortFinal]
+
+// ============================================================================
+// GATE FUNCTIONS (3A)
+// ============================================================================
+
+// RZ Gate: Check if price is inside reversal zone
+// @param rzBuy, rzSell: Reversal zone flags
+// @returns: [inRZLong, inRZShort]
+f_rzGate(bool rzBuy, bool rzSell, bool rzBuyHigh, bool rzSellHigh) =>
+    bool inRZLong = rzBuy or rzBuyHigh
+    bool inRZShort = rzSell or rzSellHigh
+    [inRZLong, inRZShort]
+
+// ZigZag Pullback Gate
+// @param zzPullbackPct: Current pullback percentage
+// @param pullMax: Maximum acceptable pullback (default 0.618 = 61.8%)
+f_zzPullbackGate(float zzPullbackPct, float pullMax) =>
+    nz(zzPullbackPct) <= pullMax
+
+// Momentum Gate
+// @param useMomentumGate: Enable momentum filter
+// @param rsi: RSI value
+// @param rsiLow: RSI oversold level (default 35)
+// @param rsiHigh: RSI overbought level (default 65)
+f_momentumGate(bool useMomentumGate, float rsi, float rsiLow, float rsiHigh) =>
+    not useMomentumGate or (rsi < rsiLow or rsi > rsiHigh)
+
+// HTF Gate: Multi-timeframe alignment
+// @param bullTFs: Number of bullish timeframes
+// @param bearTFs: Number of bearish timeframes
+// @param minTFs: Minimum timeframes required (default 2)
+f_htfGate(int bullTFs, int bearTFs, int minTFs) =>
+    bullTFs >= minTFs or bearTFs >= minTFs
+
+// ============================================================================
+// ZONE-EXIT CONFIRMATION (3C)
+// ============================================================================
+// Signal only when zone is exited with direction confirmation
+
+// Check if price has exited zone with confirmation
+// @param close: Current close
+// @param kcMid: KC mid-line (basis)
+// @param zzTurnUp: ZigZag turning up
+// @param zzTurnDn: ZigZag turning down
+// @returns: [exitedUpConfirmed, exitedDnConfirmed]
+f_zoneExitConfirmed(float close, float kcMid, bool zzTurnUp, bool zzTurnDn) =>
+    bool exitedUp = close > kcMid and zzTurnUp
+    bool exitedDn = close < kcMid and zzTurnDn
+    [exitedUp, exitedDn]
+
+// ============================================================================
+// FULL SIGNAL GENERATION PIPELINE (CPM-STYLE)
+// ============================================================================
+// Complete refactor using CPM concepts:
+// - Bidirectional bull/bear scores
+// - Mode-based thresholds (Strong/Moderate/Loose)
+// - Divergence Boost
+// - Diamond Gating
+// - RZ Proximity Boost
+// - Repainting Protection
+// - Signal Strength Classification
+
+// Generate final signals with all gates and scoring (CPM-Enhanced)
+// @param ... (all gate inputs)
+// @returns: [longSignal, shortSignal, signalStrength, bullScore, bearScore, totalScore]
+f_generateSignals(
+     // RZ inputs
+     bool rzBuy, bool rzSell, bool rzBuyHigh, bool rzSellHigh,
+     // ZZ inputs
+     float zzPullbackPct, float pullMax, bool zzTurnUp, bool zzTurnDn,
+     // Momentum inputs
+     bool useMomentumGate, float rsi, float rsiLow, float rsiHigh,
+     float mfi,  // For Diamond Detection
+     // HTF inputs
+     int bullTFs, int bearTFs, int minTFs,
+     // Squeeze inputs
+     bool squeezeBreakUp, bool squeezeBreakDn,
+     // Divergence inputs
+     bool divBull, bool divBear,
+     // KC inputs
+     float kcMid,
+     // Pivot inputs (for Diamond Detection)
+     float pivotLow, float pivotHigh,
+     // Mode Configuration (CPM-Style)
+     string mode = "Moderate",              // "Strong"/"Moderate"/"Loose"
+     float thStrong = 8.0,                   // Strong threshold
+     float thModerate = 5.5,                 // Moderate threshold
+     float thLoose = 4.5,                    // Loose threshold
+     float mStrong = 1.2,                    // Strong multiplier
+     float mModerate = 1.0,                  // Moderate multiplier
+     float mLoose = 0.85,                    // Loose multiplier
+     // Divergence Boost
+     bool useDivBoost = true,
+     float divBoostAmount = 1.5,
+     // Diamond Gating
+     bool useDiamondGating = false,
+     int diamondWindow = 3,
+     float rsiThLong = 38.0,
+     float rsiThShort = 62.0,
+     float mfiThLong = 25.0,
+     float mfiThShort = 75.0,
+     // RZ Proximity Boost
+     bool useRZBoost = true,
+     float rzBoostAmount = 1.0,
+     float rzTolerance = 0.75,                // ATR-based tolerance
+     // Lonely-Rule
+     int minBarsBetween = 6
+ ) =>
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 1: GATE EVALUATION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    // === GATE 1: RZ Touch/Inside ===
+    [inRZLong, inRZShort] = f_rzGate(rzBuy, rzSell, rzBuyHigh, rzSellHigh)
+    
+    // === GATE 2: ZigZag Pullback ===
+    bool pullOk = f_zzPullbackGate(zzPullbackPct, pullMax)
+    
+    // === GATE 3: Momentum ===
+    bool momGate = f_momentumGate(useMomentumGate, rsi, rsiLow, rsiHigh)
+    
+    // === GATE 4: HTF Filter ===
+    bool htfGate = f_htfGate(bullTFs, bearTFs, minTFs)
+    
+    // === GATE 5: Zone Exit Confirmation ===
+    [exitedUp, exitedDn] = f_zoneExitConfirmed(close, kcMid, zzTurnUp, zzTurnDn)
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 2: COMPOSITE SCORE CALCULATION (CPM-STYLE: BIDIRECTIONAL)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    [bullScore, bearScore, totalScore] = f_calcSignalScore(
+        inRZLong, inRZShort,
+        pullOk,
+        momGate,
+        htfGate,
+        squeezeBreakUp or squeezeBreakDn,
+        divBull or divBear
+    )
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 3: MODE-BASED THRESHOLDS (CPM-STYLE)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    float baseThreshold = f_getModeThreshold(mode, thStrong, thModerate, thLoose)
+    float modeMultiplier = f_getModeMultiplier(mode, mStrong, mModerate, mLoose)
+    
+    // Apply multiplier
+    float activeLongThreshold = baseThreshold * modeMultiplier
+    float activeShortThreshold = baseThreshold * modeMultiplier
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 4: DIVERGENCE BOOST (CPM-STYLE)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    activeLongThreshold := f_applyDivergenceBoost(
+        activeLongThreshold, divBull, divBear, 
+        useDivBoost, divBoostAmount, true
+    )
+    
+    activeShortThreshold := f_applyDivergenceBoost(
+        activeShortThreshold, divBull, divBear, 
+        useDivBoost, divBoostAmount, false
+    )
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 5: RZ PROXIMITY BOOST (CPM-STYLE)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    if useRZBoost
+        // Calculate ATR for proximity check
+        float atr = ta.atr(14)
+        
+        // Check proximity to RZ zones (simplified - assumes rzBuyHigh/rzSellHigh
+        // indicate high-quality RZ proximity)
+        if rzBuyHigh
+            activeLongThreshold -= rzBoostAmount
+        if rzSellHigh
+            activeShortThreshold -= rzBoostAmount
+    
+    // Never go below 1.0
+    activeLongThreshold := math.max(1.0, activeLongThreshold)
+    activeShortThreshold := math.max(1.0, activeShortThreshold)
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 6: RAW SIGNALS (SCORE vs THRESHOLD)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    bool longRaw = bullScore >= activeLongThreshold and inRZLong and exitedUp
+    bool shortRaw = bearScore >= activeShortThreshold and inRZShort and exitedDn
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 7: DIAMOND GATING (CPM-STYLE - OPTIONAL)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    if useDiamondGating
+        // Detect Diamonds
+        [diamondLong, diamondShort] = f_detectDiamonds(
+            rsi, mfi, pivotLow, pivotHigh,
+            rsiThLong, rsiThShort, mfiThLong, mfiThShort
+        )
+        
+        // Apply Gating
+        [longRaw, shortRaw] = f_applyDiamondGating(
+            longRaw, shortRaw,
+            diamondLong, diamondShort,
+            diamondWindow, true  // useDiamondGating = true
+        )
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 8: LONELY-RULE (ANTI-CLUSTERING)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    bool lonelyOk = f_lonely_ok(minBarsBetween)
+    
+    bool longSignal = longRaw and lonelyOk
+    bool shortSignal = shortRaw and lonelyOk
+    
+    // Update last signal tracker
+    if longSignal or shortSignal
+        updateLastSignal()
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 9: REPAINTING PROTECTION (CPM-STYLE)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    [longSignalConfirmed, shortSignalConfirmed] = f_confirmSignals(
+        longSignal, shortSignal, mode
+    )
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 10: SIGNAL STRENGTH CLASSIFICATION (CPM-STYLE)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    string strengthLong = f_classifySignalStrength(bullScore, activeLongThreshold)
+    string strengthShort = f_classifySignalStrength(bearScore, activeShortThreshold)
+    
+    // Determine active strength
+    string strength = "None"
+    if longSignalConfirmed
+        strength := strengthLong
+    else if shortSignalConfirmed
+        strength := strengthShort
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // RETURN: [LONG, SHORT, STRENGTH, BULL_SCORE, BEAR_SCORE, TOTAL_SCORE]
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    [longSignalConfirmed, shortSignalConfirmed, strength, bullScore, bearScore, totalScore]
+
+
+// ===========================================================================
+// MODULE: modules/signals.pine
+// ===========================================================================
+
+// ============================================================================
+// TRADING SIGNALS (CPM-Enhanced Signal Engine Integration)
+// ============================================================================
+// Exports clean trading signals following the universal signal convention
+// These signals are used by the Strategy Adapter Template
+//
+// Signal Convention:
+// - strongBuySignal / strongSellSignal (Required)
+// - moderateBuySignal / moderateSellSignal (Optional)
+// - overallScore (Optional)
+//
+// CPM-Enhanced Features:
+// - Bidirectional bull/bear composite scores
+// - Mode-based thresholds (Strong/Moderate/Loose)
+// - Divergence Boost (relaxed thresholds on divergence)
+// - Diamond Gating (pivot-confirmed exhaustion zones)
+// - RZ Proximity Boost (enhanced signals near reversal zones)
+// - Repainting Protection (HTF confirmation in Strong mode)
+// - Signal Strength Classification (Strong/Moderate/Weak)
+// ============================================================================
+
+// ============================================================================
+// REQUIRED INPUTS FROM MAIN SCRIPT
+// ============================================================================
+// The following variables must be available from the main script context:
+// 
+// From reversal_precision.pine:
+//   - rzBuy, rzSell, rzBuyHigh, rzSellHigh
+// 
+// From zigzag_core.pine:
+//   - zzPullbackPct, zzTurnUp, zzTurnDn
+// 
+// From calculations.pine:
+//   - rsi, mfi (for momentum & diamonds)
+//   - sqzReleaseUp, sqzReleaseDn (squeeze breakout)
+//   - pivotLow, pivotHigh (for diamond detection)
+// 
+// From divergence.pine (if available):
+//   - divBull, divBear
+// 
+// From envelopes.pine:
+//   - kcMid, kcUp, kcDn
+//   - donMid, donHigh, donLow
+// 
+// From htf_context.pine:
+//   - bullTFs, bearTFs
+// 
+// From inputs.pine:
+//   - signalMode, thStrong, thModerate, thLoose
+//   - mStrong, mModerate, mLoose
+//   - useDivBoost, divBoostAmount
+//   - useDiamondGate, diamondWindow, rsiThLong, rsiThShort, mfiThLong, mfiThShort
+//   - useRZBoost, rzBoostAmount
+//   - pullMax (ZigZag pullback max, typically 0.618)
+//   - useMomentumGate, rsiLow (35), rsiHigh (65)
+//   - minTFs (HTF minimum, typically 2)
+//   - minSpacing (signal spacing, typically 6)
+// ============================================================================
+
+// ============================================================================
+// CALL CPM SIGNAL PIPELINE
+// ============================================================================
+// Generate signals using the CPM-enhanced pipeline from signal_scoring.pine
+
+// Note: Divergence detection should be available from divergence.pine
+// If not available, create placeholder:
+// bool divBull = false  // TODO: Import from divergence.pine
+// bool divBear = false  // TODO: Import from divergence.pine
+
+[longSignal, shortSignal, signalStrength, bullScore, bearScore, totalScore] = 
+    f_generateSignals(
+        // RZ inputs
+        rzBuy, rzSell, rzBuyHigh, rzSellHigh,
+        // ZZ inputs
+        zzPullbackPct, pullMax, zzTurnUp, zzTurnDn,
+        // Momentum inputs
+        useMomentumGate, rsi, 35.0, 65.0,  // rsiLow, rsiHigh defaults
+        mfi,
+        // HTF inputs
+        bullTFs, bearTFs, 2,  // minTFs default = 2
+        // Squeeze inputs
+        sqzReleaseUp, sqzReleaseDn,
+        // Divergence inputs (TODO: Import from divergence module)
+        divBull, divBear,
+        // KC inputs
+        kcMid,
+        // Pivot inputs
+        pivotLow, pivotHigh,
+        // Mode Configuration
+        signalMode, thStrong, thModerate, thLoose,
+        mStrong, mModerate, mLoose,
+        // Divergence Boost
+        useDivBoost, divBoostAmount,
+        // Diamond Gating
+        useDiamondGate, diamondWindow,
+        rsiThLong, rsiThShort, mfiThLong, mfiThShort,
+        // RZ Proximity Boost
+        useRZBoost, rzBoostAmount, 0.75,  // rzTolerance default
+        // Lonely-Rule
+        minSpacing  // minBarsBetween
+    )
+
+// ============================================================================
+// SIGNAL CONVENTION MAPPING
+// ============================================================================
+// Map CPM pipeline outputs to Strategy Adapter convention
+
+// Strong Signals: Strong classification from CPM pipeline
+bool strongBuySignal = longSignal and (signalStrength == "Strong")
+bool strongSellSignal = shortSignal and (signalStrength == "Strong")
+
+// Moderate Signals: Moderate or Weak classification from CPM pipeline
+bool moderateBuySignal = longSignal and (signalStrength == "Moderate" or signalStrength == "Weak")
+bool moderateSellSignal = shortSignal and (signalStrength == "Moderate" or signalStrength == "Weak")
+
+// Overall Score: Use totalScore from CPM pipeline
+// Range: Bull/Bear scores are positive, totalScore = bullScore - bearScore
+float overallScore = totalScore
+
+// ============================================================================
+// ADDITIONAL SIGNAL QUALITY CHECKS
+// ============================================================================
+// Optional quality filters for strategies that need extra filtering
+
+// Clean trend check: Price aligned with corridor
+bool cleanBullTrend = close > kcMid and close > donMid
+bool cleanBearTrend = close < kcMid and close < donMid
+
+// Volume confirmation: Above average volume
+bool volumeConfirmsBull = volume > ta.sma(volume, 20) * 1.1
+bool volumeConfirmsBear = volume > ta.sma(volume, 20) * 1.1
+
+// Not in extreme territory: Avoid buying tops/selling bottoms of corridor
+bool notAtTopEdge = close < kcUp * 0.98 and close < donHigh * 0.98
+bool notAtBottomEdge = close > kcDn * 1.02 and close > donLow * 1.02
+
+// === ENHANCED SIGNAL QUALITY VARIANTS ===
+// These can be used by strategies that want even stricter filters
+
+// High-Quality Signals: All conditions met
+bool highQualityBuy = strongBuySignal and cleanBullTrend and volumeConfirmsBull and notAtTopEdge
+bool highQualitySell = strongSellSignal and cleanBearTrend and volumeConfirmsBear and notAtBottomEdge
+
+// Standard Signals: Minimal filters (just edge check)
+bool standardBuy = strongBuySignal and notAtTopEdge
+bool standardSell = strongSellSignal and notAtBottomEdge
+
+// Squeeze-Filtered Signals: Only during squeeze release
+bool squeezeFilteredBuy = strongBuySignal and sqzReleaseUp
+bool squeezeFilteredSell = strongSellSignal and sqzReleaseDn
+
+// Ultimate Quality: All filters combined - highest probability
+bool ultimateBuy = highQualityBuy and sqzReleaseUp and bullScore >= 8.0
+bool ultimateSell = highQualitySell and sqzReleaseDn and bearScore >= 8.0
+
+// ============================================================================
+// NOTES & DOCUMENTATION
+// ============================================================================
+// Signal Convention Compliance:
+// ✓ strongBuySignal / strongSellSignal (Required) - CPM "Strong" strength signals
+// ✓ moderateBuySignal / moderateSellSignal (Optional) - CPM "Moderate"/"Weak" signals
+// ✓ overallScore (Optional) - CPM totalScore (bullScore - bearScore)
+//
+// CPM-Enhanced Pipeline Features:
+// ✓ Bidirectional Scoring: Separate bullScore/bearScore for clear directional signals
+// ✓ Mode-Based Thresholds: Strong/Moderate/Loose modes with adaptive thresholds
+// ✓ Divergence Boost: Threshold relaxation when divergence confirms signal
+// ✓ Diamond Gating: Optional pivot-confirmed exhaustion zone filtering
+// ✓ RZ Proximity Boost: Enhanced signals near reversal zone edges
+// ✓ Repainting Protection: HTF confirmation in Strong mode
+// ✓ Signal Strength Classification: Strong (50%+ excess), Moderate (20-50%), Weak (<20%)
+// ✓ Lonely Rule: Anti-clustering filter (min bars between signals)
+//
+// Integration with Existing Modules:
+// - signal_scoring.pine: f_generateSignals() - Full CPM pipeline
+// - reversal_precision.pine: rzBuy/rzSell/rzBuyHigh/rzSellHigh - RZ detection
+// - zigzag_core.pine: zzPullbackPct, zzTurnUp/Dn - ZigZag state
+// - calculations.pine: rsi, mfi, sqzReleaseUp/Dn - Momentum & squeeze
+// - envelopes.pine: kcMid/Up/Dn, donMid/High/Low - Corridor bands
+// - htf_context.pine: bullTFs, bearTFs - Multi-timeframe alignment
+// - divergence.pine: divBull, divBear - Divergence detection (TODO: integrate)
+//
+// Quality Variants Available:
+// - highQualityBuy/Sell: Strong signals + trend + volume + edge filters
+// - squeezeFilteredBuy/Sell: Strong signals during squeeze release only
+// - ultimateBuy/Sell: Ultra-conservative (all filters + high bullScore/bearScore)
+//
+// Strategy Adapter Usage:
+// The universal strategy adapter will automatically use:
+// - strongBuySignal/strongSellSignal for primary entries ("Strong" classification)
+// - moderateBuySignal/moderateSellSignal if "Trade Moderate Signals" enabled
+// - overallScore for score-based filtering (positive = bullish, negative = bearish)
+//
+// CPM Mode Recommendations:
+// - Strong Mode: High-confidence, fewer signals, waits for daily close (no repainting)
+// - Moderate Mode: Balanced, immediate confirmation on bar close
+// - Loose Mode: More signals, lower threshold, best for ranging markets
+//
+// Threshold Tuning:
+// - thStrong: 8.0 (default) - Requires excellent alignment across all gates
+// - thModerate: 5.5 (default) - Balanced, good for most markets
+// - thLoose: 4.5 (default) - More permissive, watch for false signals
+//
+// Enhancement Tuning:
+// - divBoostAmount: 1.5 (default) - Threshold reduction on divergence
+// - rzBoostAmount: 1.0 (default) - Threshold reduction near RZ edges
+// - diamondWindow: 3 bars (default) - Signal window after Diamond setup
+// ============================================================================
+
+
+// ===========================================================================
+// MODULE: modules/arra_zones.pine
+// ===========================================================================
+
+// ============================================================================
+// ARRA REBUILD ZONES & LAST-LEG FIBS
+// ============================================================================
+// Action/Reaction-Rebuild-Analysis (ARRA) with horizontal Fibonacci levels
+// and quality-gated rebuild zones for the last completed ZigZag leg
+//
+// Features:
+// - Persistent object updates (no object spam)
+// - Horizontal Fib retracements (38.2%, 50%, 61.8%)
+// - ARRA Rebuild Zones (RZ-1 around 50%, RZ-2 between 50-61.8%)
+// - Quality Gate (Momentum decay + Squeeze detection)
+// - SOW/LPSY Wyckoff markers (Sign of Weakness / Last Point of Supply)
+//
+// NOTE: All ARRA inputs are defined in inputs.pine module
+// ============================================================================
+
+// === PERSISTENT OBJECTS (Delete and recreate for proper scaling) ===
+// CPM Pattern: Fresh objects each bar to ensure zoom/pan compatibility
+var line fib38L = na
+var line fib50L = na
+var line fib61L = na
+var label fib38Lbl = na
+var label fib50Lbl = na
+var label fib61Lbl = na
+var box rz1Box = na
+var box rz2Box = na
+
+// === LAST LEG DETECTION ===
+
+// Hook: Get from ZigZag engine (connected to calculations.pine)
+get_last_leg_from_hook() =>
+    // Check if ZigZag has valid leg data
+    bool hasValidLeg = not na(zzLegStartIdx) and not na(zzLegEndIdx) and zzLegStartIdx != zzLegEndIdx
+    // Return consistent types (series int, series float, series int, series float, bool)
+    int retStartIdx = hasValidLeg ? zzLegStartIdx : int(na)
+    float retStartPrice = hasValidLeg ? zzLegStartPrice : float(na)
+    int retEndIdx = hasValidLeg ? zzLegEndIdx : int(na)
+    float retEndPrice = hasValidLeg ? zzLegEndPrice : float(na)
+    [retStartIdx, retStartPrice, retEndIdx, retEndPrice, hasValidLeg]
+
+// Fallback: Pivot scanner (non-repainting)
+get_last_leg_fallback(int L, int R) =>
+    var int p1i = na
+    var int p2i = na
+    var float p1p = na
+    var float p2p = na
+    
+    ph = ta.pivothigh(high, L, R)
+    pl = ta.pivotlow(low, L, R)
+    
+    if not na(ph)
+        p1i := p2i
+        p1p := p2p
+        p2i := bar_index - R
+        p2p := ph
+    
+    if not na(pl)
+        p1i := p2i
+        p1p := p2p
+        p2i := bar_index - R
+        p2p := pl
+    
+    [p1i, p1p, p2i, p2p, not na(p1i) and not na(p2i) and p1i != p2i]
+
+// Unified getter (hook first, fallback if needed)
+get_last_leg() =>
+    [sIdx, sPrice, eIdx, ePrice, okHook] = get_last_leg_from_hook()
+    if okHook
+        [sIdx, sPrice, eIdx, ePrice, true]
+    else
+        get_last_leg_fallback(5, 5)
+
+// === CORE RENDER (Only on last bar, update persistent objects) ===
+if barstate.islast
+    [sIdx, sPx, eIdx, ePx, ok] = get_last_leg()
+    
+    if ok and (showLastLegFibs or showARRAZones)
+        bool legUp = ePx > sPx
+        float legHi = legUp ? ePx : sPx
+        float legLo = legUp ? sPx : ePx
+        float legLen = legHi - legLo
+        int legStart = math.min(sIdx, eIdx)
+        int legEnd = math.max(sIdx, eIdx)
+        
+        if legLen > 0
+            // === FIBONACCI LEVELS (Horizontal from leg end) ===
+            float fib38 = legUp ? legHi - 0.382*legLen : legLo + 0.382*legLen
+            float fib50 = legUp ? legHi - 0.500*legLen : legLo + 0.500*legLen
+            float fib61 = legUp ? legHi - 0.618*legLen : legLo + 0.618*legLen
+            
+            int x1 = legEnd
+            int x2 = legEnd + barsAhead
+            color colFib = color.new(color.silver, fibOpacity)
+            
+            if showLastLegFibs
+                // Delete old objects (CPM pattern for proper scaling)
+                if not na(fib38L)
+                    line.delete(fib38L)
+                    line.delete(fib50L)
+                    line.delete(fib61L)
+                    label.delete(fib38Lbl)
+                    label.delete(fib50Lbl)
+                    label.delete(fib61Lbl)
+                
+                // Create fresh objects (ensures zoom/pan compatibility)
+                fib38L := line.new(x1, fib38, x2, fib38, color=colFib, style=line.style_dotted, width=1)
+                fib50L := line.new(x1, fib50, x2, fib50, color=colFib, style=line.style_dotted, width=1)
+                fib61L := line.new(x1, fib61, x2, fib61, color=colFib, style=line.style_dotted, width=1)
+                fib38Lbl := label.new(x2, fib38, "38.2%", style=label.style_none, textcolor=colFib, textalign=text.align_right, size=size.small)
+                fib50Lbl := label.new(x2, fib50, "50%", style=label.style_none, textcolor=colFib, textalign=text.align_right, size=size.small)
+                fib61Lbl := label.new(x2, fib61, "61.8%", style=label.style_none, textcolor=colFib, textalign=text.align_right, size=size.small)
+            
+            // === ARRA CENTER & WIDTH ===
+            // Fair Value Center: AVWAP of the leg
+            float cumPV = 0.0
+            float cumV = 0.0
+            float basePV = 0.0
+            float baseV = 0.0
+            
+            for bi = legStart to legEnd
+                cumPV += close[bar_index - bi] * volume[bar_index - bi]
+                cumV += volume[bar_index - bi]
+                if bi == legStart
+                    basePV := cumPV
+                    baseV := cumV
+            
+            float legAVWAP = (cumV - baseV) == 0 ? (legLo + legHi) / 2.0 : (cumPV - basePV) / (cumV - baseV)
+            
+            // Average ATR over leg → Width (Refactored: Use centralized helper)
+            float atrMean = calcLegATR(legStart, legEnd)
+            float W = atrMean * widthK
+            
+            // === QUALITY GATE (Momentum/Squeeze) ===
+            bool gate = true
+            
+            if useMomentumGate
+                // Refactored Phase 2: Use calcBB/calcKC helpers
+                rsi = getRSI(14)
+                adx = getADX(14)
+                [bbU, bbL, _, _] = calcBB(20, 2.0)
+                [kcU, kcL, _, _] = calcKC(20, 20, 1.5)
+                inSq = bbU < kcU and bbL > kcL
+                decMo = legUp ? rsi < rsi[1] : rsi > rsi[1]
+                adxDn = adx < adx[1]
+                gate := (decMo and (adxDn or inSq))
+            
+            // === ARRA REBUILD ZONES (Horizontal boxes) ===
+            if showARRAZones and gate
+                // RZ-1: Around 50% retrace (primary rebuild zone)
+                float rz1Top = fib50 + W
+                float rz1Bot = fib50 - W
+                
+                // RZ-2: Between 50-61.8% (deeper test zone)
+                float midRZ2 = (fib50 + fib61) * 0.5
+                float rz2Top = midRZ2 + W * 1.5
+                float rz2Bot = midRZ2 - W * 1.5
+                
+                // Colors: subtle, direction-aware
+                color colRZ1 = color.new(legUp ? #00C853 : #EF5350, boxOpacity)
+                color colRZ2 = color.new(legUp ? #4CAF50 : #D32F2F, boxOpacity)
+                
+                // Delete old boxes (CPM pattern for proper scaling)
+                if not na(rz1Box)
+                    box.delete(rz1Box)
+                    box.delete(rz2Box)
+                
+                // Create fresh boxes (ensures zoom/pan compatibility)
+                rz1Box := box.new(x1, rz1Top, x2, rz1Bot, bgcolor=colRZ1, border_color=color.new(color.gray, 85))
+                rz2Box := box.new(x1, rz2Top, x2, rz2Bot, bgcolor=colRZ2, border_color=color.new(color.gray, 90))
+
+// === WYCKOFF SOW / LPSY (Sign of Weakness / Last Point of Supply) ===
+// Optional: Wyckoff-style markers for distribution/accumulation
+lenRange = 55
+wyckoffHigh = ta.highest(high, lenRange)
+wyckoffLow = ta.lowest(low, lenRange)
+ICE = wyckoffLow
+midRng = (wyckoffHigh + wyckoffLow) / 2
+
+spread = high - low
+sprMA = ta.sma(spread, 20)
+volMA = ta.sma(volume, 20)
+clv = (high == low) ? 0.0 : ((close - low) / (high - low)) * 2 - 1
+
+// SOW: Sign of Weakness (wide spread down bar, high volume, poor close)
+isSOW = close < ICE and spread > sprMA and volume > volMA and clv < -0.5
+
+// LPSY: Last Point of Supply (pullback to ICE after SOW, weak demand)
+pullICE = ta.barssince(isSOW) < 120 and high <= ICE * 1.003
+weakDem = (volume < volMA) and (spread < sprMA)
+bearFlip = close < open or close < getEMA(20)  // Refactored: Use centralized helper
+isLPSY = pullICE and weakDem and bearFlip
+isDeepLPSY = isLPSY and close < midRng
+
+// Plot markers
+plotshape(isSOW, title="SOW", style=shape.triangledown, color=color.new(color.red, 0), 
+         size=size.tiny, location=location.abovebar, text="SOW")
+plotshape(isDeepLPSY, title="LPSY*", style=shape.circle, color=color.new(color.red, 0), 
+         size=size.small, location=location.abovebar, text="LPSY*")
+plotshape(isLPSY and not isDeepLPSY, title="LPSY", style=shape.circle, color=color.new(color.red, 40), 
+         size=size.tiny, location=location.abovebar, text="LPSY")
+
+// ============================================================================
+// NOTES & FINE-TUNING
+// ============================================================================
+// Integration with ZigZag:
+// - Replace get_last_leg_from_hook() with actual ZigZag leg variables
+// - Hook into zigzag_engine.pine leg completion events
+//
+// ARRA Concept:
+// - Action = completed ZigZag leg (swing high to low or vice versa)
+// - Center = AVWAP of leg (fair value of the swing)
+// - Reaction/Rebuild = symmetric zones around 50% Fib, scaled by ATR
+// - Horizontal zones (not diagonal) match corridor approach
+//
+// Quality Gate:
+// - Only shows zones when momentum decays OR squeeze occurs
+// - Prevents zones during strong trends (reduces noise)
+// - More selective, higher quality signals
+//
+// Fine-tuning for NatGas 4H:
+// - widthK: 1.3 (wider zones for volatile market)
+// - widthATRlen: 14
+// - barsAhead: 600
+// - useMomentumGate: true
+//
+// Wyckoff SOW/LPSY:
+// - SOW: Wide spread down bar at/below ICE with high volume
+// - LPSY: Weak pullback to ICE after SOW (low volume, narrow spread)
+// - Deep LPSY: Below mid-range (stronger distribution signal)
+// ============================================================================
+
+
+// ============================================================================
+// STRATEGY ADAPTER (Auto-Generated)
+// ============================================================================
+
+// ============================================================================
+// STRATEGY ADAPTER (Pine v6) – Universal Template
+// ============================================================================
+// Automatically converts any Indicator into a testable Strategy.
+//
+// REQUIREMENTS (mark in indicator with // @export):
+//   - Entry Signals: strongBuySignal, strongSellSignal
+//   - Optional: moderateBuySignal, moderateSellSignal
+//   - Optional: overallScore (for score filtering)
+//
+// Features:
+//   ✓ ATR-based Stop-Loss & Take-Profit (dynamic)
+//   ✓ Trailing Stop for Trend-Following
+//   ✓ Signal Cooldown (prevents whipsaws)
+//   ✓ Score Filter (only high-quality setups)
+//   ✓ Directional Trading (Long/Short/Both)
+//   ✓ Non-Repainting (barstate.isconfirmed)
+// ============================================================================
+
+// === Inputs: Trading, Risk, Filters ===
+groupTrade   = "Strategy – Trading & Risk"
+useModerate  = input.bool(false, "Trade Moderate Signals", group=groupTrade, 
+  tooltip="Also trade moderateBuySignal/moderateSellSignal (if available)")
+oneSideOnly  = input.string("Both Directions", "Trade Direction", 
+  options=["Both Directions", "Long Only", "Short Only"], group=groupTrade)
+cooldownBars = input.int(3, "Cooldown After Exit (Bars)", minval=0, group=groupTrade,
+  tooltip="Verhindert sofortigen Re-Entry (Whipsaw-Schutz) - 3 Bars empfohlen")
+
+riskGroup    = "Stops & Targets"
+atrLen       = input.int(14, "ATR Length", minval=1, group=riskGroup)
+atrSLmult    = input.float(2.5, "Stop-Loss = ATR x", minval=0.1, step=0.1, group=riskGroup, tooltip="Größerer SL = weniger Stop-Outs")
+atrTPmult    = input.float(4.0, "Take-Profit = ATR x", minval=0.1, step=0.1, group=riskGroup, tooltip="Größerer TP = Gewinne laufen lassen")
+useTrail     = input.bool(true, "Use Trailing Stop (ATR-based)", group=riskGroup, tooltip="Trailing Stop für Trends")
+trailATRmult = input.float(2.5, "Trailing ATR x", minval=0.5, step=0.5, group=riskGroup)
+
+filters      = "Filters"
+minScoreForTrade = input.float(0.0, "Min ABS(overallScore) for Trade", minval=0.0, step=0.5, group=filters,
+  tooltip="Only trade when |overallScore| >= this value (0 = disabled)")
+confirmOnClose   = input.bool(true, "Confirmed Bar Only (barstate.isconfirmed)", group=filters,
+  tooltip="Prevents repainting – recommended!")
+
+// === Helper Values ===
+atr_val  = ta.atr(atrLen)
+longSL   = close - atr_val * atrSLmult
+longTP   = close + atr_val * atrTPmult
+shortSL  = close + atr_val * atrSLmult
+shortTP  = close - atr_val * atrTPmult
+
+var int lastExitBar = na
+
+// === Entry Setups (non-repainting, optional only on confirmed bar) ===
+// Check: Do required signals exist? (Safe fallback)
+var bool hasStrongSignals = false
+var bool hasModerateSignals = false
+var bool hasOverallScore = false
+
+// Runtime check (only once)
+if barstate.isfirst
+    // These variables should be defined by the indicator
+    // If not → safe fallback to false
+    hasStrongSignals := true    // We assume strongBuy/SellSignal exists
+    hasModerateSignals := true  // Optional
+    hasOverallScore := true     // Optional
+
+// Base Entry Signals (from Indicator)
+// Includes both regular signals and reversal-zone signals
+bool enterLongBase  = strongBuySignal or rzBuy
+bool enterShortBase = strongSellSignal or rzSell
+
+// Optional moderate signals (don't counter strong signals)
+bool enterLong  = enterLongBase  or (useModerate and moderateBuySignal  and not strongSellSignal)
+bool enterShort = enterShortBase or (useModerate and moderateSellSignal and not strongBuySignal)
+
+// Bar confirmation (prevents repainting)
+enterLong  := confirmOnClose  ? (enterLong  and barstate.isconfirmed) : enterLong
+enterShort := confirmOnClose  ? (enterShort and barstate.isconfirmed) : enterShort
+
+// Score filter (if overallScore available)
+if minScoreForTrade > 0.0 and hasOverallScore
+    enterLong  := enterLong  and math.abs(overallScore) >= minScoreForTrade
+    enterShort := enterShort and math.abs(overallScore) >= minScoreForTrade
+
+// Direction filter
+enterLong  := enterLong  and (oneSideOnly != "Short Only")
+enterShort := enterShort and (oneSideOnly != "Long Only")
+
+// Cooldown after exit (whipsaw protection)
+bool inCooldown = not na(lastExitBar) and (bar_index - lastExitBar) < cooldownBars
+enterLong  := enterLong  and not inCooldown
+enterShort := enterShort and not inCooldown
+
+// === Entries (switch side only after complete exit) ===
+bool canLong  = strategy.position_size <= 0
+bool canShort = strategy.position_size >= 0
+
+if enterLong and canLong
+    strategy.entry("Long", strategy.long)
+    // Log entry trigger
+    string mode = rzBuy ? "RZ" : "BASE"
+    string logMsg = "ENTRY LONG @" + str.tostring(close, "#.#####") + " | mode=" + mode + " | score=" + str.tostring(overallScore, "#.##") + " | grad=" + str.tostring(gradScoreFinal, "#.##")
+    log.warning(logMsg)
+
+if enterShort and canShort
+    strategy.entry("Short", strategy.short)
+    // Log entry trigger
+    string mode = rzSell ? "RZ" : "BASE"
+    string logMsg = "ENTRY SHORT @" + str.tostring(close, "#.#####") + " | mode=" + mode + " | score=" + str.tostring(overallScore, "#.##") + " | grad=" + str.tostring(gradScoreFinal, "#.##")
+    log.warning(logMsg)
+
+// === Exits ===
+// IMPORTANT: strategy.exit() must ALWAYS have at least one exit parameter!
+
+if useTrail
+    // With Trailing Stop (combined with SL/TP)
+    float trailOffset = atr_val * trailATRmult
+    strategy.exit("L-Exit", from_entry="Long",  stop=longSL, limit=longTP, trail_offset=trailOffset)
+    strategy.exit("S-Exit", from_entry="Short", stop=shortSL, limit=shortTP, trail_offset=trailOffset)
+else
+    // Fixed SL/TP only (no trailing)
+    strategy.exit("L-Exit", from_entry="Long",  stop=longSL, limit=longTP)
+    strategy.exit("S-Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+// === Track exit events (for cooldown) ===
+bool closedPos = (strategy.closedtrades > 0) and (strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index)
+if closedPos
+    lastExitBar := bar_index
+
+// ============================================================================
+// NOTES / BEST PRACTICES:
+// ============================================================================
+// 1. NO REPAINTING:
+//    - Use barstate.isconfirmed (default ON)
+//    - Indicator should use request.security(..., lookahead=barmerge.lookahead_off)
+//
+// 2. MODERATE SIGNALS:
+//    - For more aggressive testing: enable "Trade Moderate Signals"
+//
+// 3. RISK LOGIC:
+//    - ATR-based stops/TPs are robust for commodities
+//    - Adjust multipliers in Strategy Tester settings
+//    - Trailing Stop optional for trend-following
+//
+// 4. COOLDOWN:
+//    - Prevents immediate re-entry after exit (whipsaw protection)
+//    - 0 = no cooldown, 5-10 bars typical
+//
+// 5. PYRAMIDING:
+//    - Default = 1 (no adding to positions)
+//    - Can be increased in strategy(...) parameters
+//
+// 6. POSITION SIZE:
+//    - Configured in Strategy Tester
+//    - "Order Size" → "% of Equity" for risk-based sizing
+//    - Or fixed Contracts/Shares
+//
+// ============================================================================
+// END STRATEGY ADAPTER
+// ============================================================================

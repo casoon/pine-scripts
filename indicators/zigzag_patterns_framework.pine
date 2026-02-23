@@ -1,0 +1,520 @@
+//@version=6
+// ============================================================================
+// ZigZag Patterns [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2025-12-22 01:01:30
+// ============================================================================
+// ZigZag pivot engine with ABC, triangle, Wolfe detection, and smart pivot labels.
+//
+// ============================================================================
+indicator("ZigZag Patterns [WavesUnchained]", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// MODULES:
+// - inputs.pine
+// - core.pine
+// - visualization.pine
+// ============================================================================
+
+// NOTE: Modules are combined by the build system.
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+groupZZ = "ZigZag"
+len      = input.int(5, "Pivot Length", minval=2, group=groupZZ)
+maxPiv   = input.int(80, "Max Pivots stored", minval=10, maxval=300, group=groupZZ)
+maxDraw  = input.int(200, "Max ZigZag lines", minval=20, maxval=500, group=groupZZ)
+showZZ   = input.bool(true, "Draw ZigZag", group=groupZZ)
+showLbl  = input.bool(false, "Pivot Labels (HH/LH/HL/LL)", group=groupZZ)
+
+groupLbl = "Smart Pivot Labels"
+enableSmartLbl = input.bool(true, "Enable Smart Labels", group=groupLbl)
+lblMinSignals   = input.int(1, "Min signals to show label", minval=1, maxval=4, group=groupLbl)
+showHHLL        = input.bool(true, "Show HH/LH/HL/LL", group=groupLbl)
+useRSI          = input.bool(true, "RSI Divergence", group=groupLbl)
+rsiLen          = input.int(14, "RSI Len", minval=2, group=groupLbl)
+useWickReject   = input.bool(true, "Wick rejection", group=groupLbl)
+useLegStrength  = input.bool(true, "Leg strength (Impulse/Correction)", group=groupLbl)
+
+groupPat = "Patterns"
+enableABC      = input.bool(true, "ABC (simple)", group=groupPat)
+enableTri      = input.bool(true, "Triangles (sym / rising / falling)", group=groupPat)
+enableWolfe    = input.bool(true, "Wolfe (quality wedge)", group=groupPat)
+
+groupFilt = "Filters"
+atrLen    = input.int(14, "ATR Len", group=groupFilt)
+flatATR   = input.float(0.25, "Flat tolerance (ATR mult)", step=0.05, group=groupFilt)
+minRetr   = input.float(0.382, "ABC min retrace", step=0.001, group=groupFilt)
+maxRetr   = input.float(0.886, "ABC max retrace", step=0.001, group=groupFilt)
+minLegATR = input.float(0.8, "Min leg size (ATR) to count as impulse", step=0.1, group=groupFilt)
+wickATR   = input.float(0.6, "Min wick (ATR) for rejection", step=0.1, group=groupFilt)
+
+atr = ta.atr(atrLen)
+rsi = ta.rsi(close, rsiLen)
+
+
+// ============================================================================
+// MODULE: core
+// ============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Storage
+// ─────────────────────────────────────────────────────────────────────────────
+// pivotType: +1 = High pivot, -1 = Low pivot
+var float[] pivPrice = array.new_float()
+var int[]   pivIndex = array.new_int()
+var int[]   pivType  = array.new_int()
+
+// drawing objects (zigzag)
+var line[]  zzLines  = array.new_line()
+var label[] zzLabels = array.new_label()
+
+// pattern drawings (keep lightweight)
+var line[]  patLines = array.new_line()
+var label[] patLbls  = array.new_label()
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+f_cap_lines(line[] arr, int cap) =>
+    while array.size(arr) > cap
+        line.delete(array.shift(arr))
+
+f_cap_labels(label[] arr, int cap) =>
+    while array.size(arr) > cap
+        label.delete(array.shift(arr))
+
+f_push_pivot(int pIndex, float pPrice, int pType) =>
+    // enforce alternation: if same type as last, replace if more extreme
+    int n = array.size(pivType)
+    if n > 0 and array.get(pivType, n - 1) == pType
+        float lastPrice = array.get(pivPrice, n - 1)
+        bool replace = pType == 1 ? (pPrice > lastPrice) : (pPrice < lastPrice)
+        if replace
+            array.set(pivPrice, n - 1, pPrice)
+            array.set(pivIndex, n - 1, pIndex)
+        false
+    else
+        array.push(pivType,  pType)
+        array.push(pivPrice, pPrice)
+        array.push(pivIndex, pIndex)
+        // cap pivots
+        while array.size(pivType) > maxPiv
+            array.shift(pivType)
+            array.shift(pivPrice)
+            array.shift(pivIndex)
+        true
+
+f_dir_tag(int i) =>
+    // HH/LH/HL/LL vs previous same-type pivot
+    int t = array.get(pivType, i)
+    float v = array.get(pivPrice, i)
+
+    // find previous pivot of same type
+    float prev = na
+    for k = i - 1 to 0 by -1
+        if array.get(pivType, k) == t
+            prev := array.get(pivPrice, k)
+            break
+    string tag = "NA"
+    if not na(prev)
+        if t == 1
+            tag := v > prev ? "HH" : "LH"
+        else
+            tag := v > prev ? "HL" : "LL"
+    tag
+
+f_draw_last_segment() =>
+    if not showZZ
+        return
+    int n = array.size(pivType)
+    if n < 2
+        return
+    int i1 = array.get(pivIndex, n - 2)
+    float y1 = array.get(pivPrice, n - 2)
+    int i2 = array.get(pivIndex, n - 1)
+    float y2 = array.get(pivPrice, n - 1)
+
+    line ln = line.new(i1, y1, i2, y2, xloc=xloc.bar_index, extend=extend.none)
+    array.push(zzLines, ln)
+    f_cap_lines(zzLines, maxDraw)
+
+    if showLbl
+        string tag = f_dir_tag(n - 1)
+        int t = array.get(pivType, n - 1)
+        label lb = label.new(i2, y2, tag, xloc=xloc.bar_index, style=(t == 1 ? label.style_label_down : label.style_label_up))
+        array.push(zzLabels, lb)
+        f_cap_labels(zzLabels, 250)
+
+f_clear_patterns_if_too_many() =>
+    f_cap_lines(patLines, 120)
+    f_cap_labels(patLbls, 120)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pivot detection (confirmed)
+// ─────────────────────────────────────────────────────────────────────────────
+ph = ta.pivothigh(high, len, len)
+pl = ta.pivotlow(low, len, len)
+
+bool newPivot = false
+
+// If both occur (rare), add in a stable order based on last pivot type
+if not na(ph) or not na(pl)
+    int pBar = bar_index - len
+
+    if not na(ph) and not na(pl)
+        // choose order: if last was high, add low first, else add high first
+        int lastT = array.size(pivType) > 0 ? array.get(pivType, array.size(pivType) - 1) : 0
+        if lastT == 1
+            newPivot := f_push_pivot(pBar, pl, -1) or newPivot
+            newPivot := f_push_pivot(pBar, ph,  1) or newPivot
+        else
+            newPivot := f_push_pivot(pBar, ph,  1) or newPivot
+            newPivot := f_push_pivot(pBar, pl, -1) or newPivot
+    else if not na(ph)
+        newPivot := f_push_pivot(pBar, ph, 1) or newPivot
+    else
+        newPivot := f_push_pivot(pBar, pl, -1) or newPivot
+
+if newPivot
+    f_draw_last_segment()
+    f_make_smart_label()
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pattern detection helpers
+// ─────────────────────────────────────────────────────────────────────────────
+f_lastN_ok(int need) =>
+    array.size(pivType) >= need
+
+f_get(int back, int which) =>
+    // back=0 => last pivot, back=1 => previous...
+    int n = array.size(pivType)
+    int idx = n - 1 - back
+    which == 0 ? array.get(pivPrice, idx) : which == 1 ? float(array.get(pivIndex, idx)) : float(array.get(pivType, idx))
+
+f_line(int x1, float y1, int x2, float y2, line_style st, int w) =>
+    line ln = line.new(x1, y1, x2, y2, xloc=xloc.bar_index, extend=extend.none, style=st, width=w)
+    array.push(patLines, ln)
+    ln
+
+f_label(int x, float y, string txt, bool up) =>
+    label lb = label.new(x, y, txt, xloc=xloc.bar_index, style=(up ? label.style_label_up : label.style_label_down))
+    array.push(patLbls, lb)
+    lb
+
+f_pivot_label(int x, float y, string txt, bool up) =>
+    label lb = label.new(x, y, txt, xloc=xloc.bar_index, style=(up ? label.style_label_up : label.style_label_down))
+    array.push(zzLabels, lb)
+    f_cap_labels(zzLabels, 250)
+    lb
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Smart Label logic
+// ─────────────────────────────────────────────────────────────────────────────
+f_wick_reject_score(int pivotBar, int pType) =>
+    // Use the pivot candle itself (at pivotBar). We are in realtime bar_index now,
+    // so we refer by offset = bar_index - pivotBar
+    int off = bar_index - pivotBar
+    if off < 0 or off > 2000
+        [false, ""]
+    else
+        float o = open[off], h = high[off], l = low[off], c = close[off]
+        float upW = h - math.max(o, c)
+        float dnW = math.min(o, c) - l
+        float body = math.abs(c - o)
+
+        bool rej = false
+        string txt = ""
+        if pType == 1
+            // High pivot: big upper wick, small-ish body
+            rej := upW >= atr * wickATR and upW > dnW and body <= upW
+            txt := rej ? "Rej↑" : ""
+        else
+            // Low pivot: big lower wick
+            rej := dnW >= atr * wickATR and dnW > upW and body <= dnW
+            txt := rej ? "Rej↓" : ""
+        [rej, txt]
+
+f_leg_strength_txt() =>
+    // Needs at least 3 pivots: measure last leg size vs prev leg size
+    if not f_lastN_ok(3)
+        [false, ""]
+    else
+        int n = array.size(pivType)
+        float C = array.get(pivPrice, n - 1)
+        float B = array.get(pivPrice, n - 2)
+        float A = array.get(pivPrice, n - 3)
+        float leg1 = math.abs(B - A)
+        float leg2 = math.abs(C - B)
+        bool impulse = leg2 >= atr * minLegATR and (leg2 > leg1 * 1.15)
+        bool correction = (leg2 < leg1 * 0.85)
+        string txt = impulse ? "Imp" : correction ? "Corr" : ""
+        [impulse or correction, txt]
+
+f_rsi_div_txt(int pivotBar, int pType) =>
+    if not useRSI or not f_lastN_ok(3)
+        [false, ""]
+    int n = array.size(pivType)
+    // we compare current pivot with previous same-type pivot
+    int iCur = n - 1
+    int iPrev = na
+    for k = iCur - 1 to 0 by -1
+        if array.get(pivType, k) == pType
+            iPrev := k
+            break
+    if na(iPrev)
+        [false, ""]
+    else
+        int xCur = array.get(pivIndex, iCur)
+        int xPrev = array.get(pivIndex, iPrev)
+        int offCur = bar_index - xCur
+        int offPrev = bar_index - xPrev
+        if offCur < 0 or offPrev < 0 or offCur > 2000 or offPrev > 2000
+            [false, ""]
+        else
+            float pCur = array.get(pivPrice, iCur)
+            float pPrev = array.get(pivPrice, iPrev)
+            float rCur = rsi[offCur]
+            float rPrev = rsi[offPrev]
+
+            bool div = false
+            if pType == 1
+                // bearish div: price HH, RSI lower high
+                div := (pCur > pPrev) and (rCur < rPrev)
+                [div, div ? "RSI div" : ""]
+            else
+                // bullish div: price LL, RSI higher low
+                div := (pCur < pPrev) and (rCur > rPrev)
+                [div, div ? "RSI div" : ""]
+
+f_make_smart_label() =>
+    if not enableSmartLbl or not f_lastN_ok(2)
+        return
+
+    int n = array.size(pivType)
+    int pType = array.get(pivType, n - 1)
+    int pBar  = array.get(pivIndex, n - 1)
+    float pPx = array.get(pivPrice, n - 1)
+
+    int signals = 0
+    string txt = ""
+
+    if showHHLL
+        string hhll = f_dir_tag(n - 1)
+        if hhll != "NA"
+            txt += hhll
+            signals += 1
+
+    // Leg strength (Imp/Corr)
+    if useLegStrength
+        [okLeg, legTxt] = f_leg_strength_txt()
+        if okLeg and legTxt != ""
+            txt += (txt == "" ? "" : " | ") + legTxt
+            signals += 1
+
+    // Wick rejection
+    if useWickReject
+        [okW, wTxt] = f_wick_reject_score(pBar, pType)
+        if okW and wTxt != ""
+            txt += (txt == "" ? "" : " | ") + wTxt
+            signals += 1
+
+    // RSI divergence
+    [okD, dTxt] = f_rsi_div_txt(pBar, pType)
+    if okD and dTxt != ""
+        txt += (txt == "" ? "" : " | ") + dTxt
+        signals += 1
+
+    if signals >= lblMinSignals and txt != ""
+        // position: highs label down, lows label up
+        f_pivot_label(pBar, pPx, txt, pType == -1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ABC Pattern (simple)
+// last 3 pivots must be alternating: Low-High-Low (bullish) or High-Low-High (bearish)
+// retrace filter on BC vs AB
+// ─────────────────────────────────────────────────────────────────────────────
+f_scan_abc() =>
+    if not enableABC or not f_lastN_ok(3)
+        return
+
+    float C = f_get(0, 0), B = f_get(1, 0), A = f_get(2, 0)
+    int   Ci = int(f_get(0, 1)), Bi = int(f_get(1, 1)), Ai = int(f_get(2, 1))
+    int   Ct = int(f_get(0, 2)), Bt = int(f_get(1, 2)), At = int(f_get(2, 2))
+
+    // bullish: A low, B high, C low (higher low preferred)
+    bool bull = (At == -1 and Bt == 1 and Ct == -1)
+    // bearish: A high, B low, C high (lower high preferred)
+    bool bear = (At ==  1 and Bt == -1 and Ct ==  1)
+
+    if bull
+        float AB = math.abs(B - A)
+        float BC = math.abs(B - C)
+        float retr = AB > 0 ? (BC / AB) : na
+        bool ok = not na(retr) and retr >= minRetr and retr <= maxRetr and C > A
+        if ok
+            f_line(Ai, A, Bi, B, line.style_dotted, 1)
+            f_line(Bi, B, Ci, C, line.style_dotted, 1)
+            f_label(Ci, C, "ABC Bull", true)
+
+    if bear
+        float AB = math.abs(A - B)
+        float BC = math.abs(C - B)
+        float retr = AB > 0 ? (BC / AB) : na
+        bool ok = not na(retr) and retr >= minRetr and retr <= maxRetr and C < A
+        if ok
+            f_line(Ai, A, Bi, B, line.style_dotted, 1)
+            f_line(Bi, B, Ci, C, line.style_dotted, 1)
+            f_label(Ci, C, "ABC Bear", false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Triangles (use last 5 pivots)
+// Sym: highs down + lows up
+// Rising: highs ~ flat + lows up
+// Falling: lows ~ flat + highs down
+// ─────────────────────────────────────────────────────────────────────────────
+f_scan_triangles() =>
+    if not enableTri or not f_lastN_ok(5)
+        return
+
+    // points 1..5 (oldest to newest among last 5)
+    int n = array.size(pivType)
+    int i1 = n - 5, i2 = n - 4, i3 = n - 3, i4 = n - 2, i5 = n - 1
+
+    float p1 = array.get(pivPrice, i1), p2 = array.get(pivPrice, i2), p3 = array.get(pivPrice, i3), p4 = array.get(pivPrice, i4), p5 = array.get(pivPrice, i5)
+    int   x1 = array.get(pivIndex, i1), x2 = array.get(pivIndex, i2), x3 = array.get(pivIndex, i3), x4 = array.get(pivIndex, i4), x5 = array.get(pivIndex, i5)
+    int   t1 = array.get(pivType,  i1), t2 = array.get(pivType,  i2), t3 = array.get(pivType,  i3), t4 = array.get(pivType,  i4), t5 = array.get(pivType,  i5)
+
+    // Need alternating types
+    bool alt = (t1 != t2 and t2 != t3 and t3 != t4 and t4 != t5)
+    if not alt
+        return
+
+    // Extract last 3 highs and last 3 lows among these 5 (actually 3 of one side, 2 of other depending on start)
+    float[] highs = array.new_float()
+    int[]   highx = array.new_int()
+    float[] lows  = array.new_float()
+    int[]   lowx  = array.new_int()
+
+    for k = i1 to i5
+        int tt = array.get(pivType, k)
+        if tt == 1
+            array.push(highs, array.get(pivPrice, k))
+            array.push(highx, array.get(pivIndex, k))
+        else
+            array.push(lows, array.get(pivPrice, k))
+            array.push(lowx, array.get(pivIndex, k))
+
+    float tol = atr * flatATR
+
+    bool have2H = array.size(highs) >= 2
+    bool have2L = array.size(lows)  >= 2
+    if not (have2H and have2L)
+        return
+
+    float h1 = array.get(highs, 0), h2 = array.get(highs, 1)
+    float l1 = array.get(lows,  0), l2 = array.get(lows,  1)
+
+    bool highsDown = h2 < h1
+    bool lowsUp    = l2 > l1
+
+    bool highsFlat = math.abs(h2 - h1) <= tol
+    bool lowsFlat  = math.abs(l2 - l1) <= tol
+
+    // Draw boundary lines using first two highs/lows found
+    int hx1 = array.get(highx, 0), hx2 = array.get(highx, 1)
+    int lx1 = array.get(lowx,  0), lx2 = array.get(lowx,  1)
+
+    // Sym triangle
+    if highsDown and lowsUp
+        f_line(hx1, h1, hx2, h2, line.style_solid, 1)
+        f_line(lx1, l1, lx2, l2, line.style_solid, 1)
+        f_label(x5, p5, "Triangle Sym", t5 == -1)
+
+    // Rising triangle: highs flat + lows up
+    if highsFlat and lowsUp
+        f_line(hx1, h1, hx2, h2, line.style_solid, 1)
+        f_line(lx1, l1, lx2, l2, line.style_solid, 1)
+        f_label(x5, p5, "Triangle Rising", t5 == -1)
+
+    // Falling triangle: lows flat + highs down
+    if lowsFlat and highsDown
+        f_line(hx1, h1, hx2, h2, line.style_solid, 1)
+        f_line(lx1, l1, lx2, l2, line.style_solid, 1)
+        f_label(x5, p5, "Triangle Falling", t5 == -1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wolfe (quality wedge) using last 5 pivots (confirmed)
+// Basic: contracting + alternating + point5 overshoot towards wedge edge
+// EPA line: point1 -> point4
+// ─────────────────────────────────────────────────────────────────────────────
+f_scan_wolfe() =>
+    if not enableWolfe or not f_lastN_ok(5)
+        return
+
+    int n = array.size(pivType)
+    int i1 = n - 5, i2 = n - 4, i3 = n - 3, i4 = n - 2, i5 = n - 1
+
+    float P1 = array.get(pivPrice, i1), P2 = array.get(pivPrice, i2), P3 = array.get(pivPrice, i3), P4 = array.get(pivPrice, i4), P5 = array.get(pivPrice, i5)
+    int   X1 = array.get(pivIndex, i1), X2 = array.get(pivIndex, i2), X3 = array.get(pivIndex, i3), X4 = array.get(pivIndex, i4), X5 = array.get(pivIndex, i5)
+    int   T1 = array.get(pivType,  i1), T2 = array.get(pivType,  i2), T3 = array.get(pivType,  i3), T4 = array.get(pivType,  i4), T5 = array.get(pivType,  i5)
+
+    bool alt = (T1 != T2 and T2 != T3 and T3 != T4 and T4 != T5)
+    if not alt
+        return
+
+    // Define wedge sides as (1-3) and (2-4)
+    // Contracting heuristic: range between lines at X4 smaller than at X2 (approx)
+    float rangeStart = math.abs(P1 - P2)
+    float rangeMid   = math.abs(P3 - P4)
+    bool contracting = rangeMid < rangeStart
+
+    // Overshoot heuristic: point5 extends beyond its side direction
+    // If last pivot is Low (T5=-1), expect P5 < P3 (lower low) in wedge context.
+    // If last pivot is High (T5=+1), expect P5 > P3 (higher high).
+    bool overshoot = (T5 == -1 and P5 < P3) or (T5 == 1 and P5 > P3)
+
+    // Simple time sanity: pivots must be spaced (avoid micro noise)
+    bool spaced = (X5 - X1) >= (len * 3)
+
+    if contracting and overshoot and spaced
+        // Draw wedge sides (thin)
+        f_line(X1, P1, X3, P3, line.style_dashed, 1)
+        f_line(X2, P2, X4, P4, line.style_dashed, 1)
+
+        // EPA / projection: line 1 -> 4 extended to X5
+        line epa = line.new(X1, P1, X4, P4, xloc=xloc.bar_index, extend=extend.right, style=line.style_dotted)
+        array.push(patLines, epa)
+
+        // Label at point 5
+        f_label(X5, P5, "Wolfe", T5 == -1)
+
+
+// ============================================================================
+// MODULE: visualization
+// ============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Run scans only when a new pivot is added (saves CPU + avoids spam)
+// ─────────────────────────────────────────────────────────────────────────────
+if newPivot
+    // keep pattern drawings bounded
+    f_clear_patterns_if_too_many()
+    f_scan_abc()
+    f_scan_triangles()
+    f_scan_wolfe()
+
+// Alerts (optional basic)
+alertcondition(newPivot, "New Pivot", "New ZigZag pivot confirmed")
+
+

@@ -1,0 +1,2196 @@
+//@version=6
+// ============================================================================
+// Regime Detector (MA Zones Overlay) [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2025-12-22 23:41:13
+// ============================================================================
+// Features:
+//   ✓ core_adaptive_engine
+//   ✓ regime_detection
+//   ✓ multi_timeframe_gate
+//   ✓ advanced_filters
+//   ✓ signal_management
+//   ✓ visualization
+//   ✓ performance
+//
+// ============================================================================
+indicator("Regime Detector (MA Zones Overlay) [WavesUnchained]", "RDP", overlay=true, max_labels_count=200, max_lines_count=500, max_boxes_count=100)
+
+// ============================================================================
+// Regime Detector Pro
+// ============================================================================
+// MODULES:
+// - inputs.pine
+// - core.pine
+// - visualization.pine
+// ============================================================================
+
+// NOTE: Modules are combined by the build system.
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: engine_local
+// ============================================================================
+
+// ============================================================================
+// LOCAL ENGINE (Lite) for Regime Detector
+// Minimal engine: Adaptive -> Regime -> MTF Gate -> Filters -> Signals -> Perf
+// ============================================================================
+
+// --- Helpers
+f_clamp01(x) => math.max(0.0, math.min(1.0, x))
+
+// --- JMA (CPM/Everget-style)
+calculateJMA(src, length, phase, power) =>
+    ph = math.max(-100.0, math.min(100.0, phase))
+    pr = (ph + 100.0) / 200.0
+    len = math.max(1.0, length)
+    beta = 0.45 * (len - 1.0) / (0.45 * (len - 1.0) + 2.0)
+    alpha = math.pow(beta, power)
+    var float e0 = na
+    var float e1 = na
+    var float e2 = na
+    var float jma = na
+    e0 := (1.0 - alpha) * src + alpha * nz(e0[1], src)
+    e1 := (src - e0) * (1.0 - beta) + beta * nz(e1[1], 0.0)
+    e2 := (e0 + pr * e1 - nz(jma[1], src)) * math.pow(1.0 - alpha, 2.0) + math.pow(alpha, 2.0) * nz(e2[1], 0.0)
+    jma := e2 + nz(jma[1], src)
+    jma
+
+// --- Adaptive Engine
+
+type AdaptiveConfig
+    bool enableAdaptiveEngine
+    int erLength
+    float alphaMin
+    float alphaMax
+    float gamma
+    int atrLength
+    float source
+
+type AdaptiveState
+    float line
+    float atr
+    float efficiencyRatio
+    float currentAlpha
+    float normalizedSlope
+
+newAdaptiveConfig() =>
+    AdaptiveConfig.new(true, 20, 0.03, 0.30, 1.25, 14, close)
+
+newAdaptiveState() =>
+    AdaptiveState.new(na, na, 0.0, 0.0, 0.0)
+
+processAdaptiveEngine(AdaptiveState state, AdaptiveConfig config, int atrLen) =>
+    src = config.source
+    erLen = math.max(2, config.erLength)
+    direction = math.abs(src - src[erLen])
+    volatility = ta.sma(math.abs(src - src[1]), erLen) * erLen
+    er = volatility == 0 ? 0.0 : direction / volatility
+
+    alpha = config.alphaMin + (config.alphaMax - config.alphaMin) * math.pow(er, config.gamma)
+    var float lastLine = na
+    prevLine = na(lastLine) ? src : lastLine
+    line = prevLine + alpha * (src - prevLine)
+
+    atr = ta.atr(atrLen)
+    slope = atr > 0 ? (line - prevLine) / atr : 0.0
+
+    state.line := line
+    state.atr := atr
+    state.efficiencyRatio := er
+    state.currentAlpha := alpha
+    state.normalizedSlope := slope
+    lastLine := line
+    state
+
+// --- Regime Detection
+
+type RegimeConfig
+    bool enableAdvancedRegime
+    string regimeMode
+    float erThreshold
+    float erThresholdExit
+    float sensitivity
+    float minConfidence
+    float minConfidenceExit
+    bool enableMLEnhancement
+    int mlLookback
+    float mlConfidenceThreshold
+
+type RegimeState
+    int currentRegime
+    float confidence
+    float strength
+
+newRegimeConfig() =>
+    RegimeConfig.new(true, "Trend + Momentum", 0.2, 0.15, 0.6, 0.65, 0.55, false, 50, 0.7)
+
+newRegimeState() =>
+    RegimeState.new(0, 0.0, 0.0)
+
+processRegimeDetection(RegimeState state, RegimeConfig config, AdaptiveState adaptiveState) =>
+    slope = adaptiveState.normalizedSlope
+    strength = f_clamp01(math.abs(slope))
+
+    erEnterOk = adaptiveState.efficiencyRatio >= config.erThreshold
+    erExitOk = adaptiveState.efficiencyRatio >= config.erThresholdExit
+
+    baseConfEnter = erEnterOk ? f_clamp01((adaptiveState.efficiencyRatio - config.erThreshold) / math.max(1e-6, 1.0 - config.erThreshold)) : 0.0
+    baseConfExit = erExitOk ? f_clamp01((adaptiveState.efficiencyRatio - config.erThresholdExit) / math.max(1e-6, 1.0 - config.erThresholdExit)) : 0.0
+    confEnter = f_clamp01(baseConfEnter * config.sensitivity)
+    confExit = f_clamp01(baseConfExit * config.sensitivity)
+
+    trendEnterOk = erEnterOk
+    trendExitOk = erExitOk
+    momEnterOk = strength >= config.sensitivity
+    momExitOk = strength >= (config.sensitivity * 0.8)
+
+    modeEnterOk = not config.enableAdvancedRegime ? true : config.regimeMode == "Trend Only" ? trendEnterOk : config.regimeMode == "Momentum Only" ? momEnterOk : config.regimeMode == "Trend + Momentum" ? (trendEnterOk and momEnterOk) : (trendEnterOk and momEnterOk)
+
+    modeExitOk = not config.enableAdvancedRegime ? true : config.regimeMode == "Trend Only" ? trendExitOk : config.regimeMode == "Momentum Only" ? momExitOk : config.regimeMode == "Trend + Momentum" ? (trendExitOk and momExitOk) : (trendExitOk and momExitOk)
+
+    int prevRegime = state.currentRegime
+    int regime = prevRegime
+
+    if regime == 0
+        if erEnterOk and modeEnterOk and confEnter >= config.minConfidence
+            regime := slope > 0 ? 1 : slope < 0 ? -1 : 0
+    else if regime == 1
+        if erExitOk and modeExitOk and confExit >= config.minConfidenceExit and slope > 0
+            regime := 1
+        else if erEnterOk and modeEnterOk and confEnter >= config.minConfidence and slope < 0
+            regime := -1
+        else
+            regime := 0
+    else
+        if erExitOk and modeExitOk and confExit >= config.minConfidenceExit and slope < 0
+            regime := -1
+        else if erEnterOk and modeEnterOk and confEnter >= config.minConfidence and slope > 0
+            regime := 1
+        else
+            regime := 0
+
+    conf = regime == 0 ? confEnter : (regime == prevRegime ? confExit : confEnter)
+
+    state.currentRegime := regime
+    state.confidence := conf
+    state.strength := strength
+    state
+
+// --- MTF Gate
+
+type MultiTimeframeConfig
+    bool enableHTFGate
+    bool enableDivergenceDetection
+    string[] timeframes
+    map<string, float> weights
+    float minAgreement
+
+type MultiTimeframeState
+    bool enabled
+    float agreementRatio
+    int overallBias
+    float divergenceStrength
+    float minAgreement
+
+newMultiTimeframeConfig() =>
+    MultiTimeframeConfig.new(true, true, array.new_string(), map.new<string, float>(), 0.6)
+
+newMultiTimeframeState() =>
+    MultiTimeframeState.new(false, 1.0, 0, 0.0, 0.6)
+
+processMultiTimeframeAnalysis(MultiTimeframeState state, MultiTimeframeConfig config, int baseRegime) =>
+    state.enabled := config.enableHTFGate
+    state.minAgreement := config.minAgreement
+
+    if not config.enableHTFGate
+        state.agreementRatio := 1.0
+        state.overallBias := baseRegime
+        state.divergenceStrength := 0.0
+        state
+    else
+        totalW = 0.0
+        agreeW = 0.0
+        biasSum = 0.0
+
+        for i = 0 to array.size(config.timeframes) - 1
+            tf = array.get(config.timeframes, i)
+            w = map.contains(config.weights, tf) ? map.get(config.weights, tf) : 1.0
+            dir = request.security(syminfo.tickerid, tf, close > ta.ema(close, 50) ? 1 : close < ta.ema(close, 50) ? -1 : 0, barmerge.gaps_off, barmerge.lookahead_off)
+
+            totalW += w
+            biasSum += dir * w
+            if baseRegime != 0 and dir == baseRegime
+                agreeW += w
+
+        agreement = totalW > 0 ? (baseRegime == 0 ? math.abs(biasSum) / totalW : agreeW / totalW) : 0.0
+        overallBias = biasSum > 0 ? 1 : biasSum < 0 ? -1 : 0
+        divergence = config.enableDivergenceDetection ? (1.0 - agreement) : 0.0
+
+        state.agreementRatio := agreement
+        state.overallBias := overallBias
+        state.divergenceStrength := divergence
+        state
+
+// --- Filters
+
+type FilterConfig
+    bool enableAdvancedFilters
+    float minATRPercent
+    string volatilityMode
+    bool enableVolumeFilter
+    int volumeLength
+    float volumeQuantile
+    bool enableMarketCondition
+    int marketConditionPeriod
+    bool enableConfluence
+    float confluenceThreshold
+
+type FilterState
+    float signalQuality
+    int marketCondition
+
+newFilterConfig() =>
+    FilterConfig.new(true, 0.0007, "Adaptive", false, 50, 0.3, true, 100, true, 0.6)
+
+newFilterState() =>
+    FilterState.new(0.0, 0)
+
+processFilterSystem(FilterState state, FilterConfig config, AdaptiveState adaptiveState, RegimeState regimeState) =>
+    if not config.enableAdvancedFilters
+        state.signalQuality := 1.0
+        state.marketCondition := 0
+        state
+    else
+        atrPct = close > 0 ? (adaptiveState.atr / close) : 0.0
+        atrPctAvg = ta.sma(atrPct, config.marketConditionPeriod)
+        atrPctThresh = config.volatilityMode == "Static" ? config.minATRPercent : config.volatilityMode == "Adaptive" ? math.max(config.minATRPercent, atrPctAvg * 0.7) : math.max(config.minATRPercent, atrPctAvg * (regimeState.currentRegime != 0 ? 0.6 : 0.85))
+        volOk = atrPct >= atrPctThresh
+
+        volAvg = ta.sma(volume, config.volumeLength)
+        volGate = not config.enableVolumeFilter or (volAvg > 0 and volume >= volAvg * config.volumeQuantile)
+
+        trendScore = ta.sma(math.abs(adaptiveState.normalizedSlope), config.marketConditionPeriod)
+        erAvg = ta.sma(adaptiveState.efficiencyRatio, config.marketConditionPeriod)
+        marketCond = 0
+        if config.enableMarketCondition
+            marketCond := trendScore > 0.35 ? 1 : erAvg < 0.15 ? -1 : 0
+
+        quality = 0.0
+        quality += volOk ? 0.5 : 0.0
+        quality += volGate ? 0.3 : 0.0
+        quality += trendScore > 0.2 ? 0.2 : 0.0
+
+        if config.enableConfluence and quality < config.confluenceThreshold
+            quality := quality * 0.5
+
+        state.signalQuality := f_clamp01(quality)
+        state.marketCondition := marketCond
+        state
+
+// --- Signal Engine
+
+type SignalConfig
+    int confirmBars
+    bool enableSmartConfirm
+    bool enableAdvancedExits
+    string exitMode
+    bool enableTrailingStop
+    float trailingSensitivity
+    bool enableRiskManagement
+    int maxConsecutiveLosses
+    int cooldownPeriod
+    float exitMultiplier
+    float tierAConf
+    float tierAAgree
+    float tierAQuality
+    float tierBConf
+    float tierBAgree
+    float tierBQuality
+
+type SignalState
+    bool longEntry
+    bool shortEntry
+    bool exitLong
+    bool exitShort
+    bool lowQualityLong
+    bool lowQualityShort
+    int position
+    int lastSignalBar
+
+newSignalConfig() =>
+    SignalConfig.new(2, true, true, "Hybrid", true, 0.7, true, 3, 5, 1.2, 0.8, 0.65, 0.7, 0.7, 0.55, 0.6)
+
+newSignalState() =>
+    SignalState.new(false, false, false, false, false, false, 0, na)
+
+processSignalGeneration(SignalState state, SignalConfig config, AdaptiveState adaptiveState, RegimeState regimeState, MultiTimeframeState mtfState, FilterState filterState) =>
+    bull = regimeState.currentRegime == 1
+    bear = regimeState.currentRegime == -1
+
+    barsOkBull = config.confirmBars <= 1 ? bull : ta.sma(bull ? 1 : 0, config.confirmBars) == 1.0
+    barsOkBear = config.confirmBars <= 1 ? bear : ta.sma(bear ? 1 : 0, config.confirmBars) == 1.0
+
+    canFire = na(state.lastSignalBar) or (bar_index - state.lastSignalBar >= config.cooldownPeriod)
+    htfGateOk = not mtfState.enabled or (mtfState.agreementRatio >= mtfState.minAgreement)
+    filterOk = filterState.signalQuality >= 0.5 and htfGateOk
+    htfAgree = mtfState.enabled ? mtfState.agreementRatio : 1.0
+    qualA = (regimeState.confidence >= config.tierAConf) and (htfAgree >= config.tierAAgree) and (filterState.signalQuality >= config.tierAQuality)
+    qualB = not qualA and (regimeState.confidence >= config.tierBConf) and (htfAgree >= config.tierBAgree) and (filterState.signalQuality >= config.tierBQuality)
+    allowEntry = qualA or qualB
+
+    longCandidate = canFire and filterOk and barsOkBull and state.position != 1
+    shortCandidate = canFire and filterOk and barsOkBear and state.position != -1
+
+    longEntry = longCandidate and allowEntry
+    shortEntry = shortCandidate and allowEntry
+    lowQualityLong = longCandidate and not allowEntry
+    lowQualityShort = shortCandidate and not allowEntry
+
+    upperExit = adaptiveState.line + config.exitMultiplier * adaptiveState.atr
+    lowerExit = adaptiveState.line - config.exitMultiplier * adaptiveState.atr
+
+    exitByBandLong = state.position == 1 and close < lowerExit
+    exitByBandShort = state.position == -1 and close > upperExit
+
+    exitByRegimeLong = state.position == 1 and not bull
+    exitByRegimeShort = state.position == -1 and not bear
+
+    exitLong = config.enableAdvancedExits ? (config.exitMode == "Conservative" ? exitByBandLong : config.exitMode == "Aggressive" ? exitByRegimeLong : (exitByBandLong or exitByRegimeLong)) : exitByRegimeLong
+
+    exitShort = config.enableAdvancedExits ? (config.exitMode == "Conservative" ? exitByBandShort : config.exitMode == "Aggressive" ? exitByRegimeShort : (exitByBandShort or exitByRegimeShort)) : exitByRegimeShort
+
+    if longEntry
+        state.position := 1
+        state.lastSignalBar := bar_index
+    else if shortEntry
+        state.position := -1
+        state.lastSignalBar := bar_index
+    else if exitLong or exitShort
+        state.position := 0
+
+    state.longEntry := longEntry
+    state.shortEntry := shortEntry
+    state.exitLong := exitLong
+    state.exitShort := exitShort
+    state.lowQualityLong := lowQualityLong
+    state.lowQualityShort := lowQualityShort
+    state
+
+// --- Performance
+
+type PerformanceConfig
+    bool enableAutoTuning
+    int tuningPeriod
+    float adaptationRate
+    bool enablePerformanceTracking
+    int trackingPeriod
+    bool enableMemoryOptimization
+    int maxHistoryBars
+
+type PerformanceMetrics
+    int sampleCount
+    float winRate
+    float profitFactor
+    int wins
+    int losses
+    float grossProfit
+    float grossLoss
+    float lastEntryPrice
+    int lastPosition
+
+newPerformanceConfig() =>
+    PerformanceConfig.new(true, 200, 0.02, true, 500, true, 2000)
+
+newPerformanceMetrics() =>
+    PerformanceMetrics.new(0, 0.5, 1.0, 0, 0, 0.0, 0.0, na, 0)
+
+updatePerformanceMetrics(PerformanceMetrics metrics, PerformanceConfig config, SignalState signalState) =>
+    if not config.enablePerformanceTracking
+        metrics
+    else
+        if signalState.position != metrics.lastPosition
+            if metrics.lastPosition == 0 and signalState.position != 0
+                metrics.lastEntryPrice := close
+            else if metrics.lastPosition != 0 and signalState.position == 0 and not na(metrics.lastEntryPrice)
+                pnl = (close - metrics.lastEntryPrice) * (metrics.lastPosition == 1 ? 1 : -1)
+                if pnl > 0
+                    metrics.wins += 1
+                    metrics.grossProfit += pnl
+                else
+                    metrics.losses += 1
+                    metrics.grossLoss += math.abs(pnl)
+
+                metrics.sampleCount := metrics.wins + metrics.losses
+                metrics.winRate := metrics.sampleCount > 0 ? (metrics.wins / metrics.sampleCount) : 0.0
+                metrics.profitFactor := metrics.grossLoss > 0 ? (metrics.grossProfit / metrics.grossLoss) : (metrics.grossProfit > 0 ? 99.0 : 0.0)
+
+        metrics.lastPosition := signalState.position
+        metrics
+
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+// === INPUT GROUPS ===
+var string CORE_GROUP = "Core Adaptive Engine"
+var string REGIME_GROUP = "Regime Detection"
+var string MTF_GROUP = "Multi-Timeframe Gate"
+var string FILTER_GROUP = "Advanced Filters"
+var string SIGNAL_GROUP = "Signal Management"
+var string VISUAL_GROUP = "Visualization"
+var string PERFORMANCE_GROUP = "Performance & Auto-Tune"
+var string MAZONE_GROUP = "MA Overlay Zones"
+var string WIP_GROUP = "Experimental (WIP)"
+var string LOG_GROUP = "Logging"
+
+// === CORE ADAPTIVE ENGINE SETTINGS ===
+profilePreset = input.string("Smart", "Profile Preset", ["Smart", "Futures", "Spot", "ETF", "Crypto", "Custom"], group=CORE_GROUP, tooltip="Auto-optimized parameters for different market types")
+
+dataSource = input.source(close, "Data Source", group=CORE_GROUP)
+enableAdaptiveEngine = input.bool(true, "Enable Adaptive Engine", group=CORE_GROUP, tooltip="Use the local adaptive engine for calculations")
+
+// KAMA-Hybrid Parameters
+erLength = input.int(20, "Efficiency Ratio Length", minval=5, maxval=100, group=CORE_GROUP, tooltip="Period for trend efficiency calculation")
+alphaMin = input.float(0.03, "Alpha Minimum", minval=0.001, maxval=0.5, step=0.001, group=CORE_GROUP, tooltip="Minimum smoothing factor (slow reaction)")
+alphaMax = input.float(0.30, "Alpha Maximum", minval=0.01, maxval=1.0, step=0.01, group=CORE_GROUP, tooltip="Maximum smoothing factor (fast reaction)")
+gamma = input.float(1.25, "Gamma (Reaction Hardness)", minval=0.5, maxval=3.0, step=0.05, group=CORE_GROUP, tooltip="Controls non-linearity of alpha adaptation")
+
+// ATR Bands Configuration
+atrLength = input.int(14, "ATR Length", minval=2, maxval=50, group=CORE_GROUP)
+entryMultiplier = input.float(1.6, "Entry Band Multiplier", minval=0.5, maxval=5.0, step=0.1, group=CORE_GROUP, tooltip="ATR factor for entry threshold")
+exitMultiplier = input.float(1.2, "Exit Band Multiplier", minval=0.3, maxval=5.0, step=0.1, group=CORE_GROUP, tooltip="ATR factor for exit threshold (< Entry = Hysteresis)")
+
+// === REGIME DETECTION SETTINGS ===
+enableAdvancedRegime = input.bool(true, "Enable Advanced Regime Detection", group=REGIME_GROUP, tooltip="Use enhanced regime classification")
+regimeMode = input.string("Trend + Momentum", "Regime Detection Mode", ["Trend Only", "Momentum Only", "Trend + Momentum", "Full Analysis"], group=REGIME_GROUP)
+
+erThreshold = input.float(0.2, "ER Threshold (Trend)", minval=0.0, maxval=1.0, step=0.01, group=REGIME_GROUP, tooltip="Minimum ER value for trend regime")
+erThresholdExit = input.float(0.15, "ER Exit Threshold", minval=0.0, maxval=1.0, step=0.01, group=REGIME_GROUP, tooltip="Lower ER threshold to exit regime (hysteresis)")
+regimeSensitivity = input.float(0.6, "Regime Sensitivity", minval=0.1, maxval=1.0, step=0.05, group=REGIME_GROUP, tooltip="Higher = more sensitive regime detection")
+regimeConfidenceMin = input.float(0.65, "Min Regime Confidence", minval=0.0, maxval=1.0, step=0.05, group=REGIME_GROUP, tooltip="Minimum confidence for regime classification")
+regimeConfidenceExit = input.float(0.55, "Min Regime Confidence (Exit)", minval=0.0, maxval=1.0, step=0.05, group=REGIME_GROUP, tooltip="Lower confidence threshold to exit regime (hysteresis)")
+
+// Machine Learning Enhancement
+enableMLRegime = input.bool(true, "ML-Enhanced Classification (WIP)", group=WIP_GROUP, tooltip="WIP: not yet used in engine")
+mlLookback = input.int(50, "ML Pattern Lookback (WIP)", minval=20, maxval=200, group=WIP_GROUP, tooltip="WIP: not yet used in engine")
+mlConfidence = input.float(0.7, "ML Confidence Threshold (WIP)", minval=0.5, maxval=0.95, step=0.05, group=WIP_GROUP, tooltip="WIP: not yet used in engine")
+
+// === MULTI-TIMEFRAME GATE SETTINGS ===
+enableMTFGate = input.bool(true, "Enable MTF Gate", group=MTF_GROUP, tooltip="Higher timeframe must confirm trend (auto-stacked by chart TF)")
+
+// HTF Configuration
+htfWeights = input.string("Balanced", "HTF Weight Distribution", ["Primary Focus", "Balanced", "Long-term Focus"], group=MTF_GROUP)
+htfMinAgreement = input.float(0.6, "Min HTF Agreement", minval=0.0, maxval=1.0, step=0.05, group=MTF_GROUP, tooltip="Minimum weighted agreement ratio")
+enableHTFDivergence = input.bool(true, "HTF Divergence Detection", group=MTF_GROUP, tooltip="Detect divergence between timeframes")
+
+// === ADVANCED FILTERS ===
+enableAdvancedFilters = input.bool(true, "Enable Advanced Filter System", group=FILTER_GROUP)
+
+// Volatility Filter
+minATRPercent = input.float(0.0007, "Min ATR/Price", minval=0.0, step=0.0001, group=FILTER_GROUP, tooltip="Minimum volatility filter (0.07% = 0.0007)")
+volatilityMode = input.string("Adaptive", "Volatility Filter Mode", ["Static", "Adaptive", "Dynamic"], group=FILTER_GROUP)
+
+// Volume Filter
+useVolumeFilter = input.bool(false, "Volume Filter", group=FILTER_GROUP)
+volumeLength = input.int(50, "Volume MA Length", minval=5, maxval=200, group=FILTER_GROUP)
+volumeQuantile = input.float(0.3, "Volume Quantile", minval=0.0, maxval=1.0, step=0.05, group=FILTER_GROUP, tooltip="Minimum volume as factor of MA")
+
+// Market Condition Filter
+enableMarketCondition = input.bool(true, "Market Condition Filter", group=FILTER_GROUP)
+marketConditionPeriod = input.int(100, "Market Analysis Period", minval=50, maxval=500, group=FILTER_GROUP)
+
+// Confluence Filter
+enableConfluenceFilter = input.bool(true, "Confluence Filter", group=FILTER_GROUP, tooltip="Use confluence scoring for signal validation")
+confluenceThreshold = input.float(0.6, "Confluence Threshold", minval=0.0, maxval=1.0, step=0.05, group=FILTER_GROUP)
+
+// === SIGNAL MANAGEMENT ===
+// Whipsaw Protection
+confirmBars = input.int(2, "Signal Confirmation Bars", minval=1, maxval=10, group=SIGNAL_GROUP, tooltip="Bars required for signal confirmation")
+enableSmartConfirm = input.bool(true, "Smart Confirmation (WIP)", group=WIP_GROUP, tooltip="WIP: not yet used in engine")
+
+// Position Management
+enableAdvancedExits = input.bool(true, "Advanced Exit Logic", group=SIGNAL_GROUP)
+exitMode = input.string("Hybrid", "Exit Strategy", ["Conservative", "Balanced", "Hybrid", "Aggressive"], group=SIGNAL_GROUP)
+enableTrailingStop = input.bool(true, "Trailing Stop Logic (WIP)", group=WIP_GROUP, tooltip="WIP: not yet used in engine")
+trailingSensitivity = input.float(0.7, "Trailing Sensitivity (WIP)", minval=0.1, maxval=1.0, step=0.05, group=WIP_GROUP, tooltip="WIP: not yet used in engine")
+
+// Risk Management
+enableRiskManagement = input.bool(true, "Risk Management (WIP)", group=WIP_GROUP, tooltip="WIP: not yet used in engine")
+maxConsecutiveLosses = input.int(3, "Max Consecutive Losses (WIP)", minval=1, maxval=10, group=WIP_GROUP, tooltip="WIP: not yet used in engine")
+cooldownPeriod = input.int(5, "Cooldown Period (bars)", minval=0, maxval=50, group=SIGNAL_GROUP)
+
+// Quality Tiers
+tierAConf = input.float(0.80, "Tier A: Min Confidence", minval=0.0, maxval=1.0, step=0.05, group=SIGNAL_GROUP)
+tierAAgree = input.float(0.65, "Tier A: Min HTF Agreement", minval=0.0, maxval=1.0, step=0.05, group=SIGNAL_GROUP)
+tierAQuality = input.float(0.70, "Tier A: Min Signal Quality", minval=0.0, maxval=1.0, step=0.05, group=SIGNAL_GROUP)
+
+tierBConf = input.float(0.70, "Tier B: Min Confidence", minval=0.0, maxval=1.0, step=0.05, group=SIGNAL_GROUP)
+tierBAgree = input.float(0.55, "Tier B: Min HTF Agreement", minval=0.0, maxval=1.0, step=0.05, group=SIGNAL_GROUP)
+tierBQuality = input.float(0.60, "Tier B: Min Signal Quality", minval=0.0, maxval=1.0, step=0.05, group=SIGNAL_GROUP)
+
+// Warnings
+showWarnings = input.bool(true, "Show Warnings (events only)", group=SIGNAL_GROUP)
+warningDivergenceThreshold = input.float(0.65, "Warning: MTF Divergence", minval=0.0, maxval=1.0, step=0.05, group=SIGNAL_GROUP)
+warningRegimeStrengthMin = input.float(0.30, "Warning: Low Regime Strength", minval=0.0, maxval=1.0, step=0.05, group=SIGNAL_GROUP)
+warningCooldownBars = input.int(15, "Warning Cooldown (bars)", minval=0, maxval=200, group=SIGNAL_GROUP)
+
+// === VISUALIZATION ===
+showBands = input.bool(true, "Show ATR Bands", group=VISUAL_GROUP)
+showRegimeHeatmap = input.bool(true, "Regime Heatmap", group=VISUAL_GROUP)
+showInfoPanel = input.bool(true, "Info Panel", group=VISUAL_GROUP)
+infoPanelPosition = input.string("Top Right", "Panel Position", ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=VISUAL_GROUP)
+compactMode = input.bool(false, "Compact Mode", group=VISUAL_GROUP)
+
+// Advanced Visualization
+showHTFIndicators = input.bool(true, "HTF Indicators", group=VISUAL_GROUP)
+showConfidenceMeters = input.bool(true, "Confidence Meters", group=VISUAL_GROUP)
+enableDynamicColors = input.bool(true, "Dynamic Colors", group=VISUAL_GROUP)
+showSignalStrength = input.bool(true, "Signal Strength", group=VISUAL_GROUP)
+dotMode = input.string("On Adaptive Line", "Strength Dot Position", options=["On Adaptive Line","Above/Below Bar","Off"], group=VISUAL_GROUP)
+dotOffsetAtr = input.float(0.15, "Dot Offset (ATR)", step=0.05, group=VISUAL_GROUP)
+dotColorMode = input.string("By Tier", "Strength Dot Color", options=["By Tier","By Confidence"], group=VISUAL_GROUP)
+
+// === MA OVERLAY ZONES (Regime-gated) ===
+enableMAOverlayZones = input.bool(false, "Enable MA Overlay Zones", group=MAZONE_GROUP)
+useRDPRegime = input.bool(true, "Use RDP Regime for Zones", group=MAZONE_GROUP)
+maType = input.string("DEMA", "MA Type", options=["SMA","EMA","DEMA","TEMA","JMA"], group=MAZONE_GROUP)
+len1 = input.int(21, "MA 1 Length", minval=1, group=MAZONE_GROUP)
+len2 = input.int(55, "MA 2 Length", minval=1, group=MAZONE_GROUP)
+len3 = input.int(89, "MA 3 Length", minval=1, group=MAZONE_GROUP)
+atrLenZones = input.int(20, "ATR Length", minval=1, group=MAZONE_GROUP)
+multZones = input.float(2.0, "ATR Stop Multiplier", minval=0.1, step=0.1, group=MAZONE_GROUP)
+strengthModeZones = input.string("By MA Type", "Strength Normalization", options=["Off","By MA Type","Auto"], group=MAZONE_GROUP)
+baseMinStrengthZones = input.float(0.6, "Base Min Strength (spread / ATR)", step=0.05, group=MAZONE_GROUP)
+autoLookbackZones = input.int(200, "Auto Normalize Lookback", minval=50, group=MAZONE_GROUP)
+minConfidenceForZones = input.float(0.6, "Min Regime Confidence", minval=0.0, maxval=1.0, step=0.05, group=MAZONE_GROUP)
+minHTFAgreementForZones = input.float(0.5, "Min HTF Agreement", minval=0.0, maxval=1.0, step=0.05, group=MAZONE_GROUP)
+showMAZones = input.bool(true, "Show MA Zones", group=MAZONE_GROUP)
+showMAZoneLabels = input.bool(true, "Show MA Zone Labels", group=MAZONE_GROUP)
+zoneRenderMode = input.string("Lines + Fill", "Zone Render Mode", options=["Fill only", "Lines + Fill"], group=MAZONE_GROUP)
+
+// === PERFORMANCE & AUTO-TUNING ===
+enableAutoTuning = input.bool(true, "Auto-Tuning (WIP)", group=WIP_GROUP, tooltip="Automatically optimize parameters based on performance")
+tuningPeriod = input.int(200, "Tuning Period (WIP)", minval=100, maxval=1000, group=WIP_GROUP)
+adaptationRate = input.float(0.02, "Adaptation Rate (WIP)", minval=0.005, maxval=0.1, step=0.005, group=WIP_GROUP)
+
+// Performance Metrics
+enablePerformanceTracking = input.bool(true, "Performance Tracking (WIP)", group=WIP_GROUP)
+trackingPeriod = input.int(500, "Tracking Period (WIP)", minval=100, maxval=2000, group=WIP_GROUP)
+
+// Memory Management
+enableMemoryOptimization = input.bool(true, "Memory Optimization (WIP)", group=WIP_GROUP)
+maxHistoryBars = input.int(2000, "Max History Bars (WIP)", minval=500, maxval=5000, group=WIP_GROUP)
+
+// Alert Settings
+enableSmartAlerts = input.bool(true, "Smart Alerts", group=PERFORMANCE_GROUP)
+alertConfidenceMin = input.float(0.7, "Alert Confidence Min", minval=0.5, maxval=1.0, step=0.05, group=PERFORMANCE_GROUP)
+
+// === SSA: SMART SIGNALS ASSISTANT ===
+var string SSA_GROUP = "SSA: Smart Signals"
+var string SSA_VIS = "SSA: Visuals"
+var string SSA_TM = "SSA: Trade Management"
+var string SSA_ALERT = "SSA: Alert Builder"
+
+ssaEnable = input.bool(true, "Enable SSA Overlay", group=SSA_GROUP)
+ssaMode = input.string("Swing", "Mode", options=["Swing","Scalping"], group=SSA_GROUP)
+ssaSignalMode = input.string("Trend", "Signal Mode", options=["Trend","Reversal"], group=SSA_GROUP)
+ssaEntrySource = input.string("SSA Engine", "SSA Entry Source", options=["SSA Engine","RDP A/B (both)","RDP A only","RDP B only"], group=SSA_GROUP, tooltip="When set to RDP: SSA uses RDP entry events as triggers instead of its own engine.")
+ssaUseRDPGate = input.bool(true, "Use RDP as Primary Gate", group=SSA_GROUP, tooltip="Uses RDP regime/conf/quality/HTF as main filter for SSA signals")
+
+ssaMinConfSwing = input.float(0.70, "Min Confidence (Swing)", step=0.05, group=SSA_GROUP)
+ssaMinConfScalp = input.float(0.60, "Min Confidence (Scalping)", step=0.05, group=SSA_GROUP)
+ssaMinHTF = input.float(0.55, "Min HTF Agreement", step=0.05, group=SSA_GROUP)
+ssaMinQuality = input.float(0.60, "Min Signal Quality", step=0.05, group=SSA_GROUP)
+
+ssaStrongConf = input.float(0.80, "Strong: Min Confidence", step=0.05, group=SSA_GROUP)
+ssaStrongHTF = input.float(0.65, "Strong: Min HTF Agreement", step=0.05, group=SSA_GROUP)
+ssaStrongQuality = input.float(0.70, "Strong: Min Quality", step=0.05, group=SSA_GROUP)
+
+ssaCooldownBars = input.int(5, "SSA Cooldown (bars)", minval=0, maxval=100, group=SSA_GROUP)
+
+ssaSuperEnabled = input.bool(true, "Enable Super tier", group=SSA_GROUP)
+ssaSuperNeedsTRC = input.bool(true, "Super requires TRC Trending", group=SSA_GROUP, tooltip="Uses filterState.marketCondition == 1 as TRC trending proxy")
+ssaSuperNeedsFVT = input.bool(true, "Super requires FVT aligned", group=SSA_GROUP)
+ssaSuperNeedsCloud = input.bool(true, "Super requires Cloud aligned", group=SSA_GROUP)
+ssaRequireRdpTierBPlus = input.bool(true, "SSA entries require RDP Tier B+", group=SSA_GROUP)
+ssaEntryTierGate = input.string("Tier B+", "SSA Entry Tier Gate", options=["Off","Tier B+","Tier A only"], group=SSA_GROUP)
+
+ssaCandleColoring = input.string("Off", "Candle Coloring", options=["Off","Trend Colors","Momentum Gradient","Volume Gradient","Gray In Ranging"], group=SSA_VIS)
+ssaShowSignals = input.bool(true, "Show SSA Signals", group=SSA_VIS)
+ssaSignalDisplay = input.string("All", "SSA Signal Display", options=["Off","All","Strong+","Super only"], group=SSA_VIS)
+ssaPreferSSAOverRDP = input.bool(false, "Prefer SSA visuals over RDP", group=SSA_VIS)
+ssaAutoHideRdpWhenUsingRdpEntries = input.bool(true, "Auto-hide RDP visuals when SSA uses RDP entries", group=SSA_VIS)
+ssaShowPending = input.bool(true, "Show pending marker", group=SSA_VIS)
+ssaShowStrongPlus = input.bool(true, "Strong shows plus markers", group=SSA_VIS)
+ssaShowFVT = input.bool(true, "Show Fair Value Trail (FVT)", group=SSA_VIS)
+ssaShowTrendBias = input.bool(true, "Show Trend Bias Band", group=SSA_VIS)
+ssaShowClouds = input.bool(true, "Show ATR Clouds", group=SSA_VIS)
+
+ssaTradeMgmt = input.bool(true, "Enable TP/SL Zones", group=SSA_TM)
+ssaSLSource = input.string("RDP Exit Band", "Stop-Loss Source", options=["RDP Exit Band","RDP Entry Band","MA Zone SL (if enabled)","ATR Trail"], group=SSA_TM)
+ssaRR = input.float(2.0, "Risk/Reward (TP = RR * risk)", step=0.25, group=SSA_TM)
+ssaExtendBars = input.int(50, "Extend TP/SL boxes (bars)", minval=5, maxval=500, group=SSA_TM)
+
+ssaExitMode = input.string("Hybrid", "SSA Exit Mode", options=["Conservative","Hybrid","Aggressive"], group=SSA_TM)
+ssaExitOnRegimeFlip = input.bool(true, "Exit on regime flip/flat", group=SSA_TM)
+ssaExitOnFVTFlip = input.bool(true, "Exit if FVT flips", group=SSA_TM)
+ssaExitOnCloudFlip = input.bool(false, "Exit if Cloud flips", group=SSA_TM)
+ssaTimeStopBars = input.int(0, "Time stop (0=off)", minval=0, maxval=2000, group=SSA_TM)
+
+ssaTrailEnabled = input.bool(true, "Trail SL", group=SSA_TM)
+ssaTrailSource = input.string("FVT", "Trail Source", options=["FVT","Cloud","RDP Line"], group=SSA_TM)
+ssaTrailBufferATR = input.float(0.2, "Trail buffer (ATR)", step=0.05, group=SSA_TM)
+ssaRdpEntryPriceMode = input.string("Close", "RDP-mode Entry Price", options=["Close","High/Low","Entry Band (upper/lower)","Exit Band (upper/lower)","Adaptive Line"], group=SSA_TM)
+ssaRdpProMode = input.bool(true, "Pro Mode (RDP entries)", group=SSA_TM)
+ssaRdpEntryPriceModeA = input.string("Close", "RDP A Entry Price", options=["Close","High/Low","Entry Band (upper/lower)","Exit Band (upper/lower)","Adaptive Line"], group=SSA_TM)
+ssaRdpEntryPriceModeB = input.string("Entry Band (upper/lower)", "RDP B Entry Price", options=["Close","High/Low","Entry Band (upper/lower)","Exit Band (upper/lower)","Adaptive Line"], group=SSA_TM)
+ssaRdpLimitStyle = input.bool(true, "Limit-style pending entry (touch required)", group=SSA_TM)
+ssaRdpLimitTimeoutBars = input.int(20, "Pending timeout (bars)", minval=1, maxval=500, group=SSA_TM)
+ssaRdpLimitTouchMode = input.string("Touch Entry Band", "Pending trigger", options=["Touch Entry Band","Touch Exit Band","Touch Adaptive Line","Touch FVT","Touch Cloud"], group=SSA_TM, tooltip="Which level must be touched to activate a pending entry.")
+ssaPendingDualSlots = input.bool(true, "Dual pending slots (Long + Short)", group=SSA_TM)
+ssaPendingFlipMode = input.string("Flip", "Pending on opposite signal", options=["Flip","Replace Same Side","Ignore Opposite","Cancel Opposite"], group=SSA_TM, tooltip="Flip: opposite signal converts pending direction. Replace Same Side: updates same-side pending only. Ignore Opposite: keep current pending. Cancel Opposite: cancels the opposite pending.")
+ssaLimitActivation = input.string("Touch", "Pending activation", options=["Touch","Close Confirm"], group=SSA_TM, tooltip="Touch: bar range hits trigger level. Close Confirm: close crosses/holds beyond trigger level.")
+ssaCloseConfirmBars = input.int(1, "Close confirm bars", minval=1, maxval=5, group=SSA_TM)
+
+var string SSA_TABLE = "SSA: Component Status Table"
+ssaShowTable = input.bool(true, "Show Status Table", group=SSA_TABLE)
+ssaTablePos = input.string("Top Right", "Position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=SSA_TABLE)
+ssaTableCompact = input.bool(false, "Compact", group=SSA_TABLE)
+
+ssaEnableAlerts = input.bool(true, "Enable SSA Alert Builder", group=SSA_ALERT)
+ssaStepCount = input.int(2, "Steps (1..7)", minval=1, maxval=7, group=SSA_ALERT)
+ssaLogicDefault = input.string("AND", "Default Connector", options=["AND","OR"], group=SSA_ALERT)
+
+ssaExternal1 = input.source(close, "External #1 (series)", group=SSA_ALERT)
+ssaExternal2 = input.source(close, "External #2 (series)", group=SSA_ALERT)
+ssaExternal3 = input.source(close, "External #3 (series)", group=SSA_ALERT)
+ssaExternal4 = input.source(close, "External #4 (series)", group=SSA_ALERT)
+ssaExternal5 = input.source(close, "External #5 (series)", group=SSA_ALERT)
+
+ssaExtCmp = input.string("Crossover", "External comparator", options=["Crossover","Crossunder","Above 0","Below 0","Rising","Falling"], group=SSA_ALERT)
+
+step1Cond = input.string("SSA Strong Long", "Step 1 Condition", options=[
+ "SSA Long","SSA Short","SSA Strong Long","SSA Strong Short",
+ "RDP Bull Regime","RDP Bear Regime","RDP Ranging",
+ "RDP Tier A","RDP Tier B+",
+ "FVT Bull","FVT Bear",
+ "Cloud Bull","Cloud Bear",
+ "External #1","External #2","External #3","External #4","External #5"
+], group=SSA_ALERT)
+step2Cond = input.string("RDP Tier A", "Step 2 Condition", options=[
+ "SSA Long","SSA Short","SSA Strong Long","SSA Strong Short",
+ "RDP Bull Regime","RDP Bear Regime","RDP Ranging",
+ "RDP Tier A","RDP Tier B+",
+ "FVT Bull","FVT Bear",
+ "Cloud Bull","Cloud Bear",
+ "External #1","External #2","External #3","External #4","External #5"
+], group=SSA_ALERT)
+step2Conn = input.string("AND", "Step 2 Connector", options=["AND","OR"], group=SSA_ALERT)
+
+step3Cond = input.string("HTF OK", "Step 3 Condition", options=[
+ "None",
+ "SSA Long","SSA Short","SSA Strong Long","SSA Strong Short",
+ "RDP Bull Regime","RDP Bear Regime","RDP Ranging",
+ "RDP Tier A","RDP Tier B+",
+ "HTF OK","Quality OK","Confidence OK",
+ "FVT Bull","FVT Bear",
+ "Cloud Bull","Cloud Bear",
+ "External #1","External #2","External #3","External #4","External #5"
+], group=SSA_ALERT)
+step3Conn = input.string("AND", "Step 3 Connector", options=["AND","OR"], group=SSA_ALERT)
+
+step4Cond = input.string("None", "Step 4 Condition", options=["None", "SSA Long","SSA Short","SSA Strong Long","SSA Strong Short", "RDP Bull Regime","RDP Bear Regime","RDP Ranging", "HTF OK","Quality OK","Confidence OK", "FVT Bull","FVT Bear","Cloud Bull","Cloud Bear", "External #1","External #2","External #3","External #4","External #5" ], group=SSA_ALERT)
+step4Conn = input.string("AND", "Step 4 Connector", options=["AND","OR"], group=SSA_ALERT)
+
+step5Cond = input.string("None", "Step 5 Condition", options=["None", "SSA Long","SSA Short","SSA Strong Long","SSA Strong Short", "RDP Bull Regime","RDP Bear Regime","RDP Ranging", "HTF OK","Quality OK","Confidence OK", "FVT Bull","FVT Bear","Cloud Bull","Cloud Bear", "External #1","External #2","External #3","External #4","External #5" ], group=SSA_ALERT)
+step5Conn = input.string("AND", "Step 5 Connector", options=["AND","OR"], group=SSA_ALERT)
+
+step6Cond = input.string("None", "Step 6 Condition", options=["None", "SSA Long","SSA Short","SSA Strong Long","SSA Strong Short", "RDP Bull Regime","RDP Bear Regime","RDP Ranging", "HTF OK","Quality OK","Confidence OK", "FVT Bull","FVT Bear","Cloud Bull","Cloud Bear", "External #1","External #2","External #3","External #4","External #5" ], group=SSA_ALERT)
+step6Conn = input.string("AND", "Step 6 Connector", options=["AND","OR"], group=SSA_ALERT)
+
+step7Cond = input.string("None", "Step 7 Condition", options=["None", "SSA Long","SSA Short","SSA Strong Long","SSA Strong Short", "RDP Bull Regime","RDP Bear Regime","RDP Ranging", "HTF OK","Quality OK","Confidence OK", "FVT Bull","FVT Bear","Cloud Bull","Cloud Bear", "External #1","External #2","External #3","External #4","External #5" ], group=SSA_ALERT)
+step7Conn = input.string("AND", "Step 7 Connector", options=["AND","OR"], group=SSA_ALERT)
+
+// === LOGGING ===
+logLabelMetrics = input.bool(false, "Log label metrics (last 2000 / step 10)", group=LOG_GROUP)
+
+
+// ============================================================================
+// MODULE: core
+// ============================================================================
+
+// === CORE CONFIGURATION ===
+
+// Create Adaptive Config
+adaptiveConfig = newAdaptiveConfig()
+adaptiveConfig.enableAdaptiveEngine := enableAdaptiveEngine
+adaptiveConfig.erLength := erLength
+adaptiveConfig.alphaMin := alphaMin
+adaptiveConfig.alphaMax := alphaMax
+adaptiveConfig.gamma := gamma
+adaptiveConfig.atrLength := atrLength
+adaptiveConfig.source := dataSource
+
+// Apply profile presets
+if profilePreset != "Custom"
+    if profilePreset == "Smart"
+        adaptiveConfig.alphaMin := 0.025
+        adaptiveConfig.alphaMax := 0.35
+        adaptiveConfig.gamma := 1.15
+    else if profilePreset == "Futures"
+        adaptiveConfig.alphaMin := 0.02
+        adaptiveConfig.alphaMax := 0.28
+        adaptiveConfig.gamma := 1.35
+    else if profilePreset == "Spot"
+        adaptiveConfig.alphaMin := 0.03
+        adaptiveConfig.alphaMax := 0.30
+        adaptiveConfig.gamma := 1.25
+    else if profilePreset == "ETF"
+        adaptiveConfig.alphaMin := 0.015
+        adaptiveConfig.alphaMax := 0.25
+        adaptiveConfig.gamma := 1.45
+    else if profilePreset == "Crypto"
+        adaptiveConfig.alphaMin := 0.035
+        adaptiveConfig.alphaMax := 0.40
+        adaptiveConfig.gamma := 1.05
+
+// Create Regime Config
+regimeConfig = newRegimeConfig()
+regimeConfig.enableAdvancedRegime := enableAdvancedRegime
+regimeConfig.regimeMode := regimeMode
+regimeConfig.erThreshold := erThreshold
+regimeConfig.erThresholdExit := erThresholdExit
+regimeConfig.sensitivity := regimeSensitivity
+regimeConfig.minConfidence := regimeConfidenceMin
+regimeConfig.minConfidenceExit := regimeConfidenceExit
+regimeConfig.enableMLEnhancement := enableMLRegime
+regimeConfig.mlLookback := mlLookback
+regimeConfig.mlConfidenceThreshold := mlConfidence
+
+// Create MTF Config
+chartSec = timeframe.in_seconds(timeframe.period)
+sec15 = timeframe.in_seconds("15")
+sec1h = timeframe.in_seconds("60")
+sec4h = timeframe.in_seconds("240")
+secD = timeframe.in_seconds("D")
+
+string htfTimeframe1 = "60"
+string htfTimeframe2 = "240"
+string htfTimeframe3 = "D"
+
+if chartSec <= sec15
+    htfTimeframe1 := "60"
+    htfTimeframe2 := "240"
+    htfTimeframe3 := "D"
+else if chartSec <= sec1h
+    htfTimeframe1 := "240"
+    htfTimeframe2 := "D"
+    htfTimeframe3 := "W"
+else if chartSec <= sec4h
+    htfTimeframe1 := "D"
+    htfTimeframe2 := "W"
+    htfTimeframe3 := "M"
+else if chartSec <= secD
+    htfTimeframe1 := "W"
+    htfTimeframe2 := "M"
+    htfTimeframe3 := "3M"
+else
+    htfTimeframe1 := "M"
+    htfTimeframe2 := "3M"
+    htfTimeframe3 := "6M"
+
+mtfConfig = newMultiTimeframeConfig()
+mtfConfig.enableHTFGate := enableMTFGate
+mtfConfig.enableDivergenceDetection := enableHTFDivergence
+array.clear(mtfConfig.timeframes)
+array.push(mtfConfig.timeframes, htfTimeframe1)
+array.push(mtfConfig.timeframes, htfTimeframe2)
+array.push(mtfConfig.timeframes, htfTimeframe3)
+
+// Set HTF weights
+htf1Weight = htfWeights == "Primary Focus" ? 0.6 : htfWeights == "Long-term Focus" ? 0.2 : 0.4
+htf2Weight = htfWeights == "Primary Focus" ? 0.3 : htfWeights == "Long-term Focus" ? 0.3 : 0.35
+htf3Weight = htfWeights == "Primary Focus" ? 0.1 : htfWeights == "Long-term Focus" ? 0.5 : 0.25
+
+map.put(mtfConfig.weights, htfTimeframe1, htf1Weight)
+map.put(mtfConfig.weights, htfTimeframe2, htf2Weight)
+map.put(mtfConfig.weights, htfTimeframe3, htf3Weight)
+mtfConfig.minAgreement := htfMinAgreement
+
+// Create Filter Config
+filterConfig = newFilterConfig()
+filterConfig.enableAdvancedFilters := enableAdvancedFilters
+filterConfig.minATRPercent := minATRPercent
+filterConfig.volatilityMode := volatilityMode
+filterConfig.enableVolumeFilter := useVolumeFilter
+filterConfig.volumeLength := volumeLength
+filterConfig.volumeQuantile := volumeQuantile
+filterConfig.enableMarketCondition := enableMarketCondition
+filterConfig.marketConditionPeriod := marketConditionPeriod
+filterConfig.enableConfluence := enableConfluenceFilter
+filterConfig.confluenceThreshold := confluenceThreshold
+
+// Create Signal Config
+signalConfig = newSignalConfig()
+signalConfig.confirmBars := confirmBars
+signalConfig.enableSmartConfirm := enableSmartConfirm
+signalConfig.enableAdvancedExits := enableAdvancedExits
+signalConfig.exitMode := exitMode
+signalConfig.enableTrailingStop := enableTrailingStop
+signalConfig.trailingSensitivity := trailingSensitivity
+signalConfig.enableRiskManagement := enableRiskManagement
+signalConfig.maxConsecutiveLosses := maxConsecutiveLosses
+signalConfig.cooldownPeriod := cooldownPeriod
+signalConfig.exitMultiplier := exitMultiplier
+signalConfig.tierAConf := tierAConf
+signalConfig.tierAAgree := tierAAgree
+signalConfig.tierAQuality := tierAQuality
+signalConfig.tierBConf := tierBConf
+signalConfig.tierBAgree := tierBAgree
+signalConfig.tierBQuality := tierBQuality
+
+// Create Performance Config
+performanceConfig = newPerformanceConfig()
+performanceConfig.enableAutoTuning := enableAutoTuning
+performanceConfig.tuningPeriod := tuningPeriod
+performanceConfig.adaptationRate := adaptationRate
+performanceConfig.enablePerformanceTracking := enablePerformanceTracking
+performanceConfig.trackingPeriod := trackingPeriod
+performanceConfig.enableMemoryOptimization := enableMemoryOptimization
+performanceConfig.maxHistoryBars := maxHistoryBars
+
+// === STATE INITIALIZATION ===
+var adaptiveState = newAdaptiveState()
+var regimeState = newRegimeState()
+var mtfState = newMultiTimeframeState()
+var filterState = newFilterState()
+var signalState = newSignalState()
+var performanceMetrics = newPerformanceMetrics()
+
+// === HELPER FUNCTIONS ===
+
+// Get theme colors
+getThemeColors() =>
+    [color.rgb(34, 171, 108), color.rgb(220, 73, 73), color.rgb(120, 120, 120)] // Default
+
+// Calculate adaptive parameters based on market conditions
+calculateAdaptiveParams() =>
+    if enableAutoTuning and performanceMetrics.sampleCount > tuningPeriod
+        // Auto-tune based on performance
+        if performanceMetrics.winRate < 0.4
+            // Increase selectivity
+            adaptiveConfig.gamma := math.min(3.0, adaptiveConfig.gamma * 1.05)
+            regimeConfig.erThreshold := math.min(0.8, regimeConfig.erThreshold * 1.02)
+        else if performanceMetrics.winRate > 0.7
+            // Increase sensitivity
+            adaptiveConfig.gamma := math.max(0.5, adaptiveConfig.gamma * 0.98)
+            regimeConfig.erThreshold := math.max(0.1, regimeConfig.erThreshold * 0.99)
+
+// === MAIN PROCESSING ===
+
+// 1. Update adaptive parameters
+calculateAdaptiveParams()
+
+// 2. Process Adaptive Engine
+adaptiveState := processAdaptiveEngine(adaptiveState, adaptiveConfig, atrLength)
+
+// 3. Process Regime Detection
+regimeState := processRegimeDetection(regimeState, regimeConfig, adaptiveState)
+
+// 4. Process Multi-Timeframe Analysis
+if enableMTFGate
+    mtfState := processMultiTimeframeAnalysis(mtfState, mtfConfig, regimeState.currentRegime)
+
+// 5. Process Filter System
+filterState := processFilterSystem(filterState, filterConfig, adaptiveState, regimeState)
+
+// 6. Process Signal Generation
+signalState := processSignalGeneration(signalState, signalConfig,
+    adaptiveState, regimeState, mtfState, filterState)
+
+// 7. Update Performance Metrics
+if enablePerformanceTracking
+    performanceMetrics := updatePerformanceMetrics(performanceMetrics, performanceConfig, signalState)
+
+
+// ============================================================================
+// MODULE: visualization
+// ============================================================================
+
+// === CALCULATIONS FOR VISUALIZATION ===
+
+// Extract key values from engine states
+adaptiveLine = adaptiveState.line
+upperEntry = adaptiveLine + entryMultiplier * adaptiveState.atr
+lowerEntry = adaptiveLine - entryMultiplier * adaptiveState.atr
+upperExit = adaptiveLine + exitMultiplier * adaptiveState.atr
+lowerExit = adaptiveLine - exitMultiplier * adaptiveState.atr
+
+// Regime information
+currentRegime = regimeState.currentRegime // 1=Bull, -1=Bear, 0=Flat
+regimeConfidence = regimeState.confidence
+regimeStrength = regimeState.strength
+
+// MTF information
+htfAgreement = enableMTFGate ? mtfState.agreementRatio : 1.0
+htfBias = enableMTFGate ? mtfState.overallBias : currentRegime
+
+// Signal information
+longSignal = signalState.longEntry
+shortSignal = signalState.shortEntry
+exitLongSignal = signalState.exitLong
+exitShortSignal = signalState.exitShort
+lowQualityLong = signalState.lowQualityLong
+lowQualityShort = signalState.lowQualityShort
+currentPosition = signalState.position
+
+// === VISUALIZATION ===
+
+// Theme colors
+[colorBull, colorBear, colorFlat] = getThemeColors()
+
+// Adaptive Line
+lineColor = enableDynamicColors ? (currentRegime == 1 ? colorBull : currentRegime == -1 ? colorBear : color.new(color.black, 0)) : color.new(color.black, 0)
+plot(adaptiveLine, "Adaptive Line", lineColor, linewidth=3)
+
+// ATR Bands (Simple Fill)
+bandBullCol = colorBull
+bandBearCol = colorBear
+
+// Core band lines (Entry als kräftige Kante)
+pUpperEntry = plot(showBands ? upperEntry : na, "Upper Entry",
+ color=color.new(bandBullCol, 0), linewidth=2)
+pLowerEntry = plot(showBands ? lowerEntry : na, "Lower Entry",
+ color=color.new(bandBearCol, 0), linewidth=2)
+
+pUpperExit = plot(showBands ? upperExit : na, "Upper Exit",
+ color=color.new(bandBullCol, 80), linewidth=1)
+pLowerExit = plot(showBands ? lowerExit : na, "Lower Exit",
+ color=color.new(bandBearCol, 80), linewidth=1)
+
+fill(pUpperEntry, pUpperExit, title="ATR Upper Fill",
+ color=showBands ? color.new(bandBullCol, 88) : na)
+fill(pLowerExit, pLowerEntry, title="ATR Lower Fill",
+ color=showBands ? color.new(bandBearCol, 88) : na)
+
+// Regime Heatmap
+heatAlpha = int(90 - (regimeStrength * regimeConfidence * 40))
+heatAlpha := math.max(60, math.min(90, heatAlpha))
+bgColor = currentRegime == 1 ? color.new(colorBull, heatAlpha) : currentRegime == -1 ? color.new(colorBear, heatAlpha) : na
+bgcolor(showRegimeHeatmap ? bgColor : na, title="Regime Heatmap")
+
+// --- Label anchoring (shared)
+float atrLbl = nz(adaptiveState.atr, ta.atr(14))
+float refY = math.max(high, math.max(upperEntry, upperExit))
+float pad1 = atrLbl * 0.15
+float pad2 = atrLbl * 0.15
+float yHTF = refY + pad1 + pad2
+
+// HTF Indicators (pinned to last change)
+htfColor = htfAgreement >= 0.6 ? color.green : htfAgreement <= 0.4 ? color.red : color.orange
+var label htfStatusLbl = na
+var string htfLastTxt = ""
+var color htfLastCol = na
+var int htfLastBar = na
+var float htfLastY = na
+
+if showHTFIndicators and enableMTFGate
+    string txt = "HTF " + str.tostring(htfAgreement, "#.00")
+    string tip = "HTF agreement ratio (0..1) between higher timeframes and current regime"
+    int xLbl = bar_index
+
+    if txt != htfLastTxt
+        htfLastTxt := txt
+        htfLastCol := color.new(htfColor, 0)
+        htfLastBar := xLbl
+        htfLastY := yHTF
+
+    if na(htfStatusLbl)
+        htfStatusLbl := label.new( htfLastBar, htfLastY, htfLastTxt, xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.white, color=htfLastCol, size=size.tiny, tooltip=tip, force_overlay=true )
+    else
+        label.set_xy(htfStatusLbl, htfLastBar, htfLastY)
+        label.set_text(htfStatusLbl, htfLastTxt)
+        label.set_color(htfStatusLbl, htfLastCol)
+        label.set_textcolor(htfStatusLbl, color.white)
+        label.set_tooltip(htfStatusLbl, tip)
+else
+    if not na(htfStatusLbl)
+        label.delete(htfStatusLbl)
+        htfStatusLbl := na
+
+// Signal Markers
+qualA = (regimeConfidence >= tierAConf) and (htfAgreement >= tierAAgree) and (filterState.signalQuality >= tierAQuality)
+qualB = not qualA and (regimeConfidence >= tierBConf) and (htfAgreement >= tierBAgree) and (filterState.signalQuality >= tierBQuality)
+qualC = not qualA and not qualB
+
+longEvent = longSignal and not longSignal[1]
+shortEvent = shortSignal and not shortSignal[1]
+
+longA = longEvent and qualA
+shortA = shortEvent and qualA
+longB = longEvent and qualB
+shortB = shortEvent and qualB
+longC = lowQualityLong and not lowQualityLong[1]
+shortC = lowQualityShort and not lowQualityShort[1]
+
+// --- RDP Entry exports for SSA
+rdpLongAEvent = longA
+rdpShortAEvent = shortA
+rdpLongBEvent = longB
+rdpShortBEvent = shortB
+rdpLongAnyAB = longA or longB
+rdpShortAnyAB = shortA or shortB
+
+ssaRdpLongTierA = rdpLongAEvent
+ssaRdpShortTierA = rdpShortAEvent
+ssaRdpLongTierB = rdpLongBEvent
+ssaRdpShortTierB = rdpShortBEvent
+
+isRdpSource = ssaEntrySource != "SSA Engine"
+showRdpEntryVisuals = not (ssaEnable and ssaPreferSSAOverRDP) and not (ssaEnable and ssaAutoHideRdpWhenUsingRdpEntries and isRdpSource)
+
+rdpLongEv = showRdpEntryVisuals and (longA or longB)
+rdpShortEv = showRdpEntryVisuals and (shortA or shortB)
+rdpLongTxt = longA ? "A" : "B"
+rdpShortTxt = shortA ? "A" : "B"
+rdpLongCol = longA ? colorBull : color.new(colorBull, 35)
+rdpShortCol = shortA ? colorBear : color.new(colorBear, 35)
+
+plotshape(rdpLongEv, "RDP Long Entry", shape.triangleup, location.belowbar,
+ rdpLongCol, size=size.normal)
+plotshape(rdpShortEv, "RDP Short Entry", shape.triangledown, location.abovebar,
+ rdpShortCol, size=size.normal)
+
+if showRdpEntryVisuals and longC
+    label.new(bar_index, low, "LOWQ",
+        style=label.style_label_up,
+        textcolor=color.white,
+        color=color.new(color.orange, 0),
+        size=size.tiny,
+        tooltip="Low quality: below Tier B thresholds (confidence/HTF/quality)")
+if showRdpEntryVisuals and shortC
+    label.new(bar_index, high, "LOWQ",
+        style=label.style_label_down,
+        textcolor=color.white,
+        color=color.new(color.orange, 0),
+        size=size.tiny,
+        tooltip="Low quality: below Tier B thresholds (confidence/HTF/quality)")
+
+// Warnings (events only, throttled)
+warnMTF = enableHTFDivergence and enableMTFGate and (mtfState.divergenceStrength >= warningDivergenceThreshold)
+warnChop = (filterState.marketCondition == -1) or (regimeStrength < warningRegimeStrengthMin)
+volBase = close > 0 ? (adaptiveState.atr / close) : 0.0
+volThresh = volatilityMode == "Static" ? minATRPercent : volatilityMode == "Adaptive" ? (minATRPercent * (1.0 + (1.0 - adaptiveState.efficiencyRatio) * 0.5)) : ta.sma(volBase, marketConditionPeriod)
+warnLowVol = volBase < volThresh
+
+var int lastWarnMTF = na
+var int lastWarnChop = na
+var int lastWarnLowVol = na
+
+warnMTFEvent = showWarnings and warnMTF and not warnMTF[1] and (na(lastWarnMTF) or (bar_index - lastWarnMTF >= warningCooldownBars))
+warnChopEvent = showWarnings and warnChop and not warnChop[1] and (na(lastWarnChop) or (bar_index - lastWarnChop >= warningCooldownBars))
+warnLowVolEvent = showWarnings and warnLowVol and not warnLowVol[1] and (na(lastWarnLowVol) or (bar_index - lastWarnLowVol >= warningCooldownBars))
+
+if warnMTFEvent
+    lastWarnMTF := bar_index
+if warnChopEvent
+    lastWarnChop := bar_index
+if warnLowVolEvent
+    lastWarnLowVol := bar_index
+
+// Status label (pinned to last change)
+var label statusLbl = na
+var string statusLastTxt = ""
+var color statusLastCol = na
+var int statusLastBar = na
+var float statusLastY = na
+
+string statusTxt = (longEvent or shortEvent) ? (qualA ? "A" : qualB ? "B" : "LOWQ") : (warnMTF ? "MTF" : warnChop ? "RNG" : warnLowVol ? "VOL" : "")
+
+color statusCol = (longEvent or shortEvent) ? (qualA ? color.new(color.green, 0) : qualB ? color.new(color.yellow, 0) : color.new(color.red, 0)) : (warnMTF ? color.new(color.orange, 0) : warnChop ? color.new(color.gray, 0) : warnLowVol ? color.new(color.yellow, 0) : na)
+
+string statusTip = "Regime: " + (currentRegime == 1 ? "BULL" : currentRegime == -1 ? "BEAR" : "FLAT") + "\n" + "Confidence: " + str.tostring(regimeConfidence, "#.00") + "\n" + "Quality: " + str.tostring(filterState.signalQuality, "#.00") + "\n" + "HTF: " + str.tostring(htfAgreement, "#.00")
+
+if statusTxt != ""
+    int xLbl = bar_index
+    float statusBaseY = longEvent ? low : shortEvent ? high : high
+    float statusYOffset = atrLbl * 0.15
+    float statusEventY = longEvent ? (statusBaseY - statusYOffset) : (statusBaseY + statusYOffset)
+
+    if statusTxt != statusLastTxt
+        statusLastTxt := statusTxt
+        statusLastCol := statusCol
+        statusLastBar := xLbl
+        statusLastY := statusEventY
+
+    if na(statusLbl)
+        statusLbl := label.new( statusLastBar, statusLastY, statusLastTxt, xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.white, color=statusLastCol, size=size.tiny, tooltip=statusTip, force_overlay=true )
+    else
+        label.set_xy(statusLbl, statusLastBar, statusLastY)
+        label.set_text(statusLbl, statusLastTxt)
+        label.set_color(statusLbl, statusLastCol)
+        label.set_textcolor(statusLbl, color.white)
+        label.set_tooltip(statusLbl, statusTip)
+else
+    if not na(statusLbl)
+        label.delete(statusLbl)
+        statusLbl := na
+        statusLastTxt := ""
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Logging (Pine log): last 2000 bars, step 10
+// ─────────────────────────────────────────────────────────────────────────────
+var int lastLogBar = na
+if logLabelMetrics and barstate.islast and (na(lastLogBar) or lastLogBar != bar_index)
+    lastLogBar := bar_index
+    for i = 0 to 200
+        int off = i * 10
+        if bar_index >= off
+            int logBar = bar_index - off
+            string tierTxt = qualA[off] ? "A" : qualB[off] ? "B" : "C"
+            string warnTxt = warnMTF[off] ? "MTF" : warnChop[off] ? "RNG" : warnLowVol[off] ? "VOL" : "None"
+            log.info(str.format("LBL,bar={0},time={1},regime={2},conf={3},strength={4},htf={5},quality={6},tier={7},warn={8},longEv={9},shortEv={10},pos={11},line={12},uEntry={13},lEntry={14}",
+                str.tostring(logBar),
+                str.tostring(time[off]),
+                str.tostring(currentRegime[off]),
+                str.tostring(regimeConfidence[off], "#.00"),
+                str.tostring(regimeStrength[off], "#.00"),
+                str.tostring(htfAgreement[off], "#.00"),
+                str.tostring((filterState[off]).signalQuality, "#.00"),
+                tierTxt,
+                warnTxt,
+                str.tostring(longEvent[off]),
+                str.tostring(shortEvent[off]),
+                str.tostring(currentPosition[off]),
+                str.tostring(adaptiveLine[off], format.mintick),
+                str.tostring(upperEntry[off], format.mintick),
+                str.tostring(lowerEntry[off], format.mintick)
+            ))
+
+if warnMTFEvent
+    label.new(bar_index, high, "MTF",
+        style=label.style_label_left,
+        textcolor=color.white,
+        color=color.new(color.orange, 0),
+        size=size.tiny,
+        tooltip="MTF divergence: higher timeframes conflict with current regime")
+if warnChopEvent
+    label.new(bar_index, high, "CHOP",
+        style=label.style_label_down,
+        textcolor=color.white,
+        color=color.new(color.gray, 0),
+        size=size.tiny,
+        tooltip="Chop warning: marketCondition == -1 or regimeStrength below threshold")
+plotshape(warnLowVolEvent, "Warn Low Vol", shape.triangleup, location.abovebar,
+ color=color.new(color.yellow, 0), size=size.tiny, text="VOL")
+
+// Signal Quality Label (right of bar, left-pointing)
+strengthColor = dotColorMode == "By Tier" ? (qualA ? color.new(color.green, 0) : qualB ? color.new(color.yellow, 0) : color.new(color.orange, 0)) : (regimeConfidence >= 0.8 ? color.new(color.green, 0) : regimeConfidence >= 0.6 ? color.new(color.yellow, 0) : regimeConfidence >= 0.4 ? color.new(color.orange, 0) : color.new(color.red, 0))
+
+sigEvent = (longSignal and not longSignal[1]) or (shortSignal and not shortSignal[1])
+
+f_qualityLabel(_isLong, _tierTxt, _color) =>
+    string tip = "Tier: " + _tierTxt + "\n" + "Confidence: " + str.tostring(regimeConfidence, "#.00") + "\n" + "Quality: " + str.tostring(filterState.signalQuality, "#.00") + "\n" + "HTF: " + str.tostring(htfAgreement, "#.00") + "\n" + "Regime: " + (currentRegime == 1 ? "BULL" : currentRegime == -1 ? "BEAR" : "FLAT")
+
+    label.new(bar_index, _isLong ? low : high, _tierTxt,
+        xloc=xloc.bar_index, yloc=yloc.price,
+        style=label.style_label_left,
+        textcolor=color.white,
+        color=_color,
+        size=size.tiny,
+        tooltip=tip,
+        force_overlay=true)
+
+if showRdpEntryVisuals and showSignalStrength and sigEvent
+    if longSignal
+        f_qualityLabel(true, qualA ? "A" : qualB ? "B" : "LOWQ", strengthColor)
+    if shortSignal
+        f_qualityLabel(false, qualA ? "A" : qualB ? "B" : "LOWQ", strengthColor)
+
+// === MA OVERLAY ZONES (RDP-GATED) ===
+f_ma_zone(_src, _len) =>
+    if maType == "SMA"
+        ta.sma(_src, _len)
+    else if maType == "EMA"
+        ta.ema(_src, _len)
+    else if maType == "DEMA"
+        ema1 = ta.ema(_src, _len)
+        2.0 * ema1 - ta.ema(ema1, _len)
+    else if maType == "TEMA"
+        ema1 = ta.ema(_src, _len)
+        ema2 = ta.ema(ema1, _len)
+        3.0 * ema1 - 3.0 * ema2 + ta.ema(ema2, _len)
+    else if maType == "JMA"
+        calculateJMA(_src, _len, 0.0, 2.0)
+    else
+        ta.ema(_src, _len)
+
+f_strengthFactor_zone() =>
+    if maType == "SMA"
+        1.00
+    else if maType == "EMA"
+        1.00
+    else if maType == "DEMA"
+        1.05
+    else if maType == "TEMA"
+        0.80
+    else if maType == "JMA"
+        0.85
+    else
+        1.00
+
+ma1z = f_ma_zone(close, len1)
+ma2z = f_ma_zone(close, len2)
+ma3z = f_ma_zone(close, len3)
+amaz = (ma1z + ma2z + ma3z) / 3.0
+
+atrz = ta.atr(atrLenZones)
+slDist = atrz * multZones
+
+highestMA = math.max(ma1z, math.max(ma2z, ma3z))
+lowestMA = math.min(ma1z, math.min(ma2z, ma3z))
+
+spreadATR = atrz > 0 ? (highestMA - lowestMA) / atrz : 0.0
+minStrengthByType = baseMinStrengthZones * f_strengthFactor_zone()
+amaStep = atrz > 0 ? ta.rma(math.abs(amaz - amaz[1]), atrLenZones) / atrz : 0.0
+amaStepRef = ta.sma(amaStep, autoLookbackZones)
+autoFactor = (amaStepRef > 0) ? (amaStep / amaStepRef) : 1.0
+minStrengthAuto = baseMinStrengthZones * autoFactor
+
+minStrengthZones =
+ strengthModeZones == "Off" ? baseMinStrengthZones : strengthModeZones == "By MA Type" ? minStrengthByType :
+ minStrengthAuto
+
+strongTrendZones = spreadATR >= minStrengthZones
+bullFromMAs = barstate.isconfirmed and close >= ma1z and close >= ma2z and close >= ma3z and strongTrendZones
+bearFromMAs = barstate.isconfirmed and close <= ma1z and close <= ma2z and close <= ma3z and strongTrendZones
+
+htfOk = (not enableMTFGate) or (htfAgreement >= minHTFAgreementForZones)
+zoneBull = useRDPRegime ? (currentRegime == 1 and regimeConfidence >= minConfidenceForZones and htfOk) : bullFromMAs
+zoneBear = useRDPRegime ? (currentRegime == -1 and regimeConfidence >= minConfidenceForZones and htfOk) : bearFromMAs
+zoneNeutral = not zoneBull and not zoneBear
+
+var float longEntry = na
+var float longSL = na
+var float shortEntry = na
+var float shortSL = na
+
+zoneBullFlip = zoneBull and not zoneBull[1]
+zoneBearFlip = zoneBear and not zoneBear[1]
+zoneExitFlip = zoneNeutral and not zoneNeutral[1]
+
+if zoneBullFlip
+    longEntry := highestMA
+    longSL := highestMA - slDist
+    shortEntry := na
+    shortSL := na
+
+if zoneBearFlip
+    shortEntry := lowestMA
+    shortSL := lowestMA + slDist
+    longEntry := na
+    longSL := na
+
+if zoneExitFlip
+    longEntry := na
+    longSL := na
+    shortEntry := na
+    shortSL := na
+
+showZ = enableMAOverlayZones and showMAZones
+fillOnly = zoneRenderMode == "Fill only"
+
+lineColSL = fillOnly ? color.new(color.gray, 100) : color.new(color.gray, 0)
+lineColEntry = fillOnly ? color.new(color.white, 100) : color.new(color.white, 0)
+
+pLongSL = plot(showZ and zoneBull ? longSL : na, "MA Zone Long SL",
+ color=lineColSL, style=plot.style_linebr, linewidth=1)
+pLongEntry = plot(showZ and zoneBull ? longEntry : na, "MA Zone Long Entry",
+ color=lineColEntry, style=plot.style_linebr, linewidth=1)
+pShortSL = plot(showZ and zoneBear ? shortSL : na, "MA Zone Short SL",
+ color=lineColSL, style=plot.style_linebr, linewidth=1)
+pShortEntry = plot(showZ and zoneBear ? shortEntry : na, "MA Zone Short Entry",
+ color=lineColEntry, style=plot.style_linebr, linewidth=1)
+
+fill(pLongSL, pLongEntry, title="MA Zone Long Fill",
+ color=(showZ and zoneBull) ? color.new(color.red, 75) : na)
+fill(pShortEntry, pShortSL, title="MA Zone Short Fill",
+ color=(showZ and zoneBear) ? color.new(color.yellow, 75) : na)
+
+if enableMAOverlayZones and showMAZoneLabels
+    if zoneBullFlip
+        label.new(bar_index, high, "ZONE BULL",
+            style=label.style_label_up, textcolor=color.white,
+            color=color.new(color.green, 0), size=size.small)
+    if zoneBearFlip
+        label.new(bar_index, low, "ZONE BEAR",
+            style=label.style_label_down, textcolor=color.white,
+            color=color.new(color.red, 0), size=size.small)
+
+// === INFO PANEL ===
+if showInfoPanel and barstate.islast
+    panelPos = infoPanelPosition == "Top Left" ? position.top_left : infoPanelPosition == "Bottom Right" ? position.bottom_right : infoPanelPosition == "Bottom Left" ? position.bottom_left : position.top_right
+
+    int rows = 1  // header
+    rows += 6     // Profile, Regime, Confidence, Tier, Warning, Position
+
+    if compactMode
+        if enableMTFGate
+            rows += 1
+        rows += 1  // Market Condition
+        if showConfidenceMeters
+            rows += 1
+    else
+        rows += 3  // ER, Alpha, Slope
+        if enableMTFGate
+            rows += 1
+        if enablePerformanceTracking
+            rows += 2
+        if showConfidenceMeters
+            rows += 1
+        rows += 1  // Market Condition
+        if enableAutoTuning
+            rows += 1
+
+    var table infoTable = na
+    var int lastPanelRows = na
+    var string lastPanelPos = ""
+    if na(infoTable) or rows != lastPanelRows or infoPanelPosition != lastPanelPos
+        if not na(infoTable)
+            table.delete(infoTable)
+        infoTable := table.new(panelPos, 2, rows,
+            bgcolor=color.new(color.black, 10),
+            border_width=1, border_color=color.new(color.gray, 30),
+            frame_width=2, frame_color=color.new(color.white, 70))
+        lastPanelRows := rows
+        lastPanelPos := infoPanelPosition
+
+    table.cell(infoTable, 0, 0, "RDP", text_color=color.white, text_size=size.normal,
+        bgcolor=color.new(color.black, 0))
+    table.cell(infoTable, 1, 0, "v2.0", text_color=color.white, text_size=size.small,
+        bgcolor=color.new(color.black, 0))
+
+    int r = 1
+    table.cell(infoTable, 0, r, "Profile:", text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 1, r, profilePreset, text_color=color.new(color.white, 0), text_size=size.small)
+    r += 1
+
+    table.cell(infoTable, 0, r, "Regime:", text_color=color.new(color.white, 0), text_size=size.small)
+    regimeText = currentRegime == 1 ? "BULL" : currentRegime == -1 ? "BEAR" : "FLAT"
+    regimeColor = currentRegime == 1 ? colorBull : currentRegime == -1 ? colorBear : color.new(color.white, 0)
+    table.cell(infoTable, 1, r, regimeText, text_color=regimeColor, text_size=size.small)
+    r += 1
+
+    table.cell(infoTable, 0, r, "Confidence:", text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 1, r, str.tostring(regimeConfidence, "#.##"),
+        text_color=color.new(color.white, 0), text_size=size.small)
+    r += 1
+
+    table.cell(infoTable, 0, r, "Tier:", text_color=color.new(color.white, 0), text_size=size.small)
+    tierText = qualA ? "A" : qualB ? "B" : "C"
+    tierColor = qualA ? color.green : qualB ? color.yellow : color.orange
+    table.cell(infoTable, 1, r, tierText, text_color=tierColor, text_size=size.small)
+    r += 1
+
+    table.cell(infoTable, 0, r, "Warning:", text_color=color.new(color.white, 0), text_size=size.small)
+    warnText = warnMTF ? "MTF" : warnChop ? "CHOP" : warnLowVol ? "LOWVOL" : "None"
+    table.cell(infoTable, 1, r, warnText, text_color=color.new(color.white, 0), text_size=size.small)
+    r += 1
+
+    table.cell(infoTable, 0, r, "Position:", text_color=color.new(color.white, 0), text_size=size.small)
+    posText = currentPosition == 1 ? "LONG" : currentPosition == -1 ? "SHORT" : "FLAT"
+    table.cell(infoTable, 1, r, posText, text_color=color.new(color.white, 0), text_size=size.small)
+    r += 1
+
+    if not compactMode
+        table.cell(infoTable, 0, r, "ER:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 1, r, str.tostring(adaptiveState.efficiencyRatio, "#.##"),
+            text_color=color.new(color.white, 0), text_size=size.small)
+        r += 1
+
+        table.cell(infoTable, 0, r, "Alpha:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 1, r, str.tostring(adaptiveState.currentAlpha, "#.###"),
+            text_color=color.new(color.white, 0), text_size=size.small)
+        r += 1
+
+        table.cell(infoTable, 0, r, "Slope:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 1, r, str.tostring(adaptiveState.normalizedSlope, "#.###"),
+            text_color=color.new(color.white, 0), text_size=size.small)
+        r += 1
+
+    if enableMTFGate
+        table.cell(infoTable, 0, r, "HTF Agreement:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 1, r, str.tostring(htfAgreement, "#.##"),
+            text_color=color.new(color.white, 0), text_size=size.small)
+        r += 1
+
+    if enablePerformanceTracking
+        winRateTxt = performanceMetrics.sampleCount > 10 ? str.tostring(performanceMetrics.winRate * 100, "#") + "%" : "—"
+        pfTxt = performanceMetrics.sampleCount > 10 ? str.tostring(performanceMetrics.profitFactor, "#.##") : "—"
+
+        table.cell(infoTable, 0, r, "Win Rate:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 1, r, winRateTxt, text_color=color.new(color.white, 0), text_size=size.small)
+        r += 1
+
+        table.cell(infoTable, 0, r, "Profit Factor:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 1, r, pfTxt, text_color=color.new(color.white, 0), text_size=size.small)
+        r += 1
+
+    if showConfidenceMeters
+        table.cell(infoTable, 0, r, "Signal Quality:", text_color=color.new(color.white, 0), text_size=size.small)
+        qualityText = filterState.signalQuality >= 0.8 ? "Excellent" : filterState.signalQuality >= 0.6 ? "Good" : filterState.signalQuality >= 0.4 ? "Fair" : "Poor"
+        table.cell(infoTable, 1, r, qualityText, text_color=color.new(color.white, 0), text_size=size.small)
+        r += 1
+
+    table.cell(infoTable, 0, r, "Market Condition:", text_color=color.new(color.white, 0), text_size=size.small)
+    conditionText = filterState.marketCondition == 1 ? "Trending" : filterState.marketCondition == -1 ? "Choppy" : "Neutral"
+    table.cell(infoTable, 1, r, conditionText, text_color=color.new(color.white, 0), text_size=size.small)
+    r += 1
+
+    if enableAutoTuning
+        table.cell(infoTable, 0, r, "Auto-Tune:", text_color=color.new(color.white, 0), text_size=size.small)
+        tuneStatus = performanceMetrics.sampleCount >= tuningPeriod ? "ACTIVE" : "LEARNING"
+        table.cell(infoTable, 1, r, tuneStatus, text_color=color.new(color.white, 0), text_size=size.small)
+        r += 1
+
+// === ALERTS ===
+// Smart alert conditions based on confidence
+highConfidenceLong = enableSmartAlerts and (longSignal and regimeConfidence >= alertConfidenceMin)
+highConfidenceShort = enableSmartAlerts and (shortSignal and regimeConfidence >= alertConfidenceMin)
+
+alertcondition(highConfidenceLong, "RDP Long Entry",
+ "Regime Detector: HIGH CONFIDENCE LONG")
+alertcondition(highConfidenceShort, "RDP Short Entry",
+ "Regime Detector: HIGH CONFIDENCE SHORT")
+alertcondition(enableSmartAlerts and exitLongSignal, "RDP Exit Long",
+ "Regime Detector: EXIT LONG - Market conditions changed")
+alertcondition(enableSmartAlerts and exitShortSignal, "RDP Exit Short",
+ "Regime Detector: EXIT SHORT - Market conditions changed")
+alertcondition(enableSmartAlerts and (highConfidenceLong or highConfidenceShort), "RDP Any High Confidence",
+ "Regime Detector: HIGH CONFIDENCE SIGNAL DETECTED")
+
+// Regime change alerts
+regimeChanged = ta.change(currentRegime) != 0
+alertcondition(enableSmartAlerts and regimeChanged, "RDP Regime Change",
+ "Regime Detector: REGIME CHANGE - New regime detected")
+
+// HTF divergence alerts
+htfDivergence = enableHTFDivergence and enableMTFGate and (mtfState.divergenceStrength >= 0.7)
+alertcondition(enableSmartAlerts and htfDivergence, "RDP HTF Divergence",
+ "Regime Detector: HTF DIVERGENCE - Multi-timeframe conflict detected")
+
+if highConfidenceLong
+    alert("RDP LONG | Regime=" + str.tostring(currentRegime) + " | Conf=" + str.tostring(regimeConfidence, "#.00") + " | HTF=" + str.tostring(htfAgreement, "#.00") + " | Q=" + str.tostring(filterState.signalQuality, "#.00"), alert.freq_once_per_bar_close)
+if highConfidenceShort
+    alert("RDP SHORT | Regime=" + str.tostring(currentRegime) + " | Conf=" + str.tostring(regimeConfidence, "#.00") + " | HTF=" + str.tostring(htfAgreement, "#.00") + " | Q=" + str.tostring(filterState.signalQuality, "#.00"), alert.freq_once_per_bar_close)
+if enableSmartAlerts and exitLongSignal
+    alert("RDP EXIT LONG | Regime=" + str.tostring(currentRegime) + " | Conf=" + str.tostring(regimeConfidence, "#.00"), alert.freq_once_per_bar_close)
+if enableSmartAlerts and exitShortSignal
+    alert("RDP EXIT SHORT | Regime=" + str.tostring(currentRegime) + " | Conf=" + str.tostring(regimeConfidence, "#.00"), alert.freq_once_per_bar_close)
+if enableSmartAlerts and regimeChanged
+    alert("RDP REGIME CHANGE | Regime=" + str.tostring(currentRegime) + " | Conf=" + str.tostring(regimeConfidence, "#.00"), alert.freq_once_per_bar_close)
+if enableSmartAlerts and htfDivergence
+    alert("RDP HTF DIVERGENCE | Strength=" + str.tostring(mtfState.divergenceStrength, "#.00"), alert.freq_once_per_bar_close)
+
+// === SSA: SMART SIGNALS ASSISTANT ===
+ssaReg = currentRegime
+ssaConf = regimeConfidence
+ssaLine = adaptiveLine
+ssaHTF = htfAgreement
+ssaQual = filterState.signalQuality
+
+ssaBull = ssaReg == 1
+ssaBear = ssaReg == -1
+ssaFlat = ssaReg == 0
+
+ssaMinConf = ssaMode == "Swing" ? ssaMinConfSwing : ssaMinConfScalp
+cond_conf_ok = ssaConf >= ssaMinConf
+cond_htf_ok = ssaHTF >= ssaMinHTF
+cond_qual_ok = ssaQual >= ssaMinQuality
+
+cond_strong = (ssaConf >= ssaStrongConf) and (ssaHTF >= ssaStrongHTF) and (ssaQual >= ssaStrongQuality)
+cond_tierA = (ssaConf >= tierAConf) and (ssaHTF >= tierAAgree) and (ssaQual >= tierAQuality)
+cond_tierB = (ssaConf >= tierBConf) and (ssaHTF >= tierBAgree) and (ssaQual >= tierBQuality)
+cond_tierBplus = cond_tierA or cond_tierB
+
+trcTrending = filterState.marketCondition == 1
+trcOk = not ssaSuperNeedsTRC or trcTrending
+
+var int ssaLastFire = na
+ssaCanFire = na(ssaLastFire) or (bar_index - ssaLastFire >= ssaCooldownBars)
+
+// Fair Value Trail (FVT)
+fvtLen = input.int(14, "FVT ATR Len", group=SSA_GROUP, minval=2)
+fvtMult = input.float(1.4, "FVT Mult", group=SSA_GROUP, step=0.1)
+fvtAtr = ta.atr(fvtLen)
+fvtUpper = ssaLine + fvtMult * fvtAtr
+fvtLower = ssaLine - fvtMult * fvtAtr
+
+var float fvt = na
+if barstate.isfirst
+    fvt := ssaLine
+else
+    if ssaBull
+        fvt := math.max(nz(fvt[1], ssaLine), fvtLower)
+    else if ssaBear
+        fvt := math.min(nz(fvt[1], ssaLine), fvtUpper)
+    else
+        fvt := nz(fvt[1], ssaLine)
+
+fvtBull = close >= fvt
+fvtBear = close <= fvt
+
+// Trend Bias Band
+biasLen = input.int(20, "Trend Bias Len", group=SSA_GROUP, minval=2)
+biasMom = ta.ema(close - ssaLine, biasLen)
+biasAbs = ta.ema(math.abs(biasMom), biasLen)
+biasNorm = biasAbs > 0 ? biasMom / biasAbs : 0.0
+biasBull = biasNorm > 0
+biasBear = biasNorm < 0
+
+biasBand = (ta.atr(14) * 0.25) * biasNorm
+biasTop = ssaLine + biasBand
+biasBot = ssaLine - biasBand
+
+// ATR Clouds
+cloudLen = input.int(20, "Cloud ATR Len", group=SSA_GROUP, minval=2)
+cloudMult = input.float(2.0, "Cloud Mult", group=SSA_GROUP, step=0.1)
+cloudAtr = ta.atr(cloudLen)
+cloudU = ssaLine + cloudMult * cloudAtr
+cloudL = ssaLine - cloudMult * cloudAtr
+cloudBull = close > ssaLine and biasBull
+cloudBear = close < ssaLine and biasBear
+
+fvtAligned = (ssaBull and fvtBull) or (ssaBear and fvtBear)
+cloudAligned = (ssaBull and cloudBull) or (ssaBear and cloudBear)
+fvtOk = not ssaSuperNeedsFVT or fvtAligned
+cloudOk = not ssaSuperNeedsCloud or cloudAligned
+cond_super = ssaSuperEnabled and cond_strong and trcOk and fvtOk and cloudOk
+
+// SSA Signal Engine
+tierGateOk = ssaEntryTierGate == "Off" ? true : ssaEntryTierGate == "Tier A only" ? cond_tierA : cond_tierBplus
+tierGateOk := ssaRequireRdpTierBPlus ? (tierGateOk and cond_tierBplus) : tierGateOk
+
+ssaGateOk = (not ssaUseRDPGate) or ((cond_conf_ok and cond_htf_ok and cond_qual_ok and not ssaFlat) and tierGateOk)
+
+longTrend = ssaEnable and ssaCanFire and ssaGateOk and ssaBull
+shortTrend = ssaEnable and ssaCanFire and ssaGateOk and ssaBear
+
+revDistMult = input.float(1.5, "Reversal Distance (ATR)", group=SSA_GROUP, step=0.1)
+revDist = ta.atr(14) * revDistMult
+
+longRev = ssaEnable and ssaCanFire and (not ssaFlat) and (close < fvt - revDist) and biasBull
+shortRev = ssaEnable and ssaCanFire and (not ssaFlat) and (close > fvt + revDist) and biasBear
+
+ssaLong = ssaSignalMode == "Trend" ? longTrend : longRev
+ssaShort = ssaSignalMode == "Trend" ? shortTrend : shortRev
+
+ssaStrongLong = ssaLong and cond_strong
+ssaStrongShort = ssaShort and cond_strong
+ssaSuperLong = ssaLong and cond_super
+ssaSuperShort = ssaShort and cond_super
+
+ssaLongEvent_engine = ssaLong and not ssaLong[1]
+ssaShortEvent_engine = ssaShort and not ssaShort[1]
+
+ssaLongEvent_rdp = ssaEntrySource == "RDP A only" ? rdpLongAEvent : ssaEntrySource == "RDP B only" ? rdpLongBEvent : rdpLongAnyAB
+
+ssaShortEvent_rdp = ssaEntrySource == "RDP A only" ? rdpShortAEvent : ssaEntrySource == "RDP B only" ? rdpShortBEvent : rdpShortAnyAB
+
+ssaLongEvent = (ssaEntrySource == "SSA Engine") ? ssaLongEvent_engine : ssaLongEvent_rdp
+ssaShortEvent = (ssaEntrySource == "SSA Engine") ? ssaShortEvent_engine : ssaShortEvent_rdp
+
+if ssaLongEvent or ssaShortEvent
+    ssaLastFire := bar_index
+
+// SSA Visuals
+plot(ssaEnable and ssaShowFVT ? fvt : na, "FVT", color=color.new(color.white, 0), linewidth=2)
+
+pBiasTop = plot(ssaEnable and ssaShowTrendBias ? biasTop : na, "SSA Bias Top", color=color.new(color.teal, 60))
+pBiasBot = plot(ssaEnable and ssaShowTrendBias ? biasBot : na, "SSA Bias Bot", color=color.new(color.teal, 60))
+fill(pBiasTop, pBiasBot, color=(ssaEnable and ssaShowTrendBias) ? color.new(color.teal, 88) : na, title="SSA Bias Fill")
+
+pCloudU = plot(ssaEnable and ssaShowClouds ? cloudU : na, "SSA Cloud U", color=color.new(color.gray, 80))
+pCloudL = plot(ssaEnable and ssaShowClouds ? cloudL : na, "SSA Cloud L", color=color.new(color.gray, 80))
+fill(pCloudU, pCloudL, color=(ssaEnable and ssaShowClouds) ? color.new(color.gray, 90) : na, title="SSA Cloud Fill")
+
+ssaTierIsStrong = isRdpSource ? cond_tierA : cond_strong
+ssaTierIsSuper = isRdpSource ? (cond_tierA and cond_super) : cond_super
+
+ssaStrongLongEvent = ssaLongEvent and ssaTierIsStrong
+ssaStrongShortEvent = ssaShortEvent and ssaTierIsStrong
+ssaSuperLongEvent = ssaLongEvent and ssaTierIsSuper
+ssaSuperShortEvent = ssaShortEvent and ssaTierIsSuper
+ssaNormalLongEvent = ssaLongEvent and not ssaTierIsStrong
+ssaNormalShortEvent = ssaShortEvent and not ssaTierIsStrong
+ssaStrongOnlyLongEvent = ssaStrongLongEvent and not ssaSuperLongEvent
+ssaStrongOnlyShortEvent = ssaStrongShortEvent and not ssaSuperShortEvent
+
+drawOff = ssaSignalDisplay == "Off"
+drawAll = ssaSignalDisplay == "All"
+drawStrong = ssaSignalDisplay == "Strong+"
+drawSuper = ssaSignalDisplay == "Super only"
+
+drawSignalsOk = ssaEnable and ssaShowSignals and not drawOff
+
+drawNormalLong = ssaNormalLongEvent and drawAll
+drawNormalShort = ssaNormalShortEvent and drawAll
+drawStrongLong = ssaStrongOnlyLongEvent and (drawAll or drawStrong)
+drawStrongShort = ssaStrongOnlyShortEvent and (drawAll or drawStrong)
+drawSuperLong = ssaSuperLongEvent and (drawAll or drawStrong or drawSuper)
+drawSuperShort = ssaSuperShortEvent and (drawAll or drawStrong or drawSuper)
+
+ssaLongEvDraw = drawSignalsOk and (drawNormalLong or drawStrongLong or drawSuperLong)
+ssaShortEvDraw = drawSignalsOk and (drawNormalShort or drawStrongShort or drawSuperShort)
+ssaLongTxt = drawSuperLong ? "L++" : drawStrongLong ? "L+" : "L"
+ssaShortTxt = drawSuperShort ? "S++" : drawStrongShort ? "S+" : "S"
+
+plotshape(ssaLongEvDraw, "SSA Long",
+    shape.triangleup, location.belowbar, color=color.new(color.lime, 0), size=size.small)
+plotshape(ssaShortEvDraw, "SSA Short",
+    shape.triangledown, location.abovebar, color=color.new(color.red, 0), size=size.small)
+
+// Candle coloring
+ssa_norm01(x) => math.max(0.0, math.min(1.0, x))
+mom = ta.ema(close - close[1], 10)
+momN = ssa_norm01(math.abs(mom) / (ta.atr(14) + 1e-6))
+volN = ssa_norm01(volume / (ta.sma(volume, 50) + 1e-6))
+
+cTrend = ssaBull ? color.new(color.lime, 0) : ssaBear ? color.new(color.red, 0) : color.new(color.gray, 0)
+cRange = color.new(color.gray, 0)
+cMom = ssaBull ? color.new(color.lime, int(80 - momN * 70)) : ssaBear ? color.new(color.red, int(80 - momN * 70)) : color.new(color.gray, 30)
+cVol = ssaBull ? color.new(color.lime, int(85 - volN * 75)) : ssaBear ? color.new(color.red, int(85 - volN * 75)) : color.new(color.gray, 40)
+ssaIsRanging = ssaFlat or (filterState.marketCondition == -1)
+
+barcolor( ssaEnable ? ssaCandleColoring == "Trend Colors" ? cTrend : ssaCandleColoring == "Momentum Gradient" ? cMom : ssaCandleColoring == "Volume Gradient" ? cVol : ssaCandleColoring == "Gray In Ranging" ? (ssaIsRanging ? cRange : cTrend) : na : na )
+
+// Trade Management (TP/SL)
+var int ssaPos = 0
+var float ssaEntryPx = na
+var float ssaSL = na
+var float ssaTP = na
+var int ssaEntryBar = na
+var bool pLong_on = false
+var bool pLong_tierA = false
+var float pLong_px = na
+var int pLong_bar = na
+
+var bool pShort_on = false
+var bool pShort_tierA = false
+var float pShort_px = na
+var int pShort_bar = na
+
+plotshape(ssaEnable and ssaShowPending and pLong_on, "SSA Pending Long",
+    shape.circle, location=location.belowbar, color=color.new(color.aqua, 0), size=size.tiny, text="PL")
+plotshape(ssaEnable and ssaShowPending and pShort_on, "SSA Pending Short",
+    shape.circle, location=location.abovebar, color=color.new(color.aqua, 0), size=size.tiny, text="PS")
+
+var box ssaRiskBox = na
+var box ssaRewardBox = na
+var line ssaEntryLine = na
+var line ssaSLLine = na
+var line ssaTPLine = na
+
+ssaSL_Long() => ssaSLSource == "RDP Exit Band" ? lowerExit : ssaSLSource == "RDP Entry Band" ? lowerEntry : ssaSLSource == "MA Zone SL (if enabled)" ? (enableMAOverlayZones and not na(longSL) ? longSL : lowerExit) : (ssaLine - ta.atr(14) * 1.2)
+
+ssaSL_Short() => ssaSLSource == "RDP Exit Band" ? upperExit : ssaSLSource == "RDP Entry Band" ? upperEntry : ssaSLSource == "MA Zone SL (if enabled)" ? (enableMAOverlayZones and not na(shortSL) ? shortSL : upperExit) : (ssaLine + ta.atr(14) * 1.2)
+
+f_priceByMode(bool _isLong, string _mode) => _mode == "Close" ? close : _mode == "High/Low" ? (_isLong ? high : low) : _mode == "Entry Band (upper/lower)" ? (_isLong ? upperEntry : lowerEntry) : _mode == "Exit Band (upper/lower)" ? (_isLong ? upperExit : lowerExit) : ssaLine
+
+f_rdpEntryPriceTier(bool _isLong, bool _isTierA) => ssaRdpProMode ? f_priceByMode(_isLong, _isTierA ? ssaRdpEntryPriceModeA : ssaRdpEntryPriceModeB) : f_priceByMode(_isLong, ssaRdpEntryPriceMode)
+
+f_pendingTriggerLevel(bool _isLong) =>
+    ssaRdpLimitTouchMode == "Touch Entry Band" ? (_isLong ? upperEntry : lowerEntry) : ssaRdpLimitTouchMode == "Touch Exit Band" ? (_isLong ? upperExit : lowerExit) : ssaRdpLimitTouchMode == "Touch Adaptive Line" ? ssaLine : ssaRdpLimitTouchMode == "Touch FVT" ? fvt : (_isLong ? cloudL : cloudU)
+
+f_touch(float _level) =>
+    low <= _level and high >= _level
+
+f_closeConfirm(bool _isLong, float _lvl) => ssaCloseConfirmBars <= 1 ? (_isLong ? close >= _lvl : close <= _lvl) : ta.sma((_isLong ? close >= _lvl : close <= _lvl) ? 1 : 0, ssaCloseConfirmBars) == 1
+
+f_activate(bool _isLong, float _lvl) => ssaLimitActivation == "Touch" ? f_touch(_lvl) : f_closeConfirm(_isLong, _lvl)
+
+f_rdpEntryPrice(bool _isLong) => ssaRdpEntryPriceMode == "Close" ? close : ssaRdpEntryPriceMode == "High/Low" ? (_isLong ? high : low) : ssaRdpEntryPriceMode == "Entry Band (upper/lower)" ? (_isLong ? upperEntry : lowerEntry) : ssaRdpEntryPriceMode == "Exit Band (upper/lower)" ? (_isLong ? upperExit : lowerExit) : ssaLine
+
+f_trailCandidate(bool _isLong) =>
+    float atrB = ta.atr(14) * ssaTrailBufferATR
+    float base = ssaTrailSource == "FVT" ? fvt : ssaTrailSource == "Cloud" ? (_isLong ? cloudL : cloudU) : ssaLine
+    _isLong ? (base - atrB) : (base + atrB)
+
+f_drawTrade(bool _isLong, float _entry, float _sl, float _tp, line _entryLine, line _slLine, line _tpLine, box _riskBox, box _rewardBox, int _extendBars) =>
+    int x1 = bar_index
+    int x2 = bar_index + _extendBars
+
+    if not na(_riskBox)
+        box.delete(_riskBox)
+    if not na(_rewardBox)
+        box.delete(_rewardBox)
+    if not na(_entryLine)
+        line.delete(_entryLine)
+    if not na(_slLine)
+        line.delete(_slLine)
+    if not na(_tpLine)
+        line.delete(_tpLine)
+
+    line newEntry = line.new(x1, _entry, x2, _entry, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.white, 0), width=1)
+    line newSL = line.new(x1, _sl, x2, _sl, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.red, 0), width=1)
+    line newTP = line.new(x1, _tp, x2, _tp, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.lime, 0), width=1)
+
+    float topRisk = _isLong ? _entry : _sl
+    float botRisk = _isLong ? _sl : _entry
+    float topRew = _isLong ? _tp : _entry
+    float botRew = _isLong ? _entry : _tp
+
+    box newRisk = box.new(x1, topRisk, x2, botRisk, xloc=xloc.bar_index, border_color=color.new(color.red, 30), bgcolor=color.new(color.red, 88))
+    box newReward = box.new(x1, topRew, x2, botRew, xloc=xloc.bar_index, border_color=color.new(color.lime, 30), bgcolor=color.new(color.lime, 88))
+
+    [newEntry, newSL, newTP, newRisk, newReward]
+
+f_updateLines(line _entryLine, line _slLine, line _tpLine, float _entry, float _sl, float _tp) =>
+    if not na(_entryLine)
+        line.set_y1(_entryLine, _entry)
+        line.set_y2(_entryLine, _entry)
+    if not na(_slLine)
+        line.set_y1(_slLine, _sl)
+        line.set_y2(_slLine, _sl)
+    if not na(_tpLine)
+        line.set_y1(_tpLine, _tp)
+        line.set_y2(_tpLine, _tp)
+
+f_updateBoxes(box _riskBox, box _rewardBox, float _entry, float _sl, float _tp, bool _isLong) =>
+    if not na(_riskBox)
+        float topRisk = _isLong ? _entry : _sl
+        float botRisk = _isLong ? _sl : _entry
+        box.set_top(_riskBox, topRisk)
+        box.set_bottom(_riskBox, botRisk)
+    if not na(_rewardBox)
+        float topRew = _isLong ? _tp : _entry
+        float botRew = _isLong ? _entry : _tp
+        box.set_top(_rewardBox, topRew)
+        box.set_bottom(_rewardBox, botRew)
+
+f_setPending(int _dir, bool _tierA, float _px, bool _pLong_on, bool _pLong_tierA, float _pLong_px, int _pLong_bar, bool _pShort_on, bool _pShort_tierA, float _pShort_px, int _pShort_bar, bool _dual) =>
+    bool nLong_on = _pLong_on
+    bool nLong_tierA = _pLong_tierA
+    float nLong_px = _pLong_px
+    int nLong_bar = _pLong_bar
+    bool nShort_on = _pShort_on
+    bool nShort_tierA = _pShort_tierA
+    float nShort_px = _pShort_px
+    int nShort_bar = _pShort_bar
+
+    if _dir == 1
+        nLong_on := true
+        nLong_tierA := _tierA
+        nLong_px := _px
+        nLong_bar := bar_index
+        if not _dual
+            nShort_on := false
+            nShort_tierA := false
+            nShort_px := na
+            nShort_bar := na
+    else
+        nShort_on := true
+        nShort_tierA := _tierA
+        nShort_px := _px
+        nShort_bar := bar_index
+        if not _dual
+            nLong_on := false
+            nLong_tierA := false
+            nLong_px := na
+            nLong_bar := na
+
+    [nLong_on, nLong_tierA, nLong_px, nLong_bar, nShort_on, nShort_tierA, nShort_px, nShort_bar]
+
+ssaEnterLong = ssaEnable and ssaTradeMgmt and ssaLongEvent
+ssaEnterShort = ssaEnable and ssaTradeMgmt and ssaShortEvent
+
+if ssaEnterLong and isRdpSource and ssaRdpLimitStyle
+    bool newTierA = ssaRdpLongTierA
+    float newPx = f_rdpEntryPriceTier(true, newTierA)
+    if pShort_on
+        if ssaPendingFlipMode == "Flip"
+            pShort_on := false
+            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+        else if ssaPendingFlipMode == "Cancel Opposite"
+            pShort_on := false
+            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+        else if ssaPendingFlipMode == "Ignore Opposite"
+            na
+        else
+            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+    else
+        [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+
+if ssaEnterShort and isRdpSource and ssaRdpLimitStyle
+    bool newTierA = ssaRdpShortTierA
+    float newPx = f_rdpEntryPriceTier(false, newTierA)
+    if pLong_on
+        if ssaPendingFlipMode == "Flip"
+            pLong_on := false
+            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(-1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+        else if ssaPendingFlipMode == "Cancel Opposite"
+            pLong_on := false
+            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(-1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+        else if ssaPendingFlipMode == "Ignore Opposite"
+            na
+        else
+            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(-1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+    else
+        [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(-1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+
+if ssaEnterLong and not (isRdpSource and ssaRdpLimitStyle)
+    ssaPos := 1
+    ssaEntryPx := isRdpSource ? f_rdpEntryPriceTier(true, ssaRdpLongTierA) : close
+    ssaSL := ssaSL_Long()
+    float risk = math.abs(ssaEntryPx - ssaSL)
+    ssaTP := ssaEntryPx + ssaRR * risk
+    ssaEntryBar := bar_index
+    [tmpEntryLine, tmpSLLine, tmpTPLine, tmpRiskBox, tmpRewardBox] = f_drawTrade(true, ssaEntryPx, ssaSL, ssaTP, ssaEntryLine, ssaSLLine, ssaTPLine, ssaRiskBox, ssaRewardBox, ssaExtendBars)
+    ssaEntryLine := tmpEntryLine
+    ssaSLLine := tmpSLLine
+    ssaTPLine := tmpTPLine
+    ssaRiskBox := tmpRiskBox
+    ssaRewardBox := tmpRewardBox
+
+if ssaEnterShort and not (isRdpSource and ssaRdpLimitStyle)
+    ssaPos := -1
+    ssaEntryPx := isRdpSource ? f_rdpEntryPriceTier(false, ssaRdpShortTierA) : close
+    ssaSL := ssaSL_Short()
+    float risk = math.abs(ssaEntryPx - ssaSL)
+    ssaTP := ssaEntryPx - ssaRR * risk
+    ssaEntryBar := bar_index
+    [tmpEntryLine, tmpSLLine, tmpTPLine, tmpRiskBox, tmpRewardBox] = f_drawTrade(false, ssaEntryPx, ssaSL, ssaTP, ssaEntryLine, ssaSLLine, ssaTPLine, ssaRiskBox, ssaRewardBox, ssaExtendBars)
+    ssaEntryLine := tmpEntryLine
+    ssaSLLine := tmpSLLine
+    ssaTPLine := tmpTPLine
+    ssaRiskBox := tmpRiskBox
+    ssaRewardBox := tmpRewardBox
+
+pLong_timeout = pLong_on and not na(pLong_bar) and ((bar_index - pLong_bar) >= ssaRdpLimitTimeoutBars)
+pShort_timeout = pShort_on and not na(pShort_bar) and ((bar_index - pShort_bar) >= ssaRdpLimitTimeoutBars)
+
+if ssaEnable and ssaTradeMgmt and ssaPos == 0
+    longAge = pLong_on ? (bar_index - nz(pLong_bar, bar_index)) : 1000000
+    shortAge = pShort_on ? (bar_index - nz(pShort_bar, bar_index)) : 1000000
+    bool tryLongFirst = pLong_on and (not pShort_on or longAge <= shortAge)
+
+    if tryLongFirst
+        float lvlL = f_pendingTriggerLevel(true)
+        bool okL = pLong_on and f_activate(true, lvlL)
+        if okL
+            ssaPos := 1
+            ssaEntryPx := pLong_px
+            ssaSL := ssaSL_Long()
+            ssaSL := math.min(ssaSL, ssaEntryPx)
+            float risk = math.abs(ssaEntryPx - ssaSL)
+            ssaTP := ssaEntryPx + ssaRR * risk
+            ssaEntryBar := bar_index
+            [tmpEntryLine, tmpSLLine, tmpTPLine, tmpRiskBox, tmpRewardBox] = f_drawTrade(true, ssaEntryPx, ssaSL, ssaTP, ssaEntryLine, ssaSLLine, ssaTPLine, ssaRiskBox, ssaRewardBox, ssaExtendBars)
+            ssaEntryLine := tmpEntryLine
+            ssaSLLine := tmpSLLine
+            ssaTPLine := tmpTPLine
+            ssaRiskBox := tmpRiskBox
+            ssaRewardBox := tmpRewardBox
+            pLong_on := false
+            pLong_tierA := false
+            pLong_px := na
+            pLong_bar := na
+        if ssaPos == 0
+            float lvlS = f_pendingTriggerLevel(false)
+            bool okS = pShort_on and f_activate(false, lvlS)
+            if okS
+                ssaPos := -1
+                ssaEntryPx := pShort_px
+                ssaSL := ssaSL_Short()
+                ssaSL := math.max(ssaSL, ssaEntryPx)
+                float risk = math.abs(ssaEntryPx - ssaSL)
+                ssaTP := ssaEntryPx - ssaRR * risk
+                ssaEntryBar := bar_index
+                [tmpEntryLine, tmpSLLine, tmpTPLine, tmpRiskBox, tmpRewardBox] = f_drawTrade(false, ssaEntryPx, ssaSL, ssaTP, ssaEntryLine, ssaSLLine, ssaTPLine, ssaRiskBox, ssaRewardBox, ssaExtendBars)
+                ssaEntryLine := tmpEntryLine
+                ssaSLLine := tmpSLLine
+                ssaTPLine := tmpTPLine
+                ssaRiskBox := tmpRiskBox
+                ssaRewardBox := tmpRewardBox
+                pShort_on := false
+                pShort_tierA := false
+                pShort_px := na
+                pShort_bar := na
+    else
+        float lvlS = f_pendingTriggerLevel(false)
+        bool okS = pShort_on and f_activate(false, lvlS)
+        if okS
+            ssaPos := -1
+            ssaEntryPx := pShort_px
+            ssaSL := ssaSL_Short()
+            ssaSL := math.max(ssaSL, ssaEntryPx)
+            float risk = math.abs(ssaEntryPx - ssaSL)
+            ssaTP := ssaEntryPx - ssaRR * risk
+            ssaEntryBar := bar_index
+            [tmpEntryLine, tmpSLLine, tmpTPLine, tmpRiskBox, tmpRewardBox] = f_drawTrade(false, ssaEntryPx, ssaSL, ssaTP, ssaEntryLine, ssaSLLine, ssaTPLine, ssaRiskBox, ssaRewardBox, ssaExtendBars)
+            ssaEntryLine := tmpEntryLine
+            ssaSLLine := tmpSLLine
+            ssaTPLine := tmpTPLine
+            ssaRiskBox := tmpRiskBox
+            ssaRewardBox := tmpRewardBox
+            pShort_on := false
+            pShort_tierA := false
+            pShort_px := na
+            pShort_bar := na
+        if ssaPos == 0
+            float lvlL = f_pendingTriggerLevel(true)
+            bool okL = pLong_on and f_activate(true, lvlL)
+            if okL
+                ssaPos := 1
+                ssaEntryPx := pLong_px
+                ssaSL := ssaSL_Long()
+                ssaSL := math.min(ssaSL, ssaEntryPx)
+                float risk = math.abs(ssaEntryPx - ssaSL)
+                ssaTP := ssaEntryPx + ssaRR * risk
+                ssaEntryBar := bar_index
+                [tmpEntryLine, tmpSLLine, tmpTPLine, tmpRiskBox, tmpRewardBox] = f_drawTrade(true, ssaEntryPx, ssaSL, ssaTP, ssaEntryLine, ssaSLLine, ssaTPLine, ssaRiskBox, ssaRewardBox, ssaExtendBars)
+                ssaEntryLine := tmpEntryLine
+                ssaSLLine := tmpSLLine
+                ssaTPLine := tmpTPLine
+                ssaRiskBox := tmpRiskBox
+                ssaRewardBox := tmpRewardBox
+                pLong_on := false
+                pLong_tierA := false
+                pLong_px := na
+                pLong_bar := na
+
+if pLong_timeout
+    pLong_on := false
+    pLong_tierA := false
+    pLong_px := na
+    pLong_bar := na
+
+if pShort_timeout
+    pShort_on := false
+    pShort_tierA := false
+    pShort_px := na
+    pShort_bar := na
+
+if ssaEnable and ssaTradeMgmt and ssaTrailEnabled and ssaPos != 0 and not na(ssaSL)
+    float cand = f_trailCandidate(ssaPos == 1)
+    if ssaPos == 1
+        ssaSL := math.max(ssaSL, cand)
+    else
+        ssaSL := math.min(ssaSL, cand)
+
+hitSL = ssaPos == 1 ? (low <= ssaSL) : ssaPos == -1 ? (high >= ssaSL) : false
+hitTP = ssaPos == 1 ? (high >= ssaTP) : ssaPos == -1 ? (low <= ssaTP) : false
+
+exitRegime = ssaExitOnRegimeFlip and ((ssaPos == 1 and (ssaBear or ssaFlat)) or (ssaPos == -1 and (ssaBull or ssaFlat)))
+exitFVT = ssaExitOnFVTFlip and ((ssaPos == 1 and not fvtBull) or (ssaPos == -1 and not fvtBear))
+exitCloud = ssaExitOnCloudFlip and ((ssaPos == 1 and not cloudBull) or (ssaPos == -1 and not cloudBear))
+
+exitTime = (ssaTimeStopBars > 0) and (ssaPos != 0) and not na(ssaEntryBar) and ((bar_index - ssaEntryBar) >= ssaTimeStopBars)
+
+exitSoft = (exitRegime or exitFVT or exitCloud or exitTime)
+exitHard = (hitSL or hitTP)
+
+ssaExit = ssaExitMode == "Conservative" ? (exitHard or (exitRegime and exitFVT)) : ssaExitMode == "Aggressive" ? (exitHard or exitSoft) : (exitHard or exitRegime or exitFVT)
+
+ssaExitEvent = ssaExit and (ssaPos != 0)
+ssaExitWasLong = ssaExitEvent and (ssaPos == 1)
+ssaExitWasShort = ssaExitEvent and (ssaPos == -1)
+
+if ssaExitEvent
+    ssaPos := 0
+    ssaEntryPx := na
+    ssaSL := na
+    ssaTP := na
+    ssaEntryBar := na
+
+if ssaEnable and ssaTradeMgmt and ssaPos != 0 and not na(ssaEntryPx)
+    f_updateLines(ssaEntryLine, ssaSLLine, ssaTPLine, ssaEntryPx, ssaSL, ssaTP)
+    f_updateBoxes(ssaRiskBox, ssaRewardBox, ssaEntryPx, ssaSL, ssaTP, ssaPos == 1)
+
+plotshape(ssaEnable and ssaTradeMgmt and ssaExitWasLong, "SSA Exit Long",
+    shape.xcross, location=location.abovebar, color=color.new(color.gray, 0), size=size.small, text="x")
+plotshape(ssaEnable and ssaTradeMgmt and ssaExitWasShort, "SSA Exit Short",
+    shape.xcross, location=location.belowbar, color=color.new(color.gray, 0), size=size.small, text="x")
+
+// External condition evaluation
+ssa_ext_cond(src) => ssaExtCmp == "Crossover" ? ta.crossover(src, 0) : ssaExtCmp == "Crossunder" ? ta.crossunder(src, 0) : ssaExtCmp == "Above 0" ? src > 0 : ssaExtCmp == "Below 0" ? src < 0 : ssaExtCmp == "Rising" ? ta.rising(src, 3) : ta.falling(src, 3)
+
+ext1 = ssa_ext_cond(ssaExternal1)
+ext2 = ssa_ext_cond(ssaExternal2)
+ext3 = ssa_ext_cond(ssaExternal3)
+ext4 = ssa_ext_cond(ssaExternal4)
+ext5 = ssa_ext_cond(ssaExternal5)
+
+ssa_cond(id) => id == "None" ? true : id == "SSA Long" ? ssaLongEvent : id == "SSA Short" ? ssaShortEvent : id == "SSA Strong Long" ? (ssaLongEvent and cond_strong) : id == "SSA Strong Short" ? (ssaShortEvent and cond_strong) : id == "RDP Bull Regime" ? ssaBull : id == "RDP Bear Regime" ? ssaBear : id == "RDP Ranging" ? ssaFlat : id == "RDP Tier A" ? cond_tierA : id == "RDP Tier B+" ? cond_tierBplus : id == "HTF OK" ? cond_htf_ok : id == "Quality OK" ? cond_qual_ok : id == "Confidence OK" ? cond_conf_ok : id == "FVT Bull" ? fvtBull : id == "FVT Bear" ? fvtBear : id == "Cloud Bull" ? cloudBull : id == "Cloud Bear" ? cloudBear : id == "External #1" ? ext1 : id == "External #2" ? ext2 : id == "External #3" ? ext3 : id == "External #4" ? ext4 : id == "External #5" ? ext5 : false
+
+ssa_apply_conn(a, b, conn) =>
+    conn == "OR" ? (a or b) : (a and b)
+
+step1 = ssa_cond(step1Cond)
+step2 = ssa_cond(step2Cond)
+step3 = ssa_cond(step3Cond)
+step4 = ssa_cond(step4Cond)
+step5 = ssa_cond(step5Cond)
+step6 = ssa_cond(step6Cond)
+step7 = ssa_cond(step7Cond)
+
+expr = step1
+if ssaStepCount >= 2
+    expr := ssa_apply_conn(expr, step2, step2Conn)
+if ssaStepCount >= 3
+    expr := ssa_apply_conn(expr, step3, step3Conn)
+if ssaStepCount >= 4
+    expr := ssa_apply_conn(expr, step4, step4Conn)
+if ssaStepCount >= 5
+    expr := ssa_apply_conn(expr, step5, step5Conn)
+if ssaStepCount >= 6
+    expr := ssa_apply_conn(expr, step6, step6Conn)
+if ssaStepCount >= 7
+    expr := ssa_apply_conn(expr, step7, step7Conn)
+
+ssaAlertFire = ssaEnable and ssaEnableAlerts and expr
+
+alertcondition(ssaAlertFire, "SSA Custom Alert (Builder)", "SSA Builder fired: conditions met")
+alertcondition(ssaEnable and ssaLongEvent, "SSA Long", "SSA Long signal")
+alertcondition(ssaEnable and ssaShortEvent, "SSA Short", "SSA Short signal")
+alertcondition(ssaEnable and ssaStrongLongEvent, "SSA Strong Long", "SSA STRONG Long signal")
+alertcondition(ssaEnable and ssaStrongShortEvent, "SSA Strong Short", "SSA STRONG Short signal")
+alertcondition(ssaEnable and ssaSuperLongEvent, "SSA Super Long", "SSA SUPER Long signal")
+alertcondition(ssaEnable and ssaSuperShortEvent, "SSA Super Short", "SSA SUPER Short signal")
+
+// Status Table
+f_stateTxt(_on, _bull, _bear, _flat) =>
+    not _on ? "OFF" : _flat ? "RANGE" : _bull ? "BULL" : _bear ? "BEAR" : "-"
+
+f_boolTxt(b) => b ? "ON" : "OFF"
+
+var table ssaTable = na
+var int ssaTableRows = na
+var string ssaTablePosLast = ""
+
+var int dRegBar = na
+var int dFVTBar = na
+var int dCloudBar = na
+var int dTRCBar = na
+var int dPosBar = na
+
+regState = ssaFlat ? 0 : ssaBull ? 1 : -1
+fvtState = fvtBull ? 1 : fvtBear ? -1 : 0
+cloudState = cloudBull ? 1 : cloudBear ? -1 : 0
+trcState = trcTrending ? 1 : (filterState.marketCondition == -1 ? -1 : 0)
+posState = ssaPos
+
+if barstate.isfirst
+    dRegBar := bar_index
+    dFVTBar := bar_index
+    dCloudBar := bar_index
+    dTRCBar := bar_index
+    dPosBar := bar_index
+else
+    if regState != regState[1]
+        dRegBar := bar_index
+    if fvtState != fvtState[1]
+        dFVTBar := bar_index
+    if cloudState != cloudState[1]
+        dCloudBar := bar_index
+    if trcState != trcState[1]
+        dTRCBar := bar_index
+    if posState != posState[1]
+        dPosBar := bar_index
+
+durReg = bar_index - nz(dRegBar, bar_index)
+durFVT = bar_index - nz(dFVTBar, bar_index)
+durCloud = bar_index - nz(dCloudBar, bar_index)
+durTRC = bar_index - nz(dTRCBar, bar_index)
+durPos = bar_index - nz(dPosBar, bar_index)
+
+if ssaEnable and ssaShowTable and barstate.islast
+    pos = ssaTablePos == "Top Left" ? position.top_left : ssaTablePos == "Bottom Right" ? position.bottom_right : ssaTablePos == "Bottom Left" ? position.bottom_left : position.top_right
+
+    rows = ssaTableCompact ? 9 : 12
+    if na(ssaTable) or ssaTableRows != rows or ssaTablePosLast != ssaTablePos
+        if not na(ssaTable)
+            table.delete(ssaTable)
+        ssaTable := table.new(pos, 4, rows, bgcolor=color.new(color.black, 15), border_width=1)
+        ssaTableRows := rows
+        ssaTablePosLast := ssaTablePos
+
+    table.cell(ssaTable, 0, 0, "SSA", text_color=color.white, bgcolor=color.new(color.black, 5))
+    table.cell(ssaTable, 1, 0, "State", text_color=color.white, bgcolor=color.new(color.black, 5))
+    table.cell(ssaTable, 2, 0, "Dur", text_color=color.white, bgcolor=color.new(color.black, 5))
+    table.cell(ssaTable, 3, 0, "Info", text_color=color.white, bgcolor=color.new(color.black, 5))
+
+    int r = 1
+    table.cell(ssaTable, 0, r, "Regime", text_color=color.white)
+    table.cell(ssaTable, 1, r, f_stateTxt(true, ssaBull, ssaBear, ssaFlat), text_color=color.white)
+    table.cell(ssaTable, 2, r, str.tostring(durReg), text_color=color.white)
+    table.cell(ssaTable, 3, r, "conf " + str.tostring(ssaConf, "#.00"), text_color=color.white)
+    r += 1
+
+    table.cell(ssaTable, 0, r, "HTF", text_color=color.white)
+    table.cell(ssaTable, 1, r, f_boolTxt(cond_htf_ok), text_color=color.white)
+    table.cell(ssaTable, 2, r, "", text_color=color.white)
+    table.cell(ssaTable, 3, r, str.tostring(ssaHTF, "#.00"), text_color=color.white)
+    r += 1
+
+    table.cell(ssaTable, 0, r, "Quality", text_color=color.white)
+    table.cell(ssaTable, 1, r, f_boolTxt(cond_qual_ok), text_color=color.white)
+    table.cell(ssaTable, 2, r, "", text_color=color.white)
+    table.cell(ssaTable, 3, r, str.tostring(ssaQual, "#.00"), text_color=color.white)
+    r += 1
+
+    table.cell(ssaTable, 0, r, "TRC", text_color=color.white)
+    table.cell(ssaTable, 1, r, trcTrending ? "TREND" : (filterState.marketCondition == -1 ? "CHOP" : "NEUT"), text_color=color.white)
+    table.cell(ssaTable, 2, r, str.tostring(durTRC), text_color=color.white)
+    table.cell(ssaTable, 3, r, "mc " + str.tostring(filterState.marketCondition), text_color=color.white)
+    r += 1
+
+    table.cell(ssaTable, 0, r, "FVT", text_color=color.white)
+    table.cell(ssaTable, 1, r, f_stateTxt(ssaShowFVT, fvtBull, fvtBear, fvtState == 0), text_color=color.white)
+    table.cell(ssaTable, 2, r, str.tostring(durFVT), text_color=color.white)
+    table.cell(ssaTable, 3, r, "d " + str.tostring((close - fvt), format.mintick), text_color=color.white)
+    r += 1
+
+    table.cell(ssaTable, 0, r, "Cloud", text_color=color.white)
+    table.cell(ssaTable, 1, r, f_stateTxt(ssaShowClouds, cloudBull, cloudBear, cloudState == 0), text_color=color.white)
+    table.cell(ssaTable, 2, r, str.tostring(durCloud), text_color=color.white)
+    table.cell(ssaTable, 3, r, "", text_color=color.white)
+    r += 1
+
+    table.cell(ssaTable, 0, r, "Tier", text_color=color.white)
+    table.cell(ssaTable, 1, r, cond_super ? "SUPER" : cond_strong ? "STRONG" : "NORMAL", text_color=color.white)
+    table.cell(ssaTable, 2, r, "", text_color=color.white)
+    table.cell(ssaTable, 3, r, "", text_color=color.white)
+    r += 1
+
+    posTxt = ssaPos == 1 ? "LONG" : ssaPos == -1 ? "SHORT" : "FLAT"
+    posInfo = ssaPos != 0 ? ("SL " + str.tostring(ssaSL, format.mintick) + " | TP " + str.tostring(ssaTP, format.mintick)) : ""
+    table.cell(ssaTable, 0, r, "Trade", text_color=color.white)
+    table.cell(ssaTable, 1, r, posTxt, text_color=color.white)
+    table.cell(ssaTable, 2, r, str.tostring(durPos), text_color=color.white)
+    table.cell(ssaTable, 3, r, posInfo, text_color=color.white)
+    r += 1
+
+    for rr = r to rows - 1
+        table.cell(ssaTable, 0, rr, "")
+        table.cell(ssaTable, 1, rr, "")
+        table.cell(ssaTable, 2, rr, "")
+        table.cell(ssaTable, 3, rr, "")
+
+
+// === EXPORTS FOR OTHER INDICATORS ===
+regimeDetectorRegime = currentRegime
+regimeDetectorConfidence = regimeConfidence
+regimeDetectorLine = adaptiveLine
+regimeDetectorHTFAgreement = htfAgreement
+regimeDetectorSignalQuality = filterState.signalQuality
+regimeDetectorPosition = currentPosition
+
+

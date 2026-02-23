@@ -1,0 +1,2191 @@
+//@version=6
+// ============================================================================
+// RJ-Wave Fibonacci Validator
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2025-12-20 16:35:54
+// ============================================================================
+// Validates wave structure using Fibonacci retracements. Only commits waves when pullbacks hit valid Fib levels with confirmation break.
+//
+// ============================================================================
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR
+// ============================================================================
+// Validates wave structure using Fibonacci retracements.
+// Only commits waves when pullbacks hit valid Fib levels with break confirmation.
+//
+// Core Concept:
+// 1. Track impulse waves (AnchorA → AnchorB)
+// 2. Monitor pullback candidates (up to 3 slots)
+// 3. Check if pullback hits valid Fib level (±tolerance)
+// 4. Wait for break confirmation (price breaks AnchorB)
+// 5. On confirmation: commit wave, update anchors, project targets
+//
+// Author: WavesUnchained
+// Version: 1.0.0
+// ============================================================================
+
+indicator("RJ-Wave Fibonacci Validator", shorttitle="RJ-Wave", overlay=true,
+     max_lines_count=500, max_labels_count=500, max_boxes_count=100)
+
+// ============================================================================
+// MODULE IMPORTS (will be combined by build system)
+// ============================================================================
+// #include "modules/inputs.pine"
+// #include "modules/02_types.pine"
+// #include "modules/03_fib_levels.pine"
+// #include "modules/04_pivot_detection.pine"
+// #include "modules/05_state_machine.pine"
+// #include "modules/06_candidate_manager.pine"
+// #include "modules/07_validation.pine"
+// #include "modules/08_wave_commit.pine"
+// #include "modules/09_target_projection.pine"
+// #include "modules/visualization.pine"
+
+// ============================================================================
+// GLOBAL STATE
+// ============================================================================
+
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - INPUTS
+// ============================================================================
+// User configuration for wave validation and visualization
+// ============================================================================
+
+// === GROUP: SEED / INITIALIZATION ===
+int i_seedLookback = input.int(300, "Seed Lookback Bars", minval=50, maxval=1000, group="Seed / Initialization", tooltip="How many bars back to search for initial anchor point. Larger = more history, but may include old/irrelevant structure.")
+
+string i_seedMode = input.string("Auto", "Seed Mode", options=["Auto", "Lowest Low", "Highest High"], group="Seed / Initialization", tooltip="Auto: picks the earlier extreme. Lowest Low: start from lowest point. Highest High: start from highest point.")
+
+float i_minImpulsePercent = input.float(3.0, "Min Impulse %", minval=0.5, maxval=20.0, step=0.5, group="Seed / Initialization", tooltip="Minimum impulse size (A to B) as percentage to 'arm' the structure. Prevents starting on noise.")
+
+// === GROUP: PIVOT DETECTION ===
+int i_pivotLeftBars = input.int(5, "Left Bars", minval=1, maxval=50, group="Pivot Detection", tooltip="Number of bars to the left for pivot confirmation. Higher = fewer but more significant pivots.")
+
+int i_pivotRightBars = input.int(5, "Right Bars", minval=1, maxval=50, group="Pivot Detection", tooltip="Number of bars to the right for pivot confirmation. This creates a delay of N bars.")
+
+// === GROUP: FIBONACCI VALIDATION ===
+float i_fibTolerance = input.float(1.0, "Fib Tolerance %", minval=0.1, maxval=5.0, step=0.1, group="Fibonacci Validation", tooltip="Tolerance for Fibonacci level matching. ±1% means 0.618 matches 0.612 to 0.624")
+
+bool i_useFib236 = input.bool(true, "Use 0.236", group="Fibonacci Validation", inline="fib1")
+bool i_useFib382 = input.bool(true, "Use 0.382", group="Fibonacci Validation", inline="fib1")
+bool i_useFib500 = input.bool(true, "Use 0.500", group="Fibonacci Validation", inline="fib1")
+
+bool i_useFib618 = input.bool(true, "Use 0.618", group="Fibonacci Validation", inline="fib2")
+bool i_useFib786 = input.bool(true, "Use 0.786", group="Fibonacci Validation", inline="fib2")
+bool i_useFib886 = input.bool(true, "Use 0.886", group="Fibonacci Validation", inline="fib2")
+
+bool i_useFib100 = input.bool(true, "Use 1.000", group="Fibonacci Validation", inline="fib3", tooltip="Extension levels for deep pullbacks")
+bool i_useFib127 = input.bool(true, "Use 1.272", group="Fibonacci Validation", inline="fib3")
+bool i_useFib162 = input.bool(true, "Use 1.618", group="Fibonacci Validation", inline="fib3")
+bool i_useFib200 = input.bool(true, "Use 2.000", group="Fibonacci Validation", inline="fib3")
+
+// === GROUP: BREAK CONFIRMATION ===
+string i_breakMode = input.string("High/Low", "Break Confirmation", options=["High/Low", "Close"], group="Break Confirmation", tooltip="High/Low: price.high > anchorB for uptrend break. Close: close > anchorB for stricter confirmation.")
+
+string i_invalidMode = input.string("High/Low", "Structure Invalidation", options=["High/Low", "Close"], group="Break Confirmation", tooltip="High/Low: wick through anchorA invalidates. Close: only close through anchorA invalidates (less sensitive to spikes).")
+
+// === GROUP: WAVE TARGETS (STEP 2) ===
+bool i_showTargets = input.bool(true, "Show Fib Targets", group="Wave Targets", tooltip="After confirmed pullback, project Fibonacci extension targets")
+
+bool i_target100 = input.bool(true, "Target 1.000", group="Wave Targets", inline="tgt1")
+bool i_target127 = input.bool(true, "Target 1.272", group="Wave Targets", inline="tgt1")
+bool i_target162 = input.bool(true, "Target 1.618", group="Wave Targets", inline="tgt1")
+bool i_target200 = input.bool(true, "Target 2.000", group="Wave Targets", inline="tgt1")
+
+// === GROUP: VISUALIZATION ===
+bool i_showWaveLabels = input.bool(true, "Show Wave Labels", group="Visualization", tooltip="Show Fib level labels at confirmed pullbacks")
+
+bool i_showWaveLines = input.bool(true, "Show Wave Lines", group="Visualization", tooltip="Draw ZigZag lines between confirmed pivots")
+
+bool i_showFibHelpers = input.bool(true, "Show Fib Helper Lines", group="Visualization", tooltip="Show lines from impulse end (B) to Fib pullback. Dashed = provisional, Solid = confirmed.")
+
+bool i_showCandidates = input.bool(false, "Debug: Show Candidates", group="Visualization", tooltip="Show unconfirmed pullback candidates (for debugging)")
+
+bool i_showRawPivots = input.bool(false, "Debug: Show Raw Pivots", group="Visualization", tooltip="Show all detected pivot points (before Fib validation). Disable for cleaner chart.")
+
+bool i_showInfoPanel = input.bool(true, "Show Info Panel", group="Visualization", tooltip="Show info panel with wave direction, wave ID, candidates, targets.")
+
+bool i_showDebugPanel = input.bool(true, "Debug: Show Debug Panel", group="Visualization", tooltip="Show detailed debug information panel (seed status, anchor states, pivot detection).")
+
+color i_colorBullish = input.color(color.new(#00E676, 0), "Bullish Color", group="Visualization")
+color i_colorBearish = input.color(color.new(#FF5252, 0), "Bearish Color", group="Visualization")
+color i_colorNeutral = input.color(color.new(#9E9E9E, 50), "Neutral Color", group="Visualization")
+
+// === GROUP: ALERTS ===
+bool i_alertOnNewWave = input.bool(true, "Alert: New Wave Confirmed", group="Alerts")
+bool i_alertOnInvalid = input.bool(false, "Alert: Structure Invalid", group="Alerts")
+
+
+// ============================================================================
+// MODULE: 02_types
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - TYPE DEFINITIONS
+// ============================================================================
+// Pine Script v6 - Core types for wave state machine
+// ============================================================================
+
+// Candidate slot status
+enum SlotStatus
+    WATCHING      // Monitoring pullback, no Fib match yet
+    FIB_MATCHED   // Pullback hit valid Fib level, waiting for break
+    CONFIRMED     // Break confirmed, ready to commit
+    INVALID       // Broke rules (e.g., price < anchorA)
+
+// Wave direction
+enum WaveDirection
+    UP    // Bullish wave (anchorA = low, anchorB = high)
+    DOWN  // Bearish wave (anchorA = high, anchorB = low)
+    NONE  // No direction established yet
+
+// Single pivot point
+type Pivot
+    float price
+    int   barIdx
+    bool  isHigh    // true = pivot high, false = pivot low
+
+// Candidate slot for tracking potential pullbacks
+type CandidateSlot
+    Pivot pivot           // The pullback pivot
+    float fibLevel        // Matched Fib level (0.618, etc.) or na
+    float fibError        // Distance to nearest Fib level
+    float retracementRatio // Actual retracement ratio
+    SlotStatus status     // Current status
+    int   createdBar      // Bar when slot was created
+    line  helperLine      // Provisional Fib helper line (B -> PB)
+
+// Core wave state
+type WaveState
+    WaveDirection dir     // Current wave direction
+    Pivot anchorA         // Impulse start (Low for UP, High for DOWN)
+    Pivot anchorB         // Live impulse end - moves with trend (High for UP, Low for DOWN)
+    Pivot impulseB        // FROZEN impulse end - set on commit, used for Fib calculation
+    int   waveId          // Wave counter (1, 2, 3, ...)
+    Pivot confirmedPB     // Last confirmed pullback
+    float confirmedFib    // Fib level of confirmed pullback
+
+// Target projection
+type FibTarget
+    float price
+    float level           // 1.0, 1.272, 1.618, 2.0
+    bool  isHit
+    int   projectedBar    // Bar when target was projected
+    line  targetLine      // Visual line object
+
+// Complete indicator state
+type RJWaveState
+    WaveState wave
+    array<CandidateSlot> candidates  // Max 3 slots
+    array<FibTarget> targets         // Active targets
+    array<Pivot> confirmedPivots     // History of confirmed pivots
+    array<line> waveLines            // Visual lines
+    array<label> waveLabels          // Visual labels
+    bool structureValid              // Is current structure still valid?
+    int  lastResetBar                // Bar of last structure reset
+
+// ============================================================================
+// CONSTRUCTOR FUNCTIONS
+// ============================================================================
+
+// Create new empty pivot
+newPivot() =>
+    Pivot.new(na, na, false)
+
+// Create pivot with values
+newPivot(float price, int barIdx, bool isHigh) =>
+    Pivot.new(price, barIdx, isHigh)
+
+// Create new candidate slot
+newCandidateSlot(Pivot pivot) =>
+    CandidateSlot.new(pivot, na, na, na, SlotStatus.WATCHING, bar_index, na)
+
+// Create new wave state
+newWaveState() =>
+    WaveState.new(WaveDirection.NONE, newPivot(), newPivot(), newPivot(), 0, newPivot(), na)
+
+// Create new target
+newFibTarget(float price, float level, int projBar) =>
+    FibTarget.new(price, level, false, projBar, na)
+
+// Create complete RJ-Wave state
+newRJWaveState() =>
+    RJWaveState.new(newWaveState(), array.new<CandidateSlot>(), array.new<FibTarget>(), array.new<Pivot>(), array.new<line>(), array.new<label>(), true, 0)
+
+// ============================================================================
+// HELPER METHODS
+// ============================================================================
+
+// Check if pivot is valid (has price)
+method isValid(Pivot this) =>
+    not na(this.price) and not na(this.barIdx)
+
+// Get impulse range
+method getImpulseRange(WaveState this) =>
+    if this.anchorA.isValid() and this.anchorB.isValid()
+        math.abs(this.anchorB.price - this.anchorA.price)
+    else
+        na
+
+// Check if wave is established (has direction and start anchor)
+// Note: anchorB may be invalid after commit until next pivot
+method isEstablished(WaveState this) =>
+    this.dir != WaveDirection.NONE and this.anchorA.isValid()
+
+// Check if wave has complete impulse (both A and B valid)
+// Use this for candidate/fib logic that needs full impulse
+method hasCompleteImpulse(WaveState this) =>
+    this.dir != WaveDirection.NONE and this.anchorA.isValid() and this.anchorB.isValid()
+
+// Check if wave has a frozen impulseB for Fib calculation
+// Only true after first commit establishes the reference
+method hasFrozenImpulse(WaveState this) =>
+    this.dir != WaveDirection.NONE and this.anchorA.isValid() and this.impulseB.isValid()
+
+// Get number of active candidates
+method candidateCount(RJWaveState this) =>
+    array.size(this.candidates)
+
+// Check if slots are full
+method slotsFull(RJWaveState this) =>
+    array.size(this.candidates) >= 3
+
+
+// ============================================================================
+// MODULE: 03_fib_levels
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - FIB LEVELS
+// ============================================================================
+// Pine Script v6 - Fibonacci level definitions and matching logic
+// ============================================================================
+
+// ============================================================================
+// FIBONACCI CONSTANTS
+// ============================================================================
+
+// Retracement levels
+const float FIB_236 = 0.236
+const float FIB_382 = 0.382
+const float FIB_500 = 0.500
+const float FIB_618 = 0.618
+const float FIB_786 = 0.786
+const float FIB_886 = 0.886
+
+// Extension levels
+const float FIB_100 = 1.000
+const float FIB_127 = 1.272
+const float FIB_162 = 1.618
+const float FIB_200 = 2.000
+
+// ============================================================================
+// FIB LEVEL ARRAY BUILDER
+// ============================================================================
+
+// Build array of active Fib levels based on user inputs
+buildActiveFibLevels(bool use236, bool use382, bool use500, bool use618, bool use786, bool use886, bool use100, bool use127, bool use162, bool use200) =>
+    var array<float> levels = array.new<float>()
+    array.clear(levels)
+
+    // Retracements
+    if use236
+        array.push(levels, FIB_236)
+    if use382
+        array.push(levels, FIB_382)
+    if use500
+        array.push(levels, FIB_500)
+    if use618
+        array.push(levels, FIB_618)
+    if use786
+        array.push(levels, FIB_786)
+    if use886
+        array.push(levels, FIB_886)
+
+    // Extensions (for deep pullbacks beyond 100%)
+    if use100
+        array.push(levels, FIB_100)
+    if use127
+        array.push(levels, FIB_127)
+    if use162
+        array.push(levels, FIB_162)
+    if use200
+        array.push(levels, FIB_200)
+
+    levels
+
+// ============================================================================
+// RETRACEMENT RATIO CALCULATION
+// ============================================================================
+
+// Calculate retracement ratio for a pullback
+// Uptrend: r = (anchorB - pullback) / (anchorB - anchorA)
+// Downtrend: r = (pullback - anchorB) / (anchorA - anchorB)
+calculateRetracementRatio(float anchorA, float anchorB, float pullback, WaveDirection dir) =>
+    float swingRange = math.abs(anchorB - anchorA)
+
+    if swingRange == 0
+        na
+    else
+        switch dir
+            WaveDirection.UP =>
+                // Pullback is below anchorB (high), ratio = how far down
+                (anchorB - pullback) / swingRange
+            WaveDirection.DOWN =>
+                // Pullback is above anchorB (low), ratio = how far up
+                (pullback - anchorB) / swingRange
+            => na
+
+// ============================================================================
+// FIB LEVEL MATCHING
+// ============================================================================
+
+// Check if a ratio matches a Fib level within tolerance
+// Tolerance is relative to the level: ±1% of 0.618 = ±0.00618
+isNearFibLevel(float ratio, float fibLevel, float tolerancePercent) =>
+    float tolerance = fibLevel * (tolerancePercent / 100.0)
+    math.abs(ratio - fibLevel) <= tolerance
+
+// Find the closest matching Fib level for a ratio
+// Returns: [matchedLevel, error, isMatch]
+findClosestFibLevel(float ratio, array<float> activeLevels, float tolerancePercent) =>
+    float closestLevel = na
+    float closestError = na
+    bool hasMatch = false
+
+    int size = array.size(activeLevels)
+
+    if size > 0 and not na(ratio)
+        float minError = 999999.0
+
+        for i = 0 to size - 1
+            float level = array.get(activeLevels, i)
+            float error = math.abs(ratio - level)
+            float tolerance = level * (tolerancePercent / 100.0)
+
+            if error < minError
+                minError := error
+                closestLevel := level
+                closestError := error
+                hasMatch := error <= tolerance
+
+    [closestLevel, closestError, hasMatch]
+
+// ============================================================================
+// FIB LEVEL FORMATTING
+// ============================================================================
+
+// Format Fib level for display (e.g., "0.618" or "1.272")
+formatFibLevel(float level) =>
+    str.tostring(level, "#.###")
+
+// Get Fib level name for labels
+getFibLevelName(float level) =>
+    switch
+        level == FIB_236 => "23.6%"
+        level == FIB_382 => "38.2%"
+        level == FIB_500 => "50.0%"
+        level == FIB_618 => "61.8%"
+        level == FIB_786 => "78.6%"
+        level == FIB_886 => "88.6%"
+        level == FIB_100 => "100%"
+        level == FIB_127 => "127.2%"
+        level == FIB_162 => "161.8%"
+        level == FIB_200 => "200%"
+        => str.tostring(level, "#.###")
+
+// ============================================================================
+// TARGET PROJECTION
+// ============================================================================
+
+// Calculate target price from confirmed pullback
+// Uptrend: target = pullback + (impulseRange * extensionLevel)
+// Downtrend: target = pullback - (impulseRange * extensionLevel)
+calculateFibTarget(float anchorA, float anchorB, float pullback, float extensionLevel, WaveDirection dir) =>
+    float impulseRange = math.abs(anchorB - anchorA)
+
+    switch dir
+        WaveDirection.UP =>
+            pullback + (impulseRange * extensionLevel)
+        WaveDirection.DOWN =>
+            pullback - (impulseRange * extensionLevel)
+        => na
+
+
+// ============================================================================
+// MODULE: 04_pivot_detection
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - PIVOT DETECTION
+// ============================================================================
+// Pine Script v6 - Swing point detection using ta.pivothigh/ta.pivotlow
+// ============================================================================
+
+// ============================================================================
+// PIVOT DETECTION
+// ============================================================================
+
+// Detect pivot high (returns price or na)
+detectPivotHigh(int leftBars, int rightBars) =>
+    ta.pivothigh(high, leftBars, rightBars)
+
+// Detect pivot low (returns price or na)
+detectPivotLow(int leftBars, int rightBars) =>
+    ta.pivotlow(low, leftBars, rightBars)
+
+// Detect both pivots at once
+// Returns: [pivotHighPrice, pivotLowPrice]
+detectPivots(int leftBars, int rightBars) =>
+    float ph = ta.pivothigh(high, leftBars, rightBars)
+    float pl = ta.pivotlow(low, leftBars, rightBars)
+    [ph, pl]
+
+// ============================================================================
+// PIVOT CREATION WITH BAR INDEX
+// ============================================================================
+
+// Create Pivot object from detected pivot high
+// Note: Pivot is detected 'rightBars' bars ago
+createPivotHigh(float price, int rightBars) =>
+    if not na(price)
+        Pivot.new(price, bar_index - rightBars, true)
+    else
+        Pivot.new(na, na, true)
+
+// Create Pivot object from detected pivot low
+createPivotLow(float price, int rightBars) =>
+    if not na(price)
+        Pivot.new(price, bar_index - rightBars, false)
+    else
+        Pivot.new(na, na, false)
+
+// ============================================================================
+// PIVOT HISTORY MANAGEMENT
+// ============================================================================
+
+// Add pivot to confirmed history (max size limit)
+// Same-type pivots are REPLACED (not pushed) to keep alternating sequence
+// This ensures ZigZag-like structure: Low-High-Low-High
+addToHistory(array<Pivot> history, Pivot pivot, int maxSize) =>
+    if pivot.isValid()
+        int n = array.size(history)
+
+        // If empty, just push
+        if n == 0
+            array.push(history, pivot)
+        else
+            Pivot last = array.get(history, n - 1)
+
+            // Same bar+type -> replace (keeps latest pivot for that bar)
+            if last.barIdx == pivot.barIdx and last.isHigh == pivot.isHigh
+                array.set(history, n - 1, pivot)
+
+            // Same type (two highs or two lows in a row):
+            // replace last if new one is more extreme, otherwise ignore
+            else if last.isHigh == pivot.isHigh
+                bool moreExtreme = pivot.isHigh ? (pivot.price > last.price) : (pivot.price < last.price)
+                if moreExtreme
+                    array.set(history, n - 1, pivot)
+
+            // Normal alternation -> push
+            else
+                array.push(history, pivot)
+
+        // Limit size
+        if array.size(history) > maxSize
+            array.shift(history)
+
+// Get last N pivots from history
+getLastPivots(array<Pivot> history, int count) =>
+    int size = array.size(history)
+    int actualCount = math.min(count, size)
+    array<Pivot> result = array.new<Pivot>()
+
+    if actualCount > 0
+        for i = size - actualCount to size - 1
+            array.push(result, array.get(history, i))
+
+    result
+
+// Get the most recent pivot
+getLastPivot(array<Pivot> history) =>
+    int size = array.size(history)
+    if size > 0
+        array.get(history, size - 1)
+    else
+        Pivot.new(na, na, false)
+
+// ============================================================================
+// PIVOT CLASSIFICATION
+// ============================================================================
+
+// Check if new pivot is higher high
+isHigherHigh(Pivot current, Pivot previous) =>
+    current.isValid() and previous.isValid() and
+     current.isHigh and previous.isHigh and
+     current.price > previous.price
+
+// Check if new pivot is lower low
+isLowerLow(Pivot current, Pivot previous) =>
+    current.isValid() and previous.isValid() and
+     not current.isHigh and not previous.isHigh and
+     current.price < previous.price
+
+// Check if new pivot is higher low
+isHigherLow(Pivot current, Pivot previous) =>
+    current.isValid() and previous.isValid() and
+     not current.isHigh and not previous.isHigh and
+     current.price > previous.price
+
+// Check if new pivot is lower high
+isLowerHigh(Pivot current, Pivot previous) =>
+    current.isValid() and previous.isValid() and
+     current.isHigh and previous.isHigh and
+     current.price < previous.price
+
+// ============================================================================
+// DIRECTION DETECTION
+// ============================================================================
+
+// Determine initial wave direction from first two pivots
+detectInitialDirection(Pivot first, Pivot second) =>
+    if first.isValid() and second.isValid()
+        if first.isHigh and not second.isHigh
+            // High then Low = potential downtrend start
+            WaveDirection.DOWN
+        else if not first.isHigh and second.isHigh
+            // Low then High = potential uptrend start
+            WaveDirection.UP
+        else
+            WaveDirection.NONE
+    else
+        WaveDirection.NONE
+
+
+// ============================================================================
+// MODULE: 05_state_machine
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - STATE MACHINE
+// ============================================================================
+// Pine Script v6 - Core state machine for wave tracking
+// ============================================================================
+
+// ============================================================================
+// STATE INITIALIZATION
+// ============================================================================
+
+// Initialize wave state with first two pivots
+initializeWaveState(Pivot firstPivot, Pivot secondPivot) =>
+    WaveDirection dir = detectInitialDirection(firstPivot, secondPivot)
+
+    WaveState state = newWaveState()
+    state.dir := dir
+
+    switch dir
+        WaveDirection.UP =>
+            // First is Low (anchorA), Second is High (anchorB)
+            state.anchorA := firstPivot.isHigh ? secondPivot : firstPivot
+            state.anchorB := firstPivot.isHigh ? firstPivot : secondPivot
+            // Initial impulseB = anchorB (first impulse is complete)
+            state.impulseB := state.anchorB
+            state.waveId := 1
+        WaveDirection.DOWN =>
+            // First is High (anchorA), Second is Low (anchorB)
+            state.anchorA := firstPivot.isHigh ? firstPivot : secondPivot
+            state.anchorB := firstPivot.isHigh ? secondPivot : firstPivot
+            // Initial impulseB = anchorB (first impulse is complete)
+            state.impulseB := state.anchorB
+            state.waveId := 1
+        =>
+            // No clear direction yet
+            state.waveId := 0
+
+    state
+
+// ============================================================================
+// ANCHOR UPDATES
+// ============================================================================
+
+// Update anchorB if new extreme is found (wave extends)
+// Returns true if anchorB was updated
+updateAnchorB(WaveState state, Pivot newPivot) =>
+    bool updated = false
+
+    if state.isEstablished() and newPivot.isValid()
+        switch state.dir
+            WaveDirection.UP =>
+                // In uptrend, anchorB is a High - update if new high is higher
+                if newPivot.isHigh and newPivot.price > state.anchorB.price
+                    state.anchorB := newPivot
+                    updated := true
+            WaveDirection.DOWN =>
+                // In downtrend, anchorB is a Low - update if new low is lower
+                if not newPivot.isHigh and newPivot.price < state.anchorB.price
+                    state.anchorB := newPivot
+                    updated := true
+
+    updated
+
+// ============================================================================
+// PULLBACK DETECTION
+// ============================================================================
+
+// Check if a pivot is a potential pullback candidate
+// Uptrend: pullback is a Low after anchorB (High)
+// Downtrend: pullback is a High after anchorB (Low)
+// Requires complete impulse (A+B) to measure against
+isPullbackCandidate(WaveState state, Pivot pivot) =>
+    if not state.hasCompleteImpulse() or not pivot.isValid()
+        false
+    else
+        switch state.dir
+            WaveDirection.UP =>
+                // Pullback in uptrend = Low after the High
+                not pivot.isHigh and pivot.barIdx > state.anchorB.barIdx
+            WaveDirection.DOWN =>
+                // Pullback in downtrend = High after the Low
+                pivot.isHigh and pivot.barIdx > state.anchorB.barIdx
+            => false
+
+// ============================================================================
+// STRUCTURE VALIDATION
+// ============================================================================
+
+// Check if structure is still valid (price hasn't broken anchorA)
+// Returns true if valid, false if structure is broken
+// invalidMode: "High/Low" (wick-sensitive) or "Close" (less sensitive to spikes)
+checkStructureValid(WaveState state, float currentHigh, float currentLow, float currentClose, string invalidMode) =>
+    if not state.isEstablished()
+        true
+    else
+        bool useClose = invalidMode == "Close"
+        switch state.dir
+            WaveDirection.UP =>
+                // Uptrend invalid if price goes below anchorA (the starting low)
+                if useClose
+                    currentClose >= state.anchorA.price
+                else
+                    currentLow >= state.anchorA.price
+            WaveDirection.DOWN =>
+                // Downtrend invalid if price goes above anchorA (the starting high)
+                if useClose
+                    currentClose <= state.anchorA.price
+                else
+                    currentHigh <= state.anchorA.price
+            => true
+
+// Check if pullback candidate is still valid
+// Requires complete impulse to validate against
+checkCandidateValid(WaveState state, CandidateSlot candidate) =>
+    if not state.hasCompleteImpulse() or not candidate.pivot.isValid()
+        false
+    else
+        switch state.dir
+            WaveDirection.UP =>
+                // Pullback (low) should not go below anchorA
+                candidate.pivot.price >= state.anchorA.price
+            WaveDirection.DOWN =>
+                // Pullback (high) should not go above anchorA
+                candidate.pivot.price <= state.anchorA.price
+            => false
+
+// ============================================================================
+// BREAK DETECTION
+// ============================================================================
+
+// Check if price has broken anchorB (confirmation of pullback)
+// breakMode: "High/Low" or "Close"
+// Requires complete impulse to have anchorB to break
+checkBreakConfirmation(WaveState state, float currentHigh, float currentLow, float currentClose, string breakMode) =>
+    if not state.hasCompleteImpulse()
+        false
+    else
+        bool useClose = breakMode == "Close"
+
+        switch state.dir
+            WaveDirection.UP =>
+                // Break above anchorB confirms bullish continuation
+                if useClose
+                    currentClose > state.anchorB.price
+                else
+                    currentHigh > state.anchorB.price
+            WaveDirection.DOWN =>
+                // Break below anchorB confirms bearish continuation
+                if useClose
+                    currentClose < state.anchorB.price
+                else
+                    currentLow < state.anchorB.price
+            => false
+
+// ============================================================================
+// DIRECTION REVERSAL
+// ============================================================================
+
+// Reverse wave direction after structure break
+reverseDirection(WaveState state, Pivot newAnchorA, Pivot newAnchorB) =>
+    switch state.dir
+        WaveDirection.UP =>
+            state.dir := WaveDirection.DOWN
+        WaveDirection.DOWN =>
+            state.dir := WaveDirection.UP
+        =>
+            state.dir := WaveDirection.NONE
+
+    state.anchorA := newAnchorA
+    state.anchorB := newAnchorB
+    state.impulseB := newAnchorB  // New direction starts with complete impulse
+    state.waveId := 1
+    state.confirmedPB := newPivot()
+    state.confirmedFib := na
+
+
+// ============================================================================
+// MODULE: 06_candidate_manager
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - CANDIDATE MANAGER
+// ============================================================================
+// Pine Script v6 - 3-Slot candidate management for pullback tracking
+// ============================================================================
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const int MAX_CANDIDATES = 3
+
+// ============================================================================
+// HELPER LINE MANAGEMENT
+// ============================================================================
+
+// Delete helper line from candidate
+deleteHelperLine(CandidateSlot c) =>
+    if not na(c.helperLine)
+        line.delete(c.helperLine)
+        c.helperLine := na
+
+// Draw or update provisional helper line (impulseB -> PB)
+// Uses FROZEN impulseB, not live anchorB
+drawHelperLine(CandidateSlot c, Pivot impulseB, color col) =>
+    // Delete old line first
+    deleteHelperLine(c)
+    // Draw new dashed line from frozen impulseB to pullback
+    if impulseB.isValid() and c.pivot.isValid()
+        c.helperLine := line.new(impulseB.barIdx, impulseB.price, c.pivot.barIdx, c.pivot.price, color=col, width=1, style=line.style_dashed)
+
+// Finalize helper line (make solid on confirm)
+finalizeHelperLine(CandidateSlot c) =>
+    if not na(c.helperLine)
+        line.set_style(c.helperLine, line.style_solid)
+        line.set_width(c.helperLine, 2)
+
+// ============================================================================
+// SLOT MANAGEMENT
+// ============================================================================
+
+// Add new candidate to slots (FIFO - oldest removed if full)
+addCandidate(array<CandidateSlot> candidates, Pivot pullbackPivot) =>
+    CandidateSlot newSlot = newCandidateSlot(pullbackPivot)
+
+    // Remove oldest if at capacity
+    if array.size(candidates) >= MAX_CANDIDATES
+        array.shift(candidates)
+
+    array.push(candidates, newSlot)
+    newSlot
+
+// Remove candidate at index
+removeCandidate(array<CandidateSlot> candidates, int index) =>
+    if index >= 0 and index < array.size(candidates)
+        array.remove(candidates, index)
+
+// Clear all candidates
+clearAllCandidates(array<CandidateSlot> candidates) =>
+    array.clear(candidates)
+
+// Get candidate at index
+getCandidate(array<CandidateSlot> candidates, int index) =>
+    if index >= 0 and index < array.size(candidates)
+        array.get(candidates, index)
+    else
+        CandidateSlot.new(newPivot(), na, na, na, SlotStatus.INVALID, 0, na)
+
+// ============================================================================
+// CANDIDATE UPDATES
+// ============================================================================
+
+// Update Fib matching for a candidate
+// Called when anchorB changes or on new bar
+// CRITICAL: Uses impulseB (frozen) for Fib calculation, NOT anchorB (live/moving)
+updateCandidateFib(CandidateSlot candidate, WaveState state, array<float> activeFibLevels, float tolerancePercent) =>
+    if candidate.status == SlotStatus.WATCHING or candidate.status == SlotStatus.FIB_MATCHED
+        // Calculate retracement ratio using FROZEN impulseB
+        // This ensures Fib levels are stable and not recalculated as anchorB moves
+        float ratio = calculateRetracementRatio(state.anchorA.price, state.impulseB.price, candidate.pivot.price, state.dir)
+
+        candidate.retracementRatio := ratio
+
+        // Find closest Fib level
+        [closestLevel, closestError, hasMatch] = findClosestFibLevel(ratio, activeFibLevels, tolerancePercent)
+
+        candidate.fibLevel := hasMatch ? closestLevel : na
+        candidate.fibError := closestError
+
+        // Update status
+        if hasMatch and candidate.status == SlotStatus.WATCHING
+            candidate.status := SlotStatus.FIB_MATCHED
+
+// Update all candidates with current state
+// Also handles helper line drawing/deletion
+updateAllCandidates(array<CandidateSlot> candidates, WaveState state, array<float> activeFibLevels, float tolerancePercent, bool showHelpers, color bullColor, color bearColor) =>
+    int size = array.size(candidates)
+
+    if size > 0
+        for i = 0 to size - 1
+            CandidateSlot candidate = array.get(candidates, i)
+            bool wasMatched = candidate.status == SlotStatus.FIB_MATCHED
+
+            // Check if candidate is still valid
+            if not checkCandidateValid(state, candidate)
+                candidate.status := SlotStatus.INVALID
+                deleteHelperLine(candidate)
+            else if candidate.status != SlotStatus.CONFIRMED and candidate.status != SlotStatus.INVALID
+                // Update Fib matching
+                updateCandidateFib(candidate, state, activeFibLevels, tolerancePercent)
+
+                // Handle helper lines (use frozen impulseB, not live anchorB)
+                if showHelpers
+                    bool nowMatched = candidate.status == SlotStatus.FIB_MATCHED
+                    if nowMatched and not wasMatched
+                        // Just became FibMatched - draw provisional line from impulseB
+                        color col = state.dir == WaveDirection.UP ? bullColor : bearColor
+                        drawHelperLine(candidate, state.impulseB, col)
+                    else if not nowMatched and wasMatched
+                        // Lost FibMatched status - delete line
+                        deleteHelperLine(candidate)
+
+            // CRITICAL: Write back to array after mutation
+            array.set(candidates, i, candidate)
+
+// ============================================================================
+// CANDIDATE SELECTION
+// ============================================================================
+
+// Find first FIB_MATCHED candidate (for break confirmation check)
+findFibMatchedCandidate(array<CandidateSlot> candidates) =>
+    int foundIndex = -1
+    CandidateSlot foundCandidate = CandidateSlot.new(newPivot(), na, na, na, SlotStatus.INVALID, 0, na)
+
+    int size = array.size(candidates)
+
+    if size > 0
+        for i = 0 to size - 1
+            CandidateSlot candidate = array.get(candidates, i)
+            if candidate.status == SlotStatus.FIB_MATCHED
+                foundIndex := i
+                foundCandidate := candidate
+                break
+
+    [foundIndex, foundCandidate]
+
+// Find best candidate (lowest Fib error among FIB_MATCHED)
+findBestCandidate(array<CandidateSlot> candidates) =>
+    int bestIndex = -1
+    float bestError = 999999.0
+    CandidateSlot bestCandidate = CandidateSlot.new(newPivot(), na, na, na, SlotStatus.INVALID, 0, na)
+
+    int size = array.size(candidates)
+
+    if size > 0
+        for i = 0 to size - 1
+            CandidateSlot candidate = array.get(candidates, i)
+            if candidate.status == SlotStatus.FIB_MATCHED
+                if not na(candidate.fibError) and candidate.fibError < bestError
+                    bestError := candidate.fibError
+                    bestIndex := i
+                    bestCandidate := candidate
+
+    [bestIndex, bestCandidate]
+
+// ============================================================================
+// CANDIDATE CONFIRMATION
+// ============================================================================
+
+// Mark candidate as confirmed and finalize helper line
+confirmCandidate(array<CandidateSlot> candidates, int index) =>
+    if index >= 0 and index < array.size(candidates)
+        CandidateSlot candidate = array.get(candidates, index)
+        candidate.status := SlotStatus.CONFIRMED
+        // Finalize helper line (make solid)
+        finalizeHelperLine(candidate)
+        // CRITICAL: Write back to array after mutation
+        array.set(candidates, index, candidate)
+        candidate
+
+// Remove invalid candidates
+purgeInvalidCandidates(array<CandidateSlot> candidates) =>
+    // Iterate backwards to safely remove
+    int size = array.size(candidates)
+
+    if size > 0
+        for i = size - 1 to 0
+            CandidateSlot candidate = array.get(candidates, i)
+            if candidate.status == SlotStatus.INVALID
+                array.remove(candidates, i)
+
+// ============================================================================
+// DEBUG HELPERS
+// ============================================================================
+
+// Get candidate status as string
+getCandidateStatusString(SlotStatus status) =>
+    switch status
+        SlotStatus.WATCHING => "Watching"
+        SlotStatus.FIB_MATCHED => "FibMatched"
+        SlotStatus.CONFIRMED => "Confirmed"
+        SlotStatus.INVALID => "Invalid"
+        => "Unknown"
+
+// Get summary of all candidates
+getCandidatesSummary(array<CandidateSlot> candidates) =>
+    string summary = ""
+    int size = array.size(candidates)
+
+    if size == 0
+        summary := "No candidates"
+    else
+        for i = 0 to size - 1
+            CandidateSlot candidate = array.get(candidates, i)
+            string fibStr = na(candidate.fibLevel) ? "none" : formatFibLevel(candidate.fibLevel)
+            string statusStr = getCandidateStatusString(candidate.status)
+            summary := summary + "Slot " + str.tostring(i) + ": " + statusStr + " @ " + fibStr + "\n"
+
+    summary
+
+
+// ============================================================================
+// MODULE: 07_validation
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - VALIDATION
+// ============================================================================
+// Pine Script v6 - Validation logic for Fib matching and break confirmation
+// ============================================================================
+
+// ============================================================================
+// VALIDATION RESULT TYPE
+// ============================================================================
+
+type ValidationResult
+    bool isValid
+    string reason
+    CandidateSlot confirmedCandidate
+    int candidateIndex
+
+// ============================================================================
+// MAIN VALIDATION FUNCTION
+// ============================================================================
+
+// Validate candidates and check for confirmation
+// Returns ValidationResult with confirmed candidate if break occurred
+validateAndConfirm(array<CandidateSlot> candidates, WaveState state, float currentHigh, float currentLow, float currentClose, string breakMode) =>
+    CandidateSlot emptySlot = CandidateSlot.new(newPivot(), na, na, na, SlotStatus.INVALID, 0, na)
+    ValidationResult result = ValidationResult.new(false, "", emptySlot, -1)
+
+    // Find best FIB_MATCHED candidate
+    [bestIndex, bestCandidate] = findBestCandidate(candidates)
+
+    if bestIndex >= 0
+        // Check for break confirmation
+        bool hasBreak = checkBreakConfirmation(state, currentHigh, currentLow, currentClose, breakMode)
+
+        if hasBreak
+            // Confirm the candidate
+            bestCandidate.status := SlotStatus.CONFIRMED
+            // CRITICAL: Write back to array after mutation
+            array.set(candidates, bestIndex, bestCandidate)
+            result.isValid := true
+            result.reason := "Break confirmed at " + getFibLevelName(bestCandidate.fibLevel)
+            result.confirmedCandidate := bestCandidate
+            result.candidateIndex := bestIndex
+
+    result
+
+// ============================================================================
+// STRUCTURE VALIDATION
+// ============================================================================
+
+// Check if current price action invalidates the wave structure
+validateStructure(WaveState state, float currentHigh, float currentLow, float currentClose, string invalidMode) =>
+    CandidateSlot emptySlot = CandidateSlot.new(newPivot(), na, na, na, SlotStatus.INVALID, 0, na)
+    ValidationResult result = ValidationResult.new(true, "Structure valid", emptySlot, -1)
+
+    if state.isEstablished()
+        bool structureOk = checkStructureValid(state, currentHigh, currentLow, currentClose, invalidMode)
+
+        if not structureOk
+            result.isValid := false
+            switch state.dir
+                WaveDirection.UP =>
+                    result.reason := "Price broke below anchorA (" + str.tostring(state.anchorA.price, "#.##") + ")"
+                WaveDirection.DOWN =>
+                    result.reason := "Price broke above anchorA (" + str.tostring(state.anchorA.price, "#.##") + ")"
+
+    result
+
+// ============================================================================
+// CANDIDATE VALIDATION
+// ============================================================================
+
+// Validate all candidates against current state
+// Marks invalid candidates and returns count of still-valid candidates
+validateCandidates(array<CandidateSlot> candidates, WaveState state) =>
+    int validCount = 0
+    int invalidatedCount = 0
+
+    int size = array.size(candidates)
+
+    if size > 0
+        for i = 0 to size - 1
+            CandidateSlot candidate = array.get(candidates, i)
+
+            if candidate.status != SlotStatus.INVALID and candidate.status != SlotStatus.CONFIRMED
+                bool stillValid = checkCandidateValid(state, candidate)
+
+                if stillValid
+                    validCount += 1
+                else
+                    candidate.status := SlotStatus.INVALID
+                    invalidatedCount += 1
+
+                // CRITICAL: Write back to array after mutation
+                array.set(candidates, i, candidate)
+
+    [validCount, invalidatedCount]
+
+// ============================================================================
+// FIB QUALITY ASSESSMENT
+// ============================================================================
+
+// Calculate quality score for a Fib match (0-100)
+// Based on how close the ratio is to the Fib level
+calculateFibQuality(CandidateSlot candidate) =>
+    if na(candidate.fibLevel) or na(candidate.fibError)
+        0.0
+    else
+        // Perfect match = 100, error of 1% of level = 50
+        float maxError = candidate.fibLevel * 0.02  // 2% tolerance for scoring
+        float quality = math.max(0.0, 100.0 * (1.0 - candidate.fibError / maxError))
+        math.min(100.0, quality)
+
+// Get Fib match description
+getFibMatchDescription(CandidateSlot candidate) =>
+    if na(candidate.fibLevel)
+        "No Fib match"
+    else
+        float quality = calculateFibQuality(candidate)
+        string qualityStr = switch
+            quality >= 90 => "Excellent"
+            quality >= 70 => "Good"
+            quality >= 50 => "Fair"
+            => "Weak"
+
+        getFibLevelName(candidate.fibLevel) + " (" + qualityStr + ")"
+
+// ============================================================================
+// COMPREHENSIVE VALIDATION
+// ============================================================================
+
+// Run all validations and return summary
+runFullValidation(RJWaveState rjState, float currentHigh, float currentLow, float currentClose, string breakMode, string invalidMode, array<float> activeFibLevels, float tolerancePercent, bool showHelpers, color bullColor, color bearColor) =>
+    // 1. Validate structure
+    ValidationResult structureResult = validateStructure(rjState.wave, currentHigh, currentLow, currentClose, invalidMode)
+
+    if not structureResult.isValid
+        // Structure broken - need to reset
+        rjState.structureValid := false
+        structureResult
+    else
+        // 2. Update candidate Fib matching + helper lines
+        updateAllCandidates(rjState.candidates, rjState.wave, activeFibLevels, tolerancePercent, showHelpers, bullColor, bearColor)
+
+        // 3. Validate candidates
+        [validCount, invalidatedCount] = validateCandidates(rjState.candidates, rjState.wave)
+
+        // 4. Check for break confirmation
+        ValidationResult confirmResult = validateAndConfirm(rjState.candidates, rjState.wave, currentHigh, currentLow, currentClose, breakMode)
+
+        // 5. Purge invalid candidates
+        purgeInvalidCandidates(rjState.candidates)
+
+        confirmResult
+
+
+// ============================================================================
+// MODULE: 08_wave_commit
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - WAVE COMMIT
+// ============================================================================
+// Pine Script v6 - Commit logic for confirmed waves
+// ============================================================================
+
+// ============================================================================
+// COMMIT RESULT TYPE
+// ============================================================================
+
+type CommitResult
+    bool committed
+    int newWaveId
+    Pivot newAnchorA
+    float confirmedFibLevel
+    string description
+
+// ============================================================================
+// WAVE COMMIT
+// ============================================================================
+
+// Commit a confirmed pullback as new wave start
+// This is called when a candidate has been confirmed (FibMatched + Break)
+commitWave(RJWaveState rjState, CandidateSlot confirmedCandidate) =>
+    CommitResult result = CommitResult.new(false, 0, newPivot(), na, "")
+
+    if confirmedCandidate.status == SlotStatus.CONFIRMED and confirmedCandidate.pivot.isValid()
+        WaveState wave = rjState.wave
+
+        // Store confirmed pullback info
+        wave.confirmedPB := confirmedCandidate.pivot
+        wave.confirmedFib := confirmedCandidate.fibLevel
+
+        // Save old anchors BEFORE modifying
+        Pivot oldAnchorA = wave.anchorA
+        Pivot oldAnchorB = wave.anchorB
+
+        // Add oldAnchorB to history (the impulse extreme before pullback)
+        // Structure history only contains A -> B -> B -> B pattern (no pullbacks!)
+        // Pullbacks get their own Fib helper line, not structure ZigZag
+        if oldAnchorB.isValid()
+            addToHistory(rjState.confirmedPivots, oldAnchorB, 50)
+
+        // NOTE: Pullback is NOT added to confirmedPivots!
+        // It gets Label + Fib helper line separately
+
+        // CRITICAL: Freeze impulseB for Fib calculation
+        // This is the endpoint of the confirmed impulse - used for all future Fib measurements
+        // until the next commit overwrites it
+        wave.impulseB := oldAnchorB
+
+        // New anchorA is the confirmed pullback
+        wave.anchorA := confirmedCandidate.pivot
+
+        // CRITICAL: Reset anchorB - new impulse needs new endpoint
+        // The next pivot in trend direction will become the new anchorB (live, moving)
+        // But impulseB stays frozen!
+        wave.anchorB := newPivot()
+
+        // Increment wave counter
+        wave.waveId += 1
+
+        // Clear all candidates (they were based on old impulse)
+        clearAllCandidates(rjState.candidates)
+
+        // Build result
+        result.committed := true
+        result.newWaveId := wave.waveId
+        result.newAnchorA := wave.anchorA
+        result.confirmedFibLevel := confirmedCandidate.fibLevel
+        result.description := "Wave " + str.tostring(wave.waveId) + " @ " + getFibLevelName(confirmedCandidate.fibLevel)
+
+    result
+
+// ============================================================================
+// STRUCTURE RESET
+// ============================================================================
+
+// Reset structure after invalidation
+// Called when price breaks anchorA (structure broken)
+resetStructure(RJWaveState rjState, Pivot newStartPivot) =>
+    WaveState wave = rjState.wave
+
+    // Clear current state
+    wave.dir := WaveDirection.NONE
+    wave.anchorA := newPivot()
+    wave.anchorB := newPivot()
+    wave.impulseB := newPivot()  // Clear frozen impulse reference
+    wave.waveId := 0
+    wave.confirmedPB := newPivot()
+    wave.confirmedFib := na
+
+    // Clear candidates
+    clearAllCandidates(rjState.candidates)
+
+    // Clear targets
+    array.clear(rjState.targets)
+
+    // Mark reset
+    rjState.structureValid := true
+    rjState.lastResetBar := bar_index
+
+    // If we have a new start pivot, set it as potential anchor
+    if newStartPivot.isValid()
+        wave.anchorA := newStartPivot
+
+// ============================================================================
+// DIRECTION CHANGE
+// ============================================================================
+
+// Handle direction change (e.g., uptrend becomes downtrend)
+changeDirection(RJWaveState rjState, WaveDirection newDirection, Pivot newAnchorA, Pivot newAnchorB) =>
+    WaveState wave = rjState.wave
+
+    wave.dir := newDirection
+    wave.anchorA := newAnchorA
+    wave.anchorB := newAnchorB
+    wave.impulseB := newAnchorB  // New direction has complete impulse
+    wave.waveId := 1
+    wave.confirmedPB := newPivot()
+    wave.confirmedFib := na
+
+    // Clear candidates
+    clearAllCandidates(rjState.candidates)
+
+    // Clear targets
+    array.clear(rjState.targets)
+
+    // Update state
+    rjState.structureValid := true
+
+// ============================================================================
+// WAVE EXTENSION
+// ============================================================================
+
+// Extend current wave when new extreme is found
+// Returns true if wave was extended
+extendWave(RJWaveState rjState, Pivot newExtreme) =>
+    bool extended = updateAnchorB(rjState.wave, newExtreme)
+
+    if extended
+        // When anchorB moves, all candidates need Fib recalculation
+        // This is handled in updateAllCandidates()
+        true
+    else
+        false
+
+// ============================================================================
+// WAVE INFO HELPERS
+// ============================================================================
+
+// Get current wave info as string
+getWaveInfo(WaveState wave) =>
+    if not wave.isEstablished()
+        "No wave established"
+    else
+        string dirStr = switch wave.dir
+            WaveDirection.UP => "UP"
+            WaveDirection.DOWN => "DOWN"
+            => "NONE"
+
+        string info = "Wave " + str.tostring(wave.waveId) + " " + dirStr
+        info := info + "\nA: " + str.tostring(wave.anchorA.price, "#.##") + " @ bar " + str.tostring(wave.anchorA.barIdx)
+        info := info + "\nB: " + str.tostring(wave.anchorB.price, "#.##") + " @ bar " + str.tostring(wave.anchorB.barIdx)
+
+        if wave.confirmedPB.isValid()
+            info := info + "\nPB: " + str.tostring(wave.confirmedPB.price, "#.##") + " @ " + getFibLevelName(wave.confirmedFib)
+
+        info
+
+// Get wave direction as color
+getWaveColor(WaveState wave, color bullColor, color bearColor, color neutralColor) =>
+    switch wave.dir
+        WaveDirection.UP => bullColor
+        WaveDirection.DOWN => bearColor
+        => neutralColor
+
+// Check if currently in a confirmed wave
+isInConfirmedWave(WaveState wave) =>
+    wave.isEstablished() and wave.waveId > 0
+
+// Get impulse size in points
+getImpulseSize(WaveState wave) =>
+    if wave.isEstablished()
+        math.abs(wave.anchorB.price - wave.anchorA.price)
+    else
+        na
+
+// Get impulse size as percentage
+getImpulseSizePercent(WaveState wave) =>
+    if wave.isEstablished()
+        float size = math.abs(wave.anchorB.price - wave.anchorA.price)
+        (size / wave.anchorA.price) * 100
+    else
+        na
+
+
+// ============================================================================
+// MODULE: 09_target_projection
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - TARGET PROJECTION
+// ============================================================================
+// Pine Script v6 - Step 2: Project Fibonacci extension targets after commit
+// ============================================================================
+
+// ============================================================================
+// TARGET LEVEL CONSTANTS
+// ============================================================================
+
+const float TARGET_100 = 1.000
+const float TARGET_127 = 1.272
+const float TARGET_162 = 1.618
+const float TARGET_200 = 2.000
+
+// ============================================================================
+// TARGET CALCULATION
+// ============================================================================
+
+// Calculate all target prices from confirmed pullback
+// Uptrend: target = pullback + (impulseRange * level)
+// Downtrend: target = pullback - (impulseRange * level)
+// CRITICAL: Uses frozen impulseB for calculation (not live anchorB)
+calculateTargets(WaveState wave, bool use100, bool use127, bool use162, bool use200) =>
+    array<FibTarget> targets = array.new<FibTarget>()
+
+    if wave.hasFrozenImpulse() and wave.confirmedPB.isValid()
+        float impulseRange = math.abs(wave.impulseB.price - wave.anchorA.price)
+        float pullbackPrice = wave.confirmedPB.price
+
+        // Calculate each enabled target using frozen impulseB
+        if use100
+            float price = calculateFibTarget(wave.anchorA.price, wave.impulseB.price, pullbackPrice, TARGET_100, wave.dir)
+            array.push(targets, newFibTarget(price, TARGET_100, bar_index))
+
+        if use127
+            float price = calculateFibTarget(wave.anchorA.price, wave.impulseB.price, pullbackPrice, TARGET_127, wave.dir)
+            array.push(targets, newFibTarget(price, TARGET_127, bar_index))
+
+        if use162
+            float price = calculateFibTarget(wave.anchorA.price, wave.impulseB.price, pullbackPrice, TARGET_162, wave.dir)
+            array.push(targets, newFibTarget(price, TARGET_162, bar_index))
+
+        if use200
+            float price = calculateFibTarget(wave.anchorA.price, wave.impulseB.price, pullbackPrice, TARGET_200, wave.dir)
+            array.push(targets, newFibTarget(price, TARGET_200, bar_index))
+
+    targets
+
+// ============================================================================
+// TARGET MANAGEMENT
+// ============================================================================
+
+// Update existing targets (check if hit)
+updateTargets(array<FibTarget> targets, WaveState wave, float currentHigh, float currentLow) =>
+    int hitCount = 0
+
+    int size = array.size(targets)
+    if size > 0
+        for i = 0 to size - 1
+            FibTarget target = array.get(targets, i)
+
+            if not target.isHit
+                bool hit = switch wave.dir
+                    WaveDirection.UP => currentHigh >= target.price
+                    WaveDirection.DOWN => currentLow <= target.price
+                    => false
+
+                if hit
+                    target.isHit := true
+                    hitCount += 1
+
+            // CRITICAL: Write back to array after mutation
+            array.set(targets, i, target)
+
+    hitCount
+
+// Clear all targets
+clearTargets(array<FibTarget> targets) =>
+    // Delete any line objects first
+    int size = array.size(targets)
+    if size > 0
+        for i = 0 to size - 1
+            FibTarget target = array.get(targets, i)
+            if not na(target.targetLine)
+                line.delete(target.targetLine)
+
+    array.clear(targets)
+
+// Replace targets with new set
+replaceTargets(array<FibTarget> oldTargets, array<FibTarget> newTargets) =>
+    clearTargets(oldTargets)
+
+    int size = array.size(newTargets)
+    if size > 0
+        for i = 0 to size - 1
+            array.push(oldTargets, array.get(newTargets, i))
+
+// ============================================================================
+// TARGET QUERIES
+// ============================================================================
+
+// Get next unhit target
+getNextTarget(array<FibTarget> targets) =>
+    FibTarget result = FibTarget.new(na, na, false, 0, na)
+
+    int size = array.size(targets)
+    if size > 0
+        for i = 0 to size - 1
+            FibTarget target = array.get(targets, i)
+            if not target.isHit
+                result := target
+                break
+
+    result
+
+// Get all unhit targets
+getUnhitTargets(array<FibTarget> targets) =>
+    array<FibTarget> unhit = array.new<FibTarget>()
+
+    int size = array.size(targets)
+    if size > 0
+        for i = 0 to size - 1
+            FibTarget target = array.get(targets, i)
+            if not target.isHit
+                array.push(unhit, target)
+
+    unhit
+
+// Count hit targets
+countHitTargets(array<FibTarget> targets) =>
+    int count = 0
+
+    int size = array.size(targets)
+    if size > 0
+        for i = 0 to size - 1
+            FibTarget target = array.get(targets, i)
+            if target.isHit
+                count += 1
+
+    count
+
+// ============================================================================
+// TARGET INFO
+// ============================================================================
+
+// Get target summary string
+getTargetSummary(array<FibTarget> targets) =>
+    string summary = ""
+
+    int size = array.size(targets)
+    if size == 0
+        summary := "No targets"
+    else
+        int hitCount = countHitTargets(targets)
+        summary := str.tostring(hitCount) + "/" + str.tostring(size) + " targets hit\n"
+
+        for i = 0 to size - 1
+            FibTarget target = array.get(targets, i)
+            string status = target.isHit ? "[HIT]" : "[   ]"
+            string levelName = getFibLevelName(target.level)
+            summary := summary + status + " " + levelName + ": " + str.tostring(target.price, "#.##") + "\n"
+
+    summary
+
+// Get target color based on level
+getTargetColor(float level, color baseColor) =>
+    // Lighter colors for further targets
+    int transparency = switch
+        level == TARGET_100 => 20
+        level == TARGET_127 => 35
+        level == TARGET_162 => 50
+        level == TARGET_200 => 65
+        => 50
+
+    color.new(baseColor, transparency)
+
+// Get target line style based on level
+getTargetLineStyle(float level) =>
+    switch
+        level == TARGET_100 => line.style_solid
+        level == TARGET_127 => line.style_dashed
+        level == TARGET_162 => line.style_dashed
+        level == TARGET_200 => line.style_dotted
+        => line.style_dotted
+
+
+// ============================================================================
+// MODULE: visualization
+// ============================================================================
+
+// ============================================================================
+// RJ-WAVE FIBONACCI VALIDATOR - VISUALIZATION
+// ============================================================================
+// Pine Script v6 - Drawing functions for waves, labels, and targets
+// ============================================================================
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const int MAX_WAVE_LINES = 100
+const int MAX_WAVE_LABELS = 100
+const int MAX_TARGET_LINES = 20
+
+// ============================================================================
+// WAVE LINE DRAWING
+// ============================================================================
+
+// Draw line between two pivots
+drawWaveLine(array<line> lines, Pivot startPivot, Pivot endPivot, color lineColor, int lineWidth) =>
+    if startPivot.isValid() and endPivot.isValid()
+        // Limit line count
+        if array.size(lines) >= MAX_WAVE_LINES
+            line oldLine = array.shift(lines)
+            line.delete(oldLine)
+
+        line newLine = line.new(startPivot.barIdx, startPivot.price, endPivot.barIdx, endPivot.price, color=lineColor, width=lineWidth, style=line.style_solid)
+
+        array.push(lines, newLine)
+        newLine
+
+// Draw ZigZag from confirmed pivots
+drawZigZag(array<line> lines, array<Pivot> confirmedPivots, color bullColor, color bearColor, int lineWidth) =>
+    int size = array.size(confirmedPivots)
+
+    if size >= 2
+        for i = 1 to size - 1
+            Pivot prev = array.get(confirmedPivots, i - 1)
+            Pivot curr = array.get(confirmedPivots, i)
+
+            // Color based on direction
+            color lineColor = curr.price > prev.price ? bullColor : bearColor
+
+            drawWaveLine(lines, prev, curr, lineColor, lineWidth)
+
+// ============================================================================
+// WAVE LABEL DRAWING
+// ============================================================================
+
+// Draw label at confirmed pullback with Fib level
+drawFibLabel(array<label> labels, Pivot pivot, float fibLevel, int waveId, color labelColor, bool isUptrend) =>
+    if pivot.isValid() and not na(fibLevel)
+        // Limit label count
+        if array.size(labels) >= MAX_WAVE_LABELS
+            label oldLabel = array.shift(labels)
+            label.delete(oldLabel)
+
+        string labelText = getFibLevelName(fibLevel)
+
+        var labelStyle = label.style_label_up
+        labelStyle := isUptrend ? label.style_label_up : label.style_label_down
+
+        label newLabel = label.new(pivot.barIdx, pivot.price, labelText, color=labelColor, textcolor=color.white, style=labelStyle, size=size.small)
+
+        array.push(labels, newLabel)
+        newLabel
+
+// Draw wave number label at anchor
+drawWaveIdLabel(array<label> labels, Pivot anchor, int waveId, color labelColor, bool isHigh) =>
+    if anchor.isValid()
+        // Limit label count
+        if array.size(labels) >= MAX_WAVE_LABELS
+            label oldLabel = array.shift(labels)
+            label.delete(oldLabel)
+
+        string labelText = "W" + str.tostring(waveId)
+
+        var labelStyleW = label.style_label_up
+        labelStyleW := isHigh ? label.style_label_down : label.style_label_up
+
+        label newLabel = label.new(anchor.barIdx, anchor.price, labelText, color=color.new(labelColor, 70), textcolor=labelColor, style=labelStyleW, size=size.tiny)
+
+        array.push(labels, newLabel)
+        newLabel
+
+// ============================================================================
+// CANDIDATE DEBUG DRAWING
+// ============================================================================
+
+// Draw debug marker for candidate slots
+drawCandidateDebug(array<CandidateSlot> candidates, color watchingColor, color matchedColor) =>
+    int size = array.size(candidates)
+
+    if size > 0
+        for i = 0 to size - 1
+            CandidateSlot candidate = array.get(candidates, i)
+
+            if candidate.pivot.isValid() and candidate.status != SlotStatus.INVALID
+                color markerColor = candidate.status == SlotStatus.FIB_MATCHED ? matchedColor : watchingColor
+
+                string markerText = switch candidate.status
+                    SlotStatus.WATCHING => "?"
+                    SlotStatus.FIB_MATCHED => formatFibLevel(candidate.fibLevel)
+                    => ""
+
+                if markerText != ""
+                    label.new(candidate.pivot.barIdx, candidate.pivot.price, markerText, color=color.new(markerColor, 50), textcolor=markerColor, style=label.style_circle, size=size.tiny)
+
+// ============================================================================
+// TARGET LINE DRAWING
+// ============================================================================
+
+// Draw target projection lines
+drawTargetLines(array<FibTarget> targets, int fromBar, color bullColor, color bearColor, bool isUptrend) =>
+    int size = array.size(targets)
+
+    if size > 0
+        color baseColor = isUptrend ? bullColor : bearColor
+
+        for i = 0 to size - 1
+            FibTarget target = array.get(targets, i)
+
+            if not na(target.price)
+                // Delete old line if exists
+                if not na(target.targetLine)
+                    line.delete(target.targetLine)
+
+                color lineColor = getTargetColor(target.level, baseColor)
+                var lineStyle = line.style_solid
+                lineStyle := getTargetLineStyle(target.level)
+
+                // Draw line extending to current bar
+                int toBar = bar_index + 20  // Extend into future
+
+                int targetWidth = target.isHit ? 1 : 2
+                target.targetLine := line.new(fromBar, target.price, toBar, target.price, color=lineColor, width=targetWidth, style=lineStyle, extend=extend.right)
+
+                // Add label at line start
+                if not target.isHit
+                    label.new(fromBar, target.price, getFibLevelName(target.level), color=color.new(lineColor, 80), textcolor=lineColor, style=label.style_label_left, size=size.tiny)
+
+                // CRITICAL: Write back to array after mutation
+                array.set(targets, i, target)
+
+// Update target line extensions
+updateTargetLineExtensions(array<FibTarget> targets) =>
+    int size = array.size(targets)
+
+    if size > 0
+        for i = 0 to size - 1
+            FibTarget target = array.get(targets, i)
+
+            if not na(target.targetLine)
+                // Update line end to current bar + extension
+                line.set_x2(target.targetLine, bar_index + 20)
+
+                // Dim hit targets
+                if target.isHit
+                    line.set_width(target.targetLine, 1)
+                    line.set_style(target.targetLine, line.style_dotted)
+
+            // CRITICAL: Write back to array (even if just reading, for consistency)
+            array.set(targets, i, target)
+
+// ============================================================================
+// STRUCTURE VISUALIZATION
+// ============================================================================
+
+// Draw anchor markers (A and B points)
+drawAnchors(WaveState wave, color bullColor, color bearColor) =>
+    if wave.isEstablished()
+        color anchorColor = switch wave.dir
+            WaveDirection.UP => bullColor
+            WaveDirection.DOWN => bearColor
+            => color.gray
+
+        // Anchor A marker
+        if wave.anchorA.isValid()
+            var styleA = label.style_label_up
+            styleA := wave.anchorA.isHigh ? label.style_label_down : label.style_label_up
+            label.new(wave.anchorA.barIdx, wave.anchorA.price, "A", color=color.new(anchorColor, 70), textcolor=anchorColor, style=styleA, size=size.tiny)
+
+        // Anchor B marker
+        if wave.anchorB.isValid()
+            var styleB = label.style_label_up
+            styleB := wave.anchorB.isHigh ? label.style_label_down : label.style_label_up
+            label.new(wave.anchorB.barIdx, wave.anchorB.price, "B", color=color.new(anchorColor, 70), textcolor=anchorColor, style=styleB, size=size.tiny)
+
+// ============================================================================
+// INFO PANEL
+// ============================================================================
+
+// Draw info table in corner
+drawInfoPanel(WaveState wave, array<CandidateSlot> candidates, array<FibTarget> targets) =>
+    var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.rgb(30, 30, 35, 0), border_width=1, border_color=color.rgb(60, 60, 70, 0))
+
+    // Direction
+    string dirStr = switch wave.dir
+        WaveDirection.UP => "UP"
+        WaveDirection.DOWN => "DOWN"
+        => "NONE"
+    color dirColor = switch wave.dir
+        WaveDirection.UP => color.rgb(0, 230, 118)
+        WaveDirection.DOWN => color.rgb(255, 82, 82)
+        => color.rgb(180, 180, 180)
+
+    table.cell(infoTable, 0, 0, "Direction", text_color = color.rgb(200, 200, 200), text_size = size.small)
+    table.cell(infoTable, 1, 0, dirStr, text_color = dirColor, text_size = size.small)
+
+    // Wave ID
+    table.cell(infoTable, 0, 1, "Wave", text_color = color.rgb(200, 200, 200), text_size = size.small)
+    table.cell(infoTable, 1, 1, str.tostring(wave.waveId), text_color = color.white, text_size = size.small)
+
+    // Impulse range
+    float impulse = wave.getImpulseRange()
+    string impulseStr = na(impulse) ? "-" : str.tostring(impulse, "#.##")
+    table.cell(infoTable, 0, 2, "Impulse", text_color = color.rgb(200, 200, 200), text_size = size.small)
+    table.cell(infoTable, 1, 2, impulseStr, text_color = color.white, text_size = size.small)
+
+    // Candidates
+    int candCount = array.size(candidates)
+    table.cell(infoTable, 0, 3, "Candidates", text_color = color.rgb(200, 200, 200), text_size = size.small)
+    table.cell(infoTable, 1, 3, str.tostring(candCount) + "/3", text_color = color.rgb(255, 235, 59), text_size = size.small)
+
+    // Last confirmed Fib
+    string fibStr = na(wave.confirmedFib) ? "-" : getFibLevelName(wave.confirmedFib)
+    table.cell(infoTable, 0, 4, "Last Fib", text_color = color.rgb(200, 200, 200), text_size = size.small)
+    table.cell(infoTable, 1, 4, fibStr, text_color = color.rgb(0, 229, 255), text_size = size.small)
+
+    // Targets hit
+    int hitCount = countHitTargets(targets)
+    int totalTargets = array.size(targets)
+    string targetsStr = str.tostring(hitCount) + "/" + str.tostring(totalTargets)
+    table.cell(infoTable, 0, 5, "Targets", text_color = color.rgb(200, 200, 200), text_size = size.small)
+    table.cell(infoTable, 1, 5, targetsStr, text_color = color.rgb(118, 255, 3), text_size = size.small)
+
+// ============================================================================
+// DEBUG PANEL
+// ============================================================================
+
+// Draw detailed debug panel for troubleshooting
+drawDebugPanel(WaveState wave, array<CandidateSlot> candidates, array<Pivot> confirmedPivots, int seedBar, bool seedArmed, Pivot seedAnchor, float minImpulsePercent, bool hasPivotHigh, bool hasPivotLow, int lastPivotHighBar, int lastPivotLowBar) =>
+    var table debugTable = table.new(position.bottom_right, 2, 18, bgcolor=color.rgb(25, 25, 30, 0), border_width=1, border_color=color.rgb(50, 50, 60, 0))
+
+    color labelColor = color.rgb(180, 180, 180)
+    color valueColor = color.white
+    color goodColor = color.rgb(0, 230, 118)
+    color badColor = color.rgb(255, 82, 82)
+    color warnColor = color.rgb(255, 193, 7)
+    string txtSize = size.small
+
+    int row = 0
+
+    // Header
+    table.cell(debugTable, 0, row, "RJ-Wave Debug", text_color = color.rgb(0, 229, 255), text_size = txtSize)
+    table.cell(debugTable, 1, row, "", text_color = valueColor, text_size = txtSize)
+    row += 1
+
+    // Bar Index
+    table.cell(debugTable, 0, row, "Bar Index", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, str.tostring(bar_index), text_color = valueColor, text_size = txtSize)
+    row += 1
+
+    // Seed Info
+    table.cell(debugTable, 0, row, "Seed Bar", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, na(seedBar) ? "not set" : str.tostring(seedBar), text_color = na(seedBar) ? badColor : valueColor, text_size = txtSize)
+    row += 1
+
+    table.cell(debugTable, 0, row, "Seed Anchor", text_color = labelColor, text_size = txtSize)
+    string seedStr = seedAnchor.isValid() ? (seedAnchor.isHigh ? "HIGH" : "LOW") + " @ " + str.tostring(seedAnchor.price, "#.##") : "invalid"
+    table.cell(debugTable, 1, row, seedStr, text_color = seedAnchor.isValid() ? valueColor : badColor, text_size = txtSize)
+    row += 1
+
+    table.cell(debugTable, 0, row, "Seed Armed", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, seedArmed ? "YES" : "NO", text_color = seedArmed ? goodColor : warnColor, text_size = txtSize)
+    row += 1
+
+    // Separator
+    table.cell(debugTable, 0, row, "---", text_color = color.rgb(60, 60, 70), text_size = txtSize)
+    table.cell(debugTable, 1, row, "---", text_color = color.rgb(60, 60, 70), text_size = txtSize)
+    row += 1
+
+    // Anchor A
+    table.cell(debugTable, 0, row, "AnchorA Valid", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, wave.anchorA.isValid() ? "YES" : "NO", text_color = wave.anchorA.isValid() ? goodColor : badColor, text_size = txtSize)
+    row += 1
+
+    table.cell(debugTable, 0, row, "AnchorA Price", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, wave.anchorA.isValid() ? str.tostring(wave.anchorA.price, "#.####") : "-", text_color = valueColor, text_size = txtSize)
+    row += 1
+
+    table.cell(debugTable, 0, row, "AnchorA Type", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, wave.anchorA.isValid() ? (wave.anchorA.isHigh ? "HIGH" : "LOW") : "-", text_color = valueColor, text_size = txtSize)
+    row += 1
+
+    // Separator
+    table.cell(debugTable, 0, row, "---", text_color = color.rgb(60, 60, 70), text_size = txtSize)
+    table.cell(debugTable, 1, row, "---", text_color = color.rgb(60, 60, 70), text_size = txtSize)
+    row += 1
+
+    // Anchor B
+    table.cell(debugTable, 0, row, "AnchorB Valid", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, wave.anchorB.isValid() ? "YES" : "NO", text_color = wave.anchorB.isValid() ? goodColor : warnColor, text_size = txtSize)
+    row += 1
+
+    table.cell(debugTable, 0, row, "AnchorB Price", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, wave.anchorB.isValid() ? str.tostring(wave.anchorB.price, "#.####") : "-", text_color = valueColor, text_size = txtSize)
+    row += 1
+
+    // Impulse calculation
+    float impulsePercent = na
+    if wave.anchorA.isValid() and wave.anchorB.isValid()
+        float impulseSize = math.abs(wave.anchorB.price - wave.anchorA.price)
+        impulsePercent := (impulseSize / wave.anchorA.price) * 100
+
+    table.cell(debugTable, 0, row, "Impulse %", text_color = labelColor, text_size = txtSize)
+    string impStr = na(impulsePercent) ? "-" : str.tostring(impulsePercent, "#.##") + "% (min: " + str.tostring(minImpulsePercent, "#.#") + "%)"
+    color impColor = na(impulsePercent) ? valueColor : (impulsePercent >= minImpulsePercent ? goodColor : badColor)
+    table.cell(debugTable, 1, row, impStr, text_color = impColor, text_size = txtSize)
+    row += 1
+
+    // Separator
+    table.cell(debugTable, 0, row, "---", text_color = color.rgb(60, 60, 70), text_size = txtSize)
+    table.cell(debugTable, 1, row, "---", text_color = color.rgb(60, 60, 70), text_size = txtSize)
+    row += 1
+
+    // Pivot detection
+    table.cell(debugTable, 0, row, "PivotH Now", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, hasPivotHigh ? "YES" : "no", text_color = hasPivotHigh ? goodColor : valueColor, text_size = txtSize)
+    row += 1
+
+    table.cell(debugTable, 0, row, "PivotL Now", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, hasPivotLow ? "YES" : "no", text_color = hasPivotLow ? goodColor : valueColor, text_size = txtSize)
+    row += 1
+
+    // Counts
+    table.cell(debugTable, 0, row, "Candidates", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, str.tostring(array.size(candidates)), text_color = valueColor, text_size = txtSize)
+    row += 1
+
+    table.cell(debugTable, 0, row, "Confirmed", text_color = labelColor, text_size = txtSize)
+    table.cell(debugTable, 1, row, str.tostring(array.size(confirmedPivots)), text_color = array.size(confirmedPivots) > 0 ? goodColor : valueColor, text_size = txtSize)
+
+// ============================================================================
+// CLEANUP FUNCTIONS
+// ============================================================================
+
+// Delete all visual elements
+cleanupVisuals(array<line> lines, array<label> labels, array<FibTarget> targets) =>
+    // Delete lines
+    int lineCount = array.size(lines)
+    if lineCount > 0
+        for i = 0 to lineCount - 1
+            line.delete(array.get(lines, i))
+    array.clear(lines)
+
+    // Delete labels
+    int labelCount = array.size(labels)
+    if labelCount > 0
+        for i = 0 to labelCount - 1
+            label.delete(array.get(labels, i))
+    array.clear(labels)
+
+    // Delete target lines
+    clearTargets(targets)
+
+
+var RJWaveState g_state = newRJWaveState()
+var array<float> g_activeFibLevels = array.new<float>()
+var bool g_initialized = false
+var int g_lastPivotBar = 0
+var int g_lastPivotCountDrawn = 0  // Track how many pivots have been drawn for ZigZag
+
+// Seed-based initialization
+var int g_seedBar = na           // Bar index where seed was found
+var bool g_seedArmed = false     // True when initial impulse is valid (>= minImpulsePercent)
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+// Build active Fib levels array (once)
+if barstate.isfirst
+    g_activeFibLevels := buildActiveFibLevels(
+         i_useFib236, i_useFib382, i_useFib500,
+         i_useFib618, i_useFib786, i_useFib886,
+         i_useFib100, i_useFib127, i_useFib162, i_useFib200)
+
+// ============================================================================
+// SEED DETECTION
+// ============================================================================
+
+// Find seed extremes in lookback window using ta.lowestbars/highestbars
+// These return the offset (bars ago) to the extreme within the window
+float seedLowestLow = ta.lowest(low, i_seedLookback)
+float seedHighestHigh = ta.highest(high, i_seedLookback)
+
+int barsToLowest = ta.lowestbars(low, i_seedLookback)   // Returns negative offset
+int barsToHighest = ta.highestbars(high, i_seedLookback) // Returns negative offset
+
+// Convert to absolute bar index (offset is negative, so add it)
+int seedLowBar = bar_index + barsToLowest
+int seedHighBar = bar_index + barsToHighest
+
+// Determine seed anchor based on mode
+Pivot seedAnchor = switch i_seedMode
+    "Lowest Low" => Pivot.new(seedLowestLow, seedLowBar, false)
+    "Highest High" => Pivot.new(seedHighestHigh, seedHighBar, true)
+    => seedLowBar < seedHighBar ? Pivot.new(seedLowestLow, seedLowBar, false) : Pivot.new(seedHighestHigh, seedHighBar, true)  // Auto: earlier extreme
+
+// ============================================================================
+// PIVOT DETECTION
+// ============================================================================
+
+// Detect pivots (delayed by i_pivotRightBars)
+[pivotHighPrice, pivotLowPrice] = detectPivots(i_pivotLeftBars, i_pivotRightBars)
+
+// Create pivot objects
+Pivot newPivotHigh = createPivotHigh(pivotHighPrice, i_pivotRightBars)
+Pivot newPivotLow = createPivotLow(pivotLowPrice, i_pivotRightBars)
+
+bool hasPivotHigh = newPivotHigh.isValid()
+bool hasPivotLow = newPivotLow.isValid()
+
+// ============================================================================
+// STATE MACHINE LOGIC
+// ============================================================================
+
+// Current price data
+float curHigh = high
+float curLow = low
+float curClose = close
+
+// --- Phase 1: Initialize if not yet established ---
+if not g_state.wave.isEstablished()
+    // Use seed anchor as starting point if we don't have anchorA yet
+    if not g_state.wave.anchorA.isValid() and seedAnchor.isValid()
+        // Only use seed if we're past the seed bar (streaming from seed forward)
+        if bar_index >= seedAnchor.barIdx
+            g_state.wave.anchorA := seedAnchor
+            g_seedBar := seedAnchor.barIdx
+
+    // Look for opposite pivot to establish direction
+    if g_state.wave.anchorA.isValid()
+        // Check for pivot in opposite direction
+        bool gotOpposite = false
+        Pivot candidateB = newPivot()
+
+        if g_state.wave.anchorA.isHigh and hasPivotLow
+            // High seed, got Low = potential Downtrend
+            candidateB := newPivotLow
+            gotOpposite := true
+        else if not g_state.wave.anchorA.isHigh and hasPivotHigh
+            // Low seed, got High = potential Uptrend
+            candidateB := newPivotHigh
+            gotOpposite := true
+
+        if gotOpposite and candidateB.isValid()
+            // Check minimum impulse size for arming
+            float impulseSize = math.abs(candidateB.price - g_state.wave.anchorA.price)
+            float impulsePercent = (impulseSize / g_state.wave.anchorA.price) * 100
+
+            if impulsePercent >= i_minImpulsePercent
+                // Armed! Establish direction
+                if g_state.wave.anchorA.isHigh
+                    g_state.wave.dir := WaveDirection.DOWN
+                else
+                    g_state.wave.dir := WaveDirection.UP
+
+                g_state.wave.anchorB := candidateB
+                g_state.wave.impulseB := candidateB  // Initial impulse is complete
+                g_state.wave.waveId := 1
+                g_initialized := true
+                g_seedArmed := true
+
+                // Add initial anchors to history for ZigZag
+                addToHistory(g_state.confirmedPivots, g_state.wave.anchorA, 50)
+                addToHistory(g_state.confirmedPivots, g_state.wave.anchorB, 50)
+
+// --- Phase 2: Process established wave ---
+else
+    // Check if we're waiting for new anchorB after commit
+    bool waitingForB = not g_state.wave.anchorB.isValid()
+
+    if waitingForB
+        // After commit: anchorB was reset, need new pivot in trend direction
+        // Note: Do NOT add to history here - only committed structure goes to history
+        if g_state.wave.dir == WaveDirection.UP and hasPivotHigh
+            // New high becomes anchorB
+            g_state.wave.anchorB := newPivotHigh
+        else if g_state.wave.dir == WaveDirection.DOWN and hasPivotLow
+            // New low becomes anchorB
+            g_state.wave.anchorB := newPivotLow
+    else
+        // Normal processing: both A and B are valid
+
+        // 2a. Check structure validity
+        ValidationResult structureCheck = validateStructure(g_state.wave, curHigh, curLow, curClose, i_invalidMode)
+
+        if not structureCheck.isValid
+            // Structure broken - reset
+            g_state.structureValid := false
+            resetStructure(g_state, newPivotHigh.isValid() ? newPivotHigh : newPivotLow)
+
+            if i_alertOnInvalid
+                alert("RJ-Wave: Structure invalidated - " + structureCheck.reason, alert.freq_once_per_bar)
+        else
+            // 2b. Check for wave extension (new extreme)
+            bool extended = false
+            if g_state.wave.dir == WaveDirection.UP and hasPivotHigh
+                extended := extendWave(g_state, newPivotHigh)
+            else if g_state.wave.dir == WaveDirection.DOWN and hasPivotLow
+                extended := extendWave(g_state, newPivotLow)
+
+            // 2c. Check for pullback candidate (only when A+B both valid)
+            Pivot pullbackPivot = switch g_state.wave.dir
+                WaveDirection.UP => newPivotLow
+                WaveDirection.DOWN => newPivotHigh
+                => newPivot()
+
+            if pullbackPivot.isValid() and isPullbackCandidate(g_state.wave, pullbackPivot)
+                // Add to candidate slots
+                addCandidate(g_state.candidates, pullbackPivot)
+
+            // 2d. Update all candidates (recalculate Fib matching + helper lines)
+            updateAllCandidates(g_state.candidates, g_state.wave, g_activeFibLevels, i_fibTolerance, i_showFibHelpers, i_colorBullish, i_colorBearish)
+
+            // 2e. Check for confirmation (FibMatched + Break)
+            ValidationResult confirmResult = validateAndConfirm(
+                 g_state.candidates,
+                 g_state.wave,
+                 curHigh, curLow, curClose,
+                 i_breakMode)
+
+            if confirmResult.isValid
+                // Commit the wave!
+                CommitResult commit = commitWave(g_state, confirmResult.confirmedCandidate)
+
+                if commit.committed
+                    // Calculate new targets
+                    if i_showTargets
+                        array<FibTarget> newTargets = calculateTargets(
+                             g_state.wave,
+                             i_target100, i_target127, i_target162, i_target200)
+                        replaceTargets(g_state.targets, newTargets)
+
+                    if i_alertOnNewWave
+                        alert("RJ-Wave: " + commit.description, alert.freq_once_per_bar)
+
+            // 2f. Purge invalid candidates
+            purgeInvalidCandidates(g_state.candidates)
+
+            // 2g. Update targets (check if hit)
+            if array.size(g_state.targets) > 0
+                updateTargets(g_state.targets, g_state.wave, curHigh, curLow)
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Draw wave lines (ZigZag between confirmed pivots)
+// On last bar: draw all missing segments to catch up with history
+int pivotCount = array.size(g_state.confirmedPivots)
+if i_showWaveLines and pivotCount >= 2 and pivotCount > g_lastPivotCountDrawn
+    // Calculate start index for drawing
+    int startIdx = g_lastPivotCountDrawn > 0 ? g_lastPivotCountDrawn : 1
+
+    // Draw all missing segments
+    for i = startIdx to pivotCount - 1
+        Pivot prevPivot = array.get(g_state.confirmedPivots, i - 1)
+        Pivot currPivot = array.get(g_state.confirmedPivots, i)
+        color lineColor = currPivot.price > prevPivot.price ? i_colorBullish : i_colorBearish
+        drawWaveLine(g_state.waveLines, prevPivot, currPivot, lineColor, 2)
+
+    g_lastPivotCountDrawn := pivotCount
+
+// Draw LIVE extending line from last confirmed pivot to current anchorB
+// This line grows with the trend until a pullback is confirmed or structure breaks
+var line g_liveLine = na
+if i_showWaveLines and g_state.wave.hasCompleteImpulse() and pivotCount >= 1
+    Pivot lastConfirmed = array.get(g_state.confirmedPivots, pivotCount - 1)
+    Pivot currentB = g_state.wave.anchorB
+
+    if lastConfirmed.isValid() and currentB.isValid()
+        // Only draw if anchorB is different from last confirmed (not same point)
+        if lastConfirmed.barIdx != currentB.barIdx or lastConfirmed.price != currentB.price
+            // Color based on direction
+            color liveColor = g_state.wave.dir == WaveDirection.UP ? i_colorBullish : i_colorBearish
+
+            // Delete old live line and create new one
+            if not na(g_liveLine)
+                line.delete(g_liveLine)
+
+            g_liveLine := line.new(lastConfirmed.barIdx, lastConfirmed.price, currentB.barIdx, currentB.price, color=liveColor, width=2, style=line.style_dashed)
+
+// Draw Fib labels at confirmed pullbacks
+if i_showWaveLabels and g_state.wave.confirmedPB.isValid()
+    bool isUp = g_state.wave.dir == WaveDirection.UP
+    color lblColor = isUp ? i_colorBullish : i_colorBearish
+    drawFibLabel(g_state.waveLabels, g_state.wave.confirmedPB, g_state.wave.confirmedFib, g_state.wave.waveId, lblColor, isUp)
+
+// Draw target lines
+if i_showTargets and array.size(g_state.targets) > 0
+    bool isUp = g_state.wave.dir == WaveDirection.UP
+    int fromBar = g_state.wave.confirmedPB.isValid() ? g_state.wave.confirmedPB.barIdx : bar_index
+    drawTargetLines(g_state.targets, fromBar, i_colorBullish, i_colorBearish, isUp)
+    updateTargetLineExtensions(g_state.targets)
+
+// Draw debug candidates
+if i_showCandidates
+    drawCandidateDebug(g_state.candidates, i_colorNeutral, color.yellow)
+
+// Draw info panel
+if i_showInfoPanel
+    drawInfoPanel(g_state.wave, g_state.candidates, g_state.targets)
+
+// Draw debug panel
+if i_showDebugPanel
+    drawDebugPanel(g_state.wave, g_state.candidates, g_state.confirmedPivots, g_seedBar, g_seedArmed, seedAnchor, i_minImpulsePercent, hasPivotHigh, hasPivotLow, 0, 0)
+
+// ============================================================================
+// PLOTS (for compatibility)
+// ============================================================================
+
+// RAW Pivot markers - ALWAYS show when debug enabled (no isEstablished gate)
+// This shows if pivot detection works at all
+plotshape(i_showRawPivots and hasPivotHigh, style=shape.xcross, location=location.abovebar, size=size.tiny, color=color.gray, offset=-i_pivotRightBars, title="RAW PivotHigh")
+plotshape(i_showRawPivots and hasPivotLow, style=shape.xcross, location=location.belowbar, size=size.tiny, color=color.gray, offset=-i_pivotRightBars, title="RAW PivotLow")
+
+// Pullback candidates (only when wave established)
+// Uptrend: Pullback = PivotLow (potential support)
+// Downtrend: Pullback = PivotHigh (potential resistance)
+plotshape(i_showRawPivots and hasPivotLow and g_state.wave.isEstablished() and g_state.wave.dir == WaveDirection.UP,
+     style=shape.triangleup, location=location.belowbar,
+     color=i_colorBullish, size=size.tiny, offset=-i_pivotRightBars, title="Pullback Low (Uptrend)")
+
+plotshape(i_showRawPivots and hasPivotHigh and g_state.wave.isEstablished() and g_state.wave.dir == WaveDirection.DOWN,
+     style=shape.triangledown, location=location.abovebar,
+     color=i_colorBearish, size=size.tiny, offset=-i_pivotRightBars, title="Pullback High (Downtrend)")
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+// Track wave changes for alertcondition (cannot use history on UDT fields directly)
+var int g_prevWaveId = 0
+var bool g_prevStructureValid = true
+int currentWaveId = g_state.wave.waveId
+bool currentStructureValid = g_state.structureValid
+bool newWaveDetected = currentWaveId > g_prevWaveId
+bool structureInvalidated = not currentStructureValid and g_prevStructureValid
+g_prevWaveId := currentWaveId
+g_prevStructureValid := currentStructureValid
+
+alertcondition(newWaveDetected, title="New Wave Confirmed", message="RJ-Wave: New wave confirmed at Fib level")
+
+alertcondition(structureInvalidated, title="Structure Invalid", message="RJ-Wave: Wave structure invalidated")

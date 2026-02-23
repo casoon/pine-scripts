@@ -1,0 +1,485 @@
+//@version=6
+// ============================================================================
+// Relative Leg Efficiency [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2025-12-20 19:41:46
+// ============================================================================
+// Pivot-to-pivot leg quality scoring with path, time, and counter-pressure efficiency
+//
+// Features:
+//   ✓ Live RLE scoring during the active leg
+//   ✓ Path efficiency (air distance vs path distance)
+//   ✓ Time efficiency (speed normalization or time penalty)
+//   ✓ Counter-pressure (count or body-weighted, or both)
+//   ✓ Pivot-based legs with minimum bars and ATR move filters
+//   ✓ Leg line coloring, end labels, and histogram panel
+//
+// ============================================================================
+indicator("Relative Leg Efficiency [WavesUnchained]", shorttitle="RLE", overlay=true, max_labels_count=200, max_lines_count=300)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Relative Leg Efficiency (RLE)
+// ═══════════════════════════════════════════════════════════════════════════
+// Version: 1.0.0
+// Author: WavesUnchained
+//
+// PURPOSE:
+// - Live leg quality scoring (0-100) from pivot to pivot
+// - Filter clean, directional legs from choppy movement
+//
+// ARCHITECTURE:
+// - inputs.pine: user settings
+// - leg_state.pine: pivot detection and leg lifecycle
+// - rle_calc.pine: path/time/counter metrics and scoring
+// - visualization.pine: lines, labels, histogram
+// - alerts.pine: RLE-based alerts
+// ═══════════════════════════════════════════════════════════════════════════
+
+// NOTE: Modules are combined by the build system.
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+// ==== INPUTS MODULE ====
+// User configuration for Relative Leg Efficiency
+
+// ==== GROUP: LEG DETECTION ====
+int pivotLeft = input.int(3, "Pivot Left Bars", minval=1, maxval=20, group="Leg Detection")
+int pivotRight = input.int(3, "Pivot Right Bars", minval=1, maxval=20, group="Leg Detection")
+int minLegBars = input.int(6, "Minimum Bars per Leg", minval=1, maxval=100, group="Leg Detection")
+int atrLength = input.int(14, "ATR Length", minval=5, maxval=100, group="Leg Detection")
+float minLegMoveAtr = input.float(1.0, "Minimum Leg Move (ATR)", minval=0.1, maxval=10.0, step=0.1, group="Leg Detection")
+
+// ==== GROUP: PATH EFFICIENCY ====
+series float pathSource = input.source(hlc3, "Path Source", group="Path Efficiency")
+
+// ==== GROUP: TIME EFFICIENCY ====
+string timeMode = input.string("Speed Norm", "Time Mode", options=["Speed Norm", "Time Penalty", "Combined"], group="Time Efficiency")
+int speedLookback = input.int(20, "Speed Lookback (legs)", minval=5, maxval=100, group="Time Efficiency")
+float speedClampMax = input.float(2.0, "Speed Clamp Max", minval=1.0, maxval=5.0, step=0.1, group="Time Efficiency")
+int timeRefLookback = input.int(20, "TimeRef Lookback (legs)", minval=5, maxval=100, group="Time Efficiency")
+
+// ==== GROUP: COUNTER PRESSURE ====
+string counterMode = input.string("Body Weighted", "Counter Mode", options=["Count", "Body Weighted", "Both"], group="Counter Pressure")
+bool useMeaningfulCounter = input.bool(false, "Count Only Meaningful Bodies", group="Counter Pressure")
+float counterBodyAtr = input.float(0.2, "Body Minimum (ATR)", minval=0.0, maxval=2.0, step=0.05, group="Counter Pressure")
+
+// ==== GROUP: RLE WEIGHTS ====
+float weightPath = input.float(0.5, "Path Weight", minval=0.0, maxval=1.0, step=0.05, group="RLE Weights")
+float weightTime = input.float(0.2, "Time Weight", minval=0.0, maxval=1.0, step=0.05, group="RLE Weights")
+float weightCounter = input.float(0.3, "Counter Weight", minval=0.0, maxval=1.0, step=0.05, group="RLE Weights")
+
+// ==== GROUP: THRESHOLDS ====
+int highThreshold = input.int(75, "High Threshold", minval=1, maxval=100, group="Thresholds")
+int midThreshold = input.int(55, "Mid Threshold", minval=1, maxval=100, group="Thresholds")
+
+// ==== GROUP: SPIKE GUARD ====
+bool enableSpikeGuard = input.bool(false, "Enable Spike Guard", group="Spike Guard")
+float spikeAtrMult = input.float(2.5, "Spike Body (ATR)", minval=0.5, maxval=10.0, step=0.1, group="Spike Guard")
+float spikeCap = input.float(85, "Spike RLE Cap", minval=1, maxval=100, step=1, group="Spike Guard")
+
+// ==== GROUP: DISPLAY ====
+bool showLegLines = input.bool(true, "Show Leg Lines", group="Display")
+bool showLiveLine = input.bool(true, "Show Live Leg Line", group="Display")
+bool showLegLabels = input.bool(true, "Show Completed Leg Labels", group="Display")
+bool showLegDetails = input.bool(false, "Show Detail Line", group="Display")
+bool showLiveLabel = input.bool(false, "Show Live Label", group="Display")
+bool showHistogram = input.bool(true, "Show RLE Histogram", group="Display")
+string histogramMode = input.string("Overlay", "Histogram Mode", options=["Pane", "Overlay"], group="Display")
+bool useAutoHistogramHeight = input.bool(true, "Auto Histogram Height", group="Display")
+float histogramHeightPct = input.float(0.08, "Histogram Height (% of range)", minval=0.05, maxval=0.5, step=0.01, group="Display")
+int histogramRangeLookback = input.int(200, "Histogram Range Lookback", minval=20, maxval=1000, group="Display")
+float histogramMaxAtr = input.float(1.5, "Histogram Max Height (ATR)", minval=0.5, maxval=20.0, step=0.5, group="Display")
+int histogramTransparency = input.int(75, "Histogram Transparency", minval=0, maxval=90, group="Display")
+
+// ==== GROUP: ALERTS ====
+bool alertsOnBarClose = input.bool(true, "Alerts on Bar Close Only", group="Alerts")
+int alertThreshold = input.int(70, "Alert Threshold", minval=1, maxval=100, group="Alerts")
+
+
+// ============================================================================
+// MODULE: leg_state
+// ============================================================================
+
+// ==== LEG STATE MODULE ====
+// Pivot detection and leg lifecycle management
+
+// === PIVOT STATE ===
+var int lastPivotIndex = na
+var float lastPivotPrice = na
+var int lastPivotType = 0  // 1 = pivot high, -1 = pivot low
+var float lastPivotAtr = na
+
+// === LEG STATE ===
+var bool legCompleted = false
+var int legStartIndex = na
+var float legStartPrice = na
+var int legEndIndex = na
+var float legEndPrice = na
+var int legDirection = 0  // 1 = up leg, -1 = down leg
+
+// === PIVOT DETECTION ===
+float pivotHigh = ta.pivothigh(high, pivotLeft, pivotRight)
+float pivotLow = ta.pivotlow(low, pivotLeft, pivotRight)
+
+bool hasPivotHigh = not na(pivotHigh)
+bool hasPivotLow = not na(pivotLow)
+
+int newPivotType = 0
+int newPivotIndex = na
+float newPivotPrice = na
+
+if hasPivotHigh and hasPivotLow
+    float lastPrice = lastPivotPrice
+    bool useHigh = na(lastPrice) ? true : math.abs(pivotHigh - lastPrice) >= math.abs(pivotLow - lastPrice)
+    newPivotType := useHigh ? 1 : -1
+    newPivotIndex := bar_index - pivotRight
+    newPivotPrice := useHigh ? pivotHigh : pivotLow
+else if hasPivotHigh
+    newPivotType := 1
+    newPivotIndex := bar_index - pivotRight
+    newPivotPrice := pivotHigh
+else if hasPivotLow
+    newPivotType := -1
+    newPivotIndex := bar_index - pivotRight
+    newPivotPrice := pivotLow
+
+legCompleted := false
+
+// === UPDATE LEG STATE ON NEW PIVOT ===
+if newPivotType != 0
+    if lastPivotType == 0
+        lastPivotIndex := newPivotIndex
+        lastPivotPrice := newPivotPrice
+        lastPivotType := newPivotType
+        lastPivotAtr := ta.atr(atrLength)[pivotRight]
+    else if newPivotType == lastPivotType
+        bool replace = (newPivotType == 1 and newPivotPrice >= lastPivotPrice) or
+                       (newPivotType == -1 and newPivotPrice <= lastPivotPrice)
+        if replace
+            lastPivotIndex := newPivotIndex
+            lastPivotPrice := newPivotPrice
+            lastPivotAtr := ta.atr(atrLength)[pivotRight]
+    else
+        int barsBetween = newPivotIndex - lastPivotIndex
+        float minMove = minLegMoveAtr * nz(lastPivotAtr, ta.atr(atrLength))
+        float move = math.abs(newPivotPrice - lastPivotPrice)
+        bool passBars = barsBetween >= minLegBars
+        bool passMove = move >= minMove
+
+        if passBars and passMove
+            legCompleted := true
+            legStartIndex := lastPivotIndex
+            legStartPrice := lastPivotPrice
+            legEndIndex := newPivotIndex
+            legEndPrice := newPivotPrice
+            legDirection := lastPivotType == -1 ? 1 : -1
+
+            lastPivotIndex := newPivotIndex
+            lastPivotPrice := newPivotPrice
+            lastPivotType := newPivotType
+            lastPivotAtr := ta.atr(atrLength)[pivotRight]
+
+// === ACTIVE LEG STATE ===
+bool hasActiveLeg = lastPivotType != 0
+int activeLegStartIndex = lastPivotIndex
+float activeLegStartPrice = lastPivotPrice
+int activeLegDirection = lastPivotType == -1 ? 1 : lastPivotType == 1 ? -1 : 0
+int activeLegBars = hasActiveLeg ? bar_index - activeLegStartIndex : 0
+float activeLegEndPrice = activeLegDirection == 1 ? high : activeLegDirection == -1 ? low : pathSource
+
+
+// ============================================================================
+// MODULE: rle_calc
+// ============================================================================
+
+// ==== RLE CALCULATION MODULE ====
+// Path, time, and counter-pressure metrics with weighted scoring
+
+// === BASE SERIES ===
+float atr = ta.atr(atrLength)
+float src = pathSource
+float body = math.abs(close - open)
+bool isBull = close > open
+bool isBear = close < open
+bool isMeaningful = body >= atr * counterBodyAtr
+
+float bodyAdd = useMeaningfulCounter ? (isMeaningful ? body : 0.0) : body
+float bullBodyAdd = isBull ? bodyAdd : 0.0
+float bearBodyAdd = isBear ? bodyAdd : 0.0
+float bullCountAdd = isBull and (not useMeaningfulCounter or isMeaningful) ? 1.0 : 0.0
+float bearCountAdd = isBear and (not useMeaningfulCounter or isMeaningful) ? 1.0 : 0.0
+
+// === CUMULATIVE SERIES FOR FAST SEGMENT METRICS ===
+var float pathCum = na
+var float bodyCum = na
+var float bullBodyCum = na
+var float bearBodyCum = na
+var float bullCountCum = na
+var float bearCountCum = na
+
+pathCum := nz(pathCum[1]) + math.abs(src - nz(src[1], src))
+bodyCum := nz(bodyCum[1]) + bodyAdd
+bullBodyCum := nz(bullBodyCum[1]) + bullBodyAdd
+bearBodyCum := nz(bearBodyCum[1]) + bearBodyAdd
+bullCountCum := nz(bullCountCum[1]) + bullCountAdd
+bearCountCum := nz(bearCountCum[1]) + bearCountAdd
+
+// === HELPERS ===
+f_clamp01(float v) =>
+    math.min(math.max(v, 0.0), 1.0)
+
+f_array_avg_float(float[] arr) =>
+    float total = 0.0
+    int count = array.size(arr)
+    if count == 0
+        na
+    else
+        for i = 0 to count - 1
+            total += array.get(arr, i)
+        total / count
+
+f_array_median_int(int[] arr) =>
+    int count = array.size(arr)
+    if count == 0
+        na
+    else
+        int[] tmp = array.copy(arr)
+        array.sort(tmp)
+        int mid = count / 2
+        count % 2 == 1 ? array.get(tmp, mid) : (array.get(tmp, mid - 1) + array.get(tmp, mid)) / 2.0
+
+f_time_eff_speed(float speed, float speedAvg) =>
+    if na(speedAvg) or speedAvg <= 0.0
+        0.5
+    else
+        float norm = speed / speedAvg
+        float clamped = math.min(math.max(norm, 0.0), speedClampMax)
+        clamped / speedClampMax
+
+f_time_eff_penalty(int barsInLeg, float timeRef) =>
+    if na(timeRef) or timeRef <= 0.0
+        0.5
+    else
+        1.0 / (1.0 + (barsInLeg / timeRef))
+
+f_counter_ratio(int barsInLeg, float counterCount, float counterBody, float totalBody) =>
+    float ratioCount = barsInLeg > 0 ? counterCount / barsInLeg : 0.0
+    float ratioBody = totalBody > 0.0 ? counterBody / totalBody : 0.0
+    float ratio = counterMode == "Count" ? ratioCount : counterMode == "Body Weighted" ? ratioBody : (0.3 * ratioCount + 0.7 * ratioBody)
+    f_clamp01(ratio)
+
+f_rle_score(float pe, float tf, float cp) =>
+    float wsum = weightPath + weightTime + weightCounter
+    wsum <= 0.0 ? na : 100.0 * (weightPath * pe + weightTime * tf + weightCounter * cp) / wsum
+
+// === LEG HISTORY (FOR TIME NORMALIZATION) ===
+var float[] speedHistory = array.new_float()
+var int[] lengthHistory = array.new_int()
+
+float speedAvg = f_array_avg_float(speedHistory)
+float timeRef = f_array_median_int(lengthHistory)
+
+// === ACTIVE LEG METRICS ===
+bool activeEligible = hasActiveLeg and activeLegBars >= minLegBars and math.abs(activeLegEndPrice - activeLegStartPrice) >= (minLegMoveAtr * atr)
+
+float activeAir = activeEligible ? math.abs(activeLegEndPrice - activeLegStartPrice) : na
+float activePath = activeEligible ? (pathCum - pathCum[activeLegBars]) : na
+float activeTotalBody = activeEligible ? (bodyCum - bodyCum[activeLegBars]) : na
+float activeCounterCount = activeEligible ? (activeLegDirection == 1 ? bearCountCum - bearCountCum[activeLegBars] : bullCountCum - bullCountCum[activeLegBars]) : na
+float activeCounterBody = activeEligible ? (activeLegDirection == 1 ? bearBodyCum - bearBodyCum[activeLegBars] : bullBodyCum - bullBodyCum[activeLegBars]) : na
+float activeMaxBody = activeEligible ? ta.highest(body, activeLegBars) : na
+
+float activePE = activeEligible and activePath > 0.0 ? f_clamp01(activeAir / activePath) : na
+float activeSpeed = activeEligible and activeLegBars > 0 ? activeAir / activeLegBars : na
+float activeTfSpeed = activeEligible ? f_time_eff_speed(activeSpeed, speedAvg) : na
+float activeTfPenalty = activeEligible ? f_time_eff_penalty(activeLegBars, timeRef) : na
+float activeTF = activeEligible ? (timeMode == "Speed Norm" ? activeTfSpeed : timeMode == "Time Penalty" ? activeTfPenalty : (activeTfSpeed + activeTfPenalty) / 2.0) : na
+float activeRatio = activeEligible ? f_counter_ratio(activeLegBars, activeCounterCount, activeCounterBody, activeTotalBody) : na
+float activeCP = activeEligible ? (1.0 - activeRatio) : na
+float activeRLE = activeEligible ? f_rle_score(activePE, activeTF, activeCP) : na
+
+if enableSpikeGuard and activeEligible and not na(activeMaxBody) and activeMaxBody > spikeAtrMult * atr and not na(activeRLE)
+    activeRLE := math.min(activeRLE, spikeCap)
+
+// === COMPLETED LEG METRICS ===
+var float lastCompletedRLE = na
+var float lastCompletedPE = na
+var float lastCompletedTF = na
+var float lastCompletedCP = na
+var int lastCompletedBars = na
+
+if legCompleted
+    int endOffset = bar_index - legEndIndex
+    int startOffset = bar_index - legStartIndex
+    int barsInLeg = legEndIndex - legStartIndex
+
+    float legAir = math.abs(legEndPrice - legStartPrice)
+    float legPath = pathCum[endOffset] - pathCum[startOffset]
+    float legTotalBody = bodyCum[endOffset] - bodyCum[startOffset]
+    float legCounterCount = legDirection == 1 ? (bearCountCum[endOffset] - bearCountCum[startOffset]) : (bullCountCum[endOffset] - bullCountCum[startOffset])
+    float legCounterBody = legDirection == 1 ? (bearBodyCum[endOffset] - bearBodyCum[startOffset]) : (bullBodyCum[endOffset] - bullBodyCum[startOffset])
+    float legMaxBody = barsInLeg > 0 ? ta.highest(body, barsInLeg)[endOffset] : na
+
+    float pe = legPath > 0.0 ? f_clamp01(legAir / legPath) : 0.0
+    float speed = barsInLeg > 0 ? legAir / barsInLeg : 0.0
+    float tfSpeed = f_time_eff_speed(speed, speedAvg)
+    float tfPenalty = f_time_eff_penalty(barsInLeg, timeRef)
+    float tf = timeMode == "Speed Norm" ? tfSpeed : timeMode == "Time Penalty" ? tfPenalty : (tfSpeed + tfPenalty) / 2.0
+    float ratio = f_counter_ratio(barsInLeg, legCounterCount, legCounterBody, legTotalBody)
+    float cp = 1.0 - ratio
+    float rle = f_rle_score(pe, tf, cp)
+
+    if enableSpikeGuard and not na(legMaxBody) and legMaxBody > spikeAtrMult * atr
+        rle := math.min(rle, spikeCap)
+
+    lastCompletedRLE := rle
+    lastCompletedPE := pe
+    lastCompletedTF := tf
+    lastCompletedCP := cp
+    lastCompletedBars := barsInLeg
+
+    if barsInLeg > 0
+        float legSpeed = legAir / barsInLeg
+        array.push(speedHistory, legSpeed)
+        array.push(lengthHistory, barsInLeg)
+        if array.size(speedHistory) > speedLookback
+            array.shift(speedHistory)
+        if array.size(lengthHistory) > timeRefLookback
+            array.shift(lengthHistory)
+
+
+// ============================================================================
+// MODULE: visualization
+// ============================================================================
+
+// ==== VISUALIZATION MODULE ====
+// Leg lines, labels, and RLE histogram panel
+
+f_rle_color(float score) =>
+    score >= highThreshold ? color.new(color.green, 0) : score >= midThreshold ? color.new(color.yellow, 0) : color.new(color.red, 0)
+
+// === LIVE LEG LINE ===
+var line activeLegLine = na
+
+if showLegLines and showLiveLine and hasActiveLeg
+    if na(activeLegLine)
+        activeLegLine := line.new(activeLegStartIndex, activeLegStartPrice, bar_index, activeLegEndPrice,
+            color=color.new(color.gray, 50), width=2)
+    else
+        line.set_xy1(activeLegLine, activeLegStartIndex, activeLegStartPrice)
+        line.set_xy2(activeLegLine, bar_index, activeLegEndPrice)
+        line.set_color(activeLegLine, activeEligible and not na(activeRLE) ? f_rle_color(activeRLE) : color.new(color.gray, 60))
+else
+    if not na(activeLegLine)
+        line.delete(activeLegLine)
+        activeLegLine := na
+
+// === COMPLETED LEG LINE ===
+if legCompleted and showLegLines
+    if not na(activeLegLine)
+        line.set_xy2(activeLegLine, legEndIndex, legEndPrice)
+        line.set_color(activeLegLine, f_rle_color(lastCompletedRLE))
+        activeLegLine := na
+    else
+        line.new(legStartIndex, legStartPrice, legEndIndex, legEndPrice,
+            color=f_rle_color(lastCompletedRLE), width=2)
+
+// === COMPLETED LEG LABEL ===
+if legCompleted and showLegLabels and not na(lastCompletedRLE)
+    string baseText = "RLE " + str.tostring(math.round(lastCompletedRLE))
+    string detailText = showLegDetails ? str.format("PE {0} | CP {1} | Bars {2}",
+        str.tostring(lastCompletedPE, "#.00"),
+        str.tostring(lastCompletedCP, "#.00"),
+        str.tostring(lastCompletedBars)) : ""
+    string labelText = showLegDetails ? baseText + "\n" + detailText : baseText
+    color lblColor = f_rle_color(lastCompletedRLE)
+    string lblStyle = legDirection == 1 ? label.style_label_down : label.style_label_up
+    float yOff = atr * 0.15
+    float yPos = legDirection == 1 ? (legEndPrice + yOff) : (legEndPrice - yOff)
+    label.new(legEndIndex, yPos, labelText, style=lblStyle, color=lblColor, textcolor=color.white, size=size.tiny)
+
+// === LIVE LABEL ===
+var label liveLabel = na
+
+if showLiveLabel and activeEligible and not na(activeRLE)
+    if not na(liveLabel)
+        label.delete(liveLabel)
+    string liveText = "RLE " + str.tostring(math.round(activeRLE))
+    color liveColor = f_rle_color(activeRLE)
+    string liveStyle = activeLegDirection == 1 ? label.style_label_down : label.style_label_up
+    float yOff = atr * 0.15
+    float yPos = activeLegDirection == 1 ? (activeLegEndPrice + yOff) : (activeLegEndPrice - yOff)
+    liveLabel := label.new(bar_index, yPos, liveText, style=liveStyle, color=liveColor, textcolor=color.white, size=size.tiny)
+else
+    if not na(liveLabel)
+        label.delete(liveLabel)
+        liveLabel := na
+
+// === RLE HISTOGRAM PANEL ===
+float plotRleRaw = showHistogram ? lastCompletedRLE : na
+color plotColor = not na(plotRleRaw) ? color.new(f_rle_color(plotRleRaw), histogramTransparency) : na
+bool histOverlay = histogramMode == "Overlay"
+
+float autoHeight = timeframe.in_seconds(timeframe.period) <= 900 ? 0.04 : timeframe.in_seconds(timeframe.period) <= 3600 ? 0.06 : 0.09
+float heightPct = useAutoHistogramHeight ? autoHeight : histogramHeightPct
+float rangeLow = ta.lowest(low, histogramRangeLookback)
+float rangeHigh = ta.highest(high, histogramRangeLookback)
+float rangeSpan = rangeHigh - rangeLow
+float histHeightRange = rangeSpan * heightPct
+float histHeightAtr = ta.atr(atrLength) * histogramMaxAtr
+float histHeight = math.min(histHeightRange, histHeightAtr)
+float histBase = rangeLow
+float plotOverlay = not na(plotRleRaw) ? histBase + (plotRleRaw / 100.0) * histHeight : na
+float plotPane = not na(plotRleRaw) ? plotRleRaw * heightPct : na
+
+plot(showHistogram and not histOverlay ? plotPane : na,
+     "RLE Score",
+     style=plot.style_columns,
+     color=plotColor,
+     display=display.pane,
+     offset=-pivotRight)
+
+overlayBase = plot(histOverlay and showHistogram ? histBase : na,
+     "RLE Base",
+     style=plot.style_stepline,
+     color=color.new(color.gray, 90),
+     display=display.all)
+overlayTop = plot(histOverlay and showHistogram ? plotOverlay : na,
+     "RLE Overlay",
+     style=plot.style_stepline,
+     color=color.new(color.gray, 90),
+     display=display.all)
+fill(overlayTop, overlayBase, color=plotColor)
+
+plot(showHistogram and not histOverlay ? highThreshold * heightPct : na,
+     "High Threshold",
+     color=color.new(color.green, 50),
+     style=plot.style_line,
+     display=display.pane)
+plot(showHistogram and not histOverlay ? midThreshold * heightPct : na,
+     "Mid Threshold",
+     color=color.new(color.yellow, 50),
+     style=plot.style_line,
+     display=display.pane)
+
+
+// ============================================================================
+// MODULE: alerts
+// ============================================================================
+
+// ==== ALERTS MODULE ====
+// Alert on completed legs that meet threshold
+
+bool alertReady = legCompleted and not na(lastCompletedRLE) and lastCompletedRLE >= alertThreshold
+bool alertGate = alertsOnBarClose ? barstate.isconfirmed : true
+
+alertcondition(alertReady and alertGate, "RLE High Leg", "New leg completed with RLE above threshold")
+
+

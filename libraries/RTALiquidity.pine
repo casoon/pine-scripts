@@ -1,0 +1,1707 @@
+// RTALiquidity - Liquidity & Order Flow Analysis Library v1.0.0
+// @version=6
+// @description Liquidity analysis and institutional flow detection: Liquidity Mapping (Equal Highs/Lows, Gaps, Round Numbers, Stop Hunts), Order Flow Detection (Bid/Ask Imbalance, Absorption, Exhaustion), and Wyckoff Analysis (Accumulation/Distribution, Effort vs Result)
+// @author WavesUnchained
+// @build 2025-11-17 20:09:38
+
+library("RTALiquidity")
+
+// ============================================================================
+// COMBINED LIBRARY MODULES
+// ============================================================================
+
+// ============================================================================
+// MODULE: LIQUIDITY_MAPPING
+// ============================================================================
+
+// ============================================================================
+// RTA MARKET STRUCTURE - Liquidity Mapping
+// ============================================================================
+// @description: Identifies liquidity zones where institutional orders cluster
+//
+// Purpose:
+//   - Detect Equal Highs/Lows (liquidity pools)
+//   - Track Unfilled Gaps (magnet zones)
+//   - Identify Round Number Zones (psychological levels)
+//   - Detect Stop Hunts (liquidity grabs)
+//
+// Concepts:
+//   - Liquidity = Stop orders clustered at specific levels
+//   - Institutions need liquidity to fill large orders
+//   - Price is attracted to liquidity zones (magnets)
+//   - Stop hunts = Quick move to grab liquidity, then reverse
+//
+// Usage:
+//   import "RTAMarketStructure" as MS
+//   var liquidityState = MS.newLiquidityState()
+//   MS.updateLiquidityMapping(liquidityState, 20, 0.0005)
+//   levels = MS.getActiveLiquidityLevels(liquidityState)
+// ============================================================================
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+// @type Represents an Equal High/Low level (liquidity pool)
+// @field price Price level where equal highs/lows formed
+// @field touchCount Number of times price touched this level
+// @field isHigh True if equal highs, false if equal lows
+// @field firstBar Bar index of first touch
+// @field lastBar Bar index of last touch
+// @field strength Strength score (0-100) based on touches and volume
+// @field swept True if level was broken (liquidity taken)
+export type EqualLevel
+    float price
+    int touchCount
+    bool isHigh
+    int firstBar
+    int lastBar
+    float strength
+    bool swept
+
+// @type Represents an unfilled gap (magnet zone)
+// @field gapHigh Upper boundary of gap
+// @field gapLow Lower boundary of gap
+// @field gapBar Bar index where gap formed
+// @field gapSize Size of gap in points
+// @field isFilled True if gap has been filled
+// @field fillBar Bar index where gap was filled
+// @field direction 1 for bullish gap (up), -1 for bearish gap (down)
+// @field magnetStrength Probability of gap being filled (0-100)
+export type GapZone
+    float gapHigh
+    float gapLow
+    int gapBar
+    float gapSize
+    bool isFilled
+    int fillBar
+    int direction
+    float magnetStrength
+
+// @type Represents a round number level (psychological level)
+// @field price Round number price (e.g., 100.00, 150.50)
+// @field level Level type (0=major 00, 50=half, 25/75=quarter)
+// @field distance Distance from current price
+// @field magnetStrength Attraction strength (0-100)
+// @field tested True if recently tested
+export type RoundNumberLevel
+    float price
+    int level
+    float distance
+    float magnetStrength
+    bool tested
+
+// @type Represents a stop hunt event
+// @field huntBar Bar index of stop hunt
+// @field huntPrice Price where stops were hunted
+// @field direction 1 for upside hunt, -1 for downside hunt
+// @field reversalConfirmed True if price reversed after hunt
+// @field reversalStrength Strength of reversal (0-100)
+// @field volumeSpike Volume increase during hunt
+export type StopHunt
+    int huntBar
+    float huntPrice
+    int direction
+    bool reversalConfirmed
+    float reversalStrength
+    float volumeSpike
+
+// @type Main state for liquidity mapping
+// @field equalHighs Array of equal high levels
+// @field equalLows Array of equal low levels
+// @field gaps Array of unfilled gaps
+// @field roundNumbers Array of nearby round numbers
+// @field recentHunts Array of recent stop hunts
+// @field nearestLiquidityUp Price of nearest liquidity above
+// @field nearestLiquidityDown Price of nearest liquidity below
+export type LiquidityState
+    array<EqualLevel> equalHighs
+    array<EqualLevel> equalLows
+    array<GapZone> gaps
+    array<RoundNumberLevel> roundNumbers
+    array<StopHunt> recentHunts
+    float nearestLiquidityUp
+    float nearestLiquidityDown
+
+// ============================================================================
+// INITIALIZATION FUNCTIONS
+// ============================================================================
+
+// @function Initialize a new liquidity mapping state
+// @returns New LiquidityState with empty arrays
+export newLiquidityState() =>
+    LiquidityState.new(
+        array.new<EqualLevel>(),
+        array.new<EqualLevel>(),
+        array.new<GapZone>(),
+        array.new<RoundNumberLevel>(),
+        array.new<StopHunt>(),
+        na,
+        na
+    )
+
+// @function Create a new equal level
+// @param price Price of the level
+// @param isHigh True for equal highs, false for equal lows
+// @returns New EqualLevel
+export newEqualLevel(float price, bool isHigh) =>
+    EqualLevel.new(
+        price,
+        1,      // touchCount
+        isHigh,
+        bar_index,
+        bar_index,
+        50.0,   // initial strength
+        false   // not swept
+    )
+
+// @function Create a new gap zone
+// @param gapHigh Upper boundary
+// @param gapLow Lower boundary
+// @param direction Gap direction (1=bullish, -1=bearish)
+// @returns New GapZone
+export newGapZone(float gapHigh, float gapLow, int direction) =>
+    gapSize = gapHigh - gapLow
+    GapZone.new(
+        gapHigh,
+        gapLow,
+        bar_index,
+        gapSize,
+        false,  // not filled
+        na,
+        direction,
+        70.0    // initial magnet strength
+    )
+
+// ============================================================================
+// EQUAL HIGHS/LOWS DETECTION
+// ============================================================================
+
+// @function Detect if current high equals a previous high
+// @param lookback Number of bars to look back
+// @param tolerance Price tolerance as percentage (0.0005 = 0.05%)
+// @returns [isEqual, equalPrice] True if equal high found
+export detectEqualHigh(int lookback, float tolerance) =>
+    if bar_index < lookback
+        [false, na]
+    else
+        currentHigh = high
+        toleranceRange = currentHigh * tolerance
+
+        equalPrice = na
+        isEqual = false
+
+        for i = 1 to lookback
+            priorHigh = high[i]
+            if math.abs(currentHigh - priorHigh) <= toleranceRange
+                equalPrice := priorHigh
+                isEqual := true
+                break
+
+        [isEqual, equalPrice]
+
+// @function Detect if current low equals a previous low
+// @param lookback Number of bars to look back
+// @param tolerance Price tolerance as percentage
+// @returns [isEqual, equalPrice] True if equal low found
+export detectEqualLow(int lookback, float tolerance) =>
+    if bar_index < lookback
+        [false, na]
+    else
+        currentLow = low
+        toleranceRange = currentLow * tolerance
+
+        equalPrice = na
+        isEqual = false
+
+        for i = 1 to lookback
+            priorLow = low[i]
+            if math.abs(currentLow - priorLow) <= toleranceRange
+                equalPrice := priorLow
+                isEqual := true
+                break
+
+        [isEqual, equalPrice]
+
+// @function Update equal highs in state
+// @param state LiquidityState to update
+// @param lookback Lookback period
+// @param tolerance Price tolerance
+export updateEqualHighs(LiquidityState state, int lookback, float tolerance) =>
+    [isEqual, equalPrice] = detectEqualHigh(lookback, tolerance)
+
+    if isEqual and not na(equalPrice)
+        // Check if this level already exists
+        found = false
+        for i = 0 to array.size(state.equalHighs) - 1
+            level = array.get(state.equalHighs, i)
+            if math.abs(level.price - equalPrice) <= equalPrice * tolerance
+                // Update existing level
+                level.touchCount += 1
+                level.lastBar := bar_index
+                level.strength := math.min(100.0, level.strength + 10.0)
+                array.set(state.equalHighs, i, level)
+                found := true
+                break
+
+        // Create new level if not found
+        if not found
+            newLevel = newEqualLevel(equalPrice, true)
+            array.push(state.equalHighs, newLevel)
+
+// @function Update equal lows in state
+// @param state LiquidityState to update
+// @param lookback Lookback period
+// @param tolerance Price tolerance
+export updateEqualLows(LiquidityState state, int lookback, float tolerance) =>
+    [isEqual, equalPrice] = detectEqualLow(lookback, tolerance)
+
+    if isEqual and not na(equalPrice)
+        found = false
+        for i = 0 to array.size(state.equalLows) - 1
+            level = array.get(state.equalLows, i)
+            if math.abs(level.price - equalPrice) <= equalPrice * tolerance
+                level.touchCount += 1
+                level.lastBar := bar_index
+                level.strength := math.min(100.0, level.strength + 10.0)
+                array.set(state.equalLows, i, level)
+                found := true
+                break
+
+        if not found
+            newLevel = newEqualLevel(equalPrice, false)
+            array.push(state.equalLows, newLevel)
+
+// ============================================================================
+// GAP DETECTION
+// ============================================================================
+
+// @function Detect if a gap formed on current bar
+// @returns [hasGap, gapHigh, gapLow, direction]
+export detectGap() =>
+    if bar_index < 1
+        [false, na, na, 0]
+    else
+        prevHigh = high[1]
+        prevLow = low[1]
+        currHigh = high
+        currLow = low
+
+        // Bullish gap (gap up)
+        if currLow > prevHigh
+            [true, currLow, prevHigh, 1]
+        // Bearish gap (gap down)
+        else if currHigh < prevLow
+            [true, prevLow, currHigh, -1]
+        else
+            [false, na, na, 0]
+
+// @function Update gaps in state
+// @param state LiquidityState to update
+export updateGaps(LiquidityState state) =>
+    [hasGap, gapHigh, gapLow, direction] = detectGap()
+
+    // Add new gap if detected
+    if hasGap and not na(gapHigh) and not na(gapLow)
+        newGap = newGapZone(gapHigh, gapLow, direction)
+        array.push(state.gaps, newGap)
+
+    // Check if existing gaps are filled
+    if array.size(state.gaps) > 0
+        for i = array.size(state.gaps) - 1 to 0
+            gap = array.get(state.gaps, i)
+            if not gap.isFilled
+                // Check if price filled the gap
+                if low <= gap.gapHigh and high >= gap.gapLow
+                    gap.isFilled := true
+                    gap.fillBar := bar_index
+                    array.set(state.gaps, i, gap)
+
+// ============================================================================
+// ROUND NUMBER DETECTION
+// ============================================================================
+
+// @function Get nearest round numbers around current price
+// @param numberOfLevels Number of levels above and below to find
+// @param tickSize Minimum tick size (e.g., 0.01 for stocks)
+// @returns Array of round number levels
+export getNearestRoundNumbers(int numberOfLevels, float tickSize) =>
+    roundNumbers = array.new<RoundNumberLevel>()
+
+    // Determine if we're dealing with large numbers (>10) or small (<10)
+    priceScale = close >= 10 ? 1.0 : 0.1
+    majorIncrement = close >= 100 ? 10.0 : (close >= 10 ? 1.0 : 0.1)
+    halfIncrement = majorIncrement / 2
+
+    // Find nearest major round number below
+    currentMajor = math.floor(close / majorIncrement) * majorIncrement
+
+    // Create levels above and below
+    for i = -numberOfLevels to numberOfLevels
+        levelPrice = currentMajor + (i * halfIncrement)
+
+        if levelPrice > 0
+            distance = levelPrice - close
+
+            // Determine level type
+            remainder = levelPrice % majorIncrement
+            levelType = remainder == 0 ? 0 : 50
+
+            // Calculate magnet strength (stronger when closer and at major levels)
+            distanceFactor = math.max(0, 100 - math.abs(distance / close) * 1000)
+            levelFactor = levelType == 0 ? 1.2 : 1.0
+            magnetStrength = math.min(100, distanceFactor * levelFactor)
+
+            // Check if recently tested
+            tested = false
+            if bar_index > 5
+                for j = 1 to 5
+                    if (high[j] >= levelPrice and low[j] <= levelPrice)
+                        tested := true
+                        break
+
+            level = RoundNumberLevel.new(
+                levelPrice,
+                levelType,
+                distance,
+                magnetStrength,
+                tested
+            )
+            array.push(roundNumbers, level)
+
+    roundNumbers
+
+// @function Update round numbers in state
+// @param state LiquidityState to update
+// @param numberOfLevels Number of levels to track
+// @param tickSize Minimum tick size
+export updateRoundNumbers(LiquidityState state, int numberOfLevels, float tickSize) =>
+    state.roundNumbers := getNearestRoundNumbers(numberOfLevels, tickSize)
+
+// ============================================================================
+// STOP HUNT DETECTION
+// ============================================================================
+
+// @function Detect if a stop hunt occurred
+// @param atr Current ATR value
+// @param volumeAvg Average volume
+// @returns [isHunt, huntPrice, direction]
+export detectStopHunt(float atr, float volumeAvg) =>
+    if bar_index < 2
+        [false, na, 0]
+    else
+        // Stop hunt criteria:
+        // 1. Large wick (>50% of bar range)
+        // 2. Close back inside previous bar
+        // 3. High volume
+
+        bodySize = math.abs(close - open)
+        barRange = high - low
+
+        // Upside hunt (upper wick trap)
+        upperWick = high - math.max(close, open)
+        if upperWick > barRange * 0.5 and close < high[1] and volume > volumeAvg * 1.5
+            [true, high, 1]
+        // Downside hunt (lower wick trap)
+        else
+            lowerWick = math.min(close, open) - low
+            if lowerWick > barRange * 0.5 and close > low[1] and volume > volumeAvg * 1.5
+                [true, low, -1]
+            else
+                [false, na, 0]
+
+// @function Update stop hunts in state
+// @param state LiquidityState to update
+// @param atr Current ATR
+// @param volumeAvg Average volume
+export updateStopHunts(LiquidityState state, float atr, float volumeAvg) =>
+    [isHunt, huntPrice, direction] = detectStopHunt(atr, volumeAvg)
+
+    if isHunt and not na(huntPrice)
+        volumeSpike = volume / volumeAvg
+
+        hunt = StopHunt.new(
+            bar_index,
+            huntPrice,
+            direction,
+            false,  // confirmation pending
+            50.0,   // initial strength
+            volumeSpike
+        )
+        array.push(state.recentHunts, hunt)
+
+        // Mark equal levels as swept if stop hunt occurred near them
+        if direction == 1 and array.size(state.equalHighs) > 0
+            for i = 0 to array.size(state.equalHighs) - 1
+                level = array.get(state.equalHighs, i)
+                if math.abs(level.price - huntPrice) <= atr * 0.5
+                    level.swept := true
+                    array.set(state.equalHighs, i, level)
+        else if direction == -1 and array.size(state.equalLows) > 0
+            for i = 0 to array.size(state.equalLows) - 1
+                level = array.get(state.equalLows, i)
+                if math.abs(level.price - huntPrice) <= atr * 0.5
+                    level.swept := true
+                    array.set(state.equalLows, i, level)
+
+    // Confirm reversals on recent hunts
+    if array.size(state.recentHunts) > 0
+        for i = array.size(state.recentHunts) - 1 to math.max(0, array.size(state.recentHunts) - 5)
+            hunt = array.get(state.recentHunts, i)
+            if not hunt.reversalConfirmed
+                barsElapsed = bar_index - hunt.huntBar
+                if barsElapsed >= 1 and barsElapsed <= 5
+                    // Check for reversal
+                    if hunt.direction == 1 and close < hunt.huntPrice - atr
+                        hunt.reversalConfirmed := true
+                        hunt.reversalStrength := 80.0
+                        array.set(state.recentHunts, i, hunt)
+                    else if hunt.direction == -1 and close > hunt.huntPrice + atr
+                        hunt.reversalConfirmed := true
+                        hunt.reversalStrength := 80.0
+                        array.set(state.recentHunts, i, hunt)
+
+// ============================================================================
+// MAIN UPDATE FUNCTION
+// ============================================================================
+
+// @function Update all liquidity mapping components
+// @param state LiquidityState to update
+// @param lookback Lookback period for equal levels
+// @param tolerance Price tolerance for equal levels
+export updateLiquidityMapping(LiquidityState state, int lookback = 20, float tolerance = 0.0005) =>
+    // Get ATR and volume for calculations
+    atr = ta.atr(14)
+    volumeAvg = ta.sma(volume, 20)
+
+    // Update all components
+    updateEqualHighs(state, lookback, tolerance)
+    updateEqualLows(state, lookback, tolerance)
+    updateGaps(state)
+    updateRoundNumbers(state, 5, syminfo.mintick)
+    updateStopHunts(state, atr, volumeAvg)
+
+    // Update nearest liquidity levels
+    state.nearestLiquidityUp := na
+    state.nearestLiquidityDown := na
+
+    // Find nearest unswept equal high
+    if array.size(state.equalHighs) > 0
+        for i = 0 to array.size(state.equalHighs) - 1
+            level = array.get(state.equalHighs, i)
+            if not level.swept and level.price > close
+                if na(state.nearestLiquidityUp) or level.price < state.nearestLiquidityUp
+                    state.nearestLiquidityUp := level.price
+
+    // Find nearest unswept equal low
+    if array.size(state.equalLows) > 0
+        for i = 0 to array.size(state.equalLows) - 1
+            level = array.get(state.equalLows, i)
+            if not level.swept and level.price < close
+                if na(state.nearestLiquidityDown) or level.price > state.nearestLiquidityDown
+                    state.nearestLiquidityDown := level.price
+
+// ============================================================================
+// QUERY FUNCTIONS
+// ============================================================================
+
+// @function Get active equal high levels
+// @param state LiquidityState
+// @returns Array of active equal highs
+export getActiveEqualHighs(LiquidityState state) =>
+    active = array.new<EqualLevel>()
+    if array.size(state.equalHighs) > 0
+        for i = 0 to array.size(state.equalHighs) - 1
+            level = array.get(state.equalHighs, i)
+            if not level.swept
+                array.push(active, level)
+    active
+
+// @function Get active equal low levels
+// @param state LiquidityState
+// @returns Array of active equal lows
+export getActiveEqualLows(LiquidityState state) =>
+    active = array.new<EqualLevel>()
+    if array.size(state.equalLows) > 0
+        for i = 0 to array.size(state.equalLows) - 1
+            level = array.get(state.equalLows, i)
+            if not level.swept
+                array.push(active, level)
+    active
+
+// @function Get unfilled gaps
+// @param state LiquidityState
+// @returns Array of unfilled gaps
+export getUnfilledGaps(LiquidityState state) =>
+    unfilled = array.new<GapZone>()
+    if array.size(state.gaps) > 0
+        for i = 0 to array.size(state.gaps) - 1
+            gap = array.get(state.gaps, i)
+            if not gap.isFilled
+                array.push(unfilled, gap)
+    unfilled
+
+// @function Get nearest round numbers
+// @param state LiquidityState
+// @param maxDistance Maximum distance from current price
+// @returns Array of nearby round numbers
+export getNearbyRoundNumbers(LiquidityState state, float maxDistance) =>
+    nearby = array.new<RoundNumberLevel>()
+    if array.size(state.roundNumbers) > 0
+        for i = 0 to array.size(state.roundNumbers) - 1
+            level = array.get(state.roundNumbers, i)
+            if math.abs(level.distance) <= maxDistance
+                array.push(nearby, level)
+    nearby
+
+// @function Get recent confirmed stop hunts
+// @param state LiquidityState
+// @param maxBarsAgo Maximum bars ago to consider
+// @returns Array of recent confirmed hunts
+export getRecentStopHunts(LiquidityState state, int maxBarsAgo = 10) =>
+    recent = array.new<StopHunt>()
+    if array.size(state.recentHunts) > 0
+        for i = 0 to array.size(state.recentHunts) - 1
+            hunt = array.get(state.recentHunts, i)
+            if hunt.reversalConfirmed and (bar_index - hunt.huntBar) <= maxBarsAgo
+                array.push(recent, hunt)
+    recent
+
+// @function Check if price is near liquidity
+// @param state LiquidityState
+// @param atr Current ATR value
+// @param multiplier Distance multiplier (in ATR)
+// @returns [nearUp, nearDown] True if near liquidity
+export isNearLiquidity(LiquidityState state, float atr, float multiplier = 1.0) =>
+    threshold = atr * multiplier
+
+    nearUp = false
+    nearDown = false
+
+    if not na(state.nearestLiquidityUp)
+        distUp = state.nearestLiquidityUp - close
+        if distUp > 0 and distUp <= threshold
+            nearUp := true
+
+    if not na(state.nearestLiquidityDown)
+        distDown = close - state.nearestLiquidityDown
+        if distDown > 0 and distDown <= threshold
+            nearDown := true
+
+    [nearUp, nearDown]
+
+// @function Get liquidity summary string
+// @param state LiquidityState
+// @returns Formatted summary
+export getLiquiditySummary(LiquidityState state) =>
+    equalHighCount = array.size(getActiveEqualHighs(state))
+    equalLowCount = array.size(getActiveEqualLows(state))
+    gapCount = array.size(getUnfilledGaps(state))
+    huntCount = array.size(getRecentStopHunts(state, 10))
+
+    upDist = not na(state.nearestLiquidityUp) ?
+        str.tostring((state.nearestLiquidityUp - close) / close * 100, "#.##") + "%" : "N/A"
+    downDist = not na(state.nearestLiquidityDown) ?
+        str.tostring((close - state.nearestLiquidityDown) / close * 100, "#.##") + "%" : "N/A"
+
+    str.format(
+        "Liquidity Map\nEq Highs: {0} | Eq Lows: {1}\nGaps: {2} | Hunts: {3}\nUp: {4} | Down: {5}",
+        equalHighCount, equalLowCount, gapCount, huntCount, upDist, downDist
+    )
+
+
+// ============================================================================
+// MODULE: ORDER_FLOW_DETECTION
+// ============================================================================
+
+// ============================================================================
+// RTA MARKET STRUCTURE - Order Flow & Imbalance Detection
+// ============================================================================
+// @description: Detects order flow imbalances and institutional activity
+//
+// Purpose:
+//   - Identify Bid/Ask imbalances (demand > supply or vice versa)
+//   - Detect absorption patterns (large orders absorbing flow)
+//   - Find exhaustion signals (volume weakness at extremes)
+//   - Calculate delta divergences (price vs volume delta)
+//
+// Concepts:
+//   - Order Flow = Real-time buying/selling pressure
+//   - Imbalance = When one side overwhelms the other
+//   - Absorption = Large player stops price movement
+//   - Exhaustion = Volume dries up, trend may reverse
+//   - Delta = Buying volume - Selling volume
+//
+// Usage:
+//   import "RTAMarketStructure" as MS
+//   var orderFlow = MS.newOrderFlowState()
+//   MS.updateOrderFlow(orderFlow)
+//   if orderFlow.bidImbalance > 70
+//       // Strong buying pressure
+// ============================================================================
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+// @type Represents current order flow state
+// @field buyVolume Estimated buying volume (uptick volume)
+// @field sellVolume Estimated selling volume (downtick volume)
+// @field delta Net buying pressure (buy - sell)
+// @field cumulativeDelta Running sum of delta
+// @field bidImbalance Bid pressure percentage (0-100)
+// @field askImbalance Ask pressure percentage (0-100)
+// @field imbalanceDirection 1=bullish, -1=bearish, 0=neutral
+// @field imbalanceStrength Strength of imbalance (0-100)
+export type OrderFlowState
+    float buyVolume
+    float sellVolume
+    float delta
+    float cumulativeDelta
+    float bidImbalance
+    float askImbalance
+    int imbalanceDirection
+    float imbalanceStrength
+
+// @type Absorption pattern detection
+// @field isAbsorption True if absorption detected
+// @field absorptionType "BULLISH" or "BEARISH"
+// @field absorptionBar Bar where absorption occurred
+// @field volumeRatio Volume increase during absorption
+// @field priceRejection Price rejection percentage
+// @field strength Absorption strength (0-100)
+export type AbsorptionPattern
+    bool isAbsorption
+    string absorptionType
+    int absorptionBar
+    float volumeRatio
+    float priceRejection
+    float strength
+
+// @type Exhaustion signal detection
+// @field isExhaustion True if exhaustion detected
+// @field exhaustionType "BULLISH" or "BEARISH"
+// @field exhaustionBar Bar where exhaustion occurred
+// @field volumeDecline Volume decline percentage
+// @field priceExtension Price extension from mean
+// @field divergenceScore Divergence strength (0-100)
+export type ExhaustionSignal
+    bool isExhaustion
+    string exhaustionType
+    int exhaustionBar
+    float volumeDecline
+    float priceExtension
+    float divergenceScore
+
+// @type Delta divergence detection
+// @field isDivergence True if divergence detected
+// @field divergenceType "BULLISH" or "BEARISH"
+// @field divergenceBar Starting bar of divergence
+// @field priceTrend Price trend direction
+// @field deltaTrend Delta trend direction
+// @field strength Divergence strength (0-100)
+export type DeltaDivergence
+    bool isDivergence
+    string divergenceType
+    int divergenceBar
+    int priceTrend
+    int deltaTrend
+    float strength
+
+// @type Configuration for order flow detection
+// @field deltaLookback Lookback for cumulative delta
+// @field imbalanceThreshold Minimum imbalance % (default: 65)
+// @field absorptionVolThreshold Volume multiplier for absorption (default: 2.0)
+// @field exhaustionVolDecline Volume decline % for exhaustion (default: 40)
+// @field divergenceLookback Lookback for divergence detection
+export type OrderFlowConfig
+    int deltaLookback
+    float imbalanceThreshold
+    float absorptionVolThreshold
+    float exhaustionVolDecline
+    int divergenceLookback
+
+// ============================================================================
+// INITIALIZATION FUNCTIONS
+// ============================================================================
+
+// @function Create default order flow configuration
+// @returns New OrderFlowConfig with standard settings
+export newOrderFlowConfig() =>
+    OrderFlowConfig.new(
+        20,     // deltaLookback
+        65.0,   // imbalanceThreshold
+        2.0,    // absorptionVolThreshold
+        40.0,   // exhaustionVolDecline
+        10      // divergenceLookback
+    )
+
+// @function Initialize order flow state
+// @returns New OrderFlowState with zero values
+export newOrderFlowState() =>
+    OrderFlowState.new(
+        0.0,    // buyVolume
+        0.0,    // sellVolume
+        0.0,    // delta
+        0.0,    // cumulativeDelta
+        50.0,   // bidImbalance
+        50.0,   // askImbalance
+        0,      // imbalanceDirection
+        0.0     // imbalanceStrength
+    )
+
+// @function Initialize absorption pattern
+// @returns New AbsorptionPattern
+export newAbsorptionPattern() =>
+    AbsorptionPattern.new(
+        false,      // isAbsorption
+        "NONE",     // absorptionType
+        0,          // absorptionBar
+        1.0,        // volumeRatio
+        0.0,        // priceRejection
+        0.0         // strength
+    )
+
+// @function Initialize exhaustion signal
+// @returns New ExhaustionSignal
+export newExhaustionSignal() =>
+    ExhaustionSignal.new(
+        false,      // isExhaustion
+        "NONE",     // exhaustionType
+        0,          // exhaustionBar
+        0.0,        // volumeDecline
+        0.0,        // priceExtension
+        0.0         // divergenceScore
+    )
+
+// @function Initialize delta divergence
+// @returns New DeltaDivergence
+export newDeltaDivergence() =>
+    DeltaDivergence.new(
+        false,      // isDivergence
+        "NONE",     // divergenceType
+        0,          // divergenceBar
+        0,          // priceTrend
+        0,          // deltaTrend
+        0.0         // strength
+    )
+
+// ============================================================================
+// BUY/SELL VOLUME ESTIMATION
+// ============================================================================
+
+// @function Estimate buying and selling volume from price action
+// @returns [buyVolume, sellVolume]
+export estimateBuySellVolume() =>
+    // Since TradingView doesn't provide tick-level data,
+    // we estimate based on where close is relative to bar range
+
+    barRange = high - low
+    if barRange == 0
+        // No range, split volume 50/50
+        [volume / 2, volume / 2]
+    else
+        // Close position in range (0 = at low, 1 = at high)
+        closePosition = (close - low) / barRange
+
+        // More volume to buy side if close near high
+        buyVol = volume * closePosition
+        sellVol = volume * (1 - closePosition)
+
+        [buyVol, sellVol]
+
+// @function Calculate intrabar delta (buy - sell pressure)
+// @returns Delta value
+export calculateDelta() =>
+    [buyVol, sellVol] = estimateBuySellVolume()
+    buyVol - sellVol
+
+// ============================================================================
+// IMBALANCE DETECTION
+// ============================================================================
+
+// @function Calculate bid/ask imbalance percentages
+// @param buyVolume Current buy volume
+// @param sellVolume Current sell volume
+// @returns [bidImbalance, askImbalance] Both as percentages
+export calculateImbalance(float buyVolume, float sellVolume) =>
+    totalVol = buyVolume + sellVolume
+
+    if totalVol == 0
+        [50.0, 50.0]
+    else
+        bidPct = (buyVolume / totalVol) * 100.0
+        askPct = (sellVolume / totalVol) * 100.0
+        [bidPct, askPct]
+
+// @function Determine imbalance direction and strength
+// @param bidImbalance Bid percentage
+// @param askImbalance Ask percentage
+// @param threshold Minimum threshold for signal
+// @returns [direction, strength]
+export determineImbalance(float bidImbalance, float askImbalance, float threshold) =>
+    direction = 0
+    strength = 0.0
+
+    if bidImbalance >= threshold
+        direction := 1
+        strength := bidImbalance
+    else if askImbalance >= threshold
+        direction := -1
+        strength := askImbalance
+
+    [direction, strength]
+
+// @function Update order flow state
+// @param state OrderFlowState to update
+// @param config OrderFlowConfig settings
+export updateOrderFlow(OrderFlowState state, OrderFlowConfig config = na) =>
+    useConfig = na(config) ? newOrderFlowConfig() : config
+
+    // Estimate buy/sell volume
+    [buyVol, sellVol] = estimateBuySellVolume()
+    state.buyVolume := buyVol
+    state.sellVolume := sellVol
+
+    // Calculate delta
+    state.delta := buyVol - sellVol
+
+    // Update cumulative delta
+    state.cumulativeDelta += state.delta
+
+    // Calculate imbalance
+    [bidImb, askImb] = calculateImbalance(buyVol, sellVol)
+    state.bidImbalance := bidImb
+    state.askImbalance := askImb
+
+    // Determine direction and strength
+    [dir, str] = determineImbalance(bidImb, askImb, useConfig.imbalanceThreshold)
+    state.imbalanceDirection := dir
+    state.imbalanceStrength := str
+
+// ============================================================================
+// ABSORPTION DETECTION
+// ============================================================================
+
+// @function Detect absorption patterns
+// @param config OrderFlowConfig
+// @returns AbsorptionPattern
+export detectAbsorption(OrderFlowConfig config) =>
+    absorption = newAbsorptionPattern()
+
+    if bar_index < 5
+        absorption
+    else
+        // Get volume average
+        volAvg = ta.sma(volume, 20)
+
+        // Absorption criteria:
+        // 1. High volume (> threshold * average)
+        // 2. Small body relative to range
+        // 3. Close back in previous range
+
+        bodySize = math.abs(close - open)
+        barRange = high - low
+        wickRatio = barRange > 0 ? (barRange - bodySize) / barRange : 0
+
+        isHighVolume = volume > volAvg * config.absorptionVolThreshold
+        isSmallBody = wickRatio > 0.6
+
+        // Check if price was rejected
+        if isHighVolume and isSmallBody
+            // Bullish absorption (selling absorbed at lows)
+            if close > open and low < low[1] and close > close[1]
+                absorption.isAbsorption := true
+                absorption.absorptionType := "BULLISH"
+                absorption.absorptionBar := bar_index
+                absorption.volumeRatio := volume / volAvg
+                absorption.priceRejection := (close - low) / barRange * 100
+                absorption.strength := math.min(100, absorption.volumeRatio * 30 + wickRatio * 70)
+
+            // Bearish absorption (buying absorbed at highs)
+            else if close < open and high > high[1] and close < close[1]
+                absorption.isAbsorption := true
+                absorption.absorptionType := "BEARISH"
+                absorption.absorptionBar := bar_index
+                absorption.volumeRatio := volume / volAvg
+                absorption.priceRejection := (high - close) / barRange * 100
+                absorption.strength := math.min(100, absorption.volumeRatio * 30 + wickRatio * 70)
+
+        absorption
+
+// ============================================================================
+// EXHAUSTION DETECTION
+// ============================================================================
+
+// @function Detect volume exhaustion at price extremes
+// @param config OrderFlowConfig
+// @returns ExhaustionSignal
+export detectExhaustion(OrderFlowConfig config) =>
+    exhaustion = newExhaustionSignal()
+
+    if bar_index < 20
+        exhaustion
+    else
+        // Calculate volume trend
+        recentVol = ta.sma(volume, 5)
+        priorVol = ta.sma(volume[5], 10)
+
+        volDecline = priorVol > 0 ? ((priorVol - recentVol) / priorVol) * 100 : 0
+
+        // Calculate price extension from moving average
+        ma20 = ta.sma(close, 20)
+        priceExt = ma20 > 0 ? math.abs((close - ma20) / ma20) * 100 : 0
+
+        // Exhaustion criteria:
+        // 1. Volume declining significantly
+        // 2. Price extended from mean
+        // 3. Price making new extremes
+
+        isVolDecline = volDecline >= config.exhaustionVolDecline
+        isExtended = priceExt > 2.0
+
+        if isVolDecline and isExtended
+            // Bullish exhaustion (uptrend exhausting)
+            if close > ma20 and close >= ta.highest(close, 10)
+                exhaustion.isExhaustion := true
+                exhaustion.exhaustionType := "BULLISH"
+                exhaustion.exhaustionBar := bar_index
+                exhaustion.volumeDecline := volDecline
+                exhaustion.priceExtension := priceExt
+                exhaustion.divergenceScore := math.min(100, volDecline * 1.5 + priceExt * 10)
+
+            // Bearish exhaustion (downtrend exhausting)
+            else if close < ma20 and close <= ta.lowest(close, 10)
+                exhaustion.isExhaustion := true
+                exhaustion.exhaustionType := "BEARISH"
+                exhaustion.exhaustionBar := bar_index
+                exhaustion.volumeDecline := volDecline
+                exhaustion.priceExtension := priceExt
+                exhaustion.divergenceScore := math.min(100, volDecline * 1.5 + priceExt * 10)
+
+        exhaustion
+
+// ============================================================================
+// DELTA DIVERGENCE DETECTION
+// ============================================================================
+
+// @function Detect divergence between price and delta
+// @param state OrderFlowState with cumulative delta
+// @param config OrderFlowConfig
+// @returns DeltaDivergence
+export detectDeltaDivergence(OrderFlowState state, OrderFlowConfig config) =>
+    divergence = newDeltaDivergence()
+
+    lookback = config.divergenceLookback
+
+    if bar_index < lookback + 5
+        divergence
+    else
+        // Compare price trend vs delta trend
+        priceNow = close
+        priceThen = close[lookback]
+        priceTrend = priceNow > priceThen ? 1 : (priceNow < priceThen ? -1 : 0)
+
+        deltaNow = state.cumulativeDelta
+        deltaThen = state.cumulativeDelta  // This would need historical tracking
+        deltaTrend = deltaNow > 0 ? 1 : (deltaNow < 0 ? -1 : 0)
+
+        // Simplified divergence (in production, need proper delta history)
+        // Bullish divergence: Price down, but buying pressure increasing
+        if priceTrend == -1 and state.bidImbalance > 60
+            divergence.isDivergence := true
+            divergence.divergenceType := "BULLISH"
+            divergence.divergenceBar := bar_index
+            divergence.priceTrend := priceTrend
+            divergence.deltaTrend := 1
+            divergence.strength := state.bidImbalance
+
+        // Bearish divergence: Price up, but selling pressure increasing
+        else if priceTrend == 1 and state.askImbalance > 60
+            divergence.isDivergence := true
+            divergence.divergenceType := "BEARISH"
+            divergence.divergenceBar := bar_index
+            divergence.priceTrend := priceTrend
+            divergence.deltaTrend := -1
+            divergence.strength := state.askImbalance
+
+        divergence
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// @function Get order flow direction as string
+// @param state OrderFlowState
+// @returns Direction string
+export getOrderFlowDirection(OrderFlowState state) =>
+    if state.imbalanceDirection == 1
+        "BULLISH"
+    else if state.imbalanceDirection == -1
+        "BEARISH"
+    else
+        "NEUTRAL"
+
+// @function Get order flow strength color
+// @param state OrderFlowState
+// @returns Color for visualization
+export getOrderFlowColor(OrderFlowState state) =>
+    if state.imbalanceDirection == 1
+        color.new(color.green, 100 - state.imbalanceStrength)
+    else if state.imbalanceDirection == -1
+        color.new(color.red, 100 - state.imbalanceStrength)
+    else
+        color.new(color.gray, 70)
+
+// @function Check if order flow supports trend
+// @param state OrderFlowState
+// @param trendDirection Current trend (1=up, -1=down)
+// @returns True if flow confirms trend
+export isFlowConfirming(OrderFlowState state, int trendDirection) =>
+    state.imbalanceDirection == trendDirection and
+        state.imbalanceStrength >= 60.0
+
+// @function Check if order flow shows reversal
+// @param state OrderFlowState
+// @param trendDirection Current trend (1=up, -1=down)
+// @returns True if flow diverges from trend
+export isFlowReversal(OrderFlowState state, int trendDirection) =>
+    state.imbalanceDirection == -trendDirection and
+        state.imbalanceStrength >= 70.0
+
+// @function Get cumulative delta trend
+// @param state OrderFlowState
+// @param lookback Bars to look back
+// @returns Delta trend (1=up, -1=down, 0=flat)
+export getCumulativeDeltaTrend(OrderFlowState state, int lookback) =>
+    // Simplified trend detection
+    if state.cumulativeDelta > 0
+        1
+    else if state.cumulativeDelta < 0
+        -1
+    else
+        0
+
+// ============================================================================
+// SUMMARY FUNCTIONS
+// ============================================================================
+
+// @function Get order flow summary
+// @param state OrderFlowState
+// @returns Formatted summary string
+export getOrderFlowSummary(OrderFlowState state) =>
+    direction = getOrderFlowDirection(state)
+
+    str.format(
+        "Order Flow: {0}\nBid: {1}% | Ask: {2}%\nDelta: {3}\nStrength: {4}/100",
+        direction,
+        str.tostring(state.bidImbalance, "#.#"),
+        str.tostring(state.askImbalance, "#.#"),
+        str.tostring(state.delta, "#"),
+        str.tostring(state.imbalanceStrength, "#")
+    )
+
+// @function Get absorption summary
+// @param absorption AbsorptionPattern
+// @returns Summary string
+export getAbsorptionSummary(AbsorptionPattern absorption) =>
+    if absorption.isAbsorption
+        str.format(
+            "🛡️ {0} ABSORPTION\nVolume: {1}x\nRejection: {2}%\nStrength: {3}",
+            absorption.absorptionType,
+            str.tostring(absorption.volumeRatio, "#.#"),
+            str.tostring(absorption.priceRejection, "#"),
+            str.tostring(absorption.strength, "#")
+        )
+    else
+        "No Absorption"
+
+// @function Get exhaustion summary
+// @param exhaustion ExhaustionSignal
+// @returns Summary string
+export getExhaustionSummary(ExhaustionSignal exhaustion) =>
+    if exhaustion.isExhaustion
+        str.format(
+            "⚠️ {0} EXHAUSTION\nVol Decline: {1}%\nExtension: {2}%\nScore: {3}",
+            exhaustion.exhaustionType,
+            str.tostring(exhaustion.volumeDecline, "#"),
+            str.tostring(exhaustion.priceExtension, "#.#"),
+            str.tostring(exhaustion.divergenceScore, "#")
+        )
+    else
+        "No Exhaustion"
+
+
+// ============================================================================
+// MODULE: WYCKOFF_ANALYSIS
+// ============================================================================
+
+// ============================================================================
+// RTA MARKET STRUCTURE - Wyckoff Analysis
+// ============================================================================
+// @description: Wyckoff Method - Institutional accumulation/distribution detection
+//
+// Purpose:
+//   - Identify Wyckoff accumulation and distribution phases
+//   - Detect key Wyckoff events (Spring, UTAD, SOS, SOW)
+//   - Analyze price-volume relationships
+//   - Apply Wyckoff's three fundamental laws
+//   - Map Wyckoff schematics (PS, SC, AR, ST, etc.)
+//
+// Wyckoff Method Core Concepts:
+//   THREE FUNDAMENTAL LAWS:
+//   1. Law of Supply and Demand: Price moves based on supply/demand balance
+//   2. Law of Cause and Effect: Accumulation/Distribution creates future moves
+//   3. Law of Effort vs Result: Volume (effort) should confirm price (result)
+//
+//   ACCUMULATION SCHEMATIC:
+//   PS  (Preliminary Support) - Initial buying appears
+//   SC  (Selling Climax) - Panic selling exhaustion
+//   AR  (Automatic Rally) - Relief bounce
+//   ST  (Secondary Test) - Test of SC low
+//   Spring - False breakdown to trap sellers
+//   SOS (Sign of Strength) - Strong rally on volume
+//   LPS (Last Point of Support) - Final retest before markup
+//   BU  (Backup) - Move into profit/markup phase
+//
+//   DISTRIBUTION SCHEMATIC:
+//   PSY  (Preliminary Supply) - Initial selling appears
+//   BC   (Buying Climax) - Euphoric buying exhaustion
+//   AR   (Automatic Reaction) - Sharp pullback
+//   ST   (Secondary Test) - Test of BC high
+//   UTAD (Upthrust After Distribution) - False breakout to trap buyers
+//   SOW  (Sign of Weakness) - Sharp decline on volume
+//   LPSY (Last Point of Supply) - Final rally before markdown
+//   MD   (Markdown) - Move into markdown phase
+//
+// Usage:
+//   import "RTAMarketStructure" as MS
+//   var wyckoffState = MS.newWyckoffState()
+//   MS.updateWyckoffAnalysis(wyckoffState, volumeAvg, atr)
+// ============================================================================
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+// @type Wyckoff phase
+// @field name Phase name (e.g., "ACCUMULATION", "DISTRIBUTION", "MARKUP", "MARKDOWN")
+// @field subphase Current subphase (e.g., "PS", "SC", "SPRING", "SOS")
+// @field startBar Bar where phase started
+// @field startPrice Price at phase start
+// @field rangeHigh Highest price in range
+// @field rangeLow Lowest price in range
+// @field volumeProfile Volume characteristics in phase
+// @field confidence Confidence score (0-100)
+export type WyckoffPhase
+    string name
+    string subphase
+    int startBar
+    float startPrice
+    float rangeHigh
+    float rangeLow
+    float volumeProfile
+    float confidence
+
+// @type Wyckoff event
+// @field eventType Event type (PS, SC, AR, ST, SPRING, SOS, LPS, UTAD, SOW, etc.)
+// @field bar Bar index where event occurred
+// @field price Price at event
+// @field volume Volume at event
+// @field volumeRatio Volume vs average
+// @field spread Price spread (high - low)
+// @field significance Significance score (0-100)
+// @field description Event description
+export type WyckoffEvent
+    string eventType
+    int bar
+    float price
+    float volume
+    float volumeRatio
+    float spread
+    float significance
+    string description
+
+// @type Effort vs Result analysis
+// @field effort Volume (effort)
+// @field result Price spread (result)
+// @field relationship "CONFIRMATION", "DIVERGENCE", "CLIMAX"
+// @field isPositive True if bullish, false if bearish
+// @field strength Strength of signal (0-100)
+export type EffortResult
+    float effort
+    float result
+    string relationship
+    bool isPositive
+    float strength
+
+// @type Wyckoff state
+// @field currentPhase Current Wyckoff phase
+// @field previousPhase Previous Wyckoff phase
+// @field events Array of Wyckoff events
+// @field effortResult Current effort vs result analysis
+// @field compositeOperator Composite operator position ("ACCUMULATING", "DISTRIBUTING", "NEUTRAL")
+// @field causeBuilt Cause built (accumulation/distribution range width * time)
+// @field effectExpected Expected effect (price move) based on cause
+// @field lastUpdateBar Last bar when updated
+export type WyckoffState
+    WyckoffPhase currentPhase
+    WyckoffPhase previousPhase
+    array<WyckoffEvent> events
+    EffortResult effortResult
+    string compositeOperator
+    float causeBuilt
+    float effectExpected
+    int lastUpdateBar
+
+// @type Wyckoff configuration
+// @field volumeLookback Period for volume average
+// @field climaxVolumeMultiplier Volume multiplier for climax
+// @field springThreshold % move for spring detection
+// @field utadThreshold % move for UTAD detection
+// @field sosThreshold % move for SOS detection
+// @field sowThreshold % move for SOW detection
+// @field minRangeBars Minimum bars to consider a range
+export type WyckoffConfig
+    int volumeLookback
+    float climaxVolumeMultiplier
+    float springThreshold
+    float utadThreshold
+    float sosThreshold
+    float sowThreshold
+    int minRangeBars
+
+// ============================================================================
+// INITIALIZATION FUNCTIONS
+// ============================================================================
+
+// @function Initialize Wyckoff state
+// @returns New WyckoffState
+export newWyckoffState() =>
+    WyckoffState.new(
+        na,                             // currentPhase
+        na,                             // previousPhase
+        array.new<WyckoffEvent>(),     // events
+        na,                             // effortResult
+        "NEUTRAL",                      // compositeOperator
+        0.0,                            // causeBuilt
+        0.0,                            // effectExpected
+        0                               // lastUpdateBar
+    )
+
+// @function Initialize Wyckoff configuration
+// @returns New WyckoffConfig
+export newWyckoffConfig() =>
+    WyckoffConfig.new(
+        20,         // volumeLookback
+        2.0,        // climaxVolumeMultiplier
+        2.0,        // springThreshold (%)
+        2.0,        // utadThreshold (%)
+        3.0,        // sosThreshold (%)
+        3.0,        // sowThreshold (%)
+        10          // minRangeBars
+    )
+
+// @function Create new Wyckoff phase
+// @param name Phase name
+// @param subphase Subphase name
+// @returns New WyckoffPhase
+export newWyckoffPhase(string name, string subphase = "") =>
+    WyckoffPhase.new(
+        name,           // name
+        subphase,       // subphase
+        bar_index,      // startBar
+        close,          // startPrice
+        high,           // rangeHigh
+        low,            // rangeLow
+        0.0,            // volumeProfile
+        50.0            // confidence
+    )
+
+// @function Create new Wyckoff event
+// @param eventType Event type
+// @param description Event description
+// @returns New WyckoffEvent
+export newWyckoffEvent(string eventType, string description = "") =>
+    WyckoffEvent.new(
+        eventType,      // eventType
+        bar_index,      // bar
+        close,          // price
+        volume,         // volume
+        0.0,            // volumeRatio
+        high - low,     // spread
+        50.0,           // significance
+        description     // description
+    )
+
+// ============================================================================
+// EFFORT VS RESULT ANALYSIS
+// ============================================================================
+
+// @function Analyze effort vs result
+// @param volumeCurrent Current volume
+// @param volumeAvg Average volume
+// @param spread Current price spread
+// @param spreadAvg Average price spread
+// @returns EffortResult
+export analyzeEffortResult(float volumeCurrent, float volumeAvg, float spread, float spreadAvg) =>
+    effort = volumeCurrent / volumeAvg
+    result = spread / spreadAvg
+
+    // Determine relationship
+    relationship = "CONFIRMATION"
+    isPositive = close > open
+    strength = 50.0
+
+    // HIGH EFFORT + HIGH RESULT = Confirmation
+    if effort > 1.5 and result > 1.5
+        relationship := "CONFIRMATION"
+        strength := 80.0
+
+    // HIGH EFFORT + LOW RESULT = Divergence (climax)
+    else if effort > 2.0 and result < 0.8
+        relationship := "CLIMAX"
+        strength := 90.0
+
+    // LOW EFFORT + HIGH RESULT = Sign of strength/weakness
+    else if effort < 0.8 and result > 1.2
+        relationship := "DIVERGENCE"
+        strength := 70.0
+
+    // NORMAL
+    else
+        relationship := "CONFIRMATION"
+        strength := 50.0
+
+    EffortResult.new(
+        effort,
+        result,
+        relationship,
+        isPositive,
+        strength
+    )
+
+// ============================================================================
+// WYCKOFF EVENT DETECTION
+// ============================================================================
+
+// @function Detect Selling Climax (SC)
+// @param volumeRatio Volume vs average
+// @param config WyckoffConfig
+// @returns True if SC detected
+export detectSellingClimax(float volumeRatio, WyckoffConfig config) =>
+    // High volume + wide down spread + close near low
+    isHighVolume = volumeRatio >= config.climaxVolumeMultiplier
+    isDownBar = close < open
+    isWideSpread = (high - low) / close > 0.02
+    isCloseNearLow = (close - low) / (high - low) < 0.3
+
+    isHighVolume and isDownBar and isWideSpread and isCloseNearLow
+
+// @function Detect Buying Climax (BC)
+// @param volumeRatio Volume vs average
+// @param config WyckoffConfig
+// @returns True if BC detected
+export detectBuyingClimax(float volumeRatio, WyckoffConfig config) =>
+    // High volume + wide up spread + close near high
+    isHighVolume = volumeRatio >= config.climaxVolumeMultiplier
+    isUpBar = close > open
+    isWideSpread = (high - low) / close > 0.02
+    isCloseNearHigh = (high - close) / (high - low) < 0.3
+
+    isHighVolume and isUpBar and isWideSpread and isCloseNearHigh
+
+// @function Detect Spring
+// @param rangeLow Range low price
+// @param config WyckoffConfig
+// @returns True if Spring detected
+export detectSpring(float rangeLow, WyckoffConfig config) =>
+    // False breakdown below range low + quick reversal
+    breakdownPct = ((rangeLow - low) / rangeLow) * 100
+    quickReversal = close > rangeLow
+
+    breakdownPct >= config.springThreshold and quickReversal
+
+// @function Detect Upthrust After Distribution (UTAD)
+// @param rangeHigh Range high price
+// @param config WyckoffConfig
+// @returns True if UTAD detected
+export detectUTAD(float rangeHigh, WyckoffConfig config) =>
+    // False breakout above range high + quick reversal
+    breakoutPct = ((high - rangeHigh) / rangeHigh) * 100
+    quickReversal = close < rangeHigh
+
+    breakoutPct >= config.utadThreshold and quickReversal
+
+// @function Detect Sign of Strength (SOS)
+// @param rangeLow Range low price
+// @param volumeRatio Volume vs average
+// @param config WyckoffConfig
+// @returns True if SOS detected
+export detectSOS(float rangeLow, float volumeRatio, WyckoffConfig config) =>
+    // Strong rally on high volume from range
+    rallyPct = ((close - rangeLow) / rangeLow) * 100
+    isHighVolume = volumeRatio >= 1.5
+    isUpBar = close > open
+
+    rallyPct >= config.sosThreshold and isHighVolume and isUpBar
+
+// @function Detect Sign of Weakness (SOW)
+// @param rangeHigh Range high price
+// @param volumeRatio Volume vs average
+// @param config WyckoffConfig
+// @returns True if SOW detected
+export detectSOW(float rangeHigh, float volumeRatio, WyckoffConfig config) =>
+    // Sharp decline on high volume from range
+    declinePct = ((rangeHigh - close) / rangeHigh) * 100
+    isHighVolume = volumeRatio >= 1.5
+    isDownBar = close < open
+
+    declinePct >= config.sowThreshold and isHighVolume and isDownBar
+
+// ============================================================================
+// PHASE IDENTIFICATION
+// ============================================================================
+
+// @function Identify current Wyckoff phase
+// @param state WyckoffState
+// @param volumeAvg Average volume
+// @param atr Average True Range
+// @param config WyckoffConfig
+export identifyWyckoffPhase(WyckoffState state, float volumeAvg, float atr, WyckoffConfig config) =>
+    volumeRatio = volume / volumeAvg
+    spread = high - low
+    spreadAvg = atr
+
+    // Analyze effort vs result
+    state.effortResult := analyzeEffortResult(volume, volumeAvg, spread, spreadAvg)
+
+    // Detect climaxes
+    isSellingClimax = detectSellingClimax(volumeRatio, config)
+    isBuyingClimax = detectBuyingClimax(volumeRatio, config)
+
+    // Create or update current phase
+    if na(state.currentPhase)
+        state.currentPhase := newWyckoffPhase("RANGING", "PS")
+
+    currentPhase = state.currentPhase
+
+    // Update range bounds
+    if high > currentPhase.rangeHigh
+        currentPhase.rangeHigh := high
+    if low < currentPhase.rangeLow
+        currentPhase.rangeLow := low
+
+    // Detect phase transitions based on events
+    if isSellingClimax and currentPhase.name != "ACCUMULATION"
+        // Transition to Accumulation
+        state.previousPhase := currentPhase
+        state.currentPhase := newWyckoffPhase("ACCUMULATION", "SC")
+        state.compositeOperator := "ACCUMULATING"
+
+        // Create SC event
+        event = newWyckoffEvent("SC", "Selling Climax - Panic selling exhaustion")
+        event.volumeRatio := volumeRatio
+        event.significance := 90.0
+        array.push(state.events, event)
+
+    else if isBuyingClimax and currentPhase.name != "DISTRIBUTION"
+        // Transition to Distribution
+        state.previousPhase := currentPhase
+        state.currentPhase := newWyckoffPhase("DISTRIBUTION", "BC")
+        state.compositeOperator := "DISTRIBUTING"
+
+        // Create BC event
+        event = newWyckoffEvent("BC", "Buying Climax - Euphoric buying exhaustion")
+        event.volumeRatio := volumeRatio
+        event.significance := 90.0
+        array.push(state.events, event)
+
+    // Detect sub-phase events
+    if currentPhase.name == "ACCUMULATION"
+        detectAccumulationEvents(state, volumeRatio, config)
+
+    else if currentPhase.name == "DISTRIBUTION"
+        detectDistributionEvents(state, volumeRatio, config)
+
+    // Calculate cause and effect
+    if currentPhase.name == "ACCUMULATION" or currentPhase.name == "DISTRIBUTION"
+        rangeWidth = currentPhase.rangeHigh - currentPhase.rangeLow
+        rangeDuration = bar_index - currentPhase.startBar
+        state.causeBuilt := rangeWidth * rangeDuration
+
+        // Expected effect = cause (larger range + longer time = bigger move)
+        state.effectExpected := rangeWidth * math.sqrt(rangeDuration / 100)
+
+// @function Detect accumulation sub-phase events
+// @param state WyckoffState
+// @param volumeRatio Volume ratio
+// @param config WyckoffConfig
+export detectAccumulationEvents(WyckoffState state, float volumeRatio, WyckoffConfig config) =>
+    currentPhase = state.currentPhase
+
+    // Detect Spring
+    if detectSpring(currentPhase.rangeLow, config) and currentPhase.subphase != "SPRING"
+        currentPhase.subphase := "SPRING"
+        event = newWyckoffEvent("SPRING", "False breakdown to trap sellers")
+        event.volumeRatio := volumeRatio
+        event.significance := 85.0
+        array.push(state.events, event)
+
+    // Detect SOS
+    else if detectSOS(currentPhase.rangeLow, volumeRatio, config) and
+       currentPhase.subphase != "SOS"
+        currentPhase.subphase := "SOS"
+        event = newWyckoffEvent("SOS", "Sign of Strength - Strong rally on volume")
+        event.volumeRatio := volumeRatio
+        event.significance := 80.0
+        array.push(state.events, event)
+
+        // Transition to MARKUP if strong enough
+        if volumeRatio >= 2.0
+            currentPhase.name := "MARKUP"
+            currentPhase.subphase := "BU"
+            state.compositeOperator := "NEUTRAL"
+
+// @function Detect distribution sub-phase events
+// @param state WyckoffState
+// @param volumeRatio Volume ratio
+// @param config WyckoffConfig
+export detectDistributionEvents(WyckoffState state, float volumeRatio, WyckoffConfig config) =>
+    currentPhase = state.currentPhase
+
+    // Detect UTAD
+    if detectUTAD(currentPhase.rangeHigh, config) and currentPhase.subphase != "UTAD"
+        currentPhase.subphase := "UTAD"
+        event = newWyckoffEvent("UTAD", "Upthrust After Distribution - False breakout")
+        event.volumeRatio := volumeRatio
+        event.significance := 85.0
+        array.push(state.events, event)
+
+    // Detect SOW
+    else if detectSOW(currentPhase.rangeHigh, volumeRatio, config) and
+       currentPhase.subphase != "SOW"
+        currentPhase.subphase := "SOW"
+        event = newWyckoffEvent("SOW", "Sign of Weakness - Sharp decline on volume")
+        event.volumeRatio := volumeRatio
+        event.significance := 80.0
+        array.push(state.events, event)
+
+        // Transition to MARKDOWN if strong enough
+        if volumeRatio >= 2.0
+            currentPhase.name := "MARKDOWN"
+            currentPhase.subphase := "MD"
+            state.compositeOperator := "NEUTRAL"
+
+// ============================================================================
+// MAIN UPDATE FUNCTION
+// ============================================================================
+
+// @function Update Wyckoff analysis
+// @param state WyckoffState
+// @param volumeAvg Average volume
+// @param atr Average True Range
+// @param config Wyckoff configuration
+export updateWyckoffAnalysis(WyckoffState state, float volumeAvg = na, float atr = na, WyckoffConfig config = na) =>
+    cfg = na(config) ? newWyckoffConfig() : config
+
+    volAvg = na(volumeAvg) ? ta.sma(volume, cfg.volumeLookback) : volumeAvg
+    atrValue = na(atr) ? ta.atr(14) : atr
+
+    // Identify phase
+    identifyWyckoffPhase(state, volAvg, atrValue, cfg)
+
+    state.lastUpdateBar := bar_index
+
+// ============================================================================
+// QUERY FUNCTIONS
+// ============================================================================
+
+// @function Get current Wyckoff phase
+// @param state WyckoffState
+// @returns Current phase name
+export getCurrentWyckoffPhase(WyckoffState state) =>
+    if na(state.currentPhase)
+        "UNKNOWN"
+    else
+        state.currentPhase.name
+
+// @function Get current subphase
+// @param state WyckoffState
+// @returns Current subphase
+export getCurrentSubphase(WyckoffState state) =>
+    if na(state.currentPhase)
+        ""
+    else
+        state.currentPhase.subphase
+
+// @function Check if in accumulation
+// @param state WyckoffState
+// @returns True if accumulating
+export isAccumulating(WyckoffState state) =>
+    if na(state.currentPhase)
+        false
+    else
+        state.currentPhase.name == "ACCUMULATION" or state.compositeOperator == "ACCUMULATING"
+
+// @function Check if in distribution
+// @param state WyckoffState
+// @returns True if distributing
+export isDistributing(WyckoffState state) =>
+    if na(state.currentPhase)
+        false
+    else
+        state.currentPhase.name == "DISTRIBUTION" or state.compositeOperator == "DISTRIBUTING"
+
+// @function Check if in markup
+// @param state WyckoffState
+// @returns True if in markup
+export isMarkup(WyckoffState state) =>
+    if na(state.currentPhase)
+        false
+    else
+        state.currentPhase.name == "MARKUP"
+
+// @function Check if in markdown
+// @param state WyckoffState
+// @returns True if in markdown
+export isMarkdown(WyckoffState state) =>
+    if na(state.currentPhase)
+        false
+    else
+        state.currentPhase.name == "MARKDOWN"
+
+// @function Get recent events
+// @param state WyckoffState
+// @param count Number of recent events to return
+// @returns Array of recent events
+export getRecentEvents(WyckoffState state, int count = 5) =>
+    events = state.events
+    size = array.size(events)
+
+    recentEvents = array.new<WyckoffEvent>()
+
+    if size > 0
+        startIdx = math.max(0, size - count)
+        for i = startIdx to size - 1
+            array.push(recentEvents, array.get(events, i))
+
+    recentEvents
+
+// @function Get Wyckoff summary
+// @param state WyckoffState
+// @returns Formatted summary string
+export getWyckoffSummary(WyckoffState state) =>
+    if na(state.currentPhase)
+        "No Wyckoff phase detected"
+    else
+        phase = state.currentPhase
+        str.format(
+            "Wyckoff Analysis\nPhase: {0}\nSubphase: {1}\nComposite: {2}\nCause Built: {3}\nExpected Effect: {4}%",
+            phase.name,
+            phase.subphase,
+            state.compositeOperator,
+            str.tostring(state.causeBuilt, "#"),
+            str.tostring(state.effectExpected, "#.#")
+        )
+

@@ -1,0 +1,213 @@
+//@version=6
+// ============================================================================
+// MA Regime Bands
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2025-12-22 09:50:40
+// ============================================================================
+// Regime overlay using multi-MA alignment with ATR-based stop bands and normalized trend strength.
+//
+// ============================================================================
+indicator("MA Regime Bands", overlay=true, max_labels_count=200)
+
+// ============================================================================
+// MODULES:
+// - inputs.pine
+// - core.pine
+// - visualization.pine
+// ============================================================================
+
+// NOTE: Modules are combined by the build system.
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+grpMA = "Moving Averages"
+
+maType = input.string("DEMA", "MA Type", options=["SMA","EMA","DEMA","TEMA","JMA"], group=grpMA)
+
+len1 = input.int(21, "MA 1 Length", group=grpMA, minval=1)
+len2 = input.int(55, "MA 2 Length", group=grpMA, minval=1)
+len3 = input.int(89, "MA 3 Length", group=grpMA, minval=1)
+
+showMAs = input.bool(false, "Show MAs", group=grpMA)
+showAMA = input.bool(false, "Show Average MA", group=grpMA)
+
+grpATR = "ATR Stop Zones"
+atrLen = input.int(20, "ATR Length", group=grpATR, minval=1)
+mult   = input.float(2.0, "ATR Stop Loss Multiplier", group=grpATR, minval=0.1, step=0.1)
+showZones = input.bool(true, "Show Stop Zones", group=grpATR)
+
+grpStrength = "Trend Strength"
+strengthMode = input.string("By MA Type", "Strength Normalization", options=["Off","By MA Type","Auto"], group=grpStrength)
+
+baseMinStrength = input.float(0.6, "Base Min Strength (spread / ATR)", step=0.05, group=grpStrength)
+autoLookback    = input.int(200, "Auto Normalize Lookback", group=grpStrength, minval=50)
+
+grpUI = "UI"
+showLabels = input.bool(true, "Show Regime Labels", group=grpUI)
+labelSize  = input.string("tiny", "Label Size", options=["tiny","small","normal"], group=grpUI)
+showBg     = input.bool(true, "Show Regime Background", group=grpUI)
+
+// label size map
+size _ls = labelSize == "small" ? size.small : labelSize == "normal" ? size.normal : size.tiny
+
+
+// ============================================================================
+// MODULE: core
+// ============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MA function
+// ─────────────────────────────────────────────────────────────────────────────
+f_ma(_src, _len) =>
+    switch maType
+        "SMA"  => ta.sma(_src, _len)
+        "EMA"  => ta.ema(_src, _len)
+        "DEMA" =>
+            ema1 = ta.ema(_src, _len)
+            2.0 * ema1 - ta.ema(ema1, _len)
+        "TEMA" =>
+            ema1 = ta.ema(_src, _len)
+            ema2 = ta.ema(ema1, _len)
+            3.0 * ema1 - 3.0 * ema2 + ta.ema(ema2, _len)
+        "JMA"  => ta.jma(_src, _len, 0)
+        => ta.ema(_src, _len)
+
+// Strength factor by MA type (simple normalization)
+f_strengthFactor() =>
+    switch maType
+        "SMA"  => 1.00
+        "EMA"  => 1.00
+        "DEMA" => 1.05   // slightly stricter
+        "TEMA" => 0.80   // smoother -> allow smaller spread
+        "JMA"  => 0.85   // smoother -> allow smaller spread
+        => 1.00
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core calc
+// ─────────────────────────────────────────────────────────────────────────────
+ma1 = f_ma(close, len1)
+ma2 = f_ma(close, len2)
+ma3 = f_ma(close, len3)
+ama = (ma1 + ma2 + ma3) / 3.0
+
+atr = ta.atr(atrLen)
+slDist = atr * mult
+
+highestMA = math.max(ma1, math.max(ma2, ma3))
+lowestMA  = math.min(ma1, math.min(ma2, ma3))
+
+// Trend strength = MA spread normalized by ATR
+spreadATR = atr > 0 ? (highestMA - lowestMA) / atr : 0.0
+
+minStrengthByType = baseMinStrength * f_strengthFactor()
+
+// Auto normalization: compare current AMA "step" to its long-run average
+amaStep     = atr > 0 ? ta.rma(math.abs(ama - ama[1]), atrLen) / atr : 0.0
+amaStepRef  = ta.sma(amaStep, autoLookback)
+autoFactor  = (amaStepRef > 0) ? (amaStep / amaStepRef) : 1.0
+minStrengthAuto = baseMinStrength * autoFactor
+
+minStrength =
+     strengthMode == "Off"        ? baseMinStrength : strengthMode == "By MA Type" ? minStrengthByType : minStrengthAuto
+
+strongTrend = spreadATR >= minStrength
+
+// Regimes (confirmed close + strength gate)
+bullRaw = barstate.isconfirmed and close >= ma1 and close >= ma2 and close >= ma3
+bearRaw = barstate.isconfirmed and close <= ma1 and close <= ma2 and close <= ma3
+
+bull = bullRaw and strongTrend
+bear = bearRaw and strongTrend
+neutral = barstate.isconfirmed and not bull and not bear
+
+bullFlip = bull and not bull[1]
+bearFlip = bear and not bear[1]
+exitFlip = (neutral and not neutral[1]) or ((bull[1] and not bull) and not bear) or ((bear[1] and not bear) and not bull)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Persisted levels (overlay zones)
+// ─────────────────────────────────────────────────────────────────────────────
+var float longEntry  = na
+var float longSL     = na
+var float shortEntry = na
+var float shortSL    = na
+
+if bullFlip
+    longEntry := highestMA
+    longSL    := highestMA - slDist
+    shortEntry := na
+    shortSL    := na
+
+if bearFlip
+    shortEntry := lowestMA
+    shortSL    := lowestMA + slDist
+    longEntry := na
+    longSL    := na
+
+if exitFlip
+    longEntry := na
+    longSL    := na
+    shortEntry := na
+    shortSL    := na
+
+
+// ============================================================================
+// MODULE: visualization
+// ============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plots
+// ─────────────────────────────────────────────────────────────────────────────
+trendCol = bull ? color.new(color.lime, 0) : bear ? color.new(color.fuchsia, 0) : color.new(color.gray, 0)
+
+plot(showMAs ? ma1 : na, "MA 1", color=color.new(trendCol, 60))
+plot(showMAs ? ma2 : na, "MA 2", color=color.new(trendCol, 60))
+plot(showMAs ? ma3 : na, "MA 3", color=color.new(trendCol, 60))
+
+plot(showAMA ? ama : na, "Average MA",
+     color=bull ? color.new(color.blue, 0) : bear ? color.new(color.red, 0) : color.new(color.gray, 0),
+     linewidth=2)
+
+pLongSL    = plot(bull ? longSL : na, "Long SL", color=color.new(color.gray, 0), style=plot.style_linebr)
+pLongEntry = plot(bull ? longEntry : na, "Long Entry", color=color.new(color.white, 0), style=plot.style_linebr)
+
+pShortSL    = plot(bear ? shortSL : na, "Short SL", color=color.new(color.gray, 0), style=plot.style_linebr)
+pShortEntry = plot(bear ? shortEntry : na, "Short Entry", color=color.new(color.white, 0), style=plot.style_linebr)
+
+if showZones
+    fill(pLongSL, pLongEntry, title="Long Stop Zone",  color=bull ? color.new(color.red, 75) : na)
+    fill(pShortEntry, pShortSL, title="Short Stop Zone", color=bear ? color.new(color.yellow, 75) : na)
+
+if showBg
+    bgcolor(bull ? color.new(color.green, 93) : bear ? color.new(color.purple, 93) : na)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Labels
+// ─────────────────────────────────────────────────────────────────────────────
+if showLabels and bullFlip
+    label.new(bar_index, high, "BULL", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0), size=_ls)
+
+if showLabels and bearFlip
+    label.new(bar_index, low, "BEAR", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0), size=_ls)
+
+if showLabels and exitFlip
+    label.new(bar_index, close, "NEUTRAL", style=label.style_label_left, textcolor=color.white, color=color.new(color.gray, 40), size=_ls)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+alertcondition(bullFlip, "Bull Regime", "Bull regime started on {{ticker}}")
+alertcondition(bearFlip, "Bear Regime", "Bear Regime started on {{ticker}}")
+alertcondition(exitFlip, "Neutral/Transition", "Regime ended (neutral/transition) on {{ticker}}")
+
+

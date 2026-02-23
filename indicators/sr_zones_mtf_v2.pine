@@ -1,0 +1,486 @@
+//@version=6
+// ============================================================================
+// S/R Zones MTF [WavesUnchained]
+// Version: 3.0.0
+// Author: WavesUnchained
+// Build: 2025-12-22 01:32:28
+// ============================================================================
+// Multi-timeframe S/R zones built from ATR-reversal structure swings with scoring and merging.
+//
+// ============================================================================
+indicator("S/R Zones MTF [WavesUnchained]", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// MODULES:
+// - inputs.pine
+// - core.pine
+// - visualization.pine
+// ============================================================================
+
+// NOTE: Modules are combined by the build system.
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+grpTF   = "Timeframes"
+htf1    = input.timeframe("15", "HTF1 (next higher)", group=grpTF)
+useHTF2 = input.bool(false, "Use HTF2", group=grpTF)
+htf2    = input.timeframe("60", "HTF2", group=grpTF)
+useChartSwings = input.bool(true, "Use Chart-TF Swings", group=grpTF)
+
+grpZone = "Zones"
+maxZones     = input.int(10, "Max Zones", minval=1, maxval=50, group=grpZone)
+atrLen       = input.int(14, "ATR Length", minval=1, group=grpZone)
+
+zoneAtrMultHTF = input.float(1.0, "Zone Width HTF = ATR(HTF)*", step=0.1, minval=0.1, group=grpZone)
+zoneAtrMultCH  = input.float(0.8, "Zone Width Chart = ATR(Chart)*", step=0.1, minval=0.1, group=grpZone)
+
+breakAtrMult = input.float(0.25, "Break Buffer = ATR(Chart)*", step=0.05, minval=0.0, group=grpZone)
+
+grpMerge = "Zone Merging / Dedupe"
+mergeOn      = input.bool(true, "Enable Zone Merging", group=grpMerge)
+mergeAtrMult = input.float(0.6, "Merge Distance = ATR(Source)*", step=0.1, minval=0.1, group=grpMerge)
+tooCloseAtr  = input.float(0.125, "Too-Close Filter = ATR(Source)*", step=0.025, minval=0.0, group=grpMerge)
+
+grpStruct = "Structure (Swing Engine)"
+revAtrMult = input.float(1.0, "Reversal Threshold (ATR*X)", step=0.1, minval=0.1, group=grpStruct)
+
+grpBreak = "Break Rules"
+invalidation = input.string("Close", "Invalidation", options=["Wick","Close"], group=grpBreak)
+avoidFalseBreaks = input.bool(false, "Avoid False Breaks (Volume)", group=grpBreak)
+breakVolMult     = input.float(1.2, "Break Volume Threshold = SMA(vol)*", step=0.1, minval=0.1, maxval=5.0, group=grpBreak)
+
+grpFilter = "Filter / Score"
+useFilter   = input.bool(true, "Enable Filter", group=grpFilter)
+minScore    = input.float(0.0, "Min Score (when filter on)", step=0.5, group=grpFilter)
+
+wTouch      = input.float(1.0, "Weight: Touch", step=0.25, group=grpFilter)
+wWick       = input.float(0.8, "Weight: Rejection Wick", step=0.25, group=grpFilter)
+wCloseLoc   = input.float(0.7, "Weight: Close Location", step=0.25, group=grpFilter)
+wImpulse    = input.float(0.6, "Weight: Impulse", step=0.25, group=grpFilter)
+wAge        = input.float(0.001, "Weight: Age Penalty", step=0.0005, group=grpFilter)
+
+grpShow = "Signals"
+showTests   = input.bool(true, "Show Tests", group=grpShow)
+showBreaks  = input.bool(true, "Show Breaks", group=grpShow)
+showRetests = input.bool(true, "Show Retests", group=grpShow)
+showSweeps  = input.bool(true, "Show Sweeps", group=grpShow)
+retestMinBars = input.int(3, "Retest: min bars after break", minval=1, group=grpShow)
+retestLabelCooldownBars = input.int(3, "Retest Label Cooldown (bars)", minval=0, group=grpShow)
+
+grpInvalid = "Invalidated"
+keepInvalidatedSnapshot = input.bool(false, "Keep invalidated snapshot (faded)", group=grpInvalid)
+invalidFade = input.int(92, "Invalid snapshot transparency", minval=0, maxval=100, group=grpInvalid)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Colors
+//──────────────────────────────────────────────────────────────────────────────
+cSup = color.new(color.lime, 82)
+cRes = color.new(color.red,  82)
+cMid = color.new(color.gray, 70)
+
+
+// ============================================================================
+// MODULE: core
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// Helpers
+//──────────────────────────────────────────────────────────────────────────────
+f_lowestScoreIndex(_scores) =>
+    int idx = 0
+    float v = array.get(_scores, 0)
+    for i = 1 to array.size(_scores) - 1
+        float si = array.get(_scores, i)
+        if si < v
+            v := si
+            idx := i
+    idx
+
+f_clamp01(x) =>
+    math.max(0.0, math.min(1.0, x))
+
+// find merge candidate: returns index or -1
+f_findMergeIdx(_mid, _isRes, _dist, _tops, _bots, _resFlags) =>
+    int best = -1
+    float bestD = 10e10
+    for i = 0 to array.size(_tops) - 1
+        bool r = array.get(_resFlags, i)
+        if r == _isRes
+            float top = array.get(_tops, i)
+            float bot = array.get(_bots, i)
+            float mid = (top + bot) / 2.0
+            float d = math.abs(_mid - mid)
+            if d <= _dist and d < bestD
+                bestD := d
+                best := i
+    best
+
+f_isTooClose(_mid, _isRes, _dist, _tops, _bots, _resFlags) =>
+    bool tooClose = false
+    for i = 0 to array.size(_tops) - 1
+        if array.get(_resFlags, i) == _isRes
+            float mid2 = (array.get(_tops, i) + array.get(_bots, i)) / 2.0
+            if math.abs(_mid - mid2) <= _dist
+                tooClose := true
+                break
+    tooClose
+
+f_applyVisuals(_i, _isRes, _bx, _ln) =>
+    box b = array.get(_bx, _i)
+    line l = array.get(_ln, _i)
+    if not na(b)
+        box.set_bgcolor(b, _isRes ? cRes : cSup)
+    if not na(l)
+        line.set_color(l, cMid)
+
+f_updateZoneGeom(_i, _top, _bot, _bx, _ln, _tops, _bots) =>
+    array.set(_tops, _i, _top)
+    array.set(_bots, _i, _bot)
+    box b = array.get(_bx, _i)
+    line l = array.get(_ln, _i)
+    if not na(b)
+        box.set_top(b, _top)
+        box.set_bottom(b, _bot)
+    if not na(l)
+        float mid = (_top + _bot) / 2.0
+        line.set_y1(l, mid)
+        line.set_y2(l, mid)
+
+f_deleteZone(_i, _bx, _ln, _top, _bot, _isRes, _score, _touches, _lastEvtBar, _lastBreakDir, _lastBreakBar, _lastRetestBar) =>
+    box b = array.get(_bx, _i)
+    line l = array.get(_ln, _i)
+    if not na(b)
+        box.delete(b)
+    if not na(l)
+        line.delete(l)
+    array.remove(_bx, _i)
+    array.remove(_ln, _i)
+    array.remove(_top, _i)
+    array.remove(_bot, _i)
+    array.remove(_isRes, _i)
+    array.remove(_score, _i)
+    array.remove(_touches, _i)
+    array.remove(_lastEvtBar, _i)
+    array.remove(_lastBreakDir, _i)
+    array.remove(_lastBreakBar, _i)
+    array.remove(_lastRetestBar, _i)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Structure swing engine (ATR-reversal, no lookahead)
+// Returns: newHighPrice, newLowPrice, atr
+//──────────────────────────────────────────────────────────────────────────────
+f_structSwings(_revAtrMult, _atrLen) =>
+    float a = ta.atr(_atrLen)
+    float thr = a * _revAtrMult
+
+    var int dir = 0
+    var float pivot = na
+    var float extreme = na
+
+    float newHigh = na
+    float newLow  = na
+
+    if barstate.isfirst
+        pivot := close
+        extreme := close
+        dir := 0
+
+    if dir == 0
+        if close > pivot + thr
+            dir := 1
+            extreme := high
+        else if close < pivot - thr
+            dir := -1
+            extreme := low
+
+    if dir == 1
+        extreme := math.max(extreme, high)
+        if close < extreme - thr
+            newHigh := extreme
+            dir := -1
+            extreme := low
+
+    if dir == -1
+        extreme := math.min(extreme, low)
+        if close > extreme + thr
+            newLow := extreme
+            dir := 1
+            extreme := high
+
+    [newHigh, newLow, a]
+
+//──────────────────────────────────────────────────────────────────────────────
+// Swings from TFs
+//──────────────────────────────────────────────────────────────────────────────
+[swH_ch, swL_ch, atr_ch] = f_structSwings(revAtrMult, atrLen)
+
+[swH_1, swL_1, atr_1] = request.security(syminfo.tickerid, htf1, f_structSwings(revAtrMult, atrLen), barmerge.gaps_off, barmerge.lookahead_off)
+[swH_2, swL_2, atr_2] = useHTF2 ? request.security(syminfo.tickerid, htf2, f_structSwings(revAtrMult, atrLen), barmerge.gaps_off, barmerge.lookahead_off) : [na, na, na]
+
+atrHTF1 = request.security(syminfo.tickerid, htf1, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off)
+atrHTF2 = useHTF2 ? request.security(syminfo.tickerid, htf2, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off) : na
+
+zoneW1 = atrHTF1 * zoneAtrMultHTF
+zoneW2 = useHTF2 ? atrHTF2 * zoneAtrMultHTF : na
+zoneWC = ta.atr(atrLen) * zoneAtrMultCH
+
+breakBuf = ta.atr(atrLen) * breakAtrMult
+
+// volume filter (flux-style)
+avgVol = ta.sma(volume, atrLen)
+volOK  = not avoidFalseBreaks or (volume >= avgVol * breakVolMult)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Storage (parallel arrays)
+//──────────────────────────────────────────────────────────────────────────────
+var box[]  aBx   = array.new_box()
+var line[] aLn   = array.new_line()
+var float[] aTop = array.new_float()
+var float[] aBot = array.new_float()
+var bool[]  aRes = array.new_bool()
+var float[] aScr = array.new_float()
+var int[]   aTch = array.new_int()
+var int[]   aEvt = array.new_int()
+var int[]   aBrk = array.new_int()   // -1 bear break, 0 none, +1 bull break
+var int[]   aBrkBar = array.new_int()
+var int[]   aLastRetestBar = array.new_int()
+
+//──────────────────────────────────────────────────────────────────────────────
+// Add/Merge Zone
+// _srcAtr is ATR of the source TF (for merge distance normalization)
+// _tfBoost: score boost per TF (e.g. Chart 0.5, HTF1 1.0, HTF2 2.0)
+//──────────────────────────────────────────────────────────────────────────────
+f_addOrMergeZone(_isRes, _price, _width, _srcAtr, _tfBoost) =>
+    float top = _isRes ? _price : _price + _width
+    float bot = _isRes ? _price - _width : _price
+    float mid = (top + bot) / 2.0
+
+    float tooCloseDist = _srcAtr * tooCloseAtr
+    bool tooClose = (tooCloseAtr > 0) and f_isTooClose(mid, _isRes, tooCloseDist, aTop, aBot, aRes)
+
+    if not tooClose
+        float mergeDist = _srcAtr * mergeAtrMult
+        int mergeIdx = (mergeOn and array.size(aTop) > 0) ? f_findMergeIdx(mid, _isRes, mergeDist, aTop, aBot, aRes) : -1
+
+        if mergeIdx != -1
+            // Merge: expand existing zone bounds
+            float et = array.get(aTop, mergeIdx)
+            float eb = array.get(aBot, mergeIdx)
+            float nt = math.max(et, top)
+            float nb = math.min(eb, bot)
+            f_updateZoneGeom(mergeIdx, nt, nb, aBx, aLn, aTop, aBot)
+
+            // reward merge slightly (means: another structure confirmed near same area)
+            float sc = array.get(aScr, mergeIdx) + 0.5 + _tfBoost * 0.25
+            array.set(aScr, mergeIdx, sc)
+        else
+            // Create visuals
+            color zc  = _isRes ? cRes : cSup
+            box b = box.new(left=bar_index, top=top, right=bar_index + 1, bottom=bot, bgcolor=zc, border_color=color.new(color.black, 100))
+            line l = line.new(x1=bar_index, y1=mid, x2=bar_index + 1, y2=mid, color=cMid, width=1)
+
+            array.unshift(aBx, b)
+            array.unshift(aLn, l)
+            array.unshift(aTop, top)
+            array.unshift(aBot, bot)
+            array.unshift(aRes, _isRes)
+            array.unshift(aScr, 0.0 + _tfBoost)
+            array.unshift(aTch, 0)
+            array.unshift(aEvt, bar_index)
+            array.unshift(aBrk, 0)
+            array.unshift(aBrkBar, na)
+            array.unshift(aLastRetestBar, na)
+
+            if array.size(aTop) > maxZones
+                int remIdx = useFilter ? f_lowestScoreIndex(aScr) : (array.size(aTop) - 1)
+                f_deleteZone(remIdx, aBx, aLn, aTop, aBot, aRes, aScr, aTch, aEvt, aBrk, aBrkBar, aLastRetestBar)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Create zones from swing events (Chart + HTF1 + optional HTF2)
+//──────────────────────────────────────────────────────────────────────────────
+if useChartSwings
+    if not na(swH_ch)
+        f_addOrMergeZone(true,  swH_ch, zoneWC, ta.atr(atrLen), 0.5)
+    if not na(swL_ch)
+        f_addOrMergeZone(false, swL_ch, zoneWC, ta.atr(atrLen), 0.5)
+
+if not na(swH_1)
+    f_addOrMergeZone(true,  swH_1, zoneW1, atrHTF1, 1.0)
+if not na(swL_1)
+    f_addOrMergeZone(false, swL_1, zoneW1, atrHTF1, 1.0)
+
+if useHTF2
+    if not na(swH_2)
+        f_addOrMergeZone(true,  swH_2, zoneW2, atrHTF2, 2.0)
+    if not na(swL_2)
+        f_addOrMergeZone(false, swL_2, zoneW2, atrHTF2, 2.0)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Events + scoring
+//──────────────────────────────────────────────────────────────────────────────
+int n = array.size(aTop)
+float atrNow = ta.atr(atrLen)
+
+float invHigh = (invalidation == "Close" ? close : high)
+float invLow  = (invalidation == "Close" ? close : low)
+
+for i = 0 to n - 1
+    float top = array.get(aTop, i)
+    float bot = array.get(aBot, i)
+    bool  isR = array.get(aRes, i)
+
+    // extend visuals
+    box b = array.get(aBx, i)
+    line l = array.get(aLn, i)
+    if not na(b)
+        box.set_right(b, bar_index + 1)
+    if not na(l)
+        line.set_x2(l, bar_index + 1)
+
+    float sc = array.get(aScr, i)
+    sc -= wAge
+
+    float h = high, lo = low, o = open, c = close
+    float rng = math.max(1e-6, (top - bot))
+
+    // zone interaction
+    bool inZone = (lo <= top and h >= bot)
+
+    // Sweep (stoprun) = wick beyond boundary, close back inside
+    bool sweepR = isR and h > top and c < top and c > bot
+    bool sweepS = (not isR) and lo < bot and c > bot and c < top
+
+    // Test = enters zone, close still inside (soft touch)
+    bool testR = isR and inZone and c < top and c > bot
+    bool testS = (not isR) and inZone and c > bot and c < top
+
+    // buffered breaks, invalidation-aware + volume filter
+    bool breakUp = (invHigh > (top + breakBuf)) and volOK
+    bool breakDn = (invLow  < (bot - breakBuf)) and volOK
+
+    // Quality metrics (fundierter)
+    // close location: for resistance, better if close near bottom; for support, close near top
+    float closeloc = f_clamp01((c - bot) / rng)  // 0..1
+    float qClose   = isR ? (1.0 - closeloc) : closeloc
+
+    // rejection wick quality (ATR-normalized)
+    float upperW = (h - math.max(o, c)) / math.max(1e-6, atrNow)
+    float lowerW = (math.min(o, c) - lo) / math.max(1e-6, atrNow)
+    float qWick  = isR ? upperW : lowerW
+
+    // impulse after interaction: use bar body in expected direction + range expansion
+    // support: bullish body is good, resistance: bearish body is good
+    float body = (c - o) / math.max(1e-6, atrNow) // +bull
+    float qImp = isR ? (-body) : (body)
+
+    // Touch/Test scoring
+    if (testR or testS)
+        int tch = array.get(aTch, i) + 1
+        array.set(aTch, i, tch)
+        sc += wTouch
+        sc += wCloseLoc * qClose
+        sc += wWick * qWick
+        sc += wImpulse * qImp
+        array.set(aEvt, i, bar_index)
+
+        if showTests
+            label.new(bar_index, isR ? h : lo, "T", style=isR ? label.style_label_down : label.style_label_up,
+              textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
+
+    // Sweep scoring
+    if showSweeps and (sweepR or sweepS)
+        sc += (wTouch * 0.7)
+        sc += (wWick * qWick)
+        array.set(aEvt, i, bar_index)
+        label.new(bar_index, isR ? h : lo, "SW", style=isR ? label.style_label_down : label.style_label_up,
+          textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
+
+    // Role-Reversal on Break:
+    // If resistance breaks up => becomes support
+    // If support breaks down => becomes resistance
+    if showBreaks
+        if isR and breakUp
+            if keepInvalidatedSnapshot
+                // snapshot as faded resistance, frozen to this bar
+                box bs = box.new(left=box.get_left(b), top=top, right=bar_index, bottom=bot,
+                  bgcolor=color.new(cRes, invalidFade), border_color=color.new(color.black, 100))
+                line ls = line.new(x1=line.get_x1(l), y1=(top + bot) / 2, x2=bar_index, y2=(top + bot) / 2,
+                  color=color.new(cMid, invalidFade), width=1)
+                bs := bs
+                ls := ls
+
+            array.set(aRes, i, false)
+            array.set(aBrk, i, +1)
+            array.set(aBrkBar, i, bar_index)
+            f_applyVisuals(i, false, aBx, aLn)
+            sc += (wImpulse * 1.5) + (wCloseLoc * 0.5)
+            label.new(bar_index, h, "B↑", style=label.style_label_up, textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
+
+        if (not isR) and breakDn
+            if keepInvalidatedSnapshot
+                box bs = box.new(left=box.get_left(b), top=top, right=bar_index, bottom=bot,
+                  bgcolor=color.new(cSup, invalidFade), border_color=color.new(color.black, 100))
+                line ls = line.new(x1=line.get_x1(l), y1=(top + bot) / 2, x2=bar_index, y2=(top + bot) / 2,
+                  color=color.new(cMid, invalidFade), width=1)
+                bs := bs
+                ls := ls
+
+            array.set(aRes, i, true)
+            array.set(aBrk, i, -1)
+            array.set(aBrkBar, i, bar_index)
+            f_applyVisuals(i, true, aBx, aLn)
+            sc += (wImpulse * 1.5) + (wCloseLoc * 0.5)
+            label.new(bar_index, lo, "B↓", style=label.style_label_down, textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
+
+    // Retest (sharpened): re-enter zone AFTER break + reject back out, with min bars delay
+    int brkDir = array.get(aBrk, i)
+    int brkBar = array.get(aBrkBar, i)
+    int lastR  = array.get(aLastRetestBar, i)
+
+    bool canRetest = (not na(brkBar)) and (bar_index - brkBar >= retestMinBars)
+    bool cooldownOK = na(lastR) or (bar_index - lastR >= retestLabelCooldownBars)
+
+    // After bullish break (R->S): retest should dip into zone and close back ABOVE top (reject upward)
+    bool retestBull = canRetest and cooldownOK and (brkDir == +1) and inZone and (lo <= top) and (c > top) and (c > o)
+
+    // After bearish break (S->R): retest should poke into zone and close back BELOW bot (reject downward)
+    bool retestBear = canRetest and cooldownOK and (brkDir == -1) and inZone and (h >= bot) and (c < bot) and (c < o)
+
+    if showRetests and (retestBull or retestBear)
+        sc += (wTouch * 1.2)
+        sc += (wWick * qWick)
+        sc += (wImpulse * math.abs(qImp))
+        array.set(aEvt, i, bar_index)
+        array.set(aLastRetestBar, i, bar_index)
+        label.new(bar_index, retestBull ? lo : h, "R", style=retestBull ? label.style_label_up : label.style_label_down,
+          textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
+
+    array.set(aScr, i, sc)
+
+
+// ============================================================================
+// MODULE: visualization
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// Filter visibility: fade zones below minScore
+//──────────────────────────────────────────────────────────────────────────────
+if useFilter
+    for i = 0 to array.size(aTop) - 1
+        float sc = array.get(aScr, i)
+        bool isR = array.get(aRes, i)
+        box b = array.get(aBx, i)
+        if not na(b)
+            color zc = isR ? cRes : cSup
+            box.set_bgcolor(b, sc >= minScore ? zc : color.new(zc, 100))
+
+

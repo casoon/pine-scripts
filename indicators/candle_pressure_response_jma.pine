@@ -1,0 +1,328 @@
+//@version=6
+// ============================================================================
+// Candle Pressure & Response (JMA) [Bidirectional]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2025-12-22 01:01:27
+// ============================================================================
+// Bidirectional candle pressure, rejection, efficiency, and expansion metrics with JMA smoothing.
+//
+// ============================================================================
+indicator("Candle Pressure & Response (JMA) [Bidirectional]", overlay=false, max_labels_count=500, max_lines_count=200)
+
+// ============================================================================
+// MODULES:
+// - inputs.pine
+// - core.pine
+// - visualization.pine
+// ============================================================================
+
+// NOTE: Modules are combined by the build system.
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+groupCore   = "Core"
+groupJMA    = "Smoothing (JMA)"
+groupThresh = "Thresholds"
+groupViz    = "Visuals"
+groupLabels = "Chart Labels"
+
+nATR   = input.int(14, "ATR Length", minval=1, group=groupCore)
+mEff   = input.int(8,  "Efficiency Lookback (m)", minval=2, group=groupCore)
+capR   = input.float(2.0, "Range cap (ATR multiples)", minval=0.5, step=0.1, group=groupCore)
+capWb  = input.float(2.0, "Wick-vs-Body cap", minval=0.5, step=0.1, group=groupCore)
+dojiCut= input.float(0.20, "Doji gate cutoff (Body/Range)", minval=0.05, maxval=0.5, step=0.01, group=groupCore)
+
+jLen   = input.int(20, "JMA Length", minval=1, group=groupJMA)
+jPhase = input.int(0,  "JMA Phase (-100..+100)", minval=-100, maxval=100, group=groupJMA)
+jPower = input.float(2.0, "JMA Power", minval=1.0, maxval=8.0, step=0.25, group=groupJMA)
+
+thrCompression = input.float(60, "Compression threshold", minval=0, maxval=100, group=groupThresh)
+thrPressure    = input.float(65, "Pressure threshold", minval=0, maxval=100, group=groupThresh)
+thrExpansion   = input.float(65, "Expansion threshold", minval=0, maxval=100, group=groupThresh)
+thrRejection   = input.float(70, "Rejection threshold", minval=0, maxval=100, group=groupThresh)
+thrExhaust     = input.float(70, "Exhaustion threshold", minval=0, maxval=100, group=groupThresh)
+
+showCompressionBg = input.bool(true, "Show Compression background", group=groupViz)
+showRejection     = input.bool(true, "Plot Rejection curves", group=groupViz)
+showEfficiency     = input.bool(true, "Plot Efficiency curves", group=groupViz)
+showExpansion      = input.bool(false, "Plot Expansion curves (optional)", group=groupViz)
+showExhaustion     = input.bool(false, "Plot Exhaustion curves (optional)", group=groupViz)
+
+labelsEnabled      = input.bool(true, "Enable chart labels", group=groupLabels)
+labelsSizeOpt      = input.string("large", "Label size", options=["small","normal","large","huge"], group=groupLabels)
+labelsMaxPerSide   = input.int(2, "Max labels per side (rolling)", minval=0, maxval=10, group=groupLabels)
+labelsCooldownBars = input.int(6, "Cooldown bars between labels (same type)", minval=0, maxval=50, group=groupLabels)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Helpers
+//──────────────────────────────────────────────────────────────────────────────
+eps = 1e-10
+clamp01(x) => math.max(0.0, math.min(1.0, x))
+clamp(x, a, b) => math.max(a, math.min(b, x))
+
+toLabelSize(s) =>
+    s == "small"  ? size.small  : s == "normal" ? size.normal : s == "large"  ? size.large  : size.huge
+
+lblSize = toLabelSize(labelsSizeOpt)
+
+
+// ============================================================================
+// MODULE: core
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// JMA (CPM / Everget-style with phase clamp)
+//──────────────────────────────────────────────────────────────────────────────
+calculateJMA(float src, int length, float phase = 0.0, float power = 2.0) =>
+    float phaseRatio = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100 + 1.5
+    float beta = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    float alpha = math.pow(beta, power)
+
+    var float e0 = na
+    var float e1 = na
+    var float e2 = na
+    var float jma = na
+
+    e0 := (1 - alpha) * src + alpha * nz(e0[1], src)
+    e1 := (src - e0) * (1 - beta) + beta * nz(e1[1], 0)
+    e2 := (e0 + phaseRatio * e1 - nz(jma[1], src)) * math.pow(1 - alpha, 2) + math.pow(alpha, 2) * nz(e2[1], 0)
+    jma := e2 + nz(jma[1], src)
+    jma
+
+//──────────────────────────────────────────────────────────────────────────────
+// Candle mechanics
+//──────────────────────────────────────────────────────────────────────────────
+R   = high - low
+B   = math.abs(close - open)
+U   = high - math.max(open, close)
+L   = math.min(open, close) - low
+
+ATR = ta.atr(nATR)
+
+bodyRatio = B / math.max(R, eps)
+posClose  = (close - low) / math.max(R, eps)            // 0..1
+cBull     = posClose
+cBear     = 1.0 - posClose
+
+rangeRel  = R / math.max(ATR, eps)
+RangeScore = 100.0 * clamp01(rangeRel / capR)
+
+// Doji gate reduces pressure when body is too small
+dojiGate = clamp01(bodyRatio / dojiCut)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Directional Pressure
+//──────────────────────────────────────────────────────────────────────────────
+BodyForce   = 100.0 * clamp01(bodyRatio) // already 0..100
+CommitBull  = 100.0 * clamp01(cBull)
+CommitBear  = 100.0 * clamp01(cBear)
+
+PressureBull_raw = (0.55 * BodyForce + 0.30 * CommitBull + 0.15 * RangeScore) * dojiGate
+PressureBear_raw = (0.55 * BodyForce + 0.30 * CommitBear + 0.15 * RangeScore) * dojiGate
+
+PressureBull = calculateJMA(PressureBull_raw, jLen, jPhase, jPower)
+PressureBear = calculateJMA(PressureBear_raw, jLen, jPhase, jPower)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Directional Rejection
+//──────────────────────────────────────────────────────────────────────────────
+rejBullRaw = L / math.max(R, eps) // 0..1
+rejBearRaw = U / math.max(R, eps)
+
+wickVsBodyBull = L / math.max(B, eps)
+wickVsBodyBear = U / math.max(B, eps)
+
+WickDomBull = 100.0 * clamp01((wickVsBodyBull / math.max(capWb, eps)))
+WickDomBear = 100.0 * clamp01((wickVsBodyBear / math.max(capWb, eps)))
+
+RejBull_raw = 0.60 * (100.0 * clamp01(rejBullRaw)) + 0.40 * WickDomBull
+RejBear_raw = 0.60 * (100.0 * clamp01(rejBearRaw)) + 0.40 * WickDomBear
+
+RejBull = calculateJMA(RejBull_raw, jLen, jPhase, jPower)
+RejBear = calculateJMA(RejBear_raw, jLen, jPhase, jPower)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Directional Efficiency (signed displacement over path)
+//──────────────────────────────────────────────────────────────────────────────
+disp  = close - close[mEff]
+path  = ta.sum(math.abs(close - close[1]), mEff)
+effS  = disp / math.max(path, eps)  // -1..+1
+
+net1  = close - close[1]
+eff1S = net1 / math.max(R, eps)     // approx -1..+1
+
+EffBull_raw = 100.0 * (0.70 * clamp01(effS)   + 0.30 * clamp01(eff1S))
+EffBear_raw = 100.0 * (0.70 * clamp01(-effS)  + 0.30 * clamp01(-eff1S))
+
+EffBull = calculateJMA(EffBull_raw, jLen, jPhase, jPower)
+EffBear = calculateJMA(EffBear_raw, jLen, jPhase, jPower)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Regime: Compression / Expansion / Exhaustion
+//──────────────────────────────────────────────────────────────────────────────
+smallRange = 1.0 - clamp01((R / math.max(ATR, eps)) / 1.0) // cap at 1 ATR
+lowEff     = 1.0 - (math.max(EffBull, EffBear) / 100.0)
+lowPress   = 1.0 - (math.max(PressureBull, PressureBear) / 100.0)
+
+Compression_raw = 100.0 * (0.45 * smallRange + 0.35 * lowEff + 0.20 * lowPress)
+Compression     = calculateJMA(Compression_raw, jLen, jPhase, jPower)
+
+ExpansionBull_raw = 0.40 * RangeScore + 0.35 * EffBull + 0.25 * PressureBull
+ExpansionBear_raw = 0.40 * RangeScore + 0.35 * EffBear + 0.25 * PressureBear
+ExpansionBull     = calculateJMA(ExpansionBull_raw, jLen, jPhase, jPower)
+ExpansionBear     = calculateJMA(ExpansionBear_raw, jLen, jPhase, jPower)
+
+ExhBull_raw = 100.0 * (PressureBull / 100.0) * (1.0 - EffBull / 100.0) * (1.0 + 0.50 * (RejBear / 100.0))
+ExhBear_raw = 100.0 * (PressureBear / 100.0) * (1.0 - EffBear / 100.0) * (1.0 + 0.50 * (RejBull / 100.0))
+ExhaustBull = calculateJMA(clamp(ExhBull_raw, 0, 100), jLen, jPhase, jPower)
+ExhaustBear = calculateJMA(clamp(ExhBear_raw, 0, 100), jLen, jPhase, jPower)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Chart Labels state
+//──────────────────────────────────────────────────────────────────────────────
+var int lastExpBull = na
+var int lastExpBear = na
+var int lastRejUp   = na
+var int lastRejDn   = na
+var int lastExhUp   = na
+var int lastExhDn   = na
+
+var int rollBull = 0
+var int rollBear = 0
+
+canPlace(lastBar) =>
+    na(lastBar) or (bar_index - lastBar) > labelsCooldownBars
+
+resetRollingIfNewSession() =>
+    ta.change(time("D")) != 0
+
+
+// ============================================================================
+// MODULE: visualization
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// Visuals (Panel)
+//──────────────────────────────────────────────────────────────────────────────
+cBull = color.new(color.lime, 0)
+cBear = color.new(color.red, 0)
+
+cBullSoft = color.new(color.lime, 35)
+cBearSoft = color.new(color.red, 35)
+
+cBg = color.new(color.gray, 88)
+
+if showCompressionBg
+    bgcolor(Compression > thrCompression ? cBg : na)
+
+plot(PressureBull, "Pressure Bull", color=cBull, linewidth=2)
+plot(PressureBear, "Pressure Bear", color=cBear, linewidth=2)
+
+plot(showRejection ? RejBull : na, "Rejection Bull", color=cBullSoft, linewidth=2, style=plot.style_line)
+plot(showRejection ? RejBear : na, "Rejection Bear", color=cBearSoft, linewidth=2, style=plot.style_line)
+
+plot(showEfficiency ? EffBull : na, "Efficiency Bull", color=color.new(color.green, 0), linewidth=2, style=plot.style_line)
+plot(showEfficiency ? EffBear : na, "Efficiency Bear", color=color.new(color.maroon, 0), linewidth=2, style=plot.style_line)
+
+plot(showExpansion ? ExpansionBull : na, "Expansion Bull", color=color.new(color.teal, 0), linewidth=2)
+plot(showExpansion ? ExpansionBear : na, "Expansion Bear", color=color.new(color.orange, 0), linewidth=2)
+
+plot(showExhaustion ? ExhaustBull : na, "Exhaustion Bull", color=color.new(color.aqua, 0), linewidth=2)
+plot(showExhaustion ? ExhaustBear : na, "Exhaustion Bear", color=color.new(color.fuchsia, 0), linewidth=2)
+
+hline(thrPressure, "Pressure thr", color=color.new(color.white, 75))
+hline(thrRejection, "Rejection thr", color=color.new(color.white, 85))
+hline(thrCompression, "Compression thr", color=color.new(color.white, 90))
+
+//──────────────────────────────────────────────────────────────────────────────
+// Chart Labels (force_overlay) with cooldown + max rolling
+//──────────────────────────────────────────────────────────────────────────────
+if resetRollingIfNewSession()
+    rollBull := 0
+    rollBear := 0
+
+mkTip(title, p, rj, ef, comp, extra) =>
+    title + "\n" +
+    "P: " + str.tostring(p, "#.0") + " | R: " + str.tostring(rj, "#.0") + " | E: " + str.tostring(ef, "#.0") + "\n" +
+    "Compression: " + str.tostring(comp, "#.0") + "\n" +
+    extra
+
+placeLabel(isBull, txt, tip) =>
+    // Bull event → arrow up below bar; Bear event → arrow down above bar
+    if isBull
+        label.new(bar_index, low, txt, style=label.style_label_up, textcolor=color.white,
+          color=color.new(color.green, 0), size=lblSize, tooltip=tip, force_overlay=true)
+    else
+        label.new(bar_index, high, txt, style=label.style_label_down, textcolor=color.white,
+          color=color.new(color.red, 0), size=lblSize, tooltip=tip, force_overlay=true)
+
+// Event A: Expansion from Compression (breakout-type)
+condExpBull = Compression > thrCompression and ExpansionBull > thrExpansion and PressureBull > thrPressure
+condExpBear = Compression > thrCompression and ExpansionBear > thrExpansion and PressureBear > thrPressure
+
+// Event B: Rejection against pressure (reversal risk)
+// bull push rejected above → bearish rejection dominates while bull pressure is high
+condRejDn = RejBear > thrRejection and PressureBull > thrPressure
+condRejUp = RejBull > thrRejection and PressureBear > thrPressure
+
+// Event C: Exhaustion
+condExhDn = ExhaustBull > thrExhaust
+condExhUp = ExhaustBear > thrExhaust
+
+if labelsEnabled
+    // Expansion labels
+    if condExpBull and canPlace(lastExpBull) and rollBull < labelsMaxPerSide
+        tip = mkTip("EXP↑ from Compression", PressureBull, RejBull, EffBull, Compression,
+            "Idea: Expansion + pressure after compression.\nInvalidation: no follow-through next bars.")
+        placeLabel(true, "EXP↑", tip)
+        lastExpBull := bar_index
+        rollBull += 1
+
+    if condExpBear and canPlace(lastExpBear) and rollBear < labelsMaxPerSide
+        tip = mkTip("EXP↓ from Compression", PressureBear, RejBear, EffBear, Compression,
+            "Idea: Expansion + pressure after compression.\nInvalidation: no follow-through next bars.")
+        placeLabel(false, "EXP↓", tip)
+        lastExpBear := bar_index
+        rollBear += 1
+
+    // Rejection risk labels
+    if condRejDn and canPlace(lastRejDn) and rollBear < labelsMaxPerSide
+        tip = mkTip("REJ↓ risk", PressureBull, RejBear, math.max(EffBull, EffBear), Compression,
+            "Bull pressure got rejected above.\nWatch for failure / reversal.")
+        placeLabel(false, "REJ↓", tip)
+        lastRejDn := bar_index
+        rollBear += 1
+
+    if condRejUp and canPlace(lastRejUp) and rollBull < labelsMaxPerSide
+        tip = mkTip("REJ↑ risk", PressureBear, RejBull, math.max(EffBull, EffBear), Compression,
+            "Bear pressure got rejected below.\nWatch for failure / reversal.")
+        placeLabel(true, "REJ↑", tip)
+        lastRejUp := bar_index
+        rollBull += 1
+
+    // Exhaustion labels
+    if condExhDn and canPlace(lastExhDn) and rollBear < labelsMaxPerSide
+        tip = mkTip("EXH↓ risk", PressureBull, RejBear, EffBull, Compression,
+            "High bull pressure but low bull efficiency.\nOften precedes stall / pullback.")
+        placeLabel(false, "EXH↓", tip)
+        lastExhDn := bar_index
+        rollBear += 1
+
+    if condExhUp and canPlace(lastExhUp) and rollBull < labelsMaxPerSide
+        tip = mkTip("EXH↑ risk", PressureBear, RejBull, EffBear, Compression,
+            "High bear pressure but low bear efficiency.\nOften precedes stall / pullback.")
+        placeLabel(true, "EXH↑", tip)
+        lastExhUp := bar_index
+        rollBull += 1
+
+

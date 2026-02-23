@@ -1,0 +1,2745 @@
+// RTAStrategy - Strategy Development & Execution Library v1.0.0
+// @version=6
+// @description Comprehensive strategy development library for converting indicators to strategies with advanced position management, multi-level exits, MOST trailing stops, Monte Carlo simulation, risk control, and execution logic
+// @author WavesUnchained
+// @build 2025-11-17 20:30:33
+
+library("RTAStrategy")
+
+// ============================================================================
+// COMBINED LIBRARY MODULES
+// ============================================================================
+
+// ============================================================================
+// MODULE: BASE_TYPES
+// ============================================================================
+
+// RTA STRATEGY - Base Types
+// Core types for strategy development and execution
+
+// ============================================================================
+// STRATEGY CONFIGURATION TYPES
+// ============================================================================
+
+export type StrategyConfig
+    // Position Management
+    float riskPercentPerTrade      // Risk % per trade (default: 1.0)
+    float maxPositionSize          // Max position size % of equity (default: 10.0)
+    int maxConcurrentTrades        // Max open trades (default: 1)
+    bool allowPyramiding           // Allow adding to positions (default: false)
+    int pyramidMaxEntries          // Max pyramid entries (default: 3)
+
+    // Entry/Exit Rules
+    string entryMode               // "SIGNAL", "CONFLUENCE", "BREAKOUT", "REVERSAL"
+    float minConfluenceScore       // Min confluence for entry (default: 0.6)
+    float minSignalStrength        // Min signal strength (default: 0.7)
+    bool requireTrendAlignment     // Require trend filter (default: true)
+
+    // Stop Loss Configuration
+    string slMode                  // "ATR", "FIXED", "SWING", "TRAILING", "NONE"
+    float slMultiplier             // SL multiplier for ATR/volatility (default: 2.0)
+    float slFixedPercent           // Fixed SL % (default: 2.0)
+    int slSwingLookback            // Swing lookback for swing SL (default: 10)
+
+    // Take Profit Configuration
+    string tpMode                  // "RR", "FIXED", "FIBONACCI", "TRAILING", "NONE"
+    float riskRewardRatio          // Risk:Reward ratio (default: 2.0)
+    float tpFixedPercent           // Fixed TP % (default: 4.0)
+    array<float> tpFibLevels       // Fibonacci TP levels (default: [1.618, 2.618])
+
+    // Trailing Configuration
+    bool useTrailingStop           // Enable trailing stop (default: false)
+    string trailingMode            // "ATR", "PERCENTAGE", "PROFIT"
+    float trailingStartProfit      // Start trailing after % profit (default: 1.0)
+    float trailingDistance         // Trailing distance (default: 1.5)
+
+    // Filters
+    bool useSessionFilter          // Trade only in session (default: false)
+    string tradingSession          // Session time "HHMM-HHMM" (default: "0930-1600")
+    bool useTrendFilter            // Require trend alignment (default: true)
+    string trendTimeframe          // HTF for trend filter (default: "D")
+    string requiredTrend           // Required trend: "BULL", "BEAR", "ANY" (default: "ANY")
+    bool useVolatilityFilter       // Volatility filter (default: false)
+    float minATR                   // Min ATR for volatility filter (default: 0.0)
+    float maxATR                   // Max ATR for volatility filter (default: 999.0)
+
+    // Time Management
+    bool useTimeExit               // Enable time-based exit (default: false)
+    int maxBarsInTrade             // Max bars to hold trade (default: 50)
+    bool exitAtEndOfDay            // Close at EOD (default: false)
+    bool exitAtEndOfWeek           // Close at EOW (default: false)
+
+export newStrategyConfig() =>
+    StrategyConfig.new(1.0, 10.0, 1, false, 3, "SIGNAL", 0.6, 0.7, true, "ATR", 2.0, 2.0, 10, "RR", 2.0, 4.0, array.from(1.618, 2.618), false, "ATR", 1.0, 1.5, false, "0930-1600", true, "D", "ANY", false, 0.0, 999.0, false, 50, false, false)
+
+// ============================================================================
+// SIGNAL TYPES
+// ============================================================================
+
+// Simplified signal type for standalone operation
+export type SimpleSignal
+    string direction               // "LONG", "SHORT", "NEUTRAL"
+    float strength                 // 0.0 to 1.0
+    float confidence               // 0.0 to 1.0
+
+// ============================================================================
+// TRADE ENTRY/EXIT TYPES
+// ============================================================================
+
+export type TradeEntry
+    int timestamp                  // Entry bar timestamp
+    int barIndex                   // Entry bar index
+    string direction               // "LONG", "SHORT"
+    float entryPrice               // Actual entry price
+    float stopLoss                 // Initial stop loss
+    float takeProfit               // Initial take profit
+    float positionSize             // Position size (contracts/shares)
+    float riskAmount               // $ risk on trade
+    float potentialProfit          // $ potential profit
+    string reason                  // Entry reason/signal name
+    float signalStrength           // Signal strength at entry
+    float confluenceScore          // Confluence score at entry
+
+export newTradeEntry(string dir, float price, float sl, float tp, float size, float risk, string rsn) =>
+    TradeEntry.new(time, bar_index, dir, price, sl, tp, size, risk, (tp - price) * size, rsn, 0.0, 0.0)
+
+export type TradeExit
+    int timestamp                  // Exit bar timestamp
+    int barIndex                   // Exit bar index
+    float exitPrice                // Actual exit price
+    string reason                  // "SL", "TP", "SIGNAL_REVERSAL", "TIME", "EOD", "MANUAL"
+    float profitLoss               // $ P/L
+    float profitLossPercent        // % P/L
+    float rMultiple                // R-multiple (P/L / risk)
+
+export newTradeExit(float price, string rsn, float pl, float plPct, float rMult) =>
+    TradeExit.new(time, bar_index, price, rsn, pl, plPct, rMult)
+
+// ============================================================================
+// TRADE TRACKING TYPE
+// ============================================================================
+
+export type Trade
+    int id                         // Trade ID
+    TradeEntry entry               // Entry details
+    TradeExit exit                 // Exit details (null if open)
+    bool isOpen                    // Is trade currently open
+    int barsInTrade                // Bars since entry
+    float maxDrawdown              // Max adverse excursion (MAE)
+    float maxProfit                // Max favorable excursion (MFE)
+    float currentStopLoss          // Current SL (can be trailed)
+    float currentTakeProfit        // Current TP
+    bool stopTrailing              // Is trailing active
+
+export newTrade(int tradeId, TradeEntry entry) =>
+    Trade.new(tradeId, entry, na, true, 0, 0.0, 0.0, entry.stopLoss, entry.takeProfit, false)
+
+// ============================================================================
+// POSITION SIZING TYPES
+// ============================================================================
+
+export type PositionSizeResult
+    float contracts                // Position size in contracts/shares
+    float dollarValue              // Position value in $
+    float riskDollars              // Risk in $
+    float riskPercent              // Risk in %
+    bool isValid                   // Is position size valid
+    string warning                 // Warning message if invalid
+
+export newPositionSizeResult(float qty, float value, float risk, float riskPct) =>
+    PositionSizeResult.new(qty, value, risk, riskPct, true, "")
+
+// ============================================================================
+// ENTRY CONDITIONS TYPE
+// ============================================================================
+
+export type EntryCondition
+    bool canEnter                  // Can enter trade
+    string direction               // "LONG", "SHORT", "NONE"
+    float confidence               // Entry confidence 0-1
+    float stopLoss                 // Suggested SL price
+    float takeProfit               // Suggested TP price
+    string reason                  // Entry reason
+    array<string> failedFilters    // List of failed filters
+
+export newEntryCondition() =>
+    EntryCondition.new(false, "NONE", 0.0, 0.0, 0.0, "", array.new<string>())
+
+// ============================================================================
+// EXIT CONDITIONS TYPE
+// ============================================================================
+
+export type ExitCondition
+    bool shouldExit                // Should exit trade
+    string reason                  // Exit reason
+    float suggestedPrice           // Suggested exit price
+    bool isStopHit                 // Was SL hit
+    bool isTakeHit                 // Was TP hit
+    bool isSignalExit              // Signal reversal exit
+
+export newExitCondition() =>
+    ExitCondition.new(false, "", close, false, false, false)
+
+// ============================================================================
+// PERFORMANCE METRICS TYPE
+// ============================================================================
+
+export type PerformanceMetrics
+    // Trade Statistics
+    int totalTrades                // Total number of trades
+    int winningTrades              // Number of wins
+    int losingTrades               // Number of losses
+    float winRate                  // Win rate (%)
+
+    // P/L Statistics
+    float totalProfit              // Total gross profit
+    float totalLoss                // Total gross loss
+    float netProfit                // Net profit
+    float avgWin                   // Average winning trade
+    float avgLoss                  // Average losing trade
+    float avgTrade                 // Average trade (all)
+    float largestWin               // Largest winning trade
+    float largestLoss              // Largest losing trade
+
+    // Risk Metrics
+    float profitFactor             // Gross profit / gross loss
+    float expectancy               // Average $ per trade
+    float avgRMultiple             // Average R-multiple
+    float sharpeRatio              // Sharpe ratio (simplified)
+
+    // Drawdown
+    float maxDrawdown              // Max drawdown $
+    float maxDrawdownPercent       // Max drawdown %
+    int maxConsecutiveLosses       // Max consecutive losses
+    int maxConsecutiveWins         // Max consecutive wins
+
+    // Trade Duration
+    float avgBarsInTrade           // Avg bars per trade
+    int longestTrade               // Longest trade in bars
+    int shortestTrade              // Shortest trade in bars
+
+export newPerformanceMetrics() =>
+    PerformanceMetrics.new(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0, 0)
+
+
+// ============================================================================
+// MODULE: POSITION_SIZING
+// ============================================================================
+
+// RTA STRATEGY - Position Sizing Module
+// Advanced position sizing algorithms for risk management
+
+
+// ============================================================================
+// FIXED RISK POSITION SIZING
+// ============================================================================
+
+// Calculate position size based on fixed risk percentage
+// @param accountSize - Current account equity
+// @param riskPercent - Risk percentage per trade (e.g., 1.0 for 1%)
+// @param entryPrice - Planned entry price
+// @param stopLoss - Stop loss price
+// @returns PositionSizeResult with calculated position size
+export calculateFixedRiskSize(float accountSize, float riskPercent, float entryPrice, float stopLoss) =>
+    result = newPositionSizeResult(0.0, 0.0, 0.0, 0.0)
+
+    // Validation
+    if accountSize <= 0
+        result.isValid := false
+        result.warning := "Invalid account size"
+        result
+    else if entryPrice <= 0 or stopLoss <= 0
+        result.isValid := false
+        result.warning := "Invalid entry or stop loss price"
+        result
+    else if entryPrice == stopLoss
+        result.isValid := false
+        result.warning := "Entry and stop loss cannot be equal"
+        result
+    else
+        // Calculate risk per share/contract
+        riskPerUnit = math.abs(entryPrice - stopLoss)
+
+        // Calculate dollar risk
+        riskDollars = accountSize * (riskPercent / 100.0)
+
+        // Calculate position size
+        contracts = riskDollars / riskPerUnit
+
+        // Round to reasonable precision
+        contracts := math.floor(contracts * 100) / 100
+
+        result.contracts := contracts
+        result.dollarValue := contracts * entryPrice
+        result.riskDollars := riskDollars
+        result.riskPercent := riskPercent
+        result.isValid := contracts > 0
+
+        if contracts <= 0
+            result.warning := "Calculated position size is zero or negative"
+
+        result
+
+// ============================================================================
+// KELLY CRITERION POSITION SIZING
+// ============================================================================
+
+// Calculate optimal position size using Kelly Criterion
+// @param accountSize - Current account equity
+// @param winRate - Historical win rate (0-1, e.g., 0.55 for 55%)
+// @param avgWin - Average winning trade $
+// @param avgLoss - Average losing trade $
+// @param kellyFraction - Kelly fraction (0-1, typically 0.25-0.5 for safety)
+// @returns Position size as % of account
+export calculateKellySize(float accountSize, float winRate, float avgWin, float avgLoss, float kellyFraction = 0.25) =>
+    if winRate <= 0 or winRate >= 1
+        0.0
+    else if avgWin <= 0 or avgLoss <= 0
+        0.0
+    else
+        // Kelly formula: K = W - ((1 - W) / R)
+        // W = win rate, R = avg win / avg loss
+        winLossRatio = avgWin / avgLoss
+        kellyPercent = winRate - ((1.0 - winRate) / winLossRatio)
+
+        // Apply Kelly fraction for safety
+        kellyPercent := kellyPercent * kellyFraction
+
+        // Clamp to reasonable range (0-25%)
+        kellyPercentClamped = math.max(0.0, math.min(25.0, kellyPercent * 100.0))
+
+        // Return position size in dollars
+        accountSize * (kellyPercentClamped / 100.0)
+
+// ============================================================================
+// VOLATILITY-ADJUSTED POSITION SIZING
+// ============================================================================
+
+// Calculate position size adjusted for current volatility
+// @param accountSize - Current account equity
+// @param baseRiskPercent - Base risk percentage
+// @param currentATR - Current ATR value
+// @param avgATR - Average ATR (e.g., SMA(ATR, 50))
+// @returns Adjusted risk percentage
+export calculateVolatilityAdjustedRisk(float accountSize, float baseRiskPercent, float currentATR, float avgATR) =>
+    if currentATR <= 0 or avgATR <= 0
+        accountSize * (baseRiskPercent / 100.0)
+    else
+        // Volatility ratio
+        volRatio = currentATR / avgATR
+
+        // Inverse adjustment: higher volatility = lower position size
+        adjustedRisk = baseRiskPercent / volRatio
+
+        // Clamp to reasonable range (0.25% to 3%)
+        adjustedRiskClamped = math.max(0.25, math.min(3.0, adjustedRisk))
+
+        // Return position size in dollars
+        accountSize * (adjustedRiskClamped / 100.0)
+
+// ============================================================================
+// MAXIMUM POSITION SIZE CALCULATOR
+// ============================================================================
+
+// Calculate maximum allowed position size based on various constraints
+// @param accountSize - Current account equity
+// @param maxPositionPercent - Max position size as % of equity
+// @param price - Entry price
+// @returns Maximum contracts allowed
+export calculateMaxPositionSize(float accountSize, float maxPositionPercent, float price) =>
+    if accountSize <= 0 or price <= 0 or maxPositionPercent <= 0
+        0.0
+    else
+        maxDollarValue = accountSize * (maxPositionPercent / 100.0)
+        maxContracts = maxDollarValue / price
+        math.floor(maxContracts * 100) / 100
+
+// ============================================================================
+// PYRAMID POSITION SIZING
+// ============================================================================
+
+// Calculate pyramid entry size (progressively smaller positions)
+// @param initialSize - Size of first entry
+// @param pyramidLevel - Current pyramid level (1, 2, 3...)
+// @param pyramidFactor - Size reduction factor (e.g., 0.5 for 50% reduction)
+// @returns Pyramid position size
+export calculatePyramidSize(float initialSize, int pyramidLevel, float pyramidFactor = 0.5) =>
+    if pyramidLevel <= 0
+        0.0
+    else if pyramidLevel == 1
+        initialSize
+    else
+        // Progressively smaller positions
+        initialSize * math.pow(pyramidFactor, pyramidLevel - 1)
+
+// ============================================================================
+// COMPOSITE POSITION SIZER
+// ============================================================================
+
+// Comprehensive position sizing with all constraints applied
+export calculatePosition(float accountSize, float riskPercent, float entryPrice, float stopLoss, float maxPositionPercent) =>
+    // Calculate risk-based size
+    riskBasedResult = calculateFixedRiskSize(accountSize, riskPercent, entryPrice, stopLoss)
+
+    if not riskBasedResult.isValid
+        riskBasedResult
+    else
+        // Calculate maximum allowed size
+        maxSize = calculateMaxPositionSize(accountSize, maxPositionPercent, entryPrice)
+
+        // Apply maximum position constraint
+        if riskBasedResult.contracts > maxSize
+            riskBasedResult.contracts := maxSize
+            riskBasedResult.dollarValue := maxSize * entryPrice
+            riskBasedResult.warning := "Position size limited by max position constraint"
+
+        riskBasedResult
+
+// ============================================================================
+// POSITION SIZE VALIDATOR
+// ============================================================================
+
+// Validate position size against various constraints
+export validatePositionSize(float contracts, float accountSize, float price, float minSize = 0.01, float maxSize = 9999999.0) =>
+    valid = true
+    warning = ""
+
+    if contracts < minSize
+        valid := false
+        warning := "Position size below minimum: " + str.tostring(minSize)
+    else if contracts > maxSize
+        valid := false
+        warning := "Position size exceeds maximum: " + str.tostring(maxSize)
+    else if contracts * price > accountSize
+        valid := false
+        warning := "Position value exceeds account size"
+
+    [valid, warning]
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+// Calculate R-multiple for a trade
+export calculateRMultiple(float entryPrice, float exitPrice, float stopLoss, string direction) =>
+    if direction == "LONG"
+        risk = entryPrice - stopLoss
+        profit = exitPrice - entryPrice
+        risk != 0 ? profit / risk : 0.0
+    else  // SHORT
+        risk = stopLoss - entryPrice
+        profit = entryPrice - exitPrice
+        risk != 0 ? profit / risk : 0.0
+
+// Calculate break-even point after fees
+export calculateBreakEven(float entryPrice, float feePercent, string direction) =>
+    feeMultiplier = 1.0 + (feePercent / 100.0)
+    if direction == "LONG"
+        entryPrice * feeMultiplier * feeMultiplier
+    else
+        entryPrice / (feeMultiplier * feeMultiplier)
+
+
+// ============================================================================
+// MODULE: ENTRY_EXIT_LOGIC
+// ============================================================================
+
+// RTA STRATEGY - Entry/Exit Logic Module
+// Convert indicator signals to strategy entry/exit decisions
+
+// ============================================================================
+// ENTRY CONDITION EVALUATION
+// ============================================================================
+
+// Evaluate entry conditions based on signal
+export evaluateEntry(SimpleSignal signal, StrategyConfig config) =>
+    condition = newEntryCondition()
+
+    // Check signal strength threshold
+    if signal.strength < config.minSignalStrength
+        array.push(condition.failedFilters, "Signal strength too low: " + str.tostring(signal.strength, "#.2"))
+        condition
+    else
+        // Check signal direction
+        if signal.direction == "LONG"
+            condition.canEnter := true
+            condition.direction := "LONG"
+            condition.confidence := signal.strength * signal.confidence
+            condition.reason := "Long signal with strength " + str.tostring(signal.strength, "#.2")
+        else if signal.direction == "SHORT"
+            condition.canEnter := true
+            condition.direction := "SHORT"
+            condition.confidence := signal.strength * signal.confidence
+            condition.reason := "Short signal with strength " + str.tostring(signal.strength, "#.2")
+        else
+            array.push(condition.failedFilters, "Neutral signal - no direction")
+
+        condition
+
+// Evaluate entry with confluence score
+export evaluateEntryWithConfluence(SimpleSignal signal, float confluenceScore, StrategyConfig config) =>
+    condition = newEntryCondition()
+
+    // Check confluence threshold
+    if confluenceScore < config.minConfluenceScore
+        array.push(condition.failedFilters, "Confluence too low: " + str.tostring(confluenceScore, "#.2"))
+        condition
+    else if signal.strength < config.minSignalStrength
+        array.push(condition.failedFilters, "Signal strength too low: " + str.tostring(signal.strength, "#.2"))
+        condition
+    else
+        // Check signal direction
+        if signal.direction == "LONG" or signal.direction == "SHORT"
+            condition.canEnter := true
+            condition.direction := signal.direction
+            condition.confidence := (signal.strength + confluenceScore) / 2.0
+            condition.reason := signal.direction + " signal (S:" + str.tostring(signal.strength, "#.2") + " C:" + str.tostring(confluenceScore, "#.2") + ")"
+        else
+            array.push(condition.failedFilters, "Neutral signal")
+
+        condition
+
+// ============================================================================
+// BREAKOUT ENTRY LOGIC
+// ============================================================================
+
+// Evaluate breakout entry conditions
+export evaluateBreakoutEntry(float price, float breakoutLevel, string direction, float volume, float avgVolume) =>
+    condition = newEntryCondition()
+
+    if direction == "LONG"
+        // Bullish breakout
+        if price > breakoutLevel and volume > avgVolume * 1.2
+            condition.canEnter := true
+            condition.direction := "LONG"
+            condition.confidence := 0.75
+            condition.reason := "Bullish breakout with volume confirmation"
+        else if price > breakoutLevel
+            condition.canEnter := true
+            condition.direction := "LONG"
+            condition.confidence := 0.6
+            condition.reason := "Bullish breakout (low volume)"
+        else
+            array.push(condition.failedFilters, "Price has not broken above level")
+
+    else if direction == "SHORT"
+        // Bearish breakout
+        if price < breakoutLevel and volume > avgVolume * 1.2
+            condition.canEnter := true
+            condition.direction := "SHORT"
+            condition.confidence := 0.75
+            condition.reason := "Bearish breakout with volume confirmation"
+        else if price < breakoutLevel
+            condition.canEnter := true
+            condition.direction := "SHORT"
+            condition.confidence := 0.6
+            condition.reason := "Bearish breakout (low volume)"
+        else
+            array.push(condition.failedFilters, "Price has not broken below level")
+
+    condition
+
+// ============================================================================
+// EXIT CONDITION EVALUATION
+// ============================================================================
+
+// Evaluate if trade should be exited based on signal reversal
+export evaluateSignalExit(Trade trade, SimpleSignal currentSignal) =>
+    condition = newExitCondition()
+
+    if not trade.isOpen
+        condition
+    else
+        // Check for signal reversal
+        if trade.entry.direction == "LONG" and currentSignal.direction == "SHORT"
+            if currentSignal.strength >= 0.6
+                condition.shouldExit := true
+                condition.isSignalExit := true
+                condition.reason := "Signal reversal to SHORT"
+                condition.suggestedPrice := close
+
+        else if trade.entry.direction == "SHORT" and currentSignal.direction == "LONG"
+            if currentSignal.strength >= 0.6
+                condition.shouldExit := true
+                condition.isSignalExit := true
+                condition.reason := "Signal reversal to LONG"
+                condition.suggestedPrice := close
+
+        condition
+
+// Evaluate stop loss and take profit hits
+export evaluateStopTakeProfitExit(Trade trade, float currentPrice) =>
+    condition = newExitCondition()
+
+    if not trade.isOpen
+        condition
+    else
+        if trade.entry.direction == "LONG"
+            // Check SL
+            if currentPrice <= trade.currentStopLoss
+                condition.shouldExit := true
+                condition.isStopHit := true
+                condition.reason := "Stop Loss Hit"
+                condition.suggestedPrice := trade.currentStopLoss
+            // Check TP
+            else if currentPrice >= trade.currentTakeProfit
+                condition.shouldExit := true
+                condition.isTakeHit := true
+                condition.reason := "Take Profit Hit"
+                condition.suggestedPrice := trade.currentTakeProfit
+
+        else if trade.entry.direction == "SHORT"
+            // Check SL
+            if currentPrice >= trade.currentStopLoss
+                condition.shouldExit := true
+                condition.isStopHit := true
+                condition.reason := "Stop Loss Hit"
+                condition.suggestedPrice := trade.currentStopLoss
+            // Check TP
+            else if currentPrice <= trade.currentTakeProfit
+                condition.shouldExit := true
+                condition.isTakeHit := true
+                condition.reason := "Take Profit Hit"
+                condition.suggestedPrice := trade.currentTakeProfit
+
+        condition
+
+// Evaluate time-based exit
+export evaluateTimeExit(Trade trade, StrategyConfig config) =>
+    condition = newExitCondition()
+
+    if not trade.isOpen or not config.useTimeExit
+        condition
+    else
+        // Check max bars in trade
+        if trade.barsInTrade >= config.maxBarsInTrade
+            condition.shouldExit := true
+            condition.reason := "Maximum time in trade reached (" + str.tostring(config.maxBarsInTrade) + " bars)"
+            condition.suggestedPrice := close
+
+        condition
+
+// ============================================================================
+// COMPOSITE EXIT EVALUATOR
+// ============================================================================
+
+// Evaluate all exit conditions and return first triggered
+export evaluateAllExits(Trade trade, SimpleSignal signal, StrategyConfig config) =>
+    // Priority order: SL/TP > Signal > Time
+
+    // Check SL/TP first (highest priority)
+    slTpCondition = evaluateStopTakeProfitExit(trade, close)
+    if slTpCondition.shouldExit
+        slTpCondition
+    else
+        // Check signal reversal
+        signalCondition = evaluateSignalExit(trade, signal)
+        if signalCondition.shouldExit
+            signalCondition
+        else
+            // Check time-based exit
+            timeCondition = evaluateTimeExit(trade, config)
+            timeCondition
+
+// ============================================================================
+// ENTRY TIMING HELPERS
+// ============================================================================
+
+// Check if entry timing is optimal (e.g., pullback after signal)
+export isOptimalEntryTiming(SimpleSignal signal, float currentPrice, float ma20) =>
+    if signal.direction == "LONG"
+        // For longs, prefer price near or above MA
+        currentPrice >= ma20 * 0.99
+    else if signal.direction == "SHORT"
+        // For shorts, prefer price near or below MA
+        currentPrice <= ma20 * 1.01
+    else
+        false
+
+// Check if price has confirmed direction
+export isPriceConfirmed(string direction, int confirmBars = 2) =>
+    if direction == "LONG"
+        close > close[confirmBars] and close > open
+    else if direction == "SHORT"
+        close < close[confirmBars] and close < open
+    else
+        false
+
+// ============================================================================
+// PARTIAL EXIT LOGIC
+// ============================================================================
+
+// Calculate partial exit size (take profits in stages)
+export calculatePartialExit(float originalSize, int exitLevel, array<float> exitPercentages) =>
+    if exitLevel >= array.size(exitPercentages)
+        0.0
+    else
+        exitPercent = array.get(exitPercentages, exitLevel)
+        originalSize * (exitPercent / 100.0)
+
+
+// ============================================================================
+// MODULE: STOP_LOSS_MANAGEMENT
+// ============================================================================
+
+// RTA STRATEGY - Stop Loss Management Module
+// Dynamic stop loss and take profit calculation
+
+
+// ============================================================================
+// ATR-BASED STOP LOSS
+// ============================================================================
+
+export calculateATRStopLoss(float entryPrice, string direction, float atrValue, float multiplier = 2.0) =>
+    if direction == "LONG"
+        entryPrice - (atrValue * multiplier)
+    else
+        entryPrice + (atrValue * multiplier)
+
+// ============================================================================
+// SWING-BASED STOP LOSS
+// ============================================================================
+
+export calculateSwingStopLoss(float entryPrice, string direction, int lookback = 10) =>
+    if direction == "LONG"
+        // Place SL below recent swing low
+        swingLow = ta.lowest(low, lookback)
+        math.min(swingLow, entryPrice * 0.98)  // Max 2% from entry
+    else
+        // Place SL above recent swing high
+        swingHigh = ta.highest(high, lookback)
+        math.max(swingHigh, entryPrice * 1.02)  // Max 2% from entry
+
+// ============================================================================
+// FIXED PERCENTAGE STOP LOSS
+// ============================================================================
+
+export calculateFixedPercentStopLoss(float entryPrice, string direction, float percent = 2.0) =>
+    if direction == "LONG"
+        entryPrice * (1.0 - percent / 100.0)
+    else
+        entryPrice * (1.0 + percent / 100.0)
+
+// ============================================================================
+// TRAILING STOP LOSS
+// ============================================================================
+
+export calculateTrailingStop(Trade trade, float currentPrice, float trailingDistance, string mode = "ATR") =>
+    if not trade.isOpen
+        trade.currentStopLoss
+    else
+        if trade.entry.direction == "LONG"
+            // For longs, trail up only
+            newSL = mode == "ATR" ? currentPrice - trailingDistance : currentPrice * (1.0 - trailingDistance / 100.0)
+            math.max(trade.currentStopLoss, newSL)
+        else
+            // For shorts, trail down only
+            newSL = mode == "ATR" ? currentPrice + trailingDistance : currentPrice * (1.0 + trailingDistance / 100.0)
+            math.min(trade.currentStopLoss, newSL)
+
+// ============================================================================
+// TAKE PROFIT CALCULATION
+// ============================================================================
+
+export calculateRiskRewardTP(float entryPrice, float stopLoss, float rrRatio = 2.0) =>
+    risk = math.abs(entryPrice - stopLoss)
+    reward = risk * rrRatio
+    if entryPrice > stopLoss  // LONG
+        entryPrice + reward
+    else  // SHORT
+        entryPrice - reward
+
+export calculateFixedPercentTP(float entryPrice, string direction, float percent = 4.0) =>
+    if direction == "LONG"
+        entryPrice * (1.0 + percent / 100.0)
+    else
+        entryPrice * (1.0 - percent / 100.0)
+
+// ============================================================================
+// COMPREHENSIVE SL/TP CALCULATOR
+// ============================================================================
+
+export calculateStopLossTakeProfit(float entryPrice, string direction, StrategyConfig config, float atrValue) =>
+    // Calculate Stop Loss
+    sl = switch config.slMode
+        "ATR" => calculateATRStopLoss(entryPrice, direction, atrValue, config.slMultiplier)
+        "FIXED" => calculateFixedPercentStopLoss(entryPrice, direction, config.slFixedPercent)
+        "SWING" => calculateSwingStopLoss(entryPrice, direction, config.slSwingLookback)
+        => entryPrice  // NONE
+
+    // Calculate Take Profit
+    tp = switch config.tpMode
+        "RR" => calculateRiskRewardTP(entryPrice, sl, config.riskRewardRatio)
+        "FIXED" => calculateFixedPercentTP(entryPrice, direction, config.tpFixedPercent)
+        => entryPrice * 2  // Default
+
+    [sl, tp]
+
+
+// ============================================================================
+// MODULE: MOST_TRAILING
+// ============================================================================
+
+// ============================================================================
+// RTA STRATEGY - MOST Trailing Stop
+// ============================================================================
+// @description: MOST (Modified ATR Trailing Stop) - Advanced trailing stop system
+//
+// Purpose:
+//   - ATR-based trailing stop with automatic direction detection
+//   - Dynamic stop adjustment as price moves
+//   - Flip detection for trend reversals
+//   - Support for both long and short positions
+//
+// MOST Characteristics:
+//   - Stops trail price using ATR multiplier
+//   - Automatically adjusts to volatility
+//   - Flips direction when price crosses stop level
+//   - More responsive than traditional trailing stops
+//
+// Applications:
+//   - Position management and stop-loss placement
+//   - Trend direction confirmation
+//   - Exit signal generation
+//   - Risk management with volatility adaptation
+//
+// Integration:
+//   import "most_trailing" as most
+//   state = most.newMOSTState()
+//   most.updateMOST(state, length, multiplier)
+//
+// Extracted from: tweezer-kangaroo-zones indicator
+// ============================================================================
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+// @type MOST trailing stop state
+// @field longStop Current long stop level (below price)
+// @field shortStop Current short stop level (above price)
+// @field direction Current trend direction (1 = bullish, -1 = bearish)
+// @field atrValue Current ATR value used for calculation
+// @field flipped True if direction flipped on this bar
+// @field previousDirection Direction on previous bar
+// @field stopDistance Distance from price to stop (in ATR units)
+export type MOSTState
+    float longStop
+    float shortStop
+    int direction
+    float atrValue
+    bool flipped
+    int previousDirection
+    float stopDistance
+
+// @type MOST configuration
+// @field atrLength ATR period for volatility calculation
+// @field multiplier ATR multiplier for stop distance
+// @field useHighLow Use high/low instead of close for calculations
+// @field minDistance Minimum stop distance (price units)
+// @field maxDistance Maximum stop distance (price units)
+export type MOSTConfig
+    int atrLength
+    float multiplier
+    bool useHighLow
+    float minDistance
+    float maxDistance
+
+// @type MOST signal information
+// @field isBullish True if MOST is bullish
+// @field isBearish True if MOST is bearish
+// @field justFlipped True if just flipped direction
+// @field flipToBull True if flipped from bear to bull
+// @field flipToBear True if flipped from bull to bear
+// @field stopLevel Current stop level (long or short)
+// @field distancePercent Distance from price to stop as %
+export type MOSTSignal
+    bool isBullish
+    bool isBearish
+    bool justFlipped
+    bool flipToBull
+    bool flipToBear
+    float stopLevel
+    float distancePercent
+
+// ============================================================================
+// CONFIGURATION CONSTRUCTORS
+// ============================================================================
+
+// @function Create default MOST configuration
+// @param atrLength ATR period (default: 14)
+// @param multiplier ATR multiplier (default: 2.0)
+// @returns MOSTConfig with balanced defaults
+export newMOSTConfig(int atrLength = 14, float multiplier = 2.0) =>
+    MOSTConfig.new(
+         atrLength,
+         multiplier,
+         false,    // useHighLow
+         0.0,      // minDistance (no limit)
+         0.0       // maxDistance (no limit)
+     )
+
+// @function Create aggressive MOST configuration (tighter stops)
+// @param atrLength ATR period (default: 10)
+// @param multiplier ATR multiplier (default: 1.5)
+// @returns MOSTConfig for short-term trading
+export newAggressiveMOSTConfig(int atrLength = 10, float multiplier = 1.5) =>
+    newMOSTConfig(atrLength, multiplier)
+
+// @function Create conservative MOST configuration (wider stops)
+// @param atrLength ATR period (default: 20)
+// @param multiplier ATR multiplier (default: 3.0)
+// @returns MOSTConfig for longer-term positions
+export newConservativeMOSTConfig(int atrLength = 20, float multiplier = 3.0) =>
+    newMOSTConfig(atrLength, multiplier)
+
+// ============================================================================
+// STATE MANAGEMENT
+// ============================================================================
+
+// @function Initialize new MOST state
+// @param initialDirection Starting direction (1 = bull, -1 = bear)
+// @returns Initialized MOSTState
+export newMOSTState(int initialDirection = 1) =>
+    MOSTState.new(
+         na,               // longStop
+         na,               // shortStop
+         initialDirection, // direction
+         0.0,              // atrValue
+         false,            // flipped
+         initialDirection, // previousDirection
+         0.0               // stopDistance
+     )
+
+// ============================================================================
+// CORE MOST CALCULATION
+// ============================================================================
+
+// @function Update MOST trailing stops and direction
+// @param state MOSTState to update
+// @param config MOSTConfig settings
+// @returns Updated MOSTState
+export updateMOST(MOSTState state, MOSTConfig config) =>
+    // Calculate ATR
+    atr = ta.atr(config.atrLength)
+    state.atrValue := atr
+
+    // Calculate stop distance with limits
+    stopDist = atr * config.multiplier
+    if config.minDistance > 0
+        stopDist := math.max(stopDist, config.minDistance)
+    if config.maxDistance > 0
+        stopDist := math.min(stopDist, config.maxDistance)
+
+    state.stopDistance := stopDist
+
+    // Price source for calculation
+    priceSource = config.useHighLow ?
+         (state.direction == 1 ? low : high) : close
+
+    // Update long stop (trailing below price)
+    newLongStop = priceSource - stopDist
+    if na(state.longStop)
+        state.longStop := newLongStop
+    else
+        state.longStop := math.max(state.longStop, newLongStop)
+
+    // Update short stop (trailing above price)
+    newShortStop = priceSource + stopDist
+    if na(state.shortStop)
+        state.shortStop := newShortStop
+    else
+        state.shortStop := math.min(state.shortStop, newShortStop)
+
+    // Save previous direction
+    state.previousDirection := state.direction
+    state.flipped := false
+
+    // Check for direction flip
+    if state.direction == 1 and close < state.longStop
+        // Flip to bearish
+        state.direction := -1
+        state.shortStop := close + stopDist
+        state.flipped := true
+    else if state.direction == -1 and close > state.shortStop
+        // Flip to bullish
+        state.direction := 1
+        state.longStop := close - stopDist
+        state.flipped := true
+
+    state
+
+// @function Simplified MOST update using default config
+// @param state MOSTState
+// @param atrLength ATR period
+// @param multiplier ATR multiplier
+// @returns Updated MOSTState
+export updateMOSTSimple(MOSTState state, int atrLength = 14, float multiplier = 2.0) =>
+    config = newMOSTConfig(atrLength, multiplier)
+    updateMOST(state, config)
+
+// ============================================================================
+// SIGNAL GENERATION
+// ============================================================================
+
+// @function Get MOST signal information
+// @param state MOSTState
+// @returns MOSTSignal with current signals
+export getMOSTSignal(MOSTState state) =>
+    isBullish = state.direction == 1
+    isBearish = state.direction == -1
+    justFlipped = state.flipped
+    flipToBull = justFlipped and isBullish
+    flipToBear = justFlipped and isBearish
+
+    // Current stop level
+    stopLevel = isBullish ? state.longStop : state.shortStop
+
+    // Distance as percentage
+    distPercent = close != 0 ?
+         math.abs((close - stopLevel) / close) * 100.0 : 0.0
+
+    MOSTSignal.new(
+         isBullish,
+         isBearish,
+         justFlipped,
+         flipToBull,
+         flipToBear,
+         stopLevel,
+         distPercent
+     )
+
+// @function Check if MOST is aligned with position
+// @param state MOSTState
+// @param isLong True if checking long position
+// @returns True if MOST supports position direction
+export isMOSTAligned(MOSTState state, bool isLong) =>
+    if isLong
+        state.direction == 1
+    else
+        state.direction == -1
+
+// @function Get MOST stop level for current direction
+// @param state MOSTState
+// @returns Current stop level
+export getMOSTStop(MOSTState state) =>
+    state.direction == 1 ? state.longStop : state.shortStop
+
+// @function Get distance to MOST stop in ATR units
+// @param state MOSTState
+// @returns Distance to stop in ATR multiples
+export getStopDistanceATR(MOSTState state) =>
+    if state.atrValue > 0
+        stopLevel = getMOSTStop(state)
+        math.abs(close - stopLevel) / state.atrValue
+    else
+        0.0
+
+// ============================================================================
+// MULTI-TIMEFRAME MOST
+// ============================================================================
+
+// @function Get MOST direction for higher timeframe
+// @param atrLength ATR period
+// @param multiplier ATR multiplier
+// @param htfTimeframe Higher timeframe string (e.g., "60", "240")
+// @returns HTF MOST direction (1, -1, or 0 for no data)
+export getMOSTDirectionHTF(int atrLength, float multiplier, string htfTimeframe) =>
+    htfDirection = request.security(syminfo.tickerid, htfTimeframe,
+         calculateMOSTDirection(atrLength, multiplier),
+         lookahead = barmerge.lookahead_off)
+    htfDirection
+
+// @function Calculate MOST direction (helper for HTF)
+// @param atrLength ATR period
+// @param multiplier ATR multiplier
+// @returns Current MOST direction (1 or -1)
+export calculateMOSTDirection(int atrLength, float multiplier) =>
+    var float longStop = na
+    var float shortStop = na
+    var int dir = 1
+
+    atr = ta.atr(atrLength)
+    stopDist = atr * multiplier
+
+    // Update stops
+    newLongStop = close - stopDist
+    longStop := na(longStop) ? newLongStop : math.max(longStop, newLongStop)
+
+    newShortStop = close + stopDist
+    shortStop := na(shortStop) ? newShortStop : math.min(shortStop, newShortStop)
+
+    // Check for flip
+    if dir == 1 and close < longStop
+        dir := -1
+        shortStop := close + stopDist
+    else if dir == -1 and close > shortStop
+        dir := 1
+        longStop := close - stopDist
+
+    dir
+
+// @function Check MOST alignment across multiple timeframes
+// @param ltfState Local timeframe state
+// @param htfDirection Higher timeframe direction
+// @param requireBoth Require both timeframes to agree
+// @returns True if aligned
+export isMOSTAlignedMultiTF(MOSTState ltfState, int htfDirection, bool requireBoth = true) =>
+    if requireBoth
+        ltfState.direction == htfDirection
+    else
+        ltfState.direction == htfDirection or htfDirection == 0
+
+// ============================================================================
+// STOP LOSS MANAGEMENT
+// ============================================================================
+
+// @function Get recommended stop loss level using MOST
+// @param state MOSTState
+// @param bufferATR Additional buffer in ATR units (default: 0.1)
+// @returns Stop loss level with buffer
+export getMOSTStopLoss(MOSTState state, float bufferATR = 0.1) =>
+    stopLevel = getMOSTStop(state)
+    buffer = state.atrValue * bufferATR
+
+    if state.direction == 1
+        // Long position: stop below MOST level
+        stopLevel - buffer
+    else
+        // Short position: stop above MOST level
+        stopLevel + buffer
+
+// @function Check if price has hit MOST stop
+// @param state MOSTState
+// @param isLong True if long position
+// @returns True if stop hit
+export isMOSTStopHit(MOSTState state, bool isLong) =>
+    if isLong
+        close < state.longStop
+    else
+        close > state.shortStop
+
+// @function Get trailing stop adjustment (for position management)
+// @param state MOSTState
+// @param currentStop Current stop level
+// @param isLong True if long position
+// @returns New stop level (or current if no adjustment needed)
+export getMOSTTrailingAdjustment(MOSTState state, float currentStop, bool isLong) =>
+    mostStop = getMOSTStop(state)
+
+    if isLong
+        // Only move stop up, never down
+        math.max(currentStop, mostStop)
+    else
+        // Only move stop down, never up
+        math.min(currentStop, mostStop)
+
+// ============================================================================
+// VISUALIZATION HELPERS
+// ============================================================================
+
+// @function Get color for MOST direction
+// @param state MOSTState
+// @param bullColor Color for bullish (default: green)
+// @param bearColor Color for bearish (default: red)
+// @returns Appropriate color for current direction
+export getMOSTColor(MOSTState state, color bullColor = color.green, color bearColor = color.red) =>
+    state.direction == 1 ? bullColor : bearColor
+
+// @function Get emoji for MOST signal
+// @param signal MOSTSignal
+// @returns Emoji representing signal state
+export getMOSTEmoji(MOSTSignal signal) =>
+    if signal.flipToBull
+        "🟢 FLIP LONG"
+    else if signal.flipToBear
+        "🔴 FLIP SHORT"
+    else if signal.isBullish
+        "🟢 LONG"
+    else
+        "🔴 SHORT"
+
+// @function Get MOST signal strength (0-100)
+// @param signal MOSTSignal
+// @returns Strength score based on distance and flip status
+export getMOSTStrength(MOSTSignal signal) =>
+    // Base strength: 50 (neutral)
+    strength = 50.0
+
+    // Bonus for recent flip (high conviction)
+    if signal.justFlipped
+        strength += 30.0
+
+    // Adjust for distance from stop (closer = weaker)
+    if signal.distancePercent < 1.0
+        strength -= 20.0
+    else if signal.distancePercent > 3.0
+        strength += 20.0
+
+    math.max(0.0, math.min(100.0, strength))
+
+// ============================================================================
+// STATISTICS
+// ============================================================================
+
+// @function Get MOST statistics summary
+// @param state MOSTState
+// @returns Formatted summary string
+export getMOSTSummary(MOSTState state) =>
+    signal = getMOSTSignal(state)
+    direction = state.direction == 1 ? "BULLISH" : "BEARISH"
+    stopLevel = getMOSTStop(state)
+
+    str.format(
+         "MOST {0}\\nStop: {1}\\nATR: {2}\\nDist: {3}%",
+         direction,
+         str.tostring(stopLevel, format.mintick),
+         str.tostring(state.atrValue, "#.####"),
+         str.tostring(signal.distancePercent, "#.##")
+     )
+
+
+// ============================================================================
+// MODULE: ADVANCED_EXITS
+// ============================================================================
+
+// ============================================================================
+// RTA STRATEGY - Advanced Exit Management
+// ============================================================================
+// @description: Multi-level exit system with flexible exit modes per level
+//
+// Purpose:
+//   - Multi-level partial exits (TP1, TP2, TP3...)
+//   - Different exit modes per level (Fixed TP, Trailing, Break-Even)
+//   - R:R-based target calculation
+//   - Entry counter for pyramiding control
+//   - Visual SL/TP display on chart
+//
+// Exit Modes:
+//   FIXED    - Fixed take profit at specific price
+//   TRAILING - Trailing stop after reaching profit threshold
+//   BE       - Move to break-even after reaching threshold
+//   BE_TRAIL - Break-even then trail
+//
+// Example:
+//   Level 1: 30% at 1.5R (Fixed TP + Fixed SL)
+//   Level 2: 40% at 2.5R (Break-Even SL + Trailing)
+//   Level 3: 30% at 4.0R (Trailing only)
+//
+// Usage:
+//   import "RTAStrategy" as RTAS
+//   var exitPlan = RTAS.newMultiLevelExitPlan()
+//   RTAS.addExitLevel(exitPlan, 30.0, 1.5, "FIXED")
+//   RTAS.addExitLevel(exitPlan, 40.0, 2.5, "BE_TRAIL")
+//   RTAS.addExitLevel(exitPlan, 30.0, 4.0, "TRAILING")
+// ============================================================================
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+// @type Exit level configuration
+// @field percent Percentage of position to exit at this level
+// @field rrTarget R:R target (e.g., 1.5 = 1.5x risk)
+// @field exitMode Exit mode: "FIXED", "TRAILING", "BE", "BE_TRAIL"
+// @field trailStart Start trailing after this R:R (only for trailing modes)
+// @field trailDistance Trailing distance in ATR multiples
+// @field stopMode Stop loss mode: "FIXED", "BE", "TRAILING"
+export type ExitLevel
+    float percent
+    float rrTarget
+    string exitMode
+    float trailStart
+    float trailDistance
+    string stopMode
+
+// @type Multi-level exit plan
+// @field levels Array of exit levels
+// @field totalPercent Total percentage allocated (should be 100)
+// @field atrMultiplier ATR multiplier for risk calculation
+// @field useAtrForRisk Use ATR for risk distance (vs fixed distance)
+export type MultiLevelExitPlan
+    array<ExitLevel> levels
+    float totalPercent
+    float atrMultiplier
+    bool useAtrForRisk
+
+// @type Exit target prices for visualization
+// @field entryPrice Entry price
+// @field stopLoss Stop loss price
+// @field riskDistance Risk distance (entry - SL)
+// @field tp1 Take profit 1 price
+// @field tp2 Take profit 2 price
+// @field tp3 Take profit 3 price
+// @field tp4 Take profit 4 price (optional)
+// @field tp1Percent Percent to exit at TP1
+// @field tp2Percent Percent to exit at TP2
+// @field tp3Percent Percent to exit at TP3
+// @field tp4Percent Percent to exit at TP4
+export type ExitTargets
+    float entryPrice
+    float stopLoss
+    float riskDistance
+    float tp1
+    float tp2
+    float tp3
+    float tp4
+    float tp1Percent
+    float tp2Percent
+    float tp3Percent
+    float tp4Percent
+
+// @type Entry counter for pyramiding control
+// @field longCount Number of active long entries
+// @field shortCount Number of active short entries
+// @field maxEntries Maximum allowed entries per direction
+// @field resetOnFlip Reset counters on direction flip
+export type EntryCounter
+    int longCount
+    int shortCount
+    int maxEntries
+    bool resetOnFlip
+
+// @type Exit execution state
+// @field level Current exit level (1, 2, 3...)
+// @field percentExited Total percent already exited
+// @field isTrailing Is trailing stop active
+// @field trailPrice Current trailing stop price
+// @field breakEvenSet Has break-even been set
+export type ExitState
+    int level
+    float percentExited
+    bool isTrailing
+    float trailPrice
+    bool breakEvenSet
+
+// ============================================================================
+// INITIALIZATION FUNCTIONS
+// ============================================================================
+
+// @function Create new multi-level exit plan
+// @returns New MultiLevelExitPlan
+export newMultiLevelExitPlan() =>
+    MultiLevelExitPlan.new(
+        array.new<ExitLevel>(),  // levels
+        0.0,                      // totalPercent
+        1.5,                      // atrMultiplier (default)
+        true                      // useAtrForRisk
+    )
+
+// @function Create new exit level
+// @param percent Percentage to exit
+// @param rrTarget R:R target
+// @param exitMode Exit mode
+// @returns New ExitLevel
+export newExitLevel(float percent, float rrTarget, string exitMode = "FIXED") =>
+    ExitLevel.new(
+        percent,       // percent
+        rrTarget,      // rrTarget
+        exitMode,      // exitMode
+        rrTarget,      // trailStart (default same as target)
+        1.0,           // trailDistance (1.0 ATR default)
+        "FIXED"        // stopMode (default fixed)
+    )
+
+// @function Create new entry counter
+// @param maxEntries Maximum entries allowed
+// @returns New EntryCounter
+export newEntryCounter(int maxEntries = 3) =>
+    EntryCounter.new(
+        0,            // longCount
+        0,            // shortCount
+        maxEntries,   // maxEntries
+        true          // resetOnFlip
+    )
+
+// @function Create new exit state
+// @returns New ExitState
+export newExitState() =>
+    ExitState.new(
+        0,       // level
+        0.0,     // percentExited
+        false,   // isTrailing
+        na,      // trailPrice
+        false    // breakEvenSet
+    )
+
+// ============================================================================
+// EXIT PLAN CONFIGURATION
+// ============================================================================
+
+// @function Add exit level to plan
+// @param plan MultiLevelExitPlan
+// @param percent Percentage to exit
+// @param rrTarget R:R target
+// @param exitMode Exit mode ("FIXED", "TRAILING", "BE", "BE_TRAIL")
+export addExitLevel(MultiLevelExitPlan plan, float percent, float rrTarget, string exitMode = "FIXED") =>
+    level = newExitLevel(percent, rrTarget, exitMode)
+    array.push(plan.levels, level)
+    plan.totalPercent += percent
+
+// @function Add exit level with custom trail settings
+// @param plan MultiLevelExitPlan
+// @param percent Percentage to exit
+// @param rrTarget R:R target
+// @param exitMode Exit mode
+// @param trailStart Start trailing after this R:R
+// @param trailDistance Trailing distance (ATR multiples)
+export addExitLevelAdvanced(MultiLevelExitPlan plan, float percent, float rrTarget, string exitMode, float trailStart, float trailDistance) =>
+    level = newExitLevel(percent, rrTarget, exitMode)
+    level.trailStart := trailStart
+    level.trailDistance := trailDistance
+    array.push(plan.levels, level)
+    plan.totalPercent += percent
+
+// @function Create default 3-level exit plan
+// @returns MultiLevelExitPlan with standard settings
+export createDefaultExitPlan() =>
+    plan = newMultiLevelExitPlan()
+    // Level 1: 30% at 1.5R (Fixed TP + Fixed SL)
+    addExitLevel(plan, 30.0, 1.5, "FIXED")
+    // Level 2: 40% at 2.5R (Break-Even + Trail)
+    level2 = newExitLevel(40.0, 2.5, "BE_TRAIL")
+    level2.trailStart := 2.0
+    level2.trailDistance := 0.75
+    level2.stopMode := "BE"
+    array.push(plan.levels, level2)
+    plan.totalPercent += 40.0
+    // Level 3: 30% at 4.0R (Pure Trailing)
+    level3 = newExitLevel(30.0, 4.0, "TRAILING")
+    level3.trailStart := 3.0
+    level3.trailDistance := 1.0
+    level3.stopMode := "TRAILING"
+    array.push(plan.levels, level3)
+    plan.totalPercent += 30.0
+
+    plan
+
+// @function Create aggressive 2-level exit plan
+// @returns MultiLevelExitPlan for scalping
+export createScalpExitPlan() =>
+    plan = newMultiLevelExitPlan()
+    // Level 1: 50% at 1.2R (Quick profit)
+    addExitLevel(plan, 50.0, 1.2, "FIXED")
+    // Level 2: 50% at 2.0R (Trailing)
+    level2 = newExitLevel(50.0, 2.0, "TRAILING")
+    level2.trailStart := 1.5
+    level2.trailDistance := 0.5
+    array.push(plan.levels, level2)
+    plan.totalPercent += 50.0
+
+    plan
+
+// @function Create conservative 4-level exit plan
+// @returns MultiLevelExitPlan for swing trading
+export createSwingExitPlan() =>
+    plan = newMultiLevelExitPlan()
+    addExitLevel(plan, 25.0, 1.5, "FIXED")
+    addExitLevel(plan, 25.0, 2.5, "BE")
+
+    level3 = newExitLevel(25.0, 4.0, "BE_TRAIL")
+    level3.trailStart := 3.0
+    level3.trailDistance := 1.0
+    array.push(plan.levels, level3)
+    plan.totalPercent += 25.0
+
+    level4 = newExitLevel(25.0, 6.0, "TRAILING")
+    level4.trailStart := 4.5
+    level4.trailDistance := 1.5
+    array.push(plan.levels, level4)
+    plan.totalPercent += 25.0
+
+    plan
+
+// ============================================================================
+// R:R TARGET CALCULATION
+// ============================================================================
+
+// @function Calculate exit targets based on R:R ratios
+// @param entryPrice Entry price
+// @param stopLoss Stop loss price
+// @param plan Exit plan
+// @param direction Direction (1 for long, -1 for short)
+// @returns ExitTargets
+export calculateRRTargets(float entryPrice, float stopLoss, MultiLevelExitPlan plan, int direction) =>
+    riskDistance = math.abs(entryPrice - stopLoss)
+
+    targets = ExitTargets.new(
+        entryPrice,
+        stopLoss,
+        riskDistance,
+        na, na, na, na,
+        0.0, 0.0, 0.0, 0.0
+    )
+
+    levelCount = array.size(plan.levels)
+
+    if levelCount >= 1
+        level1 = array.get(plan.levels, 0)
+        targets.tp1 := entryPrice + (riskDistance * level1.rrTarget * direction)
+        targets.tp1Percent := level1.percent
+
+    if levelCount >= 2
+        level2 = array.get(plan.levels, 1)
+        targets.tp2 := entryPrice + (riskDistance * level2.rrTarget * direction)
+        targets.tp2Percent := level2.percent
+
+    if levelCount >= 3
+        level3 = array.get(plan.levels, 2)
+        targets.tp3 := entryPrice + (riskDistance * level3.rrTarget * direction)
+        targets.tp3Percent := level3.percent
+
+    if levelCount >= 4
+        level4 = array.get(plan.levels, 3)
+        targets.tp4 := entryPrice + (riskDistance * level4.rrTarget * direction)
+        targets.tp4Percent := level4.percent
+
+    targets
+
+// @function Calculate stop loss using ATR
+// @param entryPrice Entry price
+// @param atr Current ATR value
+// @param atrMult ATR multiplier
+// @param direction Direction (1 for long, -1 for short)
+// @returns Stop loss price
+export calculateATRStopLoss(float entryPrice, float atr, float atrMult, int direction) =>
+    entryPrice - (atr * atrMult * direction)
+
+// @function Calculate risk distance for position sizing
+// @param entryPrice Entry price
+// @param stopLoss Stop loss price
+// @returns Risk distance (always positive)
+export calculateRiskDistance(float entryPrice, float stopLoss) =>
+    math.abs(entryPrice - stopLoss)
+
+// ============================================================================
+// ENTRY COUNTER & PYRAMIDING
+// ============================================================================
+
+// @function Check if can enter long
+// @param counter EntryCounter
+// @returns True if can enter
+export canEnterLong(EntryCounter counter) =>
+    counter.longCount < counter.maxEntries
+
+// @function Check if can enter short
+// @param counter EntryCounter
+// @returns True if can enter
+export canEnterShort(EntryCounter counter) =>
+    counter.shortCount < counter.maxEntries
+
+// @function Increment long entry count
+// @param counter EntryCounter
+export incrementLongEntry(EntryCounter counter) =>
+    counter.longCount += 1
+    if counter.resetOnFlip and counter.shortCount > 0
+        counter.shortCount := 0
+
+// @function Increment short entry count
+// @param counter EntryCounter
+export incrementShortEntry(EntryCounter counter) =>
+    counter.shortCount += 1
+    if counter.resetOnFlip and counter.longCount > 0
+        counter.longCount := 0
+
+// @function Reset entry counters
+// @param counter EntryCounter
+export resetEntryCounter(EntryCounter counter) =>
+    counter.longCount := 0
+    counter.shortCount := 0
+
+// @function Check if position is flat (no entries)
+// @param counter EntryCounter
+// @returns True if no active entries
+export isFlat(EntryCounter counter) =>
+    counter.longCount == 0 and counter.shortCount == 0
+
+// ============================================================================
+// EXIT STATE MANAGEMENT
+// ============================================================================
+
+// @function Update exit state after partial exit
+// @param state ExitState
+// @param percentExited Percent exited at this level
+export updateExitState(ExitState state, float percentExited) =>
+    state.level += 1
+    state.percentExited += percentExited
+
+// @function Activate trailing stop
+// @param state ExitState
+// @param trailPrice Initial trail price
+export activateTrailing(ExitState state, float trailPrice) =>
+    state.isTrailing := true
+    state.trailPrice := trailPrice
+
+// @function Update trailing stop price
+// @param state ExitState
+// @param newTrailPrice New trail price
+// @param direction Direction (1 for long, -1 for short)
+export updateTrailingStop(ExitState state, float newTrailPrice, int direction) =>
+    if state.isTrailing
+        // Trail only in favorable direction
+        if direction == 1  // Long
+            if na(state.trailPrice) or newTrailPrice > state.trailPrice
+                state.trailPrice := newTrailPrice
+        else  // Short
+            if na(state.trailPrice) or newTrailPrice < state.trailPrice
+                state.trailPrice := newTrailPrice
+
+// @function Set break-even flag
+// @param state ExitState
+export setBreakEven(ExitState state) =>
+    state.breakEvenSet := true
+
+// @function Reset exit state
+// @param state ExitState
+export resetExitState(ExitState state) =>
+    state.level := 0
+    state.percentExited := 0.0
+    state.isTrailing := false
+    state.trailPrice := na
+    state.breakEvenSet := false
+
+// ============================================================================
+// PROFIT TRACKING
+// ============================================================================
+
+// @function Calculate current profit in R (risk units)
+// @param entryPrice Entry price
+// @param currentPrice Current price
+// @param riskDistance Risk distance
+// @param direction Direction (1 for long, -1 for short)
+// @returns Profit in R units
+export calculateProfitR(float entryPrice, float currentPrice, float riskDistance, int direction) =>
+    if riskDistance == 0
+        0.0
+    else
+        priceDiff = (currentPrice - entryPrice) * direction
+        priceDiff / riskDistance
+
+// @function Check if profit threshold reached
+// @param entryPrice Entry price
+// @param currentPrice Current price
+// @param riskDistance Risk distance
+// @param thresholdR Threshold in R units
+// @param direction Direction
+// @returns True if threshold reached
+export isProfitThresholdReached(float entryPrice, float currentPrice, float riskDistance, float thresholdR, int direction) =>
+    profitR = calculateProfitR(entryPrice, currentPrice, riskDistance, direction)
+    profitR >= thresholdR
+
+// ============================================================================
+// VISUALIZATION HELPERS
+// ============================================================================
+
+// @function Get exit level description string
+// @param level ExitLevel
+// @returns Formatted string
+export getExitLevelDescription(ExitLevel level) =>
+    str.format("{0}% @ {1}R ({2})",
+        str.tostring(level.percent, "#"),
+        str.tostring(level.rrTarget, "#.#"),
+        level.exitMode)
+
+// @function Get exit plan summary
+// @param plan MultiLevelExitPlan
+// @returns Formatted string
+export getExitPlanSummary(MultiLevelExitPlan plan) =>
+    summary = "Exit Plan:\n"
+    levelCount = array.size(plan.levels)
+
+    for i = 0 to levelCount - 1
+        level = array.get(plan.levels, i)
+        summary := summary + str.format("L{0}: {1}\n",
+            str.tostring(i + 1),
+            getExitLevelDescription(level))
+
+    summary := summary + str.format("Total: {0}%",
+        str.tostring(plan.totalPercent, "#"))
+
+    summary
+
+// @function Get exit targets summary
+// @param targets ExitTargets
+// @returns Formatted string
+export getExitTargetsSummary(ExitTargets targets) =>
+    summary = "Entry: " + str.tostring(targets.entryPrice, "#.##") + "\n"
+    summary := summary + "SL: " + str.tostring(targets.stopLoss, "#.##") + "\n"
+    summary := summary + "Risk: " + str.tostring(targets.riskDistance, "#.##") + "\n"
+
+    if not na(targets.tp1)
+        summary := summary + str.format("TP1: {0} ({1}%)\n",
+            str.tostring(targets.tp1, "#.##"),
+            str.tostring(targets.tp1Percent, "#"))
+
+    if not na(targets.tp2)
+        summary := summary + str.format("TP2: {0} ({1}%)\n",
+            str.tostring(targets.tp2, "#.##"),
+            str.tostring(targets.tp2Percent, "#"))
+
+    if not na(targets.tp3)
+        summary := summary + str.format("TP3: {0} ({1}%)\n",
+            str.tostring(targets.tp3, "#.##"),
+            str.tostring(targets.tp3Percent, "#"))
+
+    if not na(targets.tp4)
+        summary := summary + str.format("TP4: {0} ({1}%)",
+            str.tostring(targets.tp4, "#.##"),
+            str.tostring(targets.tp4Percent, "#"))
+
+    summary
+
+// ============================================================================
+// VALIDATION
+// ============================================================================
+
+// @function Validate exit plan
+// @param plan MultiLevelExitPlan
+// @returns [isValid, errorMessage]
+export validateExitPlan(MultiLevelExitPlan plan) =>
+    // Check total percent
+    if plan.totalPercent < 99.5 or plan.totalPercent > 100.5
+        [false, "Total percent must be 100%, got " + str.tostring(plan.totalPercent, "#.#") + "%"]
+    // Check level count
+    else if array.size(plan.levels) == 0
+        [false, "Exit plan must have at least one level"]
+    // Check R:R progression
+    else
+        prevRR = 0.0
+        for i = 0 to array.size(plan.levels) - 1
+            level = array.get(plan.levels, i)
+            if level.rrTarget <= prevRR
+                [false, "R:R targets must be in ascending order"]
+                break
+            prevRR := level.rrTarget
+        [true, "Valid exit plan"]
+
+
+// ============================================================================
+// MODULE: MONTE_CARLO
+// ============================================================================
+
+// ============================================================================
+// RTA STRATEGY - Monte Carlo Simulation
+// ============================================================================
+// @description: Risk analysis through Monte Carlo simulation and portfolio optimization
+//
+// Purpose:
+//   - Calculate Risk of Ruin probability
+//   - Kelly Criterion for optimal position sizing
+//   - Drawdown probability distribution
+//   - Win streak / Lose streak analysis
+//   - Sharpe Ratio estimation
+//
+// Concepts:
+//   - Monte Carlo = Random simulation of future outcomes
+//   - Risk of Ruin = Probability of losing entire capital
+//   - Kelly Criterion = Optimal bet size (win% - loss%) / odds
+//   - Drawdown = Peak-to-trough decline
+//   - Sharpe Ratio = Risk-adjusted return
+//
+// Usage:
+//   import "RTAStrategy" as Strategy
+//   var mcState = Strategy.newMonteCarloState()
+//   Strategy.updateMonteCarloMetrics(mcState, winRate, avgWin, avgLoss)
+// ============================================================================
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+// @type Monte Carlo simulation state
+// @field winRate Historical win rate (0-1)
+// @field avgWinPercent Average winning trade %
+// @field avgLossPercent Average losing trade %
+// @field tradeCount Total trades simulated
+// @field riskOfRuin Probability of losing all capital (0-100)
+// @field kellyPercent Kelly Criterion optimal risk %
+// @field halfKellyPercent Conservative Kelly (50% of full Kelly)
+// @field expectedDrawdown Expected maximum drawdown %
+// @field sharpeRatio Estimated Sharpe ratio
+export type MonteCarloState
+    float winRate
+    float avgWinPercent
+    float avgLossPercent
+    int tradeCount
+    float riskOfRuin
+    float kellyPercent
+    float halfKellyPercent
+    float expectedDrawdown
+    float sharpeRatio
+
+// @type Drawdown statistics
+// @field currentDrawdown Current drawdown from peak (%)
+// @field maxDrawdown Largest historical drawdown (%)
+// @field drawdownDuration Bars in current drawdown
+// @field maxDrawdownDuration Longest drawdown duration
+// @field peakEquity Peak equity value
+// @field troughEquity Lowest point after peak
+export type DrawdownStats
+    float currentDrawdown
+    float maxDrawdown
+    int drawdownDuration
+    int maxDrawdownDuration
+    float peakEquity
+    float troughEquity
+
+// @type Position sizing recommendation
+// @field recommendedSize Recommended position size %
+// @field sizingMethod Method used (KELLY/FIXED/MARTINGALE)
+// @field riskAmount Dollar risk per trade
+// @field maxLoss Maximum loss if stop hit
+// @field riskRewardRatio Current R:R ratio
+export type PositionSize
+    float recommendedSize
+    string sizingMethod
+    float riskAmount
+    float maxLoss
+    float riskRewardRatio
+
+// @type Trade statistics for simulation
+// @field totalTrades Number of trades
+// @field winningTrades Number of winners
+// @field losingTrades Number of losers
+// @field grossProfit Total profit from winners
+// @field grossLoss Total loss from losers
+// @field netProfit Gross profit - gross loss
+// @field profitFactor Gross profit / gross loss
+export type TradeStats
+    int totalTrades
+    int winningTrades
+    int losingTrades
+    float grossProfit
+    float grossLoss
+    float netProfit
+    float profitFactor
+
+// ============================================================================
+// INITIALIZATION FUNCTIONS
+// ============================================================================
+
+// @function Initialize Monte Carlo state
+// @returns New MonteCarloState with default values
+export newMonteCarloState() =>
+    MonteCarloState.new(
+        0.50,   // winRate
+        2.0,    // avgWinPercent
+        1.0,    // avgLossPercent
+        0,      // tradeCount
+        50.0,   // riskOfRuin
+        2.0,    // kellyPercent
+        1.0,    // halfKellyPercent
+        20.0,   // expectedDrawdown
+        0.0     // sharpeRatio
+    )
+
+// @function Initialize drawdown statistics
+// @returns New DrawdownStats
+export newDrawdownStats() =>
+    DrawdownStats.new(
+        0.0,    // currentDrawdown
+        0.0,    // maxDrawdown
+        0,      // drawdownDuration
+        0,      // maxDrawdownDuration
+        na,     // peakEquity
+        na      // troughEquity
+    )
+
+// @function Initialize position sizing
+// @returns New PositionSize
+export newPositionSize() =>
+    PositionSize.new(
+        1.0,        // recommendedSize
+        "FIXED",    // sizingMethod
+        100.0,      // riskAmount
+        100.0,      // maxLoss
+        2.0         // riskRewardRatio
+    )
+
+// @function Initialize trade statistics
+// @returns New TradeStats
+export newTradeStats() =>
+    TradeStats.new(
+        0,      // totalTrades
+        0,      // winningTrades
+        0,      // losingTrades
+        0.0,    // grossProfit
+        0.0,    // grossLoss
+        0.0,    // netProfit
+        1.0     // profitFactor
+    )
+
+// ============================================================================
+// KELLY CRITERION CALCULATION
+// ============================================================================
+
+// @function Calculate Kelly Criterion for optimal position sizing
+// @param winRate Win rate as decimal (0-1)
+// @param avgWin Average win percentage
+// @param avgLoss Average loss percentage (positive number)
+// @returns Kelly percentage (can be negative if edge is negative)
+export calculateKellyCriterion(float winRate, float avgWin, float avgLoss) =>
+    if avgLoss <= 0 or avgWin <= 0
+        0.0
+    else
+        lossRate = 1 - winRate
+        winLossRatio = avgWin / avgLoss
+
+        // Kelly Formula: (win_rate * win_loss_ratio - loss_rate) / win_loss_ratio
+        kelly = (winRate * winLossRatio - lossRate) / winLossRatio
+
+        // Cap at reasonable limits
+        math.max(-5.0, math.min(25.0, kelly * 100))
+
+// @function Calculate half-Kelly (more conservative)
+// @param fullKelly Full Kelly percentage
+// @returns Half Kelly percentage
+export calculateHalfKelly(float fullKelly) =>
+    fullKelly / 2.0
+
+// @function Calculate fractional Kelly
+// @param fullKelly Full Kelly percentage
+// @param fraction Fraction to use (e.g., 0.25 for quarter Kelly)
+// @returns Fractional Kelly percentage
+export calculateFractionalKelly(float fullKelly, float fraction) =>
+    fullKelly * fraction
+
+// ============================================================================
+// RISK OF RUIN CALCULATION
+// ============================================================================
+
+// @function Calculate Risk of Ruin probability
+// @param winRate Win rate (0-1)
+// @param avgWin Average win %
+// @param avgLoss Average loss %
+// @param capital Starting capital
+// @param riskPerTrade Risk % per trade
+// @returns Risk of Ruin percentage (0-100)
+export calculateRiskOfRuin(float winRate, float avgWin, float avgLoss, float capital, float riskPerTrade) =>
+    if winRate <= 0 or winRate >= 1
+        50.0
+    else
+        lossRate = 1 - winRate
+
+        // Simplified Risk of Ruin formula
+        // RoR = ((1 - winRate) / winRate) ^ (capital / riskPerTrade)
+        if avgWin <= 0 or avgLoss <= 0
+            50.0
+        else
+            // Account for win/loss ratio
+            payoffRatio = avgWin / avgLoss
+
+            // Calculate A value
+            a = (lossRate * payoffRatio - winRate) / (lossRate * payoffRatio + winRate)
+
+            if a <= -1 or a >= 1
+                50.0
+            else
+                // Number of "units" we can lose
+                units = capital / (riskPerTrade * capital / 100)
+
+                // Risk of Ruin
+                ror = math.pow((1 - a) / (1 + a), units)
+
+                // Convert to percentage
+                math.max(0.0, math.min(100.0, ror * 100))
+
+// ============================================================================
+// DRAWDOWN CALCULATIONS
+// ============================================================================
+
+// @function Update drawdown statistics
+// @param stats DrawdownStats to update
+// @param currentEquity Current equity value
+export updateDrawdownStats(DrawdownStats stats, float currentEquity) =>
+    // Initialize peak if needed
+    if na(stats.peakEquity)
+        stats.peakEquity := currentEquity
+
+    // Update peak
+    if currentEquity > stats.peakEquity
+        stats.peakEquity := currentEquity
+        stats.drawdownDuration := 0
+    else
+        stats.drawdownDuration += 1
+
+    // Calculate current drawdown
+    if stats.peakEquity > 0
+        stats.currentDrawdown := ((stats.peakEquity - currentEquity) / stats.peakEquity) * 100
+
+        // Update max drawdown
+        if stats.currentDrawdown > stats.maxDrawdown
+            stats.maxDrawdown := stats.currentDrawdown
+            stats.troughEquity := currentEquity
+
+        // Update max duration
+        if stats.drawdownDuration > stats.maxDrawdownDuration
+            stats.maxDrawdownDuration := stats.drawdownDuration
+
+// @function Calculate expected maximum drawdown
+// @param winRate Win rate (0-1)
+// @param avgWin Average win %
+// @param avgLoss Average loss %
+// @param trades Number of trades
+// @returns Expected maximum drawdown %
+export calculateExpectedDrawdown(float winRate, float avgWin, float avgLoss, int trades) =>
+    if trades <= 0
+        0.0
+    else
+        // Empirical formula for expected drawdown
+        // Based on win rate and trade count
+        lossRate = 1 - winRate
+
+        if avgWin <= 0 or avgLoss <= 0
+            15.0
+        else
+            // Expected number of consecutive losses
+            avgConsecutiveLosses = 1.0 / winRate
+
+            // Expected drawdown scales with loss size and consecutive losses
+            expectedDD = avgConsecutiveLosses * avgLoss * math.sqrt(trades / 100.0)
+
+            math.min(90.0, expectedDD)
+
+// ============================================================================
+// SHARPE RATIO CALCULATION
+// ============================================================================
+
+// @function Calculate Sharpe Ratio
+// @param avgReturn Average return per trade %
+// @param stdReturn Standard deviation of returns
+// @param riskFreeRate Risk-free rate (annual %)
+// @param tradesPerYear Number of trades per year
+// @returns Annualized Sharpe Ratio
+export calculateSharpeRatio(float avgReturn, float stdReturn, float riskFreeRate = 2.0, int tradesPerYear = 100) =>
+    if stdReturn <= 0
+        0.0
+    else
+        // Annualize the return
+        annualReturn = avgReturn * tradesPerYear
+
+        // Annualize volatility
+        annualVol = stdReturn * math.sqrt(tradesPerYear)
+
+        // Sharpe = (Return - RiskFree) / Volatility
+        (annualReturn - riskFreeRate) / annualVol
+
+// ============================================================================
+// MAIN UPDATE FUNCTION
+// ============================================================================
+
+// @function Update Monte Carlo metrics
+// @param state MonteCarloState to update
+// @param winRate Current win rate (0-1)
+// @param avgWin Average win %
+// @param avgLoss Average loss %
+// @param tradeCount Total trades
+// @param riskPerTrade Risk % per trade (default: 2%)
+export updateMonteCarloMetrics(MonteCarloState state, float winRate, float avgWin, float avgLoss, int tradeCount = 0, float riskPerTrade = 2.0) =>
+    state.winRate := winRate
+    state.avgWinPercent := avgWin
+    state.avgLossPercent := avgLoss
+    state.tradeCount := tradeCount
+
+    // Calculate Kelly Criterion
+    state.kellyPercent := calculateKellyCriterion(winRate, avgWin, avgLoss)
+    state.halfKellyPercent := calculateHalfKelly(state.kellyPercent)
+
+    // Calculate Risk of Ruin
+    state.riskOfRuin := calculateRiskOfRuin(winRate, avgWin, avgLoss, 100.0, riskPerTrade)
+
+    // Calculate Expected Drawdown
+    state.expectedDrawdown := calculateExpectedDrawdown(winRate, avgWin, avgLoss, tradeCount > 0 ? tradeCount : 100)
+
+    // Calculate Sharpe Ratio (simplified)
+    if tradeCount > 0
+        avgReturn = winRate * avgWin - (1 - winRate) * avgLoss
+        stdReturn = math.sqrt(winRate * math.pow(avgWin, 2) + (1 - winRate) * math.pow(avgLoss, 2))
+        state.sharpeRatio := calculateSharpeRatio(avgReturn, stdReturn)
+
+// ============================================================================
+// POSITION SIZING RECOMMENDATIONS
+// ============================================================================
+
+// @function Calculate recommended position size
+// @param state MonteCarloState
+// @param capital Current capital
+// @param stopDistance Stop loss distance in $
+// @param method Sizing method ("KELLY", "FIXED", "MARTINGALE")
+// @returns PositionSize recommendation
+export calculatePositionSize(MonteCarloState state, float capital, float stopDistance, string method = "KELLY") =>
+    posSize = newPositionSize()
+    posSize.sizingMethod := method
+
+    if method == "KELLY"
+        // Use half-Kelly for safety
+        riskAmount = capital * (state.halfKellyPercent / 100.0)
+        posSize.recommendedSize := state.halfKellyPercent
+        posSize.riskAmount := riskAmount
+        posSize.maxLoss := riskAmount
+
+    else if method == "FIXED"
+        // Fixed 1-2% risk
+        riskPercent = 1.5
+        riskAmount = capital * (riskPercent / 100.0)
+        posSize.recommendedSize := riskPercent
+        posSize.riskAmount := riskAmount
+        posSize.maxLoss := riskAmount
+
+    else if method == "MARTINGALE"
+        // Double after loss (NOT RECOMMENDED)
+        // This is here for educational purposes only
+        riskPercent = 2.0
+        posSize.recommendedSize := riskPercent
+        posSize.riskAmount := capital * (riskPercent / 100.0)
+        posSize.maxLoss := posSize.riskAmount
+
+    // Calculate position size in shares/contracts
+    if stopDistance > 0
+        posSize.riskRewardRatio := (state.avgWinPercent / state.avgLossPercent)
+
+    posSize
+
+// ============================================================================
+// TRADE STATISTICS
+// ============================================================================
+
+// @function Update trade statistics
+// @param stats TradeStats to update
+// @param isWin True if trade was a winner
+// @param profitLoss Trade P&L
+export updateTradeStats(TradeStats stats, bool isWin, float profitLoss) =>
+    stats.totalTrades += 1
+
+    if isWin
+        stats.winningTrades += 1
+        stats.grossProfit += profitLoss
+    else
+        stats.losingTrades += 1
+        stats.grossLoss += math.abs(profitLoss)
+
+    stats.netProfit := stats.grossProfit - stats.grossLoss
+
+    if stats.grossLoss > 0
+        stats.profitFactor := stats.grossProfit / stats.grossLoss
+
+// @function Get win rate from trade stats
+// @param stats TradeStats
+// @returns Win rate (0-1)
+export getWinRate(TradeStats stats) =>
+    if stats.totalTrades > 0
+        stats.winningTrades / stats.totalTrades
+    else
+        0.5
+
+// @function Get average win from trade stats
+// @param stats TradeStats
+// @returns Average win percentage
+export getAvgWin(TradeStats stats) =>
+    if stats.winningTrades > 0
+        (stats.grossProfit / stats.winningTrades)
+    else
+        0.0
+
+// @function Get average loss from trade stats
+// @param stats TradeStats
+// @returns Average loss percentage (positive number)
+export getAvgLoss(TradeStats stats) =>
+    if stats.losingTrades > 0
+        (stats.grossLoss / stats.losingTrades)
+    else
+        0.0
+
+// ============================================================================
+// SUMMARY & DISPLAY
+// ============================================================================
+
+// @function Get Monte Carlo summary
+// @param state MonteCarloState
+// @returns Formatted summary string
+export getMonteCarloSummary(MonteCarloState state) =>
+    str.format(
+        "Monte Carlo Analysis\nWin Rate: {0}%\nKelly: {1}% (Half: {2}%)\nRisk of Ruin: {3}%\nExpected DD: {4}%\nSharpe: {5}",
+        str.tostring(state.winRate * 100, "#.#"),
+        str.tostring(state.kellyPercent, "#.##"),
+        str.tostring(state.halfKellyPercent, "#.##"),
+        str.tostring(state.riskOfRuin, "#.#"),
+        str.tostring(state.expectedDrawdown, "#.#"),
+        str.tostring(state.sharpeRatio, "#.##")
+    )
+
+// @function Get risk assessment
+// @param state MonteCarloState
+// @returns Risk level string
+export getRiskAssessment(MonteCarloState state) =>
+    if state.riskOfRuin > 25
+        "🔴 HIGH RISK"
+    else if state.riskOfRuin > 10
+        "🟡 MODERATE RISK"
+    else if state.riskOfRuin > 5
+        "🟢 LOW RISK"
+    else
+        "🟢 VERY LOW RISK"
+
+// @function Get Kelly recommendation
+// @param state MonteCarloState
+// @returns Recommendation string
+export getKellyRecommendation(MonteCarloState state) =>
+    if state.kellyPercent < 0
+        "⛔ NO EDGE - Do not trade"
+    else if state.kellyPercent > 10
+        "⚠️ Use Half-Kelly or less"
+    else if state.kellyPercent > 5
+        "✅ Half-Kelly recommended"
+    else
+        "✅ Full Kelly acceptable"
+
+
+// ============================================================================
+// MODULE: TRADE_FILTERS
+// ============================================================================
+
+// RTA STRATEGY - Trade Filters Module
+// Time, trend, volatility, and session filters
+
+
+// ============================================================================
+// SESSION FILTERS
+// ============================================================================
+
+export isInTradingSession(string sessionSpec) =>
+    // Session format: "HHMM-HHMM" e.g., "0930-1600"
+    // Use Pine's time function to check if current bar is within session
+    inSession = not na(time(timeframe.period, sessionSpec))
+    inSession
+
+export isMarketOpen() =>
+    // Check if market is open (Mon-Fri)
+    dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+
+// ============================================================================
+// TREND FILTERS
+// ============================================================================
+
+export isTrendAligned(string requiredTrend, float ema20, float ema50, float ema200) =>
+    if requiredTrend == "ANY"
+        true
+    else if requiredTrend == "BULL"
+        ema20 > ema50 and ema50 > ema200
+    else if requiredTrend == "BEAR"
+        ema20 < ema50 and ema50 < ema200
+    else
+        true
+
+export getTrendDirection(float ema20, float ema50, float ema200) =>
+    if ema20 > ema50 and ema50 > ema200
+        "BULL"
+    else if ema20 < ema50 and ema50 < ema200
+        "BEAR"
+    else
+        "NEUTRAL"
+
+// ============================================================================
+// VOLATILITY FILTERS
+// ============================================================================
+
+export isVolatilityAcceptable(float currentATR, float minATR, float maxATR) =>
+    currentATR >= minATR and currentATR <= maxATR
+
+export getVolatilityRegime(float currentATR, float avgATR) =>
+    ratio = currentATR / avgATR
+    if ratio > 1.5
+        "HIGH"
+    else if ratio < 0.5
+        "LOW"
+    else
+        "NORMAL"
+
+// ============================================================================
+// COMPOSITE FILTER CHECK
+// ============================================================================
+
+export passesAllFilters(StrategyConfig config, float ema20, float ema50, float ema200, float currentATR, float avgATR) =>
+    passed = true
+    reasons = array.new<string>()
+
+    // Session filter
+    if config.useSessionFilter and not isMarketOpen()
+        passed := false
+        array.push(reasons, "Market closed")
+
+    // Trend filter
+    if config.useTrendFilter and not isTrendAligned(config.requiredTrend, ema20, ema50, ema200)
+        passed := false
+        array.push(reasons, "Trend not aligned")
+
+    // Volatility filter
+    if config.useVolatilityFilter
+        if not isVolatilityAcceptable(currentATR, config.minATR, config.maxATR)
+            passed := false
+            array.push(reasons, "Volatility out of range")
+        // Use avgATR for volatility regime awareness (optional enhancement)
+        else if avgATR > 0
+            volRatio = currentATR / avgATR
+            // Extreme volatility check: reject if volatility is too extreme
+            if volRatio > 2.0 or volRatio < 0.5
+                passed := false
+                array.push(reasons, "Extreme volatility regime")
+
+    [passed, reasons]
+
+
+// ============================================================================
+// MODULE: ORDER_MANAGEMENT
+// ============================================================================
+
+// RTA STRATEGY - Order Management Module
+// Wrapper functions for strategy.* commands
+
+
+// ============================================================================
+// ORDER EXECUTION
+// ============================================================================
+
+export enterLong(float qty, string comment = "Long Entry") =>
+    strategy.entry("LONG", strategy.long, qty=qty, comment=comment)
+
+export enterShort(float qty, string comment = "Short Entry") =>
+    strategy.entry("SHORT", strategy.short, qty=qty, comment=comment)
+
+export exitPosition(string comment = "Exit") =>
+    strategy.close_all(comment=comment)
+
+export exitLong(string comment = "Exit Long") =>
+    strategy.close("LONG", comment=comment)
+
+export exitShort(string comment = "Exit Short") =>
+    strategy.close("SHORT", comment=comment)
+
+// ============================================================================
+// STOP LOSS / TAKE PROFIT ORDERS
+// ============================================================================
+
+export setStopLoss(float price) =>
+    strategy.exit("SL", stop=price)
+
+export setTakeProfit(float price) =>
+    strategy.exit("TP", limit=price)
+
+export setStopAndTarget(float stopPrice, float targetPrice, string id = "Exit") =>
+    strategy.exit(id, stop=stopPrice, limit=targetPrice)
+
+// ============================================================================
+// POSITION INFO
+// ============================================================================
+
+export hasOpenPosition() =>
+    strategy.position_size != 0
+
+export isLong() =>
+    strategy.position_size > 0
+
+export isShort() =>
+    strategy.position_size < 0
+
+export getPositionSize() =>
+    math.abs(strategy.position_size)
+
+export getPositionAvgPrice() =>
+    strategy.position_avg_price
+
+export getUnrealizedPL() =>
+    strategy.openprofit
+
+export getClosedPL() =>
+    strategy.netprofit
+
+
+// ============================================================================
+// MODULE: BACKTEST_ANALYTICS
+// ============================================================================
+
+
+
+// ============================================================================
+// PERFORMANCE METRICS CALCULATION
+// ============================================================================
+
+// @function Calculate comprehensive performance metrics from trade history
+// @param trades Array of completed trades
+// @param initialCapital Starting account balance
+// @returns PerformanceMetrics Performance statistics
+export calculatePerformanceMetrics(array<Trade> trades, float initialCapital = 10000.0) =>
+    if array.size(trades) == 0
+        PerformanceMetrics.new(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0, 0)
+    else
+        // Trade counts
+        int totalTrades = array.size(trades)
+        int winningTrades = 0
+        int losingTrades = 0
+        int breakEvenTrades = 0
+
+        // P&L tracking
+        float totalProfit = 0.0
+        float totalLoss = 0.0
+        float grossProfit = 0.0
+        float grossLoss = 0.0
+
+        // Drawdown tracking
+        float peakEquity = initialCapital
+        float currentEquity = initialCapital
+        float maxDrawdown = 0.0
+        float maxDrawdownPercent = 0.0
+
+        // Consecutive tracking
+        int currentWinStreak = 0
+        int currentLossStreak = 0
+        int maxConsecWins = 0
+        int maxConsecLosses = 0
+
+        // Bar tracking
+        int totalBarsInTrades = 0
+
+        // Return array for Sharpe calculation
+        array<float> returns = array.new<float>()
+
+        // Iterate through all trades
+        for i = 0 to totalTrades - 1
+            trade = array.get(trades, i)
+
+            if not na(trade.exit)
+                pnl = trade.exit.profitLoss
+
+                // Update equity
+                currentEquity += pnl
+                array.push(returns, pnl / currentEquity)  // Return as percentage
+
+                // Track peak and drawdown
+                if currentEquity > peakEquity
+                    peakEquity := currentEquity
+
+                drawdown = peakEquity - currentEquity
+                drawdownPercent = (drawdown / peakEquity) * 100.0
+
+                if drawdown > maxDrawdown
+                    maxDrawdown := drawdown
+                    maxDrawdownPercent := drawdownPercent
+
+                // Classify trade
+                if pnl > 0
+                    winningTrades += 1
+                    grossProfit += pnl
+                    currentWinStreak += 1
+                    currentLossStreak := 0
+                    if currentWinStreak > maxConsecWins
+                        maxConsecWins := currentWinStreak
+                else if pnl < 0
+                    losingTrades += 1
+                    grossLoss += math.abs(pnl)
+                    currentLossStreak += 1
+                    currentWinStreak := 0
+                    if currentLossStreak > maxConsecLosses
+                        maxConsecLosses := currentLossStreak
+                else
+                    breakEvenTrades += 1
+                    currentWinStreak := 0
+                    currentLossStreak := 0
+
+                totalBarsInTrades += trade.barsInTrade
+
+        // Calculate metrics
+        winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100.0 : 0.0
+
+        avgWinningTrade = winningTrades > 0 ? grossProfit / winningTrades : 0.0
+        avgLosingTrade = losingTrades > 0 ? grossLoss / losingTrades : 0.0
+
+        profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 99.99 : 0.0
+
+        netProfit = currentEquity - initialCapital
+        netProfitPercent = (netProfit / initialCapital) * 100.0
+
+        expectancy = totalTrades > 0 ? netProfit / totalTrades : 0.0
+
+        avgBarsInTrade = totalTrades > 0 ? totalBarsInTrades / totalTrades : 0.0
+
+        // Sharpe Ratio calculation
+        sharpeRatio = 0.0
+        if array.size(returns) > 1
+            avgReturn = array.avg(returns)
+            stdDev = array.stdev(returns)
+            if stdDev > 0
+                sharpeRatio := (avgReturn / stdDev) * math.sqrt(252)  // Annualized
+
+        // Return metrics
+        PerformanceMetrics.new(totalTrades, winningTrades, losingTrades, winRate, grossProfit, grossLoss, netProfit, avgWinningTrade, avgLosingTrade, expectancy, grossProfit > 0 ? grossProfit / winningTrades : 0.0, grossLoss > 0 ? grossLoss / losingTrades : 0.0, profitFactor, expectancy, 0.0, sharpeRatio, maxDrawdown, maxDrawdownPercent, maxConsecLosses, maxConsecWins, avgBarsInTrade, 0, 0)
+
+// ============================================================================
+// TRADE STATISTICS
+// ============================================================================
+
+// @function Get average trade duration in bars
+// @param trades Array of completed trades
+// @returns Average number of bars per trade
+export getAverageTradeLength(array<Trade> trades) =>
+    totalBars = 0
+    count = 0
+
+    for i = 0 to array.size(trades) - 1
+        trade = array.get(trades, i)
+        if not na(trade.exit)
+            totalBars += trade.barsInTrade
+            count += 1
+
+    count > 0 ? totalBars / count : 0
+
+// @function Get win/loss ratio (average win / average loss)
+// @param trades Array of completed trades
+// @returns Win/loss ratio
+export getWinLossRatio(array<Trade> trades) =>
+    totalWins = 0.0
+    totalLosses = 0.0
+    winCount = 0
+    lossCount = 0
+
+    for i = 0 to array.size(trades) - 1
+        trade = array.get(trades, i)
+        if not na(trade.exit)
+            pnl = trade.exit.profitLoss
+            if pnl > 0
+                totalWins += pnl
+                winCount += 1
+            else if pnl < 0
+                totalLosses += math.abs(pnl)
+                lossCount += 1
+
+    avgWin = winCount > 0 ? totalWins / winCount : 0.0
+    avgLoss = lossCount > 0 ? totalLosses / lossCount : 0.0
+
+    avgLoss > 0 ? avgWin / avgLoss : avgWin > 0 ? 99.99 : 0.0
+
+// @function Get largest winning trade
+// @param trades Array of completed trades
+// @returns Largest profit from a single trade
+export getLargestWin(array<Trade> trades) =>
+    largestWin = 0.0
+
+    for i = 0 to array.size(trades) - 1
+        trade = array.get(trades, i)
+        if not na(trade.exit)
+            pnl = trade.exit.profitLoss
+            if pnl > largestWin
+                largestWin := pnl
+
+    largestWin
+
+// @function Get largest losing trade
+// @param trades Array of completed trades
+// @returns Largest loss from a single trade (positive number)
+export getLargestLoss(array<Trade> trades) =>
+    largestLoss = 0.0
+
+    for i = 0 to array.size(trades) - 1
+        trade = array.get(trades, i)
+        if not na(trade.exit)
+            pnl = trade.exit.profitLoss
+            if pnl < largestLoss
+                largestLoss := pnl
+
+    math.abs(largestLoss)
+
+// ============================================================================
+// EQUITY CURVE ANALYSIS
+// ============================================================================
+
+// @function Calculate equity curve from trade history
+// @param trades Array of completed trades
+// @param initialCapital Starting account balance
+// @returns Array of equity values at each trade close
+export calculateEquityCurve(array<Trade> trades, float initialCapital = 10000.0) =>
+    equityCurve = array.new<float>()
+    array.push(equityCurve, initialCapital)
+
+    currentEquity = initialCapital
+
+    for i = 0 to array.size(trades) - 1
+        trade = array.get(trades, i)
+        if not na(trade.exit)
+            currentEquity += trade.exit.profitLoss
+            array.push(equityCurve, currentEquity)
+
+    equityCurve
+
+// @function Calculate drawdown series from equity curve
+// @param equityCurve Array of equity values
+// @returns Array of drawdown percentages
+export calculateDrawdownSeries(array<float> equityCurve) =>
+    drawdowns = array.new<float>()
+    peak = array.get(equityCurve, 0)
+
+    for i = 0 to array.size(equityCurve) - 1
+        equity = array.get(equityCurve, i)
+
+        if equity > peak
+            peak := equity
+
+        drawdown = peak > 0 ? ((peak - equity) / peak) * 100.0 : 0.0
+        array.push(drawdowns, drawdown)
+
+    drawdowns
+
+// ============================================================================
+// MONTHLY/PERIODIC ANALYSIS
+// ============================================================================
+
+// @function Group trades by month and calculate monthly returns
+// @param trades Array of completed trades
+// @param initialCapital Starting account balance
+// @returns Map of month_year -> monthly return %
+export calculateMonthlyReturns(array<Trade> trades, float initialCapital = 10000.0) =>
+    monthlyReturns = map.new<string, float>()
+
+    currentEquity = initialCapital
+
+    for i = 0 to array.size(trades) - 1
+        trade = array.get(trades, i)
+        if not na(trade.exit)
+            monthKey = str.format("{0}_{1}", year(trade.exit.timestamp), str.tostring(month(trade.exit.timestamp)))
+
+            pnl = trade.exit.profitLoss
+            returnPercent = (pnl / currentEquity) * 100.0
+
+            if map.contains(monthlyReturns, monthKey)
+                existing = map.get(monthlyReturns, monthKey)
+                map.put(monthlyReturns, monthKey, existing + returnPercent)
+            else
+                map.put(monthlyReturns, monthKey, returnPercent)
+
+            currentEquity += pnl
+
+    monthlyReturns
+
+// ============================================================================
+// RISK-ADJUSTED METRICS
+// ============================================================================
+
+// @function Calculate Sortino Ratio (similar to Sharpe but only penalizes downside volatility)
+// @param trades Array of completed trades
+// @param initialCapital Starting account balance
+// @param targetReturn Minimum acceptable return (default 0)
+// @returns Sortino ratio
+export calculateSortinoRatio(array<Trade> trades, float initialCapital = 10000.0, float targetReturn = 0.0) =>
+    if array.size(trades) == 0
+        0.0
+    else
+        returns = array.new<float>()
+        currentEquity = initialCapital
+
+        for i = 0 to array.size(trades) - 1
+            trade = array.get(trades, i)
+            if not na(trade.exit)
+                pnl = trade.exit.profitLoss
+                returnPercent = (pnl / currentEquity) * 100.0
+                array.push(returns, returnPercent)
+                currentEquity += pnl
+
+        if array.size(returns) < 2
+            0.0
+        else
+            avgReturn = array.avg(returns)
+
+            // Calculate downside deviation
+            downside = array.new<float>()
+            for i = 0 to array.size(returns) - 1
+                ret = array.get(returns, i)
+                if ret < targetReturn
+                    array.push(downside, math.pow(ret - targetReturn, 2))
+
+            downsideDeviation = array.size(downside) > 0 ? math.sqrt(array.avg(downside)) : 0.0
+
+            downsideDeviation > 0 ? (avgReturn - targetReturn) / downsideDeviation : 0.0
+
+// @function Calculate Maximum Adverse Excursion (MAE) - largest unrealized loss during trade
+// @param trades Array of completed trades
+// @returns Average MAE across all trades
+export calculateAverageMAE(array<Trade> trades) =>
+    if array.size(trades) == 0
+        0.0
+    else
+        totalMAE = 0.0
+        count = 0
+
+        for i = 0 to array.size(trades) - 1
+            trade = array.get(trades, i)
+            if not na(trade.exit)
+                mae = math.abs(trade.maxDrawdown)
+                totalMAE += mae
+                count += 1
+
+        count > 0 ? totalMAE / count : 0.0
+
+// @function Calculate Maximum Favorable Excursion (MFE) - largest unrealized profit during trade
+// @param trades Array of completed trades
+// @returns Average MFE across all trades
+export calculateAverageMFE(array<Trade> trades) =>
+    if array.size(trades) == 0
+        0.0
+    else
+        totalMFE = 0.0
+        count = 0
+
+        for i = 0 to array.size(trades) - 1
+            trade = array.get(trades, i)
+            if not na(trade.exit)
+                mfe = trade.maxProfit
+                totalMFE += mfe
+                count += 1
+
+        count > 0 ? totalMFE / count : 0.0
+
+// ============================================================================
+// TRADE ANALYSIS HELPERS
+// ============================================================================
+
+// @function Filter trades by direction
+// @param trades Array of trades
+// @param direction "LONG" or "SHORT"
+// @returns Array of trades matching direction
+export filterTradesByDirection(array<Trade> trades, string direction) =>
+    filtered = array.new<Trade>()
+
+    for i = 0 to array.size(trades) - 1
+        trade = array.get(trades, i)
+        if trade.entry.direction == direction
+            array.push(filtered, trade)
+
+    filtered
+
+// @function Filter trades by outcome (winners, losers, breakeven)
+// @param trades Array of trades
+// @param outcome "WIN", "LOSS", or "BREAKEVEN"
+// @returns Array of trades matching outcome
+export filterTradesByOutcome(array<Trade> trades, string outcome) =>
+    filtered = array.new<Trade>()
+
+    for i = 0 to array.size(trades) - 1
+        trade = array.get(trades, i)
+        if not na(trade.exit)
+            pnl = trade.exit.profitLoss
+
+            match = switch outcome
+                "WIN" => pnl > 0
+                "LOSS" => pnl < 0
+                "BREAKEVEN" => pnl == 0
+                => false
+
+            if match
+                array.push(filtered, trade)
+
+    filtered
+
+// @function Get trade statistics summary as formatted string
+// @param metrics PerformanceMetrics object
+// @returns Multi-line string with formatted statistics
+export formatMetricsSummary(PerformanceMetrics metrics) =>
+    str.format("Trades: {0} | Win Rate: {1}%\nProfit Factor: {2} | Expectancy: ${3}\nNet Profit: ${4} ({5}%)\nMax DD: ${6} ({7}%)\nSharpe: {8} | Avg Trade: {9} bars", str.tostring(metrics.totalTrades), str.tostring(metrics.winRate, "#.##"), str.tostring(metrics.profitFactor, "#.##"), str.tostring(metrics.expectancy, "#.##"), str.tostring(metrics.netProfit, "#.##"), str.tostring(metrics.netProfit, "#.##"), str.tostring(metrics.maxDrawdown, "#.##"), str.tostring(metrics.maxDrawdownPercent, "#.##"), str.tostring(metrics.sharpeRatio, "#.##"), str.tostring(metrics.avgBarsInTrade, "#.#"))
+

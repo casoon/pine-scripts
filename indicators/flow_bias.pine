@@ -1,0 +1,475 @@
+//@version=6
+// ============================================================================
+// FlowBias
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2025-12-22 01:01:20
+// ============================================================================
+// Composite bias engine with CMF, volume delta, Stoch, and Ultimate Oscillator for trend pullbacks and exhaustion.
+//
+// ============================================================================
+indicator("FlowBias", overlay=false, max_labels_count=500)
+
+// ============================================================================
+// MODULES:
+// - inputs.pine
+// - core.pine
+// - visualization.pine
+// ============================================================================
+
+// NOTE: Modules are combined by the build system.
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+groupCore   = "Core"
+groupBias   = "Bias"
+groupSignal = "Signals"
+groupStoch  = "Stoch"
+groupUO     = "Ultimate Osc"
+groupExh    = "Exhaustion / Reversal"
+groupMTF    = "MTF (optional)"
+groupPlot   = "Plot/Labels"
+
+// Mode
+mode = input.string("Auto", "Mode", options=["Auto", "Trend (Pullback)", "Reversal (Exhaustion)", "Both"], group=groupCore)
+
+// Bias style
+biasStyle = input.string("Balanced", "Bias Style", options=["Direct", "Balanced", "Smooth"], group=groupBias)
+biasLenBalanced = input.int(9,  "Balanced Smoothing Len", minval=1, group=groupBias)
+biasLenSmooth   = input.int(21, "Smooth Smoothing Len",   minval=1, group=groupBias)
+
+// Weights (Default: CMF stronger)
+wCMF = input.float(2.0, "Weight CMF", minval=0.0, step=0.25, group=groupBias)
+wUO  = input.float(1.0, "Weight UO",  minval=0.0, step=0.25, group=groupBias)
+wVOL = input.float(1.0, "Weight VolΔ", minval=0.0, step=0.25, group=groupBias)
+
+// CMF
+cmfLen     = input.int(20, "CMF Length", minval=1, group=groupBias)
+cmfScale   = input.float(0.20, "CMF Scale (Normalization)", minval=0.01, step=0.01, group=groupBias)
+
+// Signal density presets
+density = input.string("Balanced", "Signal Density", options=["Clean", "Balanced", "Active"], group=groupSignal)
+useCustomThresholds = input.bool(false, "Custom Thresholds (override Density)", group=groupSignal)
+biasMinCustom       = input.float(0.28, "Bias Min", minval=0.0, maxval=1.0, step=0.01, group=groupSignal)
+stochExtCustom      = input.float(0.60, "Stoch Extreme", minval=0.0, maxval=1.0, step=0.01, group=groupSignal)
+strengthTrigCustom  = input.float(0.55, "Label Threshold |Strength|", minval=0.0, maxval=1.0, step=0.01, group=groupSignal)
+cooldownCustom      = input.int(8, "Cooldown Bars", minval=0, group=groupSignal)
+
+// Confirmations
+confirmRule = input.string("Auto (by Density)", "Confirmation Rule", options=["Auto (by Density)", "AND", "OR", "Minimal"], group=groupSignal)
+
+// Stoch
+periodK = input.int(14, "K Length", minval=1, group=groupStoch)
+smoothK = input.int(3,  "K Smooth", minval=1, group=groupStoch)
+periodD = input.int(3,  "D Smooth", minval=1, group=groupStoch)
+stochTrigger = input.string("Cross (default)", "Stoch Trigger", options=["Cross (default)", "Exit Extreme Zone"], group=groupStoch)
+stochUse = input.string("K", "Use Stoch Line", options=["K", "D"], group=groupStoch)
+
+// UO
+uoLen1 = input.int(7,  "UO Len 1", minval=1, group=groupUO)
+uoLen2 = input.int(14, "UO Len 2", minval=1, group=groupUO)
+uoLen3 = input.int(28, "UO Len 3", minval=1, group=groupUO)
+
+// Exhaustion / Reversal
+enableReversal = input.bool(true, "Enable Reversal (Exhaustion)", group=groupExh)
+pivotLeft  = input.int(5, "Pivot Left",  minval=1, group=groupExh)
+pivotRight = input.int(5, "Pivot Right", minval=1, group=groupExh)
+divLookbackPivots = input.int(3, "Max pivot steps back for divergence", minval=1, maxval=10, group=groupExh)
+divNeed = input.string("Either (CMF or UO)", "Divergence needs", options=["Either (CMF or UO)", "Both (CMF and UO)"], group=groupExh)
+reversalStrengthMult = input.float(1.15, "Reversal strength boost", minval=0.5, maxval=2.0, step=0.05, group=groupExh)
+
+// MTF bias filter
+useMTF = input.bool(false, "Use MTF Bias Filter", group=groupMTF)
+mtfTf  = input.timeframe("60", "MTF Timeframe", group=groupMTF)
+mtfBlend = input.float(0.50, "Blend MTF into Bias (0..1)", minval=0.0, maxval=1.0, step=0.05, group=groupMTF)
+mtfMinAgree = input.float(0.10, "MTF agree threshold", minval=0.0, maxval=1.0, step=0.01, group=groupMTF)
+
+// Plot/Labels
+showLabels = input.bool(true, "Show Chart Labels", group=groupPlot)
+labelSize  = input.string("small", "Label Size", options=["tiny","small","normal","large"], group=groupPlot)
+forceOverlay = input.bool(true, "Force Overlay (draw on chart)", group=groupPlot)
+showSetupHint = input.bool(true, "Show Setup Hint (faint, not only triggers)", group=groupSignal)
+showRegimeBg  = input.bool(true, "Background Regime Hint", group=groupPlot)
+
+// Anti-spam: one-per-cycle
+onePerStochCycle = input.bool(true, "Anti-spam: one signal per Stoch cycle", group=groupSignal)
+
+// Optional: visualize divergence points lightly (debug)
+showDivMarks = input.bool(false, "Show Divergence Marks (debug)", group=groupExh)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Helpers
+//──────────────────────────────────────────────────────────────────────────────
+clamp(x, lo, hi) => math.max(lo, math.min(hi, x))
+
+toSize(s) =>
+    s == "tiny" ? size.tiny : s == "small" ? size.small : s == "normal" ? size.normal : size.large
+
+// Density defaults
+float biasMin = switch density
+    "Clean"    => 0.35
+    "Balanced" => 0.28
+    => 0.20
+
+float stochExt = switch density
+    "Clean"    => 0.70
+    "Balanced" => 0.60
+    => 0.55
+
+float strengthTrig = switch density
+    "Clean"    => 0.65
+    "Balanced" => 0.55
+    => 0.45
+
+int cooldownBars = switch density
+    "Clean"    => 12
+    "Balanced" => 8
+    => 4
+
+biasMin      := useCustomThresholds ? biasMinCustom : biasMin
+stochExt     := useCustomThresholds ? stochExtCustom : stochExt
+strengthTrig := useCustomThresholds ? strengthTrigCustom : strengthTrig
+cooldownBars := useCustomThresholds ? cooldownCustom : cooldownBars
+
+confRuleResolved = confirmRule == "Auto (by Density)" ? (density == "Clean" ? "AND" : density == "Balanced" ? "OR" : "Minimal") : confirmRule
+
+
+// ============================================================================
+// MODULE: core
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// Core components
+//──────────────────────────────────────────────────────────────────────────────
+atr = ta.atr(14)
+rsi = ta.rsi(close, rsiLen)
+
+// CMF
+ad = (close == high and close == low) or (high == low) ? 0.0 : ((2.0 * close - low - high) / (high - low)) * volume
+cmf = ta.sum(ad, cmfLen) / ta.sum(volume, cmfLen)
+cmfNorm = clamp(cmf / cmfScale, -1.0, 1.0)
+
+// Close-location weighted volume split proxy
+bv = (high == low) ? 0.0 : volume * (close - low) / (high - low)
+sv = (high == low) ? 0.0 : volume * (high - close) / (high - low)
+den = (bv + sv)
+buyPct  = den == 0.0 ? 0.5 : (bv / den)
+sellPct = den == 0.0 ? 0.5 : (sv / den)
+volDelta = clamp(buyPct - sellPct, -1.0, 1.0)
+
+// Stoch normalized to [-1..+1]
+kRaw = ta.stoch(close, high, low, periodK)
+k = ta.sma(kRaw, smoothK)
+d = ta.sma(k, periodD)
+stochK = ((k / 100.0) - 0.5) * 2.0
+stochD = ((d / 100.0) - 0.5) * 2.0
+stochLine = stochUse == "K" ? stochK : stochD
+
+bullCross = ta.crossover(stochK, stochD)
+bearCross = ta.crossunder(stochK, stochD)
+exitFromOS = ta.crossover(stochLine, -stochExt)
+exitFromOB = ta.crossunder(stochLine,  stochExt)
+
+wasOS = stochLine < -stochExt
+wasOB = stochLine >  stochExt
+
+longStochTrig  = stochTrigger == "Cross (default)" ? bullCross : exitFromOS
+shortStochTrig = stochTrigger == "Cross (default)" ? bearCross : exitFromOB
+
+// Ultimate Oscillator normalized [-1..+1]
+average(bp, tr_, len) => ta.sum(bp, len) / ta.sum(tr_, len)
+high_ = math.max(high, close[1])
+low_  = math.min(low, close[1])
+bp_   = close - low_
+tr__  = high_ - low_
+avg1 = average(bp_, tr__, uoLen1)
+avg2 = average(bp_, tr__, uoLen2)
+avg3 = average(bp_, tr__, uoLen3)
+uoNorm = (((4.0 * avg1 + 2.0 * avg2 + avg3) / 7.0) - 0.5) * 2.0
+uoNorm := clamp(uoNorm, -1.0, 1.0)
+
+// Confirm signals
+uoUp   = uoNorm > uoNorm[1]
+uoDown = uoNorm < uoNorm[1]
+volUp  = volDelta > 0
+volDown= volDelta < 0
+
+// Bias raw
+wSum = math.max(wCMF + wUO + wVOL, 0.0001)
+biasRaw = (wCMF * cmfNorm + wUO * uoNorm + wVOL * volDelta) / wSum
+biasLocal = switch biasStyle
+    "Direct"   => biasRaw
+    "Balanced" => ta.ema(biasRaw, biasLenBalanced)
+    => ta.ema(biasRaw, biasLenSmooth)
+biasLocal := clamp(biasLocal, -1.0, 1.0)
+
+// Optional MTF bias (computed with same formula, using security)
+biasRawForTF() =>
+    // recompute inside security context
+    ad_tf = (close == high and close == low) or (high == low) ? 0.0 : ((2.0 * close - low - high) / (high - low)) * volume
+    cmf_tf = ta.sum(ad_tf, cmfLen) / ta.sum(volume, cmfLen)
+    cmfN_tf = clamp(cmf_tf / cmfScale, -1.0, 1.0)
+
+    bv_tf = (high == low) ? 0.0 : volume * (close - low) / (high - low)
+    sv_tf = (high == low) ? 0.0 : volume * (high - close) / (high - low)
+    den_tf = (bv_tf + sv_tf)
+    buy_tf  = den_tf == 0.0 ? 0.5 : (bv_tf / den_tf)
+    sell_tf = den_tf == 0.0 ? 0.5 : (sv_tf / den_tf)
+    volD_tf = clamp(buy_tf - sell_tf, -1.0, 1.0)
+
+    high_tf = math.max(high, close[1])
+    low_tf  = math.min(low, close[1])
+    bp_tf   = close - low_tf
+    tr_tf   = high_tf - low_tf
+    avg1_tf = ta.sum(bp_tf, uoLen1) / ta.sum(tr_tf, uoLen1)
+    avg2_tf = ta.sum(bp_tf, uoLen2) / ta.sum(tr_tf, uoLen2)
+    avg3_tf = ta.sum(bp_tf, uoLen3) / ta.sum(tr_tf, uoLen3)
+    uo_tf   = clamp((((4.0 * avg1_tf + 2.0 * avg2_tf + avg3_tf) / 7.0) - 0.5) * 2.0, -1.0, 1.0)
+
+    bRaw_tf = (wCMF * cmfN_tf + wUO * uo_tf + wVOL * volD_tf) / wSum
+    // keep it raw-ish (no extra smoothing across TF; smoothing already happens in that TF’s bars)
+    clamp(bRaw_tf, -1.0, 1.0)
+
+biasMTF = useMTF ? request.security(syminfo.tickerid, mtfTf, biasRawForTF(), barmerge.gaps_off, barmerge.lookahead_off) : na
+bias = useMTF ? clamp((1.0 - mtfBlend) * biasLocal + mtfBlend * biasMTF, -1.0, 1.0) : biasLocal
+
+mtfAgreeLong  = not useMTF or (biasMTF > +mtfMinAgree)
+mtfAgreeShort = not useMTF or (biasMTF < -mtfMinAgree)
+
+// Regimes
+isTrend = math.abs(bias) > biasMin
+isChop  = not isTrend
+
+//──────────────────────────────────────────────────────────────────────────────
+// Exhaustion / Reversal via pivot divergence
+//──────────────────────────────────────────────────────────────────────────────
+ph = ta.pivothigh(high, pivotLeft, pivotRight)
+pl = ta.pivotlow(low,  pivotLeft, pivotRight)
+
+var float lastPHPrice = na
+var float lastPHCmf   = na
+var float lastPHUo    = na
+var int   lastPHBar   = na
+
+var float lastPLPrice = na
+var float lastPLCmf   = na
+var float lastPLUo    = na
+var int   lastPLBar   = na
+
+var float prevPHPrice = na
+var float prevPHCmf   = na
+var float prevPHUo    = na
+var int   prevPHBar   = na
+
+var float prevPLPrice = na
+var float prevPLCmf   = na
+var float prevPLUo    = na
+var int   prevPLBar   = na
+
+if not na(ph)
+    prevPHPrice := lastPHPrice
+    prevPHCmf   := lastPHCmf
+    prevPHUo    := lastPHUo
+    prevPHBar   := lastPHBar
+
+    lastPHPrice := ph
+    lastPHCmf   := cmfNorm[pivotRight]
+    lastPHUo    := uoNorm[pivotRight]
+    lastPHBar   := bar_index - pivotRight
+
+if not na(pl)
+    prevPLPrice := lastPLPrice
+    prevPLCmf   := lastPLCmf
+    prevPLUo    := lastPLUo
+    prevPLBar   := lastPLBar
+
+    lastPLPrice := pl
+    lastPLCmf   := cmfNorm[pivotRight]
+    lastPLUo    := uoNorm[pivotRight]
+    lastPLBar   := bar_index - pivotRight
+
+// Divergence conditions evaluated when pivot confirms (on current bar)
+bearDivPrice = not na(ph) and (not na(prevPHPrice)) and (ph > prevPHPrice)
+bearDivCMF   = not na(ph) and (not na(prevPHCmf))   and (cmfNorm[pivotRight] < prevPHCmf)
+bearDivUO    = not na(ph) and (not na(prevPHUo))    and (uoNorm[pivotRight]  < prevPHUo)
+
+bullDivPrice = not na(pl) and (not na(prevPLPrice)) and (pl < prevPLPrice)
+bullDivCMF   = not na(pl) and (not na(prevPLCmf))   and (cmfNorm[pivotRight] > prevPLCmf)
+bullDivUO    = not na(pl) and (not na(prevPLUo))    and (uoNorm[pivotRight]  > prevPLUo)
+
+bearDiv = bearDivPrice and (divNeed == "Both (CMF and UO)" ? (bearDivCMF and bearDivUO) : (bearDivCMF or bearDivUO))
+bullDiv = bullDivPrice and (divNeed == "Both (CMF and UO)" ? (bullDivCMF and bullDivUO) : (bullDivCMF or bullDivUO))
+
+// Reversal trigger confirmation (on current bar, not pivot bar): // We require: bias was strong in opposite direction recently + stoch extreme + cross/exit + volDelta flips
+biasWasBull = ta.highest(bias, pivotLeft + pivotRight + 5) > +biasMin
+biasWasBear = ta.lowest(bias,  pivotLeft + pivotRight + 5) < -biasMin
+
+revShortSetup = enableReversal and bearDiv and biasWasBull
+revLongSetup  = enableReversal and bullDiv and biasWasBear
+
+// Confirm on current bar:
+revShortTrig = revShortSetup and (wasOB) and shortStochTrig and (volDown or uoDown)
+revLongTrig  = revLongSetup  and (wasOS) and longStochTrig  and (volUp   or uoUp)
+
+// Strength for reversals
+pbIntensity = clamp((math.abs(stochLine) - stochExt) / (1.0 - stochExt), 0.0, 1.0)
+biasStrengthLong  = clamp((bias - biasMin) / (1.0 - biasMin), 0.0, 1.0)
+biasStrengthShort = clamp((math.abs(bias) - biasMin) / (1.0 - biasMin), 0.0, 1.0)
+
+revStrengthShort = (revShortTrig ? clamp(pbIntensity * reversalStrengthMult, 0.0, 1.0) : 0.0)
+revStrengthLong  = (revLongTrig  ? clamp(pbIntensity * reversalStrengthMult, 0.0, 1.0) : 0.0)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Trend Pullback logic (Continuation)
+//──────────────────────────────────────────────────────────────────────────────
+biasLong  = bias >  biasMin and mtfAgreeLong
+biasShort = bias < -biasMin and mtfAgreeShort
+
+pbLong  = biasLong  and wasOS
+pbShort = biasShort and wasOB
+
+confLongA = volUp
+confLongB = uoUp
+confShortA = volDown
+confShortB = uoDown
+
+confLong = confRuleResolved == "AND" ? (confLongA and confLongB) : confRuleResolved == "OR"  ? (confLongA or  confLongB) : (confLongA or confLongB)
+
+confShort = confRuleResolved == "AND" ? (confShortA and confShortB) : confRuleResolved == "OR"  ? (confShortA or  confShortB) : (confShortA or confShortB)
+
+confLongScore  = confLong  ? 1.0 : 0.0
+confShortScore = confShort ? 1.0 : 0.0
+
+trendStrengthLong  = (pbLong  and longStochTrig  ? pbIntensity * confLongScore  * biasStrengthLong  : 0.0)
+trendStrengthShort = (pbShort and shortStochTrig ? pbIntensity * confShortScore * biasStrengthShort : 0.0)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Auto mode regime decision
+//──────────────────────────────────────────────────────────────────────────────
+// Decide what is "active" this bar
+wantTrend = mode == "Trend (Pullback)" or mode == "Both" or mode == "Auto"
+wantRev   = (mode == "Reversal (Exhaustion)" or mode == "Both" or mode == "Auto") and enableReversal
+
+// In Auto:
+// - if chop -> reduce signals
+// - if trend -> allow trend signals
+// - if exhaustion setup -> allow reversal signals even if trend-ish
+autoAllowTrend = mode != "Auto" ? true : isTrend
+autoAllowRev   = mode != "Auto" ? true : true  // divergence is already selective
+
+// Final strengths
+float strengthLong  = 0.0
+float strengthShort = 0.0
+
+if wantTrend and autoAllowTrend
+    strengthLong  := math.max(strengthLong,  trendStrengthLong)
+    strengthShort := math.max(strengthShort, trendStrengthShort)
+
+if wantRev and autoAllowRev
+    strengthLong  := math.max(strengthLong,  revStrengthLong)
+    strengthShort := math.max(strengthShort, revStrengthShort)
+
+// Signed signal curve
+signal = strengthLong > 0 ? strengthLong : strengthShort > 0 ? -strengthShort : 0.0
+
+// Setup hint (faint)
+setupHintStrengthLong  = pbLong  ? pbIntensity * biasStrengthLong  : 0.0
+setupHintStrengthShort = pbShort ? pbIntensity * biasStrengthShort : 0.0
+setupHint = showSetupHint ? (setupHintStrengthLong > setupHintStrengthShort ? setupHintStrengthLong : -setupHintStrengthShort) : 0.0
+signalPlot = showSetupHint ? (math.abs(signal) > 0 ? signal : setupHint * 0.35) : signal
+
+//──────────────────────────────────────────────────────────────────────────────
+// Anti-spam: cooldown + one per stoch cycle
+//──────────────────────────────────────────────────────────────────────────────
+var int lastSigBar = na
+cooldownOK = na(lastSigBar) or (bar_index - lastSigBar >= cooldownBars)
+
+// Track stoch cycle: allow new long only after leaving OS, new short only after leaving OB
+var bool longCycleArmed = true
+var bool shortCycleArmed = true
+
+leftOS = ta.crossover(stochLine, -stochExt)  // exited OS
+leftOB = ta.crossunder(stochLine,  stochExt) // exited OB
+
+if leftOS
+    longCycleArmed := true
+if leftOB
+    shortCycleArmed := true
+
+allowLongByCycle  = not onePerStochCycle or longCycleArmed
+allowShortByCycle = not onePerStochCycle or shortCycleArmed
+
+// When we fire a signal, disarm that side until exit happens again
+fireLong  = showLabels and cooldownOK and allowLongByCycle  and (strengthLong  >= strengthTrig)
+fireShort = showLabels and cooldownOK and allowShortByCycle and (strengthShort >= strengthTrig)
+
+
+// ============================================================================
+// MODULE: visualization
+// ============================================================================
+
+//──────────────────────────────────────────────────────────────────────────────
+// Labels with tooltips
+//──────────────────────────────────────────────────────────────────────────────
+mkTooltip(dir, s, kind) =>
+    "Kind: " + kind + "\n" +
+    "Mode: " + mode + "\n" +
+    "Bias: " + str.tostring(bias, format.mintick) + (useMTF ? ("\nBiasMTF: " + str.tostring(biasMTF, format.mintick) + " (" + mtfTf + ")") : "") + "\n" +
+    "CMF(n): " + str.tostring(cmfNorm, format.mintick) + "\n" +
+    "UO(n): " + str.tostring(uoNorm, format.mintick) + "\n" +
+    "VolΔ: " + str.tostring(volDelta, format.mintick) + "\n" +
+    "Stoch(" + stochUse + "): " + str.tostring(stochLine, format.mintick) + "\n" +
+    "Strength " + dir + ": " + str.tostring(s, format.mintick) + "\n" +
+    "Confirm rule: " + confRuleResolved
+
+kindLong  = revStrengthLong  > trendStrengthLong  ? "Reversal (Exhaustion)" : "Trend Pullback"
+kindShort = revStrengthShort > trendStrengthShort ? "Reversal (Exhaustion)" : "Trend Pullback"
+
+if fireLong
+    lastSigBar := bar_index
+    longCycleArmed := false
+    label.new(bar_index, high, (kindLong == "Reversal (Exhaustion)" ? "XR Long" : "PB Long") + "\n" + str.tostring(strengthLong, "#.##"),
+      style=label.style_label_up,
+      textcolor=color.white,
+      color=kindLong == "Reversal (Exhaustion)" ? color.new(color.lime, 0) : color.new(color.green, 0),
+      size=toSize(labelSize),
+      tooltip=mkTooltip("LONG", strengthLong, kindLong),
+      force_overlay=forceOverlay)
+
+if fireShort
+    lastSigBar := bar_index
+    shortCycleArmed := false
+    label.new(bar_index, low, (kindShort == "Reversal (Exhaustion)" ? "XR Short" : "PB Short") + "\n" + str.tostring(strengthShort, "#.##"),
+      style=label.style_label_down,
+      textcolor=color.white,
+      color=kindShort == "Reversal (Exhaustion)" ? color.new(color.orange, 0) : color.new(color.red, 0),
+      size=toSize(labelSize),
+      tooltip=mkTooltip("SHORT", strengthShort, kindShort),
+      force_overlay=forceOverlay)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Plots
+//──────────────────────────────────────────────────────────────────────────────
+plot(bias, "BiasScore [-1..+1]", color=color.new(color.aqua, 0), linewidth=2)
+plot(signalPlot, "SignalStrength signed [-1..+1]", color=color.new(color.orange, 0), linewidth=2)
+
+plot(0, "Zero", color=color.new(color.gray, 70))
+plot(+biasMin, "Bias +Min", color=color.new(color.green, 80))
+plot(-biasMin, "Bias -Min", color=color.new(color.red, 80))
+
+bgcolor(showRegimeBg ? (isChop ? color.new(color.gray, 92) : na) : na)
+
+// Optional: visualize divergence points lightly (debug)
+plotshape(showDivMarks and bearDiv, title="Bear Div", style=shape.triangledown, location=location.top, size=size.tiny, color=color.new(color.red, 0), text="Div")
+plotshape(showDivMarks and bullDiv, title="Bull Div", style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.new(color.green, 0), text="Div")
+
+

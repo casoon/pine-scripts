@@ -1,0 +1,605 @@
+//@version=6
+// ============================================================================
+// Market Exhaustion [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2025-12-21 00:02:21
+// ============================================================================
+// MFI + StochRSI fusion with optional JMA smoothing, HTF context, signals, and divergences
+//
+// Features:
+//   ✓ Adaptive MFI zones with optional background highlights
+//   ✓ Auto-HTF MFI context with bias label
+//   ✓ StochRSI timing overlay
+//   ✓ Context + timing signals
+//   ✓ Regular divergences on MFI
+//
+// ============================================================================
+indicator("Market Exhaustion [WavesUnchained]", shorttitle="Market Exhaustion", precision=0, max_lines_count=300, max_labels_count=300)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Market Exhaustion
+// ═══════════════════════════════════════════════════════════════════════════
+// Version: 1.0.0
+// Author: WavesUnchained
+//
+// MODULES:
+// - inputs.pine
+// - helpers.pine
+// - core.pine
+// - visuals.pine
+// - signals.pine
+// - divergences.pine
+// ═══════════════════════════════════════════════════════════════════════════
+
+// NOTE: Modules are combined by the build system.
+
+// ============================================================================
+// INLINE MODULES (Combined at build time)
+// ============================================================================
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+//────────────────────────────────────────────────────────────────────
+// Inputs
+//────────────────────────────────────────────────────────────────────
+groupCore = "Core"
+src       = input.source(hlc3, "Source", group=groupCore)
+mfiLen    = input.int(14, "MFI Length", minval=1, group=groupCore)
+
+groupOsc = "Oscillator"
+oscMode  = input.string("MFI", "Oscillator mode", options=["MFI","CCI","MFI+CCI"], group=groupOsc)
+oscEngine = input.string("MFI", "Engine source (for MFI+CCI)", options=["MFI","CCI"], group=groupOsc)
+cciLen   = input.int(34, "CCI length", minval=1, group=groupOsc)
+cciSrc   = input.source(hlc3, "CCI source", group=groupOsc)
+cciMapScale = input.float(150.0, "CCI map scale (higher = flatter)", minval=50.0, maxval=500.0, step=10.0, group=groupOsc)
+
+groupZones = "Zones"
+useDynZones   = input.bool(true, "Use dynamic zones (adaptive)", group=groupZones)
+zoneLookback  = input.int(200, "Dynamic zone lookback", minval=50, group=groupZones)
+dynUpperFrac  = input.float(0.85, "Upper fraction (0..1)", minval=0.50, maxval=1.00, step=0.01, group=groupZones)
+dynLowerFrac  = input.float(0.15, "Lower fraction (0..1)", minval=0.00, maxval=0.50, step=0.01, group=groupZones)
+staticUpper   = input.int(80, "Static Upper", minval=50, maxval=100, group=groupZones)
+staticLower   = input.int(20, "Static Lower", minval=0, maxval=50, group=groupZones)
+showBgZones   = input.bool(true, "Background highlight OB/OS", group=groupZones)
+showBandFill  = input.bool(true, "Fill between zones", group=groupZones)
+showMidLine   = input.bool(true, "Show midline (50)", group=groupZones)
+
+groupViz = "Visuals"
+mfiColorOB      = input.color(color.new(color.red, 0), "MFI color OB", group=groupViz)
+mfiColorOS      = input.color(color.new(color.lime, 0), "MFI color OS", group=groupViz)
+mfiColorNeutral = input.color(color.new(color.gray, 0), "MFI color neutral", group=groupViz)
+stochColor      = input.color(color.new(color.aqua, 55), "StochRSI K color", group=groupViz)
+htfMfiColor     = input.color(color.new(color.orange, 35), "HTF MFI color", group=groupViz)
+cciColor        = input.color(color.new(color.blue, 35), "CCI mapped color", group=groupViz)
+zoneUpperColor  = input.color(color.new(color.red, 75), "Zone upper line", group=groupViz)
+zoneLowerColor  = input.color(color.new(color.lime, 75), "Zone lower line", group=groupViz)
+midlineColor    = input.color(color.new(color.gray, 92), "Midline color", group=groupViz)
+
+groupStoch = "StochRSI"
+useStoch      = input.bool(true, "Show StochRSI K", group=groupStoch)
+rsiLen        = input.int(14, "RSI Length", minval=1, group=groupStoch)
+stochLen      = input.int(14, "Stoch Length", minval=1, group=groupStoch)
+kSmooth       = input.int(3, "K smoothing", minval=1, group=groupStoch)
+stochOS       = input.int(20, "StochRSI OS level", minval=1, maxval=49, group=groupStoch)
+stochOB       = input.int(80, "StochRSI OB level", minval=51, maxval=99, group=groupStoch)
+
+groupSignals = "Signals"
+showSignals   = input.bool(true, "Show context+timing signals", group=groupSignals)
+needConfirm   = input.int(1, "Zone confirm bars (0..5)", minval=0, maxval=5, group=groupSignals)
+
+groupJMA = "JMA smoothing"
+useJMA        = input.bool(true, "Enable JMA smoothing", group=groupJMA)
+jmaLen        = input.int(20, "JMA Length", minval=1, group=groupJMA)
+jmaPhase      = input.int(0, "JMA Phase (-100..100)", minval=-100, maxval=100, group=groupJMA)
+jmaPower      = input.float(2.0, "JMA Power (1..8)", minval=1.0, maxval=8.0, step=0.1, group=groupJMA)
+smoothMFI     = input.bool(true, "Apply JMA to MFI", group=groupJMA)
+smoothStoch   = input.bool(true, "Apply JMA to StochRSI K", group=groupJMA)
+
+groupMTF = "MTF context"
+useMTF        = input.bool(true,  "Show HTF MFI (default on)", group=groupMTF)
+useAutoTF     = input.bool(true,  "Auto-select HTF", group=groupMTF)
+manualTF      = input.timeframe("60", "Manual HTF (fallback)", group=groupMTF)
+useHTFFilter  = input.bool(false, "Use HTF as signal filter", group=groupMTF)
+mtfSmooth     = input.bool(true,  "Smooth HTF MFI", group=groupMTF)
+mtfEmaLen     = input.int(10,     "HTF EMA length (fallback)", minval=1, group=groupMTF)
+biasLevel     = input.int(50,     "HTF bias level", minval=1, maxval=99, group=groupMTF)
+showBiasLabel = input.bool(true,  "Show HTF bias label (top)", group=groupMTF)
+biasLabelOffset = input.int(50, "Bias label offset bars", minval=0, maxval=200, group=groupMTF)
+
+groupDiv = "Divergences"
+showDiv       = input.bool(true, "Show divergences", group=groupDiv)
+maxDivs       = input.int(30, "Max divergence objects", minval=5, maxval=200, group=groupDiv)
+
+requireOSOB   = input.bool(true, "Require OS/OB area", group=groupDiv)
+osobMode      = input.string("StartOrEnd", "OS/OB check", options=["End","StartOrEnd","Both"], group=groupDiv)
+osobBufferPct_in = input.float(0.10, "OS/OB buffer (% of band)", minval=0.0, maxval=0.50, step=0.01, group=groupDiv)
+
+useAtrFilter  = input.bool(true, "ATR swing filter", group=groupDiv)
+divAtrLen     = input.int(14, "ATR length", minval=1, group=groupDiv)
+
+showDivScore  = input.bool(true, "Show score instead of text", group=groupDiv)
+showScoreLabel = input.bool(true, "Show mid score label", group=groupDiv)
+scoreStrong   = input.int(65, "Strong score threshold", minval=0, maxval=100, group=groupDiv)
+divScoreScale = input.float(2.0, "Score scale", minval=0.5, maxval=10.0, step=0.1, group=groupDiv)
+fatigueLen    = input.int(40, "Fatigue lookback (bars)", minval=5, maxval=300, group=groupDiv)
+reactBars     = input.int(10, "Reaction window (bars)", minval=2, maxval=100, group=groupDiv)
+reactAtrFrac  = input.float(0.35, "Reaction threshold (ATR frac)", minval=0.05, maxval=2.0, step=0.05, group=groupDiv)
+useBiasBonus  = input.bool(false, "Bias bonus (needs HTF bias)", group=groupDiv)
+
+divProfile = input.string("More Signals", "Divergence profile", options=["More Signals","Conservative"], group=groupDiv)
+usePreset  = input.bool(true, "Use preset values", group=groupDiv)
+
+pivLeft_in     = input.int(7, "Pivot Left", minval=1, maxval=20, group=groupDiv)
+pivRight_in    = input.int(7, "Pivot Right", minval=1, maxval=20, group=groupDiv)
+minMfiDelta_in = input.int(15, "Min MFI delta", minval=0, maxval=100, group=groupDiv)
+minAtrMove_in  = input.float(0.75, "Min swing (ATR)", minval=0.0, maxval=10.0, step=0.05, group=groupDiv)
+dirPriceEps_in = input.float(0.0010, "Dir tolerance price (%)", minval=0.0, maxval=0.02, step=0.0001, group=groupDiv)
+dirMfiEps_in   = input.float(1.0, "Dir tolerance MFI (pts)", minval=0.0, maxval=10.0, step=0.1, group=groupDiv)
+
+tfMinDiv = timeframe.in_seconds(timeframe.period) / 60.0
+divPresetAuto = tfMinDiv <= 5 ? "5m" : tfMinDiv <= 15 ? "15m" : tfMinDiv <= 60 ? "1H" : tfMinDiv <= 240 ? "4H" : "1D"
+
+pivL_p = divPresetAuto == "5m" ? 3 : divPresetAuto == "15m" ? 5 : divPresetAuto == "1H" ? 6 : divPresetAuto == "4H" ? 5 : 9
+pivR_p = pivL_p
+mfiD_base = divPresetAuto == "5m" ? 5 : divPresetAuto == "15m" ? 7 : divPresetAuto == "1H" ? 9 : divPresetAuto == "4H" ? 10 : 16
+buf_base  = divPresetAuto == "5m" ? 0.10 : divPresetAuto == "15m" ? 0.25 : divPresetAuto == "1H" ? 0.12 : divPresetAuto == "4H" ? 0.30 : 0.16
+atr_base  = divPresetAuto == "5m" ? 0.25 : divPresetAuto == "15m" ? 0.45 : divPresetAuto == "1H" ? 0.60 : divPresetAuto == "4H" ? 0.70 : 1.00
+
+mfiEps_base = divPresetAuto == "5m" ? 0.8 : divPresetAuto == "15m" ? 1.0 : divPresetAuto == "1H" ? 1.2 : divPresetAuto == "4H" ? 1.5 : 2.0
+priceEps_base = divPresetAuto == "5m" ? 0.0016 : divPresetAuto == "15m" ? 0.0015 : divPresetAuto == "1H" ? 0.0012 : divPresetAuto == "4H" ? 0.0010 : 0.0008
+
+mfiD_p = divProfile == "Conservative" ? (mfiD_base + 4) : math.max(1, mfiD_base - 2)
+buf_p  = divProfile == "Conservative" ? math.max(0.05, buf_base - 0.07) : math.min(0.35, buf_base + 0.05)
+atr_p  = divProfile == "Conservative" ? (atr_base + 0.30) : math.max(0.15, atr_base - 0.15)
+dirMfi_p = divProfile == "Conservative" ? math.max(0.2, mfiEps_base - 0.3) : (mfiEps_base + 0.5)
+dirPrice_p = divProfile == "Conservative" ? math.max(0.0001, priceEps_base - 0.0004) : (priceEps_base + 0.0005)
+
+pivLeft     = usePreset ? pivL_p : pivLeft_in
+pivRight    = usePreset ? pivR_p : pivRight_in
+minMfiDelta = usePreset ? mfiD_p : minMfiDelta_in
+osobBufferPct = usePreset ? buf_p  : osobBufferPct_in
+minAtrMove  = usePreset ? atr_p  : minAtrMove_in
+dirMfiEps   = usePreset ? dirMfi_p : dirMfiEps_in
+dirPriceEps = usePreset ? dirPrice_p : dirPriceEps_in
+
+groupCandles = "Candle Colors"
+colorCandles = input.bool(false, "Color candles", group=groupCandles)
+candleMode   = input.string("HTF Bias", "Mode", options=["HTF Bias","Signals"], group=groupCandles)
+candleAlpha  = input.int(70, "Opacity (0 solid .. 100 transparent)", minval=0, maxval=100, group=groupCandles)
+
+groupDebug = "Debug"
+enableDivLog = input.bool(false, "Log divergence diagnostics (>= 2025-02-01)", group=groupDebug)
+
+
+// ============================================================================
+// MODULE: helpers
+// ============================================================================
+
+//────────────────────────────────────────────────────────────────────
+// Helpers
+//────────────────────────────────────────────────────────────────────
+clamp01(x) => math.max(0.0, math.min(1.0, x))
+
+inZoneConfirmed(cond, bars) =>
+    if bars <= 0
+        cond
+    else
+        int okCount = 0
+        for i = 0 to bars
+            okCount += cond[i] ? 1 : 0
+        okCount == (bars + 1)
+
+// JMA approximation (works well in practice)
+jma(_src, _len, _phase, _power) =>
+    pr = _phase < -100 ? 0.5 : _phase > 100 ? 2.5 : _phase / 100.0 + 1.5
+    beta  = 0.45 * (_len - 1) / (0.45 * (_len - 1) + 2)
+    alpha = math.pow(beta, _power)
+
+    e0 = 0.0
+    e1 = 0.0
+    e2 = 0.0
+    j  = 0.0
+
+    e0 := (1 - alpha) * _src + alpha * nz(e0[1])
+    e1 := (_src - e0) * (1 - beta) + beta * nz(e1[1])
+    e2 := (e0 + pr * e1 - nz(j[1])) * math.pow(1 - alpha, 2) + math.pow(alpha, 2) * nz(e2[1])
+    j  := e2 + nz(j[1])
+    j
+
+getAutoHTF() =>
+    string res = "M"
+    if timeframe.isminutes
+        if timeframe.multiplier <= 5
+            res := "15"
+        else if timeframe.multiplier <= 15
+            res := "60"
+        else if timeframe.multiplier <= 60
+            res := "240"
+        else
+            res := "D"
+    else if timeframe.isdaily
+        res := "M"
+    res
+
+
+// ============================================================================
+// MODULE: core
+// ============================================================================
+
+//────────────────────────────────────────────────────────────────────
+// Core series
+//────────────────────────────────────────────────────────────────────
+mfiRaw = ta.mfi(src, mfiLen)
+mfi    = (useJMA and smoothMFI) ? jma(mfiRaw, jmaLen, jmaPhase, jmaPower) : mfiRaw
+
+// CCI mapped to 0..100
+cciRaw  = ta.cci(cciSrc, cciLen)
+float cciNorm = cciRaw / cciMapScale
+float cciExp  = math.exp(2.0 * cciNorm)
+float cciTanh = (cciExp - 1.0) / math.max(cciExp + 1.0, 1e-6)
+cci01   = 0.5 + 0.5 * cciTanh
+cci100  = 100.0 * cci01
+
+// Active oscillator for divergence/score logic
+osc = oscMode == "MFI" ? mfi : oscMode == "CCI" ? cci100 : (oscEngine == "CCI" ? cci100 : mfi)
+
+// Zones
+hi = ta.highest(mfi, zoneLookback)
+lo = ta.lowest(mfi, zoneLookback)
+upper = useDynZones ? (lo + (hi - lo) * clamp01(dynUpperFrac)) : float(staticUpper)
+lower = useDynZones ? (lo + (hi - lo) * clamp01(dynLowerFrac)) : float(staticLower)
+
+isOB = mfi > upper
+isOS = mfi < lower
+
+// StochRSI
+rsi   = ta.rsi(close, rsiLen)
+rsiLo = ta.lowest(rsi, stochLen)
+rsiHi = ta.highest(rsi, stochLen)
+stochRsi = 100 * (rsi - rsiLo) / math.max(rsiHi - rsiLo, 1e-10)
+kRaw = ta.sma(stochRsi, kSmooth)
+k    = (useJMA and smoothStoch) ? jma(kRaw, jmaLen, jmaPhase, jmaPower) : kRaw
+
+// HTF MFI
+string htf = useAutoTF ? getAutoHTF() : manualTF
+mfiMtfRaw = request.security(syminfo.tickerid, htf, ta.mfi(src, mfiLen))
+
+mfiMtf = mtfSmooth ? (useJMA ? jma(mfiMtfRaw, jmaLen, jmaPhase, jmaPower) : ta.ema(mfiMtfRaw, mtfEmaLen)) : mfiMtfRaw
+
+htfBull = useMTF and not na(mfiMtf) and (mfiMtf >= biasLevel)
+htfBear = useMTF and not na(mfiMtf) and (mfiMtf <  biasLevel)
+
+allowLong  = not useHTFFilter or htfBull
+allowShort = not useHTFFilter or htfBear
+
+
+// ============================================================================
+// MODULE: visuals
+// ============================================================================
+
+//────────────────────────────────────────────────────────────────────
+// Visuals
+//────────────────────────────────────────────────────────────────────
+mfiColor = isOB ? mfiColorOB : isOS ? mfiColorOS : mfiColorNeutral
+plot(mfi, "MFI", color=mfiColor, linewidth=2)
+
+plot(useStoch ? k : na, "StochRSI K", color=stochColor, linewidth=1)
+plot(useMTF ? mfiMtf : na, "MFI (HTF)", color=htfMfiColor, linewidth=2)
+plot(oscMode == "CCI" or oscMode == "MFI+CCI" ? cci100 : na, "CCI (mapped 0-100)", color=cciColor, linewidth=1)
+
+hline(80, "80", color=color.new(color.gray, 85))
+hline(20, "20", color=color.new(color.gray, 85))
+plot(showMidLine ? 50 : na, "50", color=midlineColor, linewidth=1)
+hline(0,  "", color=color.new(color.black, 100))
+hline(100,"", color=color.new(color.black, 100))
+
+pU = plot(useDynZones ? upper : na, "Upper (dyn)", color=zoneUpperColor, linewidth=1)
+pL = plot(useDynZones ? lower : na, "Lower (dyn)", color=zoneLowerColor, linewidth=1)
+fill(pU, pL, color=showBandFill ? color.new(color.gray, 92) : na)
+
+bg = showBgZones ? (isOB ? color.new(color.red, 88) : isOS ? color.new(color.lime, 90) : na) : na
+bgcolor(bg)
+
+// Bias label (optional)
+var label biasLbl = na
+if barstate.islast and showBiasLabel and useMTF
+    label.delete(biasLbl)
+    biasText = "HTF " + htf + " MFI: " + str.tostring(mfiMtf, "#") + " | Bias: " + (htfBull ? "LONG" : "SHORT") + (useHTFFilter ? " (filter ON)" : " (filter OFF)")
+    biasLbl := label.new(bar_index + biasLabelOffset, 95, biasText, style=label.style_label_center, textcolor=color.white,
+         color=htfBull ? color.new(color.lime, 0) : color.new(color.red, 0))
+
+
+// ============================================================================
+// MODULE: signals
+// ============================================================================
+
+//────────────────────────────────────────────────────────────────────
+// Signals: Context + Timing (+ optional HTF filter)
+//────────────────────────────────────────────────────────────────────
+mfiOS_confirm = inZoneConfirmed(mfi < lower, needConfirm)
+mfiOB_confirm = inZoneConfirmed(mfi > upper, needConfirm)
+
+longCond  = showSignals and useStoch and allowLong  and (mfiOS_confirm or ta.crossover(mfi, lower)) and ta.crossover(k, stochOS)
+shortCond = showSignals and useStoch and allowShort and (mfiOB_confirm or ta.crossunder(mfi, upper)) and ta.crossunder(k, stochOB)
+
+plotshape(longCond,  title="Long",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.new(color.lime, 0), text="L")
+plotshape(shortCond, title="Short", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.new(color.red, 0),  text="S")
+
+
+// ============================================================================
+// MODULE: candle_colors
+// ============================================================================
+
+//────────────────────────────────────────────────────────────────────
+// Candle coloring (optional)
+//────────────────────────────────────────────────────────────────────
+color cCol = na
+
+if colorCandles
+    if candleMode == "HTF Bias"
+        cCol := htfBull ? color.new(color.lime, candleAlpha) : htfBear ? color.new(color.red, candleAlpha) : na
+    else if candleMode == "Signals"
+        cCol := longCond ? color.new(color.lime, candleAlpha) : shortCond ? color.new(color.red, candleAlpha) : na
+barcolor(cCol)
+
+
+// ============================================================================
+// MODULE: divergences
+// ============================================================================
+
+//────────────────────────────────────────────────────────────────────
+// DIVERGENCES (regular) anchored on PRICE pivots
+// Bullish: price LL + MFI HL  (MFI sampled at price pivot bar)
+// Bearish: price HH + MFI LH  (MFI sampled at price pivot bar)
+// Labels: midpoint label + endpoint marker (points to divergence)
+// Cleanup: keep only last maxDivs
+//────────────────────────────────────────────────────────────────────
+
+plPrice = ta.pivotlow(low,  pivLeft, pivRight)
+phPrice = ta.pivothigh(high, pivLeft, pivRight)
+
+var float lastPL_price = na
+var float lastPL_mfi   = na
+var int   lastPL_bar   = na
+
+var float lastPH_price = na
+var float lastPH_mfi   = na
+var int   lastPH_bar   = na
+
+var int bullSeq = 0
+var int bearSeq = 0
+
+var line[]  divLines  = array.new_line()
+var label[] divLabels = array.new_label()
+
+logStart = timestamp("GMT+0", 2025, 2, 1, 0, 0)
+logActive = enableDivLog and time >= logStart
+
+f_bool(bool v) => v ? "Y" : "N"
+
+// Fall back to fixed 20/80 zones until dynamic bands are ready (prevents NaNs in early bars).
+bool zonesReady = not na(upper) and not na(lower)
+float band = zonesReady ? math.max(upper - lower, 1.0) : na
+float osLevel = 20.0
+float obLevel = 80.0
+float fallbackBuf = 5.0
+inOS(_m) => zonesReady ? _m <= (lower + band * osobBufferPct) : _m <= (osLevel + fallbackBuf)
+inOB(_m) => zonesReady ? _m >= (upper - band * osobBufferPct) : _m >= (obLevel - fallbackBuf)
+
+pushAndTrim(line ln, label labMid, label labEnd) =>
+    array.push(divLines, ln)
+    array.push(divLabels, labMid)
+    array.push(divLabels, labEnd)
+    while array.size(divLines) > maxDivs
+        line oldL = array.shift(divLines)
+        if not na(oldL)
+            line.delete(oldL)
+        if array.size(divLabels) > 0
+            label oldA = array.shift(divLabels)
+            if not na(oldA)
+                label.delete(oldA)
+        if array.size(divLabels) > 0
+            label oldB = array.shift(divLabels)
+            if not na(oldB)
+                label.delete(oldB)
+
+atrDiv = ta.atr(divAtrLen)
+
+if showDiv and not na(plPrice)
+    int   x2 = bar_index - pivRight
+    float p2 = plPrice
+    float m2 = osc[pivRight]
+
+    if not na(lastPL_price) and not na(lastPL_mfi)
+        int   x1 = lastPL_bar
+        float p1 = lastPL_price
+        float m1 = lastPL_mfi
+
+        bool areaOk = not requireOSOB ? true : osobMode == "End" ? inOS(m2) : osobMode == "StartOrEnd" ? (inOS(m1) or inOS(m2)) : (inOS(m1) and inOS(m2))
+
+        float dMfi = m2 - m1
+        bool swingOk = not useAtrFilter or (math.abs(p1 - p2) >= atrDiv * minAtrMove)
+
+        bool priceOk = p2 <= (p1 * (1 + dirPriceEps))
+        bool mfiOk = m2 >= (m1 - dirMfiEps)
+        bool bullReg = priceOk and mfiOk and areaOk and (dMfi >= minMfiDelta) and swingOk
+
+        if logActive
+            log.info(str.format("DIV_BULL chk | bar={0} pivBar={1} p1={2} p2={3} m1={4} m2={5} dMfi={6} area={7} swing={8} minΔ={9} minATR={10} band={11} low={12} up={13} buf%={14} epsP={15} epsM={16}",
+                str.tostring(bar_index),
+                str.tostring(x2),
+                str.tostring(p1, format.mintick),
+                str.tostring(p2, format.mintick),
+                str.tostring(m1, "#.##"),
+                str.tostring(m2, "#.##"),
+                str.tostring(dMfi, "#.##"),
+                f_bool(areaOk),
+                f_bool(swingOk),
+                str.tostring(minMfiDelta),
+                str.tostring(minAtrMove, "#.##"),
+                str.tostring(band, "#.##"),
+                str.tostring(lower, "#.##"),
+                str.tostring(upper, "#.##"),
+                str.tostring(osobBufferPct, "#.##"),
+                str.tostring(dirPriceEps, "#.####"),
+                str.tostring(dirMfiEps, "#.##")))
+
+        if bullReg
+            bullSeq += 1
+            bearSeq := 0
+
+            float mfiMin = ta.lowest(osc, fatigueLen)
+            float fatigue01 = clamp01((m2 - mfiMin) / 20.0)
+
+            int dtBars = math.max(1, x2 - x1)
+            float time01 = clamp01(dtBars / 40.0)
+
+            int reactLen = math.min(reactBars, bar_index - x2)
+            float bounce = reactLen > 0 ? (ta.highest(high, reactLen) - p2) : 0.0
+            float react01 = clamp01(bounce / math.max(atrDiv * reactAtrFrac, 1e-10))
+
+            float mfiDelta01 = minMfiDelta <= 0 ? 1.0 : clamp01(dMfi / (minMfiDelta * 2.0))
+            float atr01 = clamp01((math.abs(p1 - p2) / math.max(atrDiv * minAtrMove, 1e-10)) / 2.0)
+            float seq01 = clamp01(bullSeq / 3.0)
+
+            float biasBonus = useBiasBonus and htfBull ? 0.10 : 0.0
+
+            float score01 = clamp01( 0.18 * mfiDelta01 + 0.16 * atr01 + 0.18 * time01 + 0.18 * fatigue01 + 0.18 * react01 + 0.12 * seq01 + biasBonus )
+            int score = math.round(score01 * 100)
+            int lnWidth = score >= scoreStrong ? 2 : 1
+            line ln = line.new(x1, m1, x2, m2, color=color.lime, width=lnWidth)
+            string txt = showDivScore ? str.tostring(score) : "Bull Div"
+
+            int   midX = math.round((x1 + x2) / 2)
+            float midY = (m1 + m2) / 2
+            string tip = str.format("Bull Divergence\nSeq: {0}\nScore: {1}\nΔMFI: {2}\nBars: {3}\nFatigue: {4}%\nReact: {5}%",
+                str.tostring(bullSeq),
+                str.tostring(score),
+                str.tostring(dMfi, "#.0"),
+                str.tostring(dtBars),
+                str.tostring(fatigue01 * 100, "#.0"),
+                str.tostring(react01 * 100, "#.0"))
+
+            label labMid = na
+            if showScoreLabel
+                labMid := label.new(midX, midY, txt,
+                    style=label.style_label_center,
+                    textcolor=color.white,
+                    color=color.lime,
+                    size=size.tiny,
+                    tooltip=tip)
+
+            label labEnd = label.new(x2, m2, "▲",
+                style=label.style_label_up,
+                textcolor=color.white,
+                color=color.lime,
+                size=size.tiny,
+                tooltip="Divergence point (pivot)")
+
+            pushAndTrim(ln, labMid, labEnd)
+
+    lastPL_price := p2
+    lastPL_mfi   := m2
+    lastPL_bar   := x2
+
+if showDiv and not na(phPrice)
+    int   x2 = bar_index - pivRight
+    float p2 = phPrice
+    float m2 = osc[pivRight]
+
+    if not na(lastPH_price) and not na(lastPH_mfi)
+        int   x1 = lastPH_bar
+        float p1 = lastPH_price
+        float m1 = lastPH_mfi
+
+        bool areaOk = not requireOSOB ? true : osobMode == "End" ? inOB(m2) : osobMode == "StartOrEnd" ? (inOB(m1) or inOB(m2)) : (inOB(m1) and inOB(m2))
+
+        float dMfi = m1 - m2
+        bool swingOk = not useAtrFilter or (math.abs(p2 - p1) >= atrDiv * minAtrMove)
+
+        bool priceOk = p2 >= (p1 * (1 - dirPriceEps))
+        bool mfiOk = m2 <= (m1 + dirMfiEps)
+        bool bearReg = priceOk and mfiOk and areaOk and (dMfi >= minMfiDelta) and swingOk
+
+        if logActive
+            log.info(str.format("DIV_BEAR chk | bar={0} pivBar={1} p1={2} p2={3} m1={4} m2={5} dMfi={6} area={7} swing={8} minΔ={9} minATR={10} band={11} low={12} up={13} buf%={14} epsP={15} epsM={16}",
+                str.tostring(bar_index),
+                str.tostring(x2),
+                str.tostring(p1, format.mintick),
+                str.tostring(p2, format.mintick),
+                str.tostring(m1, "#.##"),
+                str.tostring(m2, "#.##"),
+                str.tostring(dMfi, "#.##"),
+                f_bool(areaOk),
+                f_bool(swingOk),
+                str.tostring(minMfiDelta),
+                str.tostring(minAtrMove, "#.##"),
+                str.tostring(band, "#.##"),
+                str.tostring(lower, "#.##"),
+                str.tostring(upper, "#.##"),
+                str.tostring(osobBufferPct, "#.##"),
+                str.tostring(dirPriceEps, "#.####"),
+                str.tostring(dirMfiEps, "#.##")))
+
+        if bearReg
+            bearSeq += 1
+            bullSeq := 0
+
+            float mfiMax = ta.highest(osc, fatigueLen)
+            float fatigue01 = clamp01((mfiMax - m2) / 20.0)
+
+            int dtBars = math.max(1, x2 - x1)
+            float time01 = clamp01(dtBars / 40.0)
+
+            int reactLen = math.min(reactBars, bar_index - x2)
+            float drop = reactLen > 0 ? (p2 - ta.lowest(low, reactLen)) : 0.0
+            float react01 = clamp01(drop / math.max(atrDiv * reactAtrFrac, 1e-10))
+
+            float mfiDelta01 = minMfiDelta <= 0 ? 1.0 : clamp01(dMfi / (minMfiDelta * 2.0))
+            float atr01 = clamp01((math.abs(p2 - p1) / math.max(atrDiv * minAtrMove, 1e-10)) / 2.0)
+            float seq01 = clamp01(bearSeq / 3.0)
+
+            float biasBonus = useBiasBonus and htfBear ? 0.10 : 0.0
+
+            float score01 = clamp01( 0.18 * mfiDelta01 + 0.16 * atr01 + 0.18 * time01 + 0.18 * fatigue01 + 0.18 * react01 + 0.12 * seq01 + biasBonus )
+            int score = math.round(score01 * 100)
+            int lnWidth = score >= scoreStrong ? 2 : 1
+            line ln = line.new(x1, m1, x2, m2, color=color.red, width=lnWidth)
+            string txt = showDivScore ? str.tostring(score) : "Bear Div"
+
+            int   midX = math.round((x1 + x2) / 2)
+            float midY = (m1 + m2) / 2
+            string tip = str.format("Bear Divergence\nSeq: {0}\nScore: {1}\nΔMFI: {2}\nBars: {3}\nFatigue: {4}%\nReact: {5}%",
+                str.tostring(bearSeq),
+                str.tostring(score),
+                str.tostring(dMfi, "#.0"),
+                str.tostring(dtBars),
+                str.tostring(fatigue01 * 100, "#.0"),
+                str.tostring(react01 * 100, "#.0"))
+
+            label labMid = na
+            if showScoreLabel
+                labMid := label.new(midX, midY, txt,
+                    style=label.style_label_center,
+                    textcolor=color.white,
+                    color=color.red,
+                    size=size.tiny,
+                    tooltip=tip)
+
+            label labEnd = label.new(x2, m2, "▼",
+                style=label.style_label_down,
+                textcolor=color.white,
+                color=color.red,
+                size=size.tiny,
+                tooltip="Divergence point (pivot)")
+
+            pushAndTrim(ln, labMid, labEnd)
+
+    lastPH_price := p2
+    lastPH_mfi   := m2
+    lastPH_bar   := x2
+
+
