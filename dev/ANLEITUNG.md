@@ -279,6 +279,66 @@ Zeigt auf einen Blick:
 
 ---
 
+## 5. NG Levels & Zones (Overlay)
+
+Zeichnet automatisch horizontale Support-/Resistance-Zonen als farbige Boxen auf den Chart.
+
+### Zonenquellen
+
+| Typ | Quelle | Richtung | Qualität |
+|-----|--------|----------|----------|
+| Swing Zone | Major Swing High/Low | S/R | Normal |
+| Spring Zone | Sweep Low → altes Swing Low | Support | Nach Wick + Range |
+| Upthrust Zone | Altes Swing High → Sweep High | Resistance | Nach Wick + Range |
+| BOS Flip | Gebrochenes Major Swing Level | Flip (S↔R) | Normal |
+| Climax Zone | High/Low der Climax-Kerze | Nach Candle-Richtung | Nach Volumen |
+
+### Zonenstatus
+
+Jede Zone durchläuft einen Lebenszyklus:
+
+| Status | Farbe | Bedeutung |
+|--------|-------|-----------|
+| Fresh | Normal | Neu erzeugt, noch nicht getestet |
+| Tested | Normal | Preis hat die Zone berührt |
+| Confirmed | Kräftiger | Preis hat in der Zone in erwarteter Richtung reagiert |
+| Broken | Grau | Preis hat die Zone durchbrochen |
+| Flipped | Amber | Gebrochene Zone wird von der Gegenrichtung genutzt |
+
+### Zonendarstellung
+
+- **Boxen** mit transparenter Füllung und farbigem Rand
+- **Grüne Boxen** = Support-Zonen
+- **Rote Boxen** = Resistance-Zonen
+- **Amber Boxen** = Flip-Zonen (Rolle gewechselt)
+- Stärkere Events (★) = kräftigere Farben
+- Schwächere Events (~) = blassere Farben
+
+### Priorisierung
+
+Nur die besten N Zonen werden angezeigt (Default: 8). Die Priorität basiert auf:
+- Zonentyp (Spring > BOS Flip > Swing)
+- Event-Qualität (★ > normal > ~)
+- Status (Confirmed > Tested > Fresh)
+- Touch Count (öfter getestet = relevanter)
+- Alter (neue Zonen wichtiger, ab 100 Bars Abzug)
+
+### Tooltips
+
+Hover über jede Zone zeigt: Typ, Status, Score, Touches, Qualität, Alter.
+
+### Research-Tabelle (unten rechts)
+
+Zeigt: Total Zones, Support/Resistance-Verteilung, Status-Verteilung.
+
+### Kernnutzen
+
+Nicht "hier ist Support", sondern: **"Hier ist eine Zone, an der das Reversal-System ernst genommen werden sollte."**
+
+Der Score-Indikator gibt bereits Level-Kontext-Bonus/Malus — mit echten Zonen wird das künftig viel präziser.
+
+---
+
 ## Display-Modi
 
 Jedes Skript hat drei Modi (Input "Display Mode"):

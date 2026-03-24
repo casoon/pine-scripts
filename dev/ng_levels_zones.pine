@@ -1,0 +1,437 @@
+//@version=6
+// ============================================================================
+// NG Levels & Zones [WavesUnchained]
+// Version: 0.1.0
+// Author: WavesUnchained
+// ============================================================================
+// Automatic horizontal zone generation from structure events.
+// Zones are created from Major Swings, Springs/Upthrusts, BOS Flips,
+// and Climax candles. Each zone has a type, quality, status, and score.
+//
+// Features:
+//   ✓ Support/Resistance zones from Major Swings
+//   ✓ Spring/Upthrust reaction zones
+//   ✓ BOS flip zones
+//   ✓ Climax zones
+//   ✓ Zone status: Fresh / Tested / Confirmed / Broken / Flipped
+//   ✓ Zone scoring and priority display
+//   ✓ Configurable max visible zones
+//   ✓ Light / Debug / Research display modes
+//
+// ============================================================================
+indicator("NG Levels & Zones [WavesUnchained]", "NG Zones", overlay=true, max_boxes_count=50, max_labels_count=100, max_lines_count=50)
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+var gCore = "Core"
+int atrLen       = input.int(14, "ATR Length", minval=1, group=gCore)
+int majorLeft    = input.int(7, "Major Pivot Left Bars", minval=3, group=gCore)
+int majorRight   = input.int(7, "Major Pivot Right Bars", minval=3, group=gCore)
+int microLeft    = input.int(3, "Micro Pivot Left Bars", minval=1, group=gCore)
+int microRight   = input.int(3, "Micro Pivot Right Bars", minval=1, group=gCore)
+
+var gZones = "Zone Generation"
+bool showSwingZones   = input.bool(true, "Major Swing Zones", group=gZones)
+bool showSpringZones  = input.bool(true, "Spring / Upthrust Zones", group=gZones)
+bool showBOSFlips     = input.bool(true, "BOS Flip Zones", group=gZones)
+bool showClimaxZones  = input.bool(true, "Climax Zones", group=gZones)
+float zoneWidthATR    = input.float(0.3, "Zone Width (ATR multiple)", minval=0.1, maxval=1.0, step=0.05, group=gZones)
+int   maxZones        = input.int(8, "Max Visible Zones", minval=2, maxval=20, group=gZones)
+int   zoneExpireBars  = input.int(200, "Zone Expire After (bars)", minval=50, maxval=500, group=gZones)
+
+var gWyckoff = "Event Detection"
+float minWickRatio    = input.float(0.35, "Spring/UT Min Wick Ratio", minval=0.1, step=0.05, group=gWyckoff)
+float minCandleATR    = input.float(0.5, "Spring/UT Min Candle/ATR", minval=0.1, step=0.1, group=gWyckoff)
+float climaxRangeATR  = input.float(1.8, "Climax Min Range/ATR", minval=1.0, step=0.1, group=gWyckoff)
+float climaxVolFactor = input.float(1.8, "Climax Min Vol/Avg", minval=1.0, step=0.1, group=gWyckoff)
+
+var gDisplay = "Display"
+string displayMode  = input.string("Light", "Display Mode", options=["Light", "Debug", "Research"], group=gDisplay)
+bool showBroken     = input.bool(false, "Show Broken Zones", group=gDisplay)
+bool showZoneLabels = input.bool(true, "Show Zone Labels", group=gDisplay)
+color supportColor  = input.color(color.new(#00e676, 0), "Support Color", group=gDisplay)
+color resistColor   = input.color(color.new(#ff1744, 0), "Resistance Color", group=gDisplay)
+color flipColor     = input.color(color.new(#ffab00, 0), "Flip Zone Color", group=gDisplay)
+
+// ============================================================================
+// MODULE: base calculations
+// ============================================================================
+
+float atrValue   = ta.atr(atrLen)
+float avgVol     = ta.sma(volume, 20)
+float candleRange = high - low
+float candleATR  = atrValue > 0 ? candleRange / atrValue : 0.0
+float upperWickR = candleRange > 0 ? (high - math.max(open, close)) / candleRange : 0.0
+float lowerWickR = candleRange > 0 ? (math.min(open, close) - low) / candleRange : 0.0
+
+// ============================================================================
+// MODULE: swing detection
+// ============================================================================
+
+float majorPivotHi = ta.pivothigh(high, majorLeft, majorRight)
+float majorPivotLo = ta.pivotlow(low, majorLeft, majorRight)
+float microPivotHi = ta.pivothigh(high, microLeft, microRight)
+float microPivotLo = ta.pivotlow(low, microLeft, microRight)
+
+var float lastMajorHigh = na
+var float lastMajorLow  = na
+var float lastMicroHigh = na
+var float lastMicroLow  = na
+
+if not na(majorPivotHi)
+    lastMajorHigh := majorPivotHi
+if not na(majorPivotLo)
+    lastMajorLow := majorPivotLo
+if not na(microPivotHi)
+    lastMicroHigh := microPivotHi
+if not na(microPivotLo)
+    lastMicroLow := microPivotLo
+
+// ============================================================================
+// MODULE: event detection (mirrored from structure events)
+// ============================================================================
+
+// BOS
+bool microBullBOS = not na(lastMicroHigh) and close > lastMicroHigh and close[1] <= lastMicroHigh
+bool microBearBOS = not na(lastMicroLow) and close < lastMicroLow and close[1] >= lastMicroLow
+bool majorBullBOS = not na(lastMajorHigh) and close > lastMajorHigh and close[1] <= lastMajorHigh
+bool majorBearBOS = not na(lastMajorLow) and close < lastMajorLow and close[1] >= lastMajorLow
+
+// Fake breaks
+bool fakeBreakdown      = not na(lastMicroLow) and low < lastMicroLow and close >= lastMicroLow
+bool fakeBreakout       = not na(lastMicroHigh) and high > lastMicroHigh and close <= lastMicroHigh
+bool majorFakeBreakdown = not na(lastMajorLow) and low < lastMajorLow and close >= lastMajorLow
+bool majorFakeBreakout  = not na(lastMajorHigh) and high > lastMajorHigh and close <= lastMajorHigh
+
+// Spring / Upthrust
+bool isSpring        = fakeBreakdown and lowerWickR >= minWickRatio and candleATR >= minCandleATR
+bool isMajorSpring   = majorFakeBreakdown and lowerWickR >= minWickRatio and candleATR >= minCandleATR
+bool isUpthrust      = fakeBreakout and upperWickR >= minWickRatio and candleATR >= minCandleATR
+bool isMajorUpthrust = majorFakeBreakout and upperWickR >= minWickRatio and candleATR >= minCandleATR
+
+// Climax
+bool isClimaxCandle = candleATR >= climaxRangeATR and avgVol > 0 and volume >= climaxVolFactor * avgVol
+
+// ============================================================================
+// MODULE: zone management — UDT and arrays
+// ============================================================================
+
+// Zone type constants
+// 1=swing_support, 2=swing_resist, 3=spring, 4=upthrust, 5=bos_flip_support,
+// 6=bos_flip_resist, 7=climax_support, 8=climax_resist
+
+type Zone
+    int    zoneType
+    float  upper
+    float  lower
+    float  mid
+    int    direction    // 1=support, -1=resistance
+    int    quality      // 1=weak, 2=normal, 3=strong
+    int    createBar
+    int    status       // 0=fresh, 1=tested, 2=confirmed, 3=broken, 4=flipped
+    int    touchCount
+    float  score
+    box    zoneBox
+    label  zoneLabel
+
+var array<Zone> zones = array.new<Zone>()
+
+// ============================================================================
+// MODULE: zone helper functions
+// ============================================================================
+
+f_zoneTypeStr(int t) =>
+    t == 1 ? "S/R Swing" : t == 2 ? "S/R Swing" : t == 3 ? "Spring" : t == 4 ? "Upthrust" : t == 5 ? "BOS Flip" : t == 6 ? "BOS Flip" : t == 7 ? "CLX Zone" : t == 8 ? "CLX Zone" : "?"
+
+f_statusStr(int s) =>
+    s == 0 ? "Fresh" : s == 1 ? "Tested" : s == 2 ? "Confirmed" : s == 3 ? "Broken" : s == 4 ? "Flipped" : "?"
+
+f_zoneScore(int zType, int qual, int status, int age, int touches) =>
+    // Base score by type
+    float base = zType == 3 or zType == 4 ? 3.0 : zType == 5 or zType == 6 ? 2.5 : zType == 7 or zType == 8 ? 2.0 : 2.0
+    // Quality bonus
+    float qBonus = qual == 3 ? 1.5 : qual == 2 ? 0.5 : 0.0
+    // Status bonus
+    float sBonus = status == 2 ? 1.5 : status == 1 ? 0.5 : status == 4 ? 1.0 : 0.0
+    // Age penalty (linear decay after 100 bars)
+    float aPenalty = age > 100 ? math.min(2.0, (age - 100) / 100.0) : 0.0
+    // Touch bonus (tested zones are more relevant, up to a point)
+    float tBonus = math.min(1.0, touches * 0.3)
+    math.max(0.0, base + qBonus + sBonus + tBonus - aPenalty)
+
+addZone(int zType, float upper, float lower, int dir, int qual) =>
+    Zone z = Zone.new()
+    z.zoneType  := zType
+    z.upper     := upper
+    z.lower     := lower
+    z.mid       := (upper + lower) / 2.0
+    z.direction := dir
+    z.quality   := qual
+    z.createBar := bar_index
+    z.status    := 0
+    z.touchCount := 0
+    z.score     := 0.0
+    z.zoneBox   := na
+    z.zoneLabel := na
+    array.push(zones, z)
+
+// ============================================================================
+// MODULE: zone creation
+// ============================================================================
+
+float halfWidth = atrValue * zoneWidthATR / 2.0
+
+// ── Major Swing Zones ──
+if showSwingZones and not na(majorPivotHi)
+    float lvl = majorPivotHi
+    addZone(2, lvl + halfWidth, lvl - halfWidth, -1, 2)
+
+if showSwingZones and not na(majorPivotLo)
+    float lvl = majorPivotLo
+    addZone(1, lvl + halfWidth, lvl - halfWidth, 1, 2)
+
+// ── Spring Zones (sweep low → old swing low) ──
+if showSpringZones and isMajorSpring and not na(lastMajorLow)
+    float sweepLow = low
+    float oldSwing = lastMajorLow
+    int qual = lowerWickR >= 0.55 and candleATR >= 0.8 ? 3 : 2
+    addZone(3, math.max(sweepLow, oldSwing), math.min(sweepLow, oldSwing), 1, qual)
+
+else if showSpringZones and isSpring and not na(lastMicroLow)
+    float sweepLow = low
+    float oldSwing = lastMicroLow
+    int qual = lowerWickR >= 0.55 and candleATR >= 0.8 ? 3 : lowerWickR >= minWickRatio ? 2 : 1
+    addZone(3, math.max(sweepLow, oldSwing), math.min(sweepLow, oldSwing), 1, qual)
+
+// ── Upthrust Zones (old swing high → sweep high) ──
+if showSpringZones and isMajorUpthrust and not na(lastMajorHigh)
+    float sweepHigh = high
+    float oldSwing = lastMajorHigh
+    int qual = upperWickR >= 0.55 and candleATR >= 0.8 ? 3 : 2
+    addZone(4, math.max(sweepHigh, oldSwing), math.min(sweepHigh, oldSwing), -1, qual)
+
+else if showSpringZones and isUpthrust and not na(lastMicroHigh)
+    float sweepHigh = high
+    float oldSwing = lastMicroHigh
+    int qual = upperWickR >= 0.55 and candleATR >= 0.8 ? 3 : upperWickR >= minWickRatio ? 2 : 1
+    addZone(4, math.max(sweepHigh, oldSwing), math.min(sweepHigh, oldSwing), -1, qual)
+
+// ── BOS Flip Zones ──
+if showBOSFlips and majorBullBOS and not na(lastMajorHigh)
+    float lvl = lastMajorHigh
+    addZone(5, lvl + halfWidth, lvl - halfWidth, 1, 2)  // broken resist → new support
+
+if showBOSFlips and majorBearBOS and not na(lastMajorLow)
+    float lvl = lastMajorLow
+    addZone(6, lvl + halfWidth, lvl - halfWidth, -1, 2)  // broken support → new resist
+
+// ── Climax Zones ──
+if showClimaxZones and isClimaxCandle
+    float clxHi = high
+    float clxLo = low
+    int dir = close < open ? 1 : -1  // selling climax = support zone
+    int qual = avgVol > 0 and volume >= climaxVolFactor * 1.5 * avgVol ? 3 : 2
+    int zType = dir == 1 ? 7 : 8
+    addZone(zType, clxHi, clxLo, dir, qual)
+
+// ============================================================================
+// MODULE: zone status updates
+// ============================================================================
+
+int totalZones = array.size(zones)
+if totalZones > 0
+    for i = totalZones - 1 to 0
+        Zone z = array.get(zones, i)
+        int age = bar_index - z.createBar
+
+        // Skip broken zones unless showing them
+        if z.status == 3 and not showBroken
+            continue
+
+        // Expire old zones
+        if age > zoneExpireBars
+            if not na(z.zoneBox)
+                box.delete(z.zoneBox)
+            if not na(z.zoneLabel)
+                label.delete(z.zoneLabel)
+            array.remove(zones, i)
+            continue
+
+        // Test: price enters zone
+        bool priceInZone = high >= z.lower and low <= z.upper
+        bool priceAbove  = close > z.upper
+        bool priceBelow  = close < z.lower
+
+        if priceInZone and z.status == 0
+            z.status := 1  // tested
+            z.touchCount += 1
+
+        if priceInZone and z.status == 1
+            z.touchCount += 1
+
+        // Confirmed: price enters zone and bounces in expected direction
+        if z.status == 1 and z.direction == 1 and priceInZone and close > z.mid and close > open
+            z.status := 2  // confirmed support
+        if z.status == 1 and z.direction == -1 and priceInZone and close < z.mid and close < open
+            z.status := 2  // confirmed resistance
+
+        // Broken: price closes decisively through zone
+        if z.direction == 1 and priceBelow and close[1] >= z.lower  // support broken
+            z.status := 3
+        if z.direction == -1 and priceAbove and close[1] <= z.upper  // resistance broken
+            z.status := 3
+
+        // Flipped: broken zone gets retested from opposite side
+        if z.status == 3 and z.direction == 1 and priceInZone and close < z.mid
+            z.status    := 4
+            z.direction := -1  // was support, now resistance
+        if z.status == 3 and z.direction == -1 and priceInZone and close > z.mid
+            z.status    := 4
+            z.direction := 1   // was resistance, now support
+
+        // Update score
+        z.score := f_zoneScore(z.zoneType, z.quality, z.status, age, z.touchCount)
+
+        array.set(zones, i, z)
+
+// ============================================================================
+// MODULE: zone rendering — priority-based
+// ============================================================================
+
+// Sort by score (highest first) and render top N
+// Pine arrays don't have sort, so we find top zones manually
+
+int renderCount = math.min(maxZones, array.size(zones))
+
+// Clear all existing boxes/labels first, then redraw top zones
+if barstate.islast and array.size(zones) > 0
+    // Delete all existing visuals
+    for i = 0 to array.size(zones) - 1
+        Zone z = array.get(zones, i)
+        if not na(z.zoneBox)
+            box.delete(z.zoneBox)
+            z.zoneBox := na
+        if not na(z.zoneLabel)
+            label.delete(z.zoneLabel)
+            z.zoneLabel := na
+        array.set(zones, i, z)
+
+    // Find and render top zones by score
+    var array<int> rendered = array.new_int()
+    array.clear(rendered)
+
+    for r = 0 to renderCount - 1
+        float bestScore = -1.0
+        int bestIdx = -1
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            if z.score > bestScore and (z.status != 3 or showBroken)
+                // Check not already rendered
+                bool alreadyDone = false
+                for j = 0 to array.size(rendered) - 1
+                    if array.get(rendered, j) == i
+                        alreadyDone := true
+                        break
+                if not alreadyDone
+                    bestScore := z.score
+                    bestIdx := i
+
+        if bestIdx >= 0
+            array.push(rendered, bestIdx)
+            Zone z = array.get(zones, bestIdx)
+
+            // Zone color based on direction + status
+            color baseCol = z.status == 4 ? flipColor : z.direction == 1 ? supportColor : resistColor
+            color boxCol = z.status == 3 ? color.new(color.gray, 85) : z.quality == 3 ? color.new(baseCol, 75) : z.quality == 2 ? color.new(baseCol, 82) : color.new(baseCol, 88)
+            color borderCol = z.status == 3 ? color.new(color.gray, 60) : z.quality == 3 ? color.new(baseCol, 30) : z.quality == 2 ? color.new(baseCol, 50) : color.new(baseCol, 65)
+
+            // Box from creation to current bar
+            int leftBar = z.createBar
+            z.zoneBox := box.new(leftBar, z.upper, bar_index + 10, z.lower, border_color=borderCol, border_width=1, bgcolor=boxCol)
+
+            // Label
+            if showZoneLabels
+                string typeStr = f_zoneTypeStr(z.zoneType)
+                string statusStr = f_statusStr(z.status)
+                string qualStr = z.quality == 3 ? "★" : z.quality == 1 ? "~" : ""
+                string labelText = qualStr + typeStr
+                bool isDebug = displayMode == "Debug" or displayMode == "Research"
+                if isDebug
+                    labelText := labelText + " [" + statusStr + " | " + str.tostring(z.score, "#.0") + "]"
+
+                color lblCol = z.status == 3 ? color.new(color.gray, 40) : color.new(baseCol, 20)
+                z.zoneLabel := label.new(bar_index + 5, z.mid, labelText, style=label.style_label_left, color=color.new(color.black, 100), textcolor=lblCol, size=size.tiny, tooltip=typeStr + "\nStatus: " + statusStr + "\nScore: " + str.tostring(z.score, "#.0") + "\nTouches: " + str.tostring(z.touchCount) + "\nQuality: " + str.tostring(z.quality) + "/3" + "\nAge: " + str.tostring(bar_index - z.createBar) + " bars")
+
+            array.set(zones, bestIdx, z)
+
+// ============================================================================
+// MODULE: data window
+// ============================================================================
+
+plot(array.size(zones), "Total Zones", display=display.data_window, color=color.new(color.gray, 100))
+plot(renderCount, "Visible Zones", display=display.data_window, color=color.new(color.gray, 100))
+
+// ============================================================================
+// MODULE: research table
+// ============================================================================
+
+bool isResearch = displayMode == "Research"
+
+var table zoneTable = na
+if isResearch and barstate.islast
+    int zCount = array.size(zones)
+    int supportCount = 0
+    int resistCount  = 0
+    int freshCount   = 0
+    int testedCount  = 0
+    int confirmedCount = 0
+    int brokenCount  = 0
+    int flippedCount = 0
+
+    for i = 0 to zCount - 1
+        Zone z = array.get(zones, i)
+        if z.direction == 1
+            supportCount += 1
+        else
+            resistCount += 1
+        if z.status == 0
+            freshCount += 1
+        if z.status == 1
+            testedCount += 1
+        if z.status == 2
+            confirmedCount += 1
+        if z.status == 3
+            brokenCount += 1
+        if z.status == 4
+            flippedCount += 1
+
+    zoneTable := table.new(position.bottom_right, 2, 9, bgcolor=color.new(#1a1a2e, 5), border_color=color.new(color.gray, 50), border_width=1, frame_color=color.new(color.gray, 50), frame_width=2)
+
+    table.cell(zoneTable, 0, 0, "NG Zones", text_color=color.white, text_size=size.normal)
+    table.cell(zoneTable, 1, 0, "v0.1", text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(zoneTable, 0, 1, "Total", text_color=color.white, text_size=size.normal)
+    table.cell(zoneTable, 1, 1, str.tostring(zCount), text_color=color.white, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(zoneTable, 0, 2, "Support", text_color=supportColor, text_size=size.normal)
+    table.cell(zoneTable, 1, 2, str.tostring(supportCount), text_color=supportColor, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(zoneTable, 0, 3, "Resistance", text_color=resistColor, text_size=size.normal)
+    table.cell(zoneTable, 1, 3, str.tostring(resistCount), text_color=resistColor, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(zoneTable, 0, 4, "Fresh", text_color=color.new(color.white, 30), text_size=size.normal)
+    table.cell(zoneTable, 1, 4, str.tostring(freshCount), text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(zoneTable, 0, 5, "Tested", text_color=color.yellow, text_size=size.normal)
+    table.cell(zoneTable, 1, 5, str.tostring(testedCount), text_color=color.yellow, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(zoneTable, 0, 6, "Confirmed", text_color=#00e676, text_size=size.normal)
+    table.cell(zoneTable, 1, 6, str.tostring(confirmedCount), text_color=#00e676, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(zoneTable, 0, 7, "Broken", text_color=color.gray, text_size=size.normal)
+    table.cell(zoneTable, 1, 7, str.tostring(brokenCount), text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(zoneTable, 0, 8, "Flipped", text_color=flipColor, text_size=size.normal)
+    table.cell(zoneTable, 1, 8, str.tostring(flippedCount), text_color=flipColor, text_size=size.normal, text_halign=text.align_right)
