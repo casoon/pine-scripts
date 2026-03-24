@@ -573,44 +573,147 @@ if clxConfirmed and clxDirection == -1
 bearConf := math.max(0.0, bearConf) * confMultiplier * volBonus
 
 // ============================================================================
+// MODULE: event tracking — trigger level + age
+// ============================================================================
+// Track the most recent bull/bear confirmation event for follow-through
+
+var float bullTriggerLevel = na   // price level the bull event occurred at
+var int   bullEventBar     = na   // bar_index when bull event fired
+var float bullEventConf    = 0.0  // confirmation score at time of event
+var float bearTriggerLevel = na
+var int   bearEventBar     = na
+var float bearEventConf    = 0.0
+
+// Register new bull confirmation events
+bool newBullEvent = (isSpring or isMajorSpring or microBullBOS or majorBullBOS or (clxConfirmed and clxDirection == 1))
+bool newBearEvent = (isUpthrust or isMajorUpthrust or microBearBOS or majorBearBOS or (clxConfirmed and clxDirection == -1))
+
+if newBullEvent
+    bullTriggerLevel := isSpring or isMajorSpring ? low : close
+    bullEventBar     := bar_index
+    bullEventConf    := bullConf
+if newBearEvent
+    bearTriggerLevel := isUpthrust or isMajorUpthrust ? high : close
+    bearEventBar     := bar_index
+    bearEventConf    := bearConf
+
+// ============================================================================
+// MODULE: event decay
+// ============================================================================
+// Events lose weight over time. After decayBars, confirmation is heavily discounted.
+
+int decayStart = 3    // bars before decay begins
+int decayFull  = 6    // bars until event is expired
+
+int bullEventAge = not na(bullEventBar) ? bar_index - bullEventBar : 999
+int bearEventAge = not na(bearEventBar) ? bar_index - bearEventBar : 999
+
+// Decay multiplier: 1.0 within decayStart, linear fade to 0.2 at decayFull, then 0
+float f_decay(int age) =>
+    age <= decayStart ? 1.0 : age <= decayFull ? 1.0 - 0.8 * (age - decayStart) / (decayFull - decayStart) : 0.0
+
+float bullDecay = f_decay(bullEventAge)
+float bearDecay = f_decay(bearEventAge)
+
+// Apply decay to confirmation scores
+float bullConfDecayed = bullConf * bullDecay
+float bearConfDecayed = bearConf * bearDecay
+
+// ============================================================================
+// MODULE: follow-through
+// ============================================================================
+// After a bull/bear event, check if price confirms in the expected direction.
+// Follow-through requires within 2-4 bars after event:
+//   Bull: higher close, price holds above trigger level
+//   Bear: lower close, price holds below trigger level
+
+bool bullEventActive = bullEventAge >= 1 and bullEventAge <= 4 and not na(bullTriggerLevel)
+bool bearEventActive = bearEventAge >= 1 and bearEventAge <= 4 and not na(bearTriggerLevel)
+
+// Bull follow-through checks
+bool bullHigherClose    = bullEventActive and close > close[1]
+bool bullHoldsAbove     = bullEventActive and close > bullTriggerLevel
+bool bullNoCounterBOS   = bullEventActive and not microBearBOS and not majorBearBOS
+bool bullFollowThrough  = bullHigherClose and bullHoldsAbove and bullNoCounterBOS
+
+// Bear follow-through checks
+bool bearLowerClose     = bearEventActive and close < close[1]
+bool bearHoldsBelow     = bearEventActive and close < bearTriggerLevel
+bool bearNoCounterBOS   = bearEventActive and not microBullBOS and not majorBullBOS
+bool bearFollowThrough  = bearLowerClose and bearHoldsBelow and bearNoCounterBOS
+
+// Track if follow-through was ever achieved for current event
+var bool bullFTAchieved = false
+var bool bearFTAchieved = false
+
+if newBullEvent
+    bullFTAchieved := false
+if newBearEvent
+    bearFTAchieved := false
+if bullFollowThrough
+    bullFTAchieved := true
+if bearFollowThrough
+    bearFTAchieved := true
+
+// ============================================================================
+// MODULE: failed reversal / trap detection
+// ============================================================================
+// A confirmed event that fails to follow through, or where price
+// breaks back through the trigger level, is a failed reversal.
+// Failed reversals can hint at continuation in the opposite direction.
+
+bool bullExpiredNoFT = bullEventAge > decayFull and not bullFTAchieved and not na(bullTriggerLevel)
+bool bearExpiredNoFT = bearEventAge > decayFull and not bearFTAchieved and not na(bearTriggerLevel)
+
+// Active failure: price breaks back through trigger level after event
+bool bullTriggerLost = not na(bullTriggerLevel) and bullEventAge >= 1 and bullEventAge <= decayFull * 2 and close < bullTriggerLevel and bullFTAchieved
+bool bearTriggerLost = not na(bearTriggerLevel) and bearEventAge >= 1 and bearEventAge <= decayFull * 2 and close > bearTriggerLevel and bearFTAchieved
+
+// Failed status
+var bool bullFailed = false
+var bool bearFailed = false
+
+if newBullEvent
+    bullFailed := false
+if newBearEvent
+    bearFailed := false
+if bullExpiredNoFT or bullTriggerLost
+    bullFailed := true
+if bearExpiredNoFT or bearTriggerLost
+    bearFailed := true
+
+// Trap hint: failed reversal suggests opposite direction
+bool bullTrapHint = bullFailed and bearSetup > 0  // failed bull = potential bear continuation
+bool bearTrapHint = bearFailed and bullSetup > 0  // failed bear = potential bull continuation
+
+// ============================================================================
 // MODULE: combined status
 // ============================================================================
 
-// Bull status
+// Raw setup/conf thresholds
 bool bullSetupReady   = bullSetup >= setupReady
 bool bullSetupStrong  = bullSetup >= setupStrong
-bool bullConfirmed    = bullConf >= confRequired
+bool bullConfirmed    = bullConfDecayed >= confRequired  // uses decayed confirmation
 
-// Bear status
 bool bearSetupReady   = bearSetup >= setupReady
 bool bearSetupStrong  = bearSetup >= setupStrong
-bool bearConfirmed    = bearConf >= confRequired
+bool bearConfirmed    = bearConfDecayed >= confRequired
 
 // ── Conflict detection (multi-dimensional) ──
 
-// Type 1: Both sides have active setups
 bool setupConflict = bullSetupReady and bearSetupReady
-
-// Type 2: Both sides have confirmation
 bool confConflict = bullConfirmed and bearConfirmed
-
-// Type 3: Setup in one direction, but strong trend against it
 bool bullTrendConflict = bullSetupReady and isTrendDown and efficiencyRatio > 0.45
 bool bearTrendConflict = bearSetupReady and isTrendUp and efficiencyRatio > 0.45
-
-// Type 4: Candidate in one direction but opposing confirmation active
 bool bullCandidateOpposed = bullSetupReady and bullConfirmed and bearConfirmed
 bool bearCandidateOpposed = bearSetupReady and bearConfirmed and bullConfirmed
 
-// Any conflict active?
 bool isConflict = setupConflict or confConflict or bullTrendConflict or bearTrendConflict or bullCandidateOpposed or bearCandidateOpposed
 bool bothConfirmed = confConflict
 
-// Conflict severity: how many conflict types are active
 int conflictCount = (setupConflict ? 1 : 0) + (confConflict ? 1 : 0) + (bullTrendConflict ? 1 : 0) + (bearTrendConflict ? 1 : 0)
 string conflictSeverity = conflictCount >= 3 ? "HIGH" : conflictCount >= 2 ? "MODERATE" : conflictCount >= 1 ? "LOW" : "NONE"
 
-// Conflict reason string for display
 string conflictReason = ""
 if setupConflict
     conflictReason := "Both setups active"
@@ -621,11 +724,16 @@ if bullTrendConflict
 if bearTrendConflict
     conflictReason := conflictReason + (str.length(conflictReason) > 0 ? " + " : "") + "Bear vs uptrend"
 
-// Status with conflict awareness
-// Conflicts downgrade CANDIDATE to CONFLICTED
+// ── Status with follow-through and failure awareness ──
 string bullStatus = "—"
-if bullSetupReady and bullConfirmed
+if bullFailed
+    bullStatus := "FAILED"
+else if bullSetupReady and bullConfirmed and bullFTAchieved
     bullStatus := bullCandidateOpposed ? "CONFLICTED" : bullTrendConflict ? "CONFLICTED" : "CANDIDATE"
+else if bullSetupReady and bullConfirmed and not bullFTAchieved and bullEventActive
+    bullStatus := bullCandidateOpposed ? "CONFLICTED" : bullTrendConflict ? "CONFLICTED" : "PENDING"
+else if bullSetupReady and bullConfirmed
+    bullStatus := bullCandidateOpposed ? "CONFLICTED" : bullTrendConflict ? "CONFLICTED" : bullDecay < 0.5 ? "EXPIRED" : "CANDIDATE"
 else if bullSetupStrong
     bullStatus := bullTrendConflict ? "CONFLICTED" : "SETUP"
 else if bullConfirmed and not bullSetupReady
@@ -634,8 +742,14 @@ else if bullSetupReady
     bullStatus := "WATCH"
 
 string bearStatus = "—"
-if bearSetupReady and bearConfirmed
+if bearFailed
+    bearStatus := "FAILED"
+else if bearSetupReady and bearConfirmed and bearFTAchieved
     bearStatus := bearCandidateOpposed ? "CONFLICTED" : bearTrendConflict ? "CONFLICTED" : "CANDIDATE"
+else if bearSetupReady and bearConfirmed and not bearFTAchieved and bearEventActive
+    bearStatus := bearCandidateOpposed ? "CONFLICTED" : bearTrendConflict ? "CONFLICTED" : "PENDING"
+else if bearSetupReady and bearConfirmed
+    bearStatus := bearCandidateOpposed ? "CONFLICTED" : bearTrendConflict ? "CONFLICTED" : bearDecay < 0.5 ? "EXPIRED" : "CANDIDATE"
 else if bearSetupStrong
     bearStatus := bearTrendConflict ? "CONFLICTED" : "SETUP"
 else if bearConfirmed and not bearSetupReady
@@ -644,7 +758,7 @@ else if bearSetupReady
     bearStatus := "WATCH"
 
 // Overall market state
-string marketState = bothConfirmed ? "CONFLICT" : setupConflict ? "MIXED" : bullStatus == "CANDIDATE" ? "BULL CANDIDATE" : bearStatus == "CANDIDATE" ? "BEAR CANDIDATE" : bullStatus == "SETUP" ? "BULL SETUP" : bearStatus == "SETUP" ? "BEAR SETUP" : bullStatus == "WATCH" or bearStatus == "WATCH" ? "BUILDING" : "QUIET"
+string marketState = bothConfirmed ? "CONFLICT" : setupConflict ? "MIXED" : bullStatus == "CANDIDATE" ? "BULL CANDIDATE" : bearStatus == "CANDIDATE" ? "BEAR CANDIDATE" : bullStatus == "PENDING" ? "BULL PENDING" : bearStatus == "PENDING" ? "BEAR PENDING" : bullStatus == "FAILED" ? "BULL FAILED" : bearStatus == "FAILED" ? "BEAR FAILED" : bullStatus == "SETUP" ? "BULL SETUP" : bearStatus == "SETUP" ? "BEAR SETUP" : bullStatus == "WATCH" or bearStatus == "WATCH" ? "BUILDING" : "QUIET"
 
 // Combined scores
 float bullScore = bullSetup + bullConf
@@ -683,19 +797,25 @@ hline(0, "Zero", color=color.new(color.gray, 65))
 hline(-setupReady, "Setup Ready Bear", color=color.new(color.yellow, 50), linestyle=hline.style_dotted)
 hline(-setupStrong, "Setup Strong Bear", color=color.new(#ff1744, 50), linestyle=hline.style_dotted)
 
-// Background — conflict gets distinct gray/amber treatment
+// Background — status-driven coloring
 color bgColor = na
 if showBg
-    if bullStatus == "CONFLICTED" or bearStatus == "CONFLICTED"
-        bgColor := color.new(#78909c, 80)  // gray-blue = conflicted, don't act
+    if bullStatus == "FAILED" or bearStatus == "FAILED"
+        bgColor := color.new(#ff6d00, 90)  // orange = failed reversal
+    else if bullStatus == "CONFLICTED" or bearStatus == "CONFLICTED"
+        bgColor := color.new(#78909c, 80)
     else if bothConfirmed
-        bgColor := color.new(#ffab00, 82)  // amber = both confirmed
+        bgColor := color.new(#ffab00, 82)
     else if setupConflict
-        bgColor := color.new(#78909c, 88)  // faint gray = mixed setups
+        bgColor := color.new(#78909c, 88)
     else if bullStatus == "CANDIDATE"
         bgColor := color.new(#00e676, 85)
     else if bearStatus == "CANDIDATE"
         bgColor := color.new(#ff1744, 85)
+    else if bullStatus == "PENDING"
+        bgColor := color.new(#00e676, 92)
+    else if bearStatus == "PENDING"
+        bgColor := color.new(#ff1744, 92)
     else if bullStatus == "ALERT" or bearStatus == "ALERT"
         bgColor := color.new(#ffab00, 92)
 bgcolor(bgColor)
@@ -729,9 +849,9 @@ if barstate.islast
     table.cell(statusBar, 1, 1, volDetail, text_color=color.new(color.white, 50), text_size=size.small, text_halign=text.align_center)
 
     // Bull status icon
-    string bullIcon = bullStatus == "CANDIDATE" ? "◉" : bullStatus == "CONFLICTED" ? "⊘" : bullStatus == "SETUP" ? "◈" : bullStatus == "WATCH" ? "○" : bullStatus == "ALERT" ? "⚡" : "·"
-    color  bullIconColor = bullStatus == "CANDIDATE" ? #00e676 : bullStatus == "CONFLICTED" ? #78909c : bullStatus == "SETUP" ? color.yellow : bullStatus == "WATCH" ? color.new(color.white, 30) : bullStatus == "ALERT" ? #ffab00 : color.gray
-    color  bullIconBg = bullStatus == "CANDIDATE" ? color.new(#00e676, 80) : bullStatus == "CONFLICTED" ? color.new(#78909c, 75) : na
+    string bullIcon = bullStatus == "CANDIDATE" ? "◉" : bullStatus == "PENDING" ? "◎" : bullStatus == "CONFLICTED" ? "⊘" : bullStatus == "FAILED" ? "✗" : bullStatus == "EXPIRED" ? "◌" : bullStatus == "SETUP" ? "◈" : bullStatus == "WATCH" ? "○" : bullStatus == "ALERT" ? "⚡" : "·"
+    color  bullIconColor = bullStatus == "CANDIDATE" ? #00e676 : bullStatus == "PENDING" ? color.new(#00e676, 30) : bullStatus == "CONFLICTED" ? #78909c : bullStatus == "FAILED" ? #ff6d00 : bullStatus == "EXPIRED" ? color.new(color.gray, 30) : bullStatus == "SETUP" ? color.yellow : bullStatus == "WATCH" ? color.new(color.white, 30) : bullStatus == "ALERT" ? #ffab00 : color.gray
+    color  bullIconBg = bullStatus == "CANDIDATE" ? color.new(#00e676, 80) : bullStatus == "CONFLICTED" ? color.new(#78909c, 75) : bullStatus == "FAILED" ? color.new(#ff6d00, 80) : na
     table.cell(statusBar, 2, 1, bullIcon + " " + bullStatus, text_color=bullIconColor, text_size=size.normal, text_halign=text.align_center, bgcolor=bullIconBg)
 
     color bullSetupValColor = bullSetupStrong ? #00e676 : bullSetupReady ? color.yellow : color.gray
@@ -741,9 +861,9 @@ if barstate.islast
     table.cell(statusBar, 4, 1, str.tostring(bullConf, "#.0"), text_color=bullConfValColor, text_size=size.normal, text_halign=text.align_center)
 
     // Bear status icon
-    string bearIcon = bearStatus == "CANDIDATE" ? "◉" : bearStatus == "CONFLICTED" ? "⊘" : bearStatus == "SETUP" ? "◈" : bearStatus == "WATCH" ? "○" : bearStatus == "ALERT" ? "⚡" : "·"
-    color  bearIconColor = bearStatus == "CANDIDATE" ? #ff1744 : bearStatus == "CONFLICTED" ? #78909c : bearStatus == "SETUP" ? color.yellow : bearStatus == "WATCH" ? color.new(color.white, 30) : bearStatus == "ALERT" ? #ffab00 : color.gray
-    color  bearIconBg = bearStatus == "CANDIDATE" ? color.new(#ff1744, 80) : bearStatus == "CONFLICTED" ? color.new(#78909c, 75) : na
+    string bearIcon = bearStatus == "CANDIDATE" ? "◉" : bearStatus == "PENDING" ? "◎" : bearStatus == "CONFLICTED" ? "⊘" : bearStatus == "FAILED" ? "✗" : bearStatus == "EXPIRED" ? "◌" : bearStatus == "SETUP" ? "◈" : bearStatus == "WATCH" ? "○" : bearStatus == "ALERT" ? "⚡" : "·"
+    color  bearIconColor = bearStatus == "CANDIDATE" ? #ff1744 : bearStatus == "PENDING" ? color.new(#ff1744, 30) : bearStatus == "CONFLICTED" ? #78909c : bearStatus == "FAILED" ? #ff6d00 : bearStatus == "EXPIRED" ? color.new(color.gray, 30) : bearStatus == "SETUP" ? color.yellow : bearStatus == "WATCH" ? color.new(color.white, 30) : bearStatus == "ALERT" ? #ffab00 : color.gray
+    color  bearIconBg = bearStatus == "CANDIDATE" ? color.new(#ff1744, 80) : bearStatus == "CONFLICTED" ? color.new(#78909c, 75) : bearStatus == "FAILED" ? color.new(#ff6d00, 80) : na
     table.cell(statusBar, 5, 1, bearIcon + " " + bearStatus, text_color=bearIconColor, text_size=size.normal, text_halign=text.align_center, bgcolor=bearIconBg)
 
     color bearSetupValColor = bearSetupStrong ? #ff1744 : bearSetupReady ? color.yellow : color.gray
@@ -782,6 +902,14 @@ plot(bullTrendConflict ? 1 : 0, "Bull Trend Conflict [dw]", display=display.data
 plot(bearTrendConflict ? 1 : 0, "Bear Trend Conflict [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(bullStatus == "CONFLICTED" ? 1 : 0, "Bull Conflicted [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(bearStatus == "CONFLICTED" ? 1 : 0, "Bear Conflicted [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bullFTAchieved ? 1 : 0, "Bull Follow-Through [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bearFTAchieved ? 1 : 0, "Bear Follow-Through [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bullFailed ? 1 : 0, "Bull Failed [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bearFailed ? 1 : 0, "Bear Failed [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bullDecay, "Bull Event Decay [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bearDecay, "Bear Event Decay [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bullEventAge < 999 ? bullEventAge : na, "Bull Event Age [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bearEventAge < 999 ? bearEventAge : na, "Bear Event Age [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(bullScore, "Bull Total [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(bearScore, "Bear Total [dw]", display=display.data_window, color=color.new(color.gray, 100))
 
@@ -866,13 +994,21 @@ if isDebug and barstate.islast
 
     // Final status
     table.cell(scoreTable, 0, 15, "STATUS", text_color=color.white, text_size=size.normal)
-    color bullStatusColor = bullStatus == "CANDIDATE" ? #00e676 : bullStatus == "CONFLICTED" ? #78909c : bullStatus == "SETUP" ? color.yellow : bullStatus == "ALERT" ? #ffab00 : bullStatus == "WATCH" ? color.new(color.white, 40) : color.gray
-    color bearStatusColor = bearStatus == "CANDIDATE" ? #ff1744 : bearStatus == "CONFLICTED" ? #78909c : bearStatus == "SETUP" ? color.yellow : bearStatus == "ALERT" ? #ffab00 : bearStatus == "WATCH" ? color.new(color.white, 40) : color.gray
+    color bullStatusColor = bullStatus == "CANDIDATE" ? #00e676 : bullStatus == "PENDING" ? color.new(#00e676, 30) : bullStatus == "CONFLICTED" ? #78909c : bullStatus == "FAILED" ? #ff6d00 : bullStatus == "EXPIRED" ? color.gray : bullStatus == "SETUP" ? color.yellow : bullStatus == "ALERT" ? #ffab00 : bullStatus == "WATCH" ? color.new(color.white, 40) : color.gray
+    color bearStatusColor = bearStatus == "CANDIDATE" ? #ff1744 : bearStatus == "PENDING" ? color.new(#ff1744, 30) : bearStatus == "CONFLICTED" ? #78909c : bearStatus == "FAILED" ? #ff6d00 : bearStatus == "EXPIRED" ? color.gray : bearStatus == "SETUP" ? color.yellow : bearStatus == "ALERT" ? #ffab00 : bearStatus == "WATCH" ? color.new(color.white, 40) : color.gray
     table.cell(scoreTable, 1, 15, bullStatus, text_color=bullStatusColor, text_size=size.normal, text_halign=text.align_right)
     table.cell(scoreTable, 2, 15, bearStatus, text_color=bearStatusColor, text_size=size.normal, text_halign=text.align_right)
 
+    // Follow-through row
+    table.cell(scoreTable, 0, 16, "Follow-thru", text_color=color.new(color.white, 30), text_size=size.normal)
+    string bullFTStr = bullFTAchieved ? "✓ FT" : bullFailed ? "✗ FAILED" : bullEventActive ? "pending" : bullDecay < 0.5 and bullEventAge < 999 ? "expired" : "—"
+    string bearFTStr = bearFTAchieved ? "✓ FT" : bearFailed ? "✗ FAILED" : bearEventActive ? "pending" : bearDecay < 0.5 and bearEventAge < 999 ? "expired" : "—"
+    color bullFTCol = bullFTAchieved ? #00e676 : bullFailed ? #ff6d00 : bullEventActive ? color.new(color.white, 40) : color.gray
+    color bearFTCol = bearFTAchieved ? #ff1744 : bearFailed ? #ff6d00 : bearEventActive ? color.new(color.white, 40) : color.gray
+    table.cell(scoreTable, 1, 16, bullFTStr, text_color=bullFTCol, text_size=size.normal, text_halign=text.align_right)
+    table.cell(scoreTable, 2, 16, bearFTStr, text_color=bearFTCol, text_size=size.normal, text_halign=text.align_right)
+
     // Conflict row
-    table.cell(scoreTable, 0, 16, "", text_size=size.tiny)
     color conflictCol = conflictCount >= 3 ? color.new(#ff6d00, 0) : conflictCount >= 2 ? color.new(#ffab00, 0) : conflictCount >= 1 ? color.new(#78909c, 0) : color.gray
     table.cell(scoreTable, 0, 17, isConflict ? "⊘ CONFLICT" : "✓ CLEAR", text_color=isConflict ? conflictCol : color.new(#00e676, 40), text_size=size.normal, text_halign=text.align_left)
     table.cell(scoreTable, 1, 17, isConflict ? conflictSeverity : "", text_color=conflictCol, text_size=size.normal, text_halign=text.align_right)
@@ -882,16 +1018,31 @@ if isDebug and barstate.islast
 // MODULE: alerts
 // ============================================================================
 
-alertcondition(bullStatus == "CANDIDATE", "Bull Candidate", "NG 4H: Bull Setup + Confirmation = CANDIDATE")
-alertcondition(bearStatus == "CANDIDATE", "Bear Candidate", "NG 4H: Bear Setup + Confirmation = CANDIDATE")
-alertcondition(bullSetupStrong, "Bull Setup Strong", "NG 4H: Bull Setup score strong — waiting for confirmation")
-alertcondition(bearSetupStrong, "Bear Setup Strong", "NG 4H: Bear Setup score strong — waiting for confirmation")
-alertcondition(bullConfirmed, "Bull Confirmed", "NG 4H: Bull structure confirmation triggered")
-alertcondition(bearConfirmed, "Bear Confirmed", "NG 4H: Bear structure confirmation triggered")
-alertcondition(isConflict, "Conflict", "NG 4H: Conflicting signals detected")
-alertcondition(bullStatus == "CONFLICTED", "Bull Conflicted", "NG 4H: Bull signal conflicted — trend or opposing confirmation active")
-alertcondition(bearStatus == "CONFLICTED", "Bear Conflicted", "NG 4H: Bear signal conflicted — trend or opposing confirmation active")
-alertcondition(isSpring, "Spring Detected", "NG 4H: Spring heuristic triggered")
-alertcondition(isUpthrust, "Upthrust Detected", "NG 4H: Upthrust heuristic triggered")
-alertcondition(bullishBOS, "Bullish BOS", "NG 4H: Bullish Break of Structure")
-alertcondition(bearishBOS, "Bearish BOS", "NG 4H: Bearish Break of Structure")
+// ── REVIEW ALERTS — "look at this, situation is building" ──
+bool bullReview = bullSetup >= 4.0 and bullConfDecayed >= 1.5 and conflictCount < 2 and (newBullEvent or bullEventAge <= 2)
+bool bearReview = bearSetup >= 4.0 and bearConfDecayed >= 1.5 and conflictCount < 2 and (newBearEvent or bearEventAge <= 2)
+
+alertcondition(bullReview, "Bull Review", "NG 4H REVIEW: Bull setup building with confirmation — check chart")
+alertcondition(bearReview, "Bear Review", "NG 4H REVIEW: Bear setup building with confirmation — check chart")
+
+// ── ACTION ALERTS — "this is serious, consider acting" ──
+bool bullAction = bullSetup >= 5.0 and bullConfDecayed >= 3.0 and bullFTAchieved and not bullCandidateOpposed and not bullTrendConflict and close > nz(bullTriggerLevel)
+bool bearAction = bearSetup >= 5.0 and bearConfDecayed >= 3.0 and bearFTAchieved and not bearCandidateOpposed and not bearTrendConflict and close < nz(bearTriggerLevel)
+
+alertcondition(bullAction, "Bull Action", "NG 4H ACTION: Bull confirmed + follow-through + no conflict — strong candidate")
+alertcondition(bearAction, "Bear Action", "NG 4H ACTION: Bear confirmed + follow-through + no conflict — strong candidate")
+
+// ── INVALIDATION ALERTS — "previous signal is dead" ──
+alertcondition(bullFailed and not bullFailed[1], "Bull Invalidation", "NG 4H INVALIDATION: Bull candidate failed — no follow-through or trigger lost")
+alertcondition(bearFailed and not bearFailed[1], "Bear Invalidation", "NG 4H INVALIDATION: Bear candidate failed — no follow-through or trigger lost")
+
+// ── STRUCTURAL ALERTS ──
+alertcondition(bullStatus == "CANDIDATE", "Bull Candidate", "NG 4H: Bull CANDIDATE status active")
+alertcondition(bearStatus == "CANDIDATE", "Bear Candidate", "NG 4H: Bear CANDIDATE status active")
+alertcondition(isConflict and conflictCount >= 2, "Conflict", "NG 4H: Significant conflict detected")
+alertcondition(isSpring or isMajorSpring, "Spring Detected", "NG 4H: Spring heuristic triggered")
+alertcondition(isUpthrust or isMajorUpthrust, "Upthrust Detected", "NG 4H: Upthrust heuristic triggered")
+alertcondition(majorBullBOS, "Major Bull BOS", "NG 4H: Major Bullish Break of Structure")
+alertcondition(majorBearBOS, "Major Bear BOS", "NG 4H: Major Bearish Break of Structure")
+alertcondition(bullTrapHint and not bullTrapHint[1], "Bull Trap Hint", "NG 4H: Failed bull reversal — possible bear continuation")
+alertcondition(bearTrapHint and not bearTrapHint[1], "Bear Trap Hint", "NG 4H: Failed bear reversal — possible bull continuation")
