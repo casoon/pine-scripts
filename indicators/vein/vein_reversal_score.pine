@@ -81,6 +81,15 @@ float setupReady   = input.float(3.0, "Setup Ready (min setup score)", minval=1,
 float setupStrong  = input.float(5.0, "Setup Strong (high setup score)", minval=2, step=0.5, group=gZones)
 float confRequired = input.float(2.0, "Confirmation Required (min conf score)", minval=1, step=0.5, group=gZones)
 
+var gAdvanced = "Advanced Features"
+int   effEmaLen       = input.int(5, "Efficiency EMA Length", minval=2, group=gAdvanced)
+int   effFallLen      = input.int(3, "Efficiency Falling Lookback", minval=2, group=gAdvanced)
+float effFallBonus    = input.float(1.5, "Efficiency Falling Bonus", minval=0, step=0.1, group=gAdvanced, tooltip="Setup bonus when bar efficiency is falling (momentum decelerating)")
+float shockRangeMult  = input.float(2.5, "Shock Bar Range/ATR Mult", minval=1.5, step=0.1, group=gAdvanced, tooltip="Candle range must exceed this × ATR to count as shock")
+float shockVolMult    = input.float(2.0, "Shock Bar Rel Vol Mult", minval=1.0, step=0.1, group=gAdvanced)
+float shockPenalty    = input.float(2.0, "Shock Bar Score Penalty", minval=0, step=0.5, group=gAdvanced)
+int   qualityMinAlert = input.int(50, "Min Quality for ACTION Alert", minval=0, maxval=100, group=gAdvanced, tooltip="ACTION alerts only fire when quality >= this value")
+
 var gDisplay = "Display"
 string displayMode = input.string("Light", "Display Mode", options=["Light", "Debug", "Research"], group=gDisplay)
 bool showBg        = input.bool(true, "Show Background Colors", group=gDisplay)
@@ -124,6 +133,13 @@ float lowerWick   = math.min(open, close) - low
 float upperWickRatio = candleRange > 0 ? upperWick / candleRange : 0.0
 float lowerWickRatio = candleRange > 0 ? lowerWick / candleRange : 0.0
 float candleATR      = atr14 > 0 ? candleRange / atr14 : 0.0
+
+// Bar efficiency & shock detection
+float barEfficiency  = candleRange > 0 ? math.abs(close - close[1]) / candleRange : 0.0
+float efficiencyEMA  = ta.ema(barEfficiency, effEmaLen)
+bool  effFalling     = ta.falling(efficiencyEMA, effFallLen)
+
+bool  isShockBar     = candleATR > shockRangeMult and relVol > shockVolMult
 
 // ============================================================================
 // MODULE: regime detection
@@ -374,6 +390,10 @@ if lowerWickRatio >= wickThresh
 if bullAtLevel
     bullSetup += 1.0
 
+// Efficiency falling — momentum decelerating below EMA20
+if effFalling and close < ema20
+    bullSetup += effFallBonus
+
 // Deductions
 if ema20Slope < -math.abs(slopeThresh) and slopeThresh > 0
     bullSetup -= 1.0
@@ -382,6 +402,9 @@ if relVol < 0.6
 // Far from any meaningful level — penalty
 if not bullAtLevel and not na(distToMajorSwingLowATR) and distToMajorSwingLowATR > 2.0 and distToRange20Low > 0.5
     bullSetup -= 0.5
+// Shock bar penalty
+if isShockBar
+    bullSetup -= shockPenalty
 
 bullSetup := math.max(0.0, bullSetup) * setupMultiplier
 
@@ -514,6 +537,10 @@ if upperWickRatio >= wickThresh
 if bearAtLevel
     bearSetup += 1.0
 
+// Efficiency falling — momentum decelerating above EMA20
+if effFalling and close > ema20
+    bearSetup += effFallBonus
+
 // Deductions
 if ema20Slope > math.abs(slopeThresh) and slopeThresh > 0
     bearSetup -= 1.0
@@ -522,6 +549,9 @@ if relVol < 0.6
 // Far from any meaningful level — penalty
 if not bearAtLevel and not na(distToMajorSwingHighATR) and distToMajorSwingHighATR < -2.0 and distToRange20High > 0.5
     bearSetup -= 0.5
+// Shock bar penalty
+if isShockBar
+    bearSetup -= shockPenalty
 
 bearSetup := math.max(0.0, bearSetup) * setupMultiplier
 
@@ -761,6 +791,47 @@ string marketState = bothConfirmed ? "CONFLICT" : setupConflict ? "MIXED" : bull
 float bullScore = bullSetup + bullConf
 float bearScore = bearSetup + bearConf
 
+// ============================================================================
+// MODULE: quality breakdown
+// ============================================================================
+// Data-driven quality modifier on top of scores. 50 = baseline.
+// Used to gate ACTION alerts and shown in table tooltip.
+
+// Absorption: high volume but small candle range (supply/demand absorbed)
+bool isAbsorption = relVol >= 1.5 and candleATR < 0.7
+
+float bullQuality = 50.0
+if effFalling and (bullAtLevel or close < ema20)
+    bullQuality += 15.0
+if lowerWickRatio > 0.4
+    bullQuality += 10.0
+if isAbsorption
+    bullQuality += 15.0
+if isShockBar
+    bullQuality -= 20.0
+if bullSetup >= setupStrong and bullConf < confRequired
+    bullQuality -= 15.0
+if bullDecay < 0.3 and bullEventAge < 999
+    bullQuality -= 10.0
+
+float bearQuality = 50.0
+if effFalling and (bearAtLevel or close > ema20)
+    bearQuality += 15.0
+if upperWickRatio > 0.4
+    bearQuality += 10.0
+if isAbsorption
+    bearQuality += 15.0
+if isShockBar
+    bearQuality -= 20.0
+if bearSetup >= setupStrong and bearConf < confRequired
+    bearQuality -= 15.0
+if bearDecay < 0.3 and bearEventAge < 999
+    bearQuality -= 10.0
+
+// Clamp quality to 0..100
+bullQuality := math.max(0.0, math.min(100.0, bullQuality))
+bearQuality := math.max(0.0, math.min(100.0, bearQuality))
+
 // (Conflict detection and marketState are defined in the combined status module above)
 
 // ============================================================================
@@ -863,6 +934,11 @@ plot(bullEventAge < 999 ? bullEventAge : na, "Bull Event Age [dw]", display=disp
 plot(bearEventAge < 999 ? bearEventAge : na, "Bear Event Age [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(bullScore, "Bull Total [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(bearScore, "Bear Total [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(efficiencyEMA, "Efficiency EMA [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(effFalling ? 1 : 0, "Efficiency Falling [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(isShockBar ? 1 : 0, "Shock Bar [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bullQuality, "Bull Quality [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bearQuality, "Bear Quality [dw]", display=display.data_window, color=color.new(color.gray, 100))
 
 // ============================================================================
 // MODULE: debug / research table
@@ -946,7 +1022,7 @@ else
 // ── Render combined table ──
 var table scoreTable = na
 if barstate.islast
-    int rows = isDebug ? 22 : 4
+    int rows = isDebug ? 26 : 4
     scoreTable := table.new(position.top_right, 3, rows, bgcolor=color.new(color.white, 100), border_color=color.new(color.gray, 80), border_width=0, frame_color=color.new(color.gray, 80), frame_width=0)
 
     // Interpretation rows (always visible)
@@ -955,8 +1031,8 @@ if barstate.islast
 
     // ── Tooltip texts ──
     string headerTip = "Vein Reversal Score\n────────────────\nTwo-layer scoring system:\n\nSetup (S): Momentum + overextension + candle + volume\n• RSI, MFI, StochRSI, Price/EMA, Wick, BB, Level\n\nConfirmation (C): Structure events\n• BOS (micro/major), Spring/Upthrust\n• Fake Break, Climax→Test sequence\n\nStatus levels:\n• WATCH: early signs (S≥3, C<2)\n• SETUP: overextended (S≥5, C<2)\n• ALERT: structure w/o setup (C≥2, S<3)\n• CANDIDATE: confirmed (S≥3, C≥2, FT)\n• CONFLICTED: both sides active\n• FAILED: no follow-through"
-    string bullTip = "Bull Score\n────────────────\nSetup: " + str.tostring(bullSetup, "#.0") + " / Confirm: " + str.tostring(bullConf, "#.0") + "\nStatus: " + bullStatus + "\n\nSetup components:\n• RSI " + str.tostring(rsi14, "#") + (rsi14 < rsiBullThresh ? " ✓" : "") + "\n• MFI " + str.tostring(mfi14, "#") + (mfi14 < mfiBullThresh ? " ✓" : "") + "\n• StochK " + str.tostring(stochRsiKVal, "#") + (stochRsiKVal < stochExtLow ? " ✓" : "") + "\n• Price/EMA " + str.tostring(priceToEma20ATR, "#.1") + (priceToEma20ATR < -priceEmaATRThresh ? " ✓" : "") + "\n• At Level: " + (bullAtLevel ? "yes" : "no") + "\n\nConfirm components:\n• Spring: " + (isSpring ? "yes" : "no") + "\n• Bull BOS: " + (majorBullBOS ? "major" : microBullBOS ? "micro" : "no") + "\n• CLX Seq: " + (clxBullSequence ? clxStateStr : "no")
-    string bearTip = "Bear Score\n────────────────\nSetup: " + str.tostring(bearSetup, "#.0") + " / Confirm: " + str.tostring(bearConf, "#.0") + "\nStatus: " + bearStatus + "\n\nSetup components:\n• RSI " + str.tostring(rsi14, "#") + (rsi14 > rsiBearThresh ? " ✓" : "") + "\n• MFI " + str.tostring(mfi14, "#") + (mfi14 > mfiBearThresh ? " ✓" : "") + "\n• StochK " + str.tostring(stochRsiKVal, "#") + (stochRsiKVal > stochExtHigh ? " ✓" : "") + "\n• Price/EMA " + str.tostring(priceToEma20ATR, "#.1") + (priceToEma20ATR > priceEmaATRThresh ? " ✓" : "") + "\n• At Level: " + (bearAtLevel ? "yes" : "no") + "\n\nConfirm components:\n• Upthrust: " + (isUpthrust ? "yes" : "no") + "\n• Bear BOS: " + (majorBearBOS ? "major" : microBearBOS ? "micro" : "no") + "\n• CLX Seq: " + (clxBearSequence ? clxStateStr : "no")
+    string bullTip = "Bull Score\n────────────────\nSetup: " + str.tostring(bullSetup, "#.0") + " / Confirm: " + str.tostring(bullConf, "#.0") + "\nQuality: " + str.tostring(bullQuality, "#") + "%\nStatus: " + bullStatus + "\n\nSetup components:\n• RSI " + str.tostring(rsi14, "#") + (rsi14 < rsiBullThresh ? " ✓" : "") + "\n• MFI " + str.tostring(mfi14, "#") + (mfi14 < mfiBullThresh ? " ✓" : "") + "\n• StochK " + str.tostring(stochRsiKVal, "#") + (stochRsiKVal < stochExtLow ? " ✓" : "") + "\n• Price/EMA " + str.tostring(priceToEma20ATR, "#.1") + (priceToEma20ATR < -priceEmaATRThresh ? " ✓" : "") + "\n• At Level: " + (bullAtLevel ? "yes" : "no") + "\n• Eff Falling: " + (effFalling and close < ema20 ? "✓ +" + str.tostring(effFallBonus, "#.1") : "no") + "\n• Shock: " + (isShockBar ? "✓ -" + str.tostring(shockPenalty, "#.1") : "no") + "\n\nConfirm components:\n• Spring: " + (isSpring ? "yes" : "no") + "\n• Bull BOS: " + (majorBullBOS ? "major" : microBullBOS ? "micro" : "no") + "\n• CLX Seq: " + (clxBullSequence ? clxStateStr : "no") + "\n\nQuality breakdown:\n• Base: 50" + (effFalling and (bullAtLevel or close < ema20) ? "\n• Eff falling near support: +15" : "") + (lowerWickRatio > 0.4 ? "\n• Strong lower wick: +10" : "") + (isAbsorption ? "\n• Absorption: +15" : "") + (isShockBar ? "\n• Shock bar: -20" : "") + (bullSetup >= setupStrong and bullConf < confRequired ? "\n• Momentum only: -15" : "") + (bullDecay < 0.3 and bullEventAge < 999 ? "\n• Event too old: -10" : "")
+    string bearTip = "Bear Score\n────────────────\nSetup: " + str.tostring(bearSetup, "#.0") + " / Confirm: " + str.tostring(bearConf, "#.0") + "\nQuality: " + str.tostring(bearQuality, "#") + "%\nStatus: " + bearStatus + "\n\nSetup components:\n• RSI " + str.tostring(rsi14, "#") + (rsi14 > rsiBearThresh ? " ✓" : "") + "\n• MFI " + str.tostring(mfi14, "#") + (mfi14 > mfiBearThresh ? " ✓" : "") + "\n• StochK " + str.tostring(stochRsiKVal, "#") + (stochRsiKVal > stochExtHigh ? " ✓" : "") + "\n• Price/EMA " + str.tostring(priceToEma20ATR, "#.1") + (priceToEma20ATR > priceEmaATRThresh ? " ✓" : "") + "\n• At Level: " + (bearAtLevel ? "yes" : "no") + "\n• Eff Falling: " + (effFalling and close > ema20 ? "✓ +" + str.tostring(effFallBonus, "#.1") : "no") + "\n• Shock: " + (isShockBar ? "✓ -" + str.tostring(shockPenalty, "#.1") : "no") + "\n\nConfirm components:\n• Upthrust: " + (isUpthrust ? "yes" : "no") + "\n• Bear BOS: " + (majorBearBOS ? "major" : microBearBOS ? "micro" : "no") + "\n• CLX Seq: " + (clxBearSequence ? clxStateStr : "no") + "\n\nQuality breakdown:\n• Base: 50" + (effFalling and (bearAtLevel or close > ema20) ? "\n• Eff falling near resistance: +15" : "") + (upperWickRatio > 0.4 ? "\n• Strong upper wick: +10" : "") + (isAbsorption ? "\n• Absorption: +15" : "") + (isShockBar ? "\n• Shock bar: -20" : "") + (bearSetup >= setupStrong and bearConf < confRequired ? "\n• Momentum only: -15" : "") + (bearDecay < 0.3 and bearEventAge < 999 ? "\n• Event too old: -10" : "")
     string ctxTip = "Market Context\n────────────────\nRegime: " + (isTrendUp ? "Uptrend" : isTrendDown ? "Downtrend" : "Range") + "\nVolatility: " + (isHighVol ? "High" : isLowVol ? "Low" : "Normal") + "\nSetup multiplier: " + str.tostring(setupMultiplier, "#.1") + "x\nConfirm multiplier: " + str.tostring(confMultiplier * volBonus, "#.1") + "x\n\nConflict: " + (isConflict ? "YES (" + conflictSeverity + ")" : "none") + "\nBull trend conflict: " + (bullTrendConflict ? "yes" : "no") + "\nBear trend conflict: " + (bearTrendConflict ? "yes" : "no")
     string ftTip = "Follow-Through\n────────────────\nBull: " + (bullFTAchieved ? "✓ achieved" : bullFailed ? "✗ failed" : bullEventActive ? "waiting..." : "inactive") + "\nBear: " + (bearFTAchieved ? "✓ achieved" : bearFailed ? "✗ failed" : bearEventActive ? "waiting..." : "inactive") + "\n\nBull event age: " + (bullEventAge < 999 ? str.tostring(bullEventAge) + " bars" : "—") + "\nBull decay: " + (bullEventAge < 999 ? str.tostring(bullDecay * 100, "#") + "%" : "—") + "\nBear event age: " + (bearEventAge < 999 ? str.tostring(bearEventAge) + " bars" : "—") + "\nBear decay: " + (bearEventAge < 999 ? str.tostring(bearDecay * 100, "#") + "%" : "—") + "\n\nEvents expire after " + str.tostring(decayFull) + " bars"
 
@@ -1061,6 +1137,22 @@ if barstate.islast
         table.cell(scoreTable, 1, 21, "", text_size=size.normal)
         table.cell(scoreTable, 2, 21, "", text_size=size.normal)
 
+        table.cell(scoreTable, 0, 22, "─ ADVANCED ─", text_color=color.new(chart.fg_color, 40), text_size=size.normal)
+        table.cell(scoreTable, 1, 22, "", text_size=size.normal)
+        table.cell(scoreTable, 2, 22, "", text_size=size.normal)
+
+        table.cell(scoreTable, 0, 23, "Eff EMA " + str.tostring(efficiencyEMA, "#.00"), text_color=color.new(chart.fg_color, 30), text_size=size.normal)
+        table.cell(scoreTable, 1, 23, effFalling and close < ema20 ? "FALL" : effFalling ? "fall" : "—", text_color=effFalling and close < ema20 ? #00e676 : effFalling ? color.new(chart.fg_color, 30) : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+        table.cell(scoreTable, 2, 23, effFalling and close > ema20 ? "FALL" : effFalling ? "fall" : "—", text_color=effFalling and close > ema20 ? #ff1744 : effFalling ? color.new(chart.fg_color, 30) : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+
+        table.cell(scoreTable, 0, 24, "Shock Bar", text_color=color.new(chart.fg_color, 30), text_size=size.normal)
+        table.cell(scoreTable, 1, 24, isShockBar ? "SHOCK" : "—", text_color=isShockBar ? #e65100 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+        table.cell(scoreTable, 2, 24, isShockBar ? "-" + str.tostring(shockPenalty, "#.0") : "", text_color=isShockBar ? #e65100 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+
+        table.cell(scoreTable, 0, 25, "Quality", text_color=color.new(chart.fg_color, 30), text_size=size.normal)
+        table.cell(scoreTable, 1, 25, str.tostring(bullQuality, "#") + "%", text_color=bullQuality >= 50 ? #00e676 : bullQuality >= 35 ? #e65100 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+        table.cell(scoreTable, 2, 25, str.tostring(bearQuality, "#") + "%", text_color=bearQuality >= 50 ? #ff1744 : bearQuality >= 35 ? #e65100 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+
 // ============================================================================
 // MODULE: alerts
 // ============================================================================
@@ -1073,8 +1165,8 @@ alertcondition(bullReview, "Bull Review", "Vein 4H REVIEW: Bull setup building w
 alertcondition(bearReview, "Bear Review", "Vein 4H REVIEW: Bear setup building with confirmation — check chart")
 
 // ── ACTION ALERTS — "this is serious, consider acting" ──
-bool bullAction = bullSetup >= 5.0 and bullConfDecayed >= 3.0 and bullFTAchieved and not bullCandidateOpposed and not bullTrendConflict and close > nz(bullTriggerLevel)
-bool bearAction = bearSetup >= 5.0 and bearConfDecayed >= 3.0 and bearFTAchieved and not bearCandidateOpposed and not bearTrendConflict and close < nz(bearTriggerLevel)
+bool bullAction = bullSetup >= 5.0 and bullConfDecayed >= 3.0 and bullFTAchieved and not bullCandidateOpposed and not bullTrendConflict and close > nz(bullTriggerLevel) and bullQuality >= qualityMinAlert
+bool bearAction = bearSetup >= 5.0 and bearConfDecayed >= 3.0 and bearFTAchieved and not bearCandidateOpposed and not bearTrendConflict and close < nz(bearTriggerLevel) and bearQuality >= qualityMinAlert
 
 alertcondition(bullAction, "Bull Action", "Vein 4H ACTION: Bull confirmed + follow-through + no conflict — strong candidate")
 alertcondition(bearAction, "Bear Action", "Vein 4H ACTION: Bear confirmed + follow-through + no conflict — strong candidate")

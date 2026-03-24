@@ -19,7 +19,7 @@
 //   ✓ Light / Debug / Research display modes
 //
 // ============================================================================
-indicator("Vein: Structure & Zones 4H [WavesUnchained]", "Vein S&Z", overlay=true, max_labels_count=500, max_lines_count=200, max_boxes_count=50)
+indicator("Vein: Structure & Zones 4H [WavesUnchained]", "Vein S&Z", overlay=true, max_labels_count=500, max_lines_count=200, max_boxes_count=200)
 
 // ============================================================================
 // MODULE: inputs — structure
@@ -94,6 +94,8 @@ bool showZoneLabels = input.bool(true, "Show Zone Labels", group=gDisplay)
 color supportColor  = input.color(color.new(#00e676, 0), "Support Zone Color", group=gDisplay)
 color resistColor   = input.color(color.new(#ff1744, 0), "Resistance Zone Color", group=gDisplay)
 color flipColor     = input.color(color.new(#ffab00, 0), "Flip Zone Color", group=gDisplay)
+bool showFVG        = input.bool(true, "Show FVG", group=gDisplay, tooltip="Fair Value Gaps — semi-transparent boxes")
+bool showOB         = input.bool(true, "Show Order Blocks", group=gDisplay, tooltip="Order Blocks — last opposing candle before BOS")
 
 // ============================================================================
 // MODULE: base calculations
@@ -341,6 +343,261 @@ string clxStateStr = clxState == 0 ? "—" : clxState == 1 ? "CLX" : clxState ==
 string clxDirStr = clxDirection == 1 ? "Bull" : clxDirection == -1 ? "Bear" : "—"
 
 // ============================================================================
+// MODULE: absorption pattern detection (EVR)
+// ============================================================================
+
+float evr = candleRange > 0 ? volume / candleRange : 0.0
+float evrAvg = ta.sma(evr, 14)
+float evrNorm = evrAvg > 0 ? evr / evrAvg : 1.0
+
+bool evrFalling = evrNorm < nz(evrNorm[1]) and nz(evrNorm[1]) < nz(evrNorm[2]) and nz(evrNorm[2]) < nz(evrNorm[3])
+bool absCondition = evrFalling and relVol > 1.2
+
+// Absorption near Spring or Upthrust — quality boost
+bool absNearSpring   = absCondition and (isSpring or isMajorSpring)
+bool absNearUpthrust = absCondition and (isUpthrust or isMajorUpthrust)
+
+// Boost event quality when absorption detected near swing event
+int springQualityAdj      = absNearSpring ? math.min(3, springQuality + 1) : springQuality
+int majorSpringQualityAdj = absNearSpring ? math.min(3, majorSpringQuality + 1) : majorSpringQuality
+int upthrustQualityAdj      = absNearUpthrust ? math.min(3, upthrustQuality + 1) : upthrustQuality
+int majorUpthrustQualityAdj = absNearUpthrust ? math.min(3, majorUpthrustQuality + 1) : majorUpthrustQuality
+
+// Absorption near any swing level (for labeling)
+bool absAtSwingLevel = absCondition and (not na(lastSwingHigh) and math.abs(close - lastSwingHigh) < atrValue * 0.5 or not na(lastSwingLow) and math.abs(close - lastSwingLow) < atrValue * 0.5 or not na(lastMajorSwingHigh) and math.abs(close - lastMajorSwingHigh) < atrValue * 0.5 or not na(lastMajorSwingLow) and math.abs(close - lastMajorSwingLow) < atrValue * 0.5)
+
+// ============================================================================
+// MODULE: Fair Value Gap (FVG) detection
+// ============================================================================
+
+type FVG
+    float  upper
+    float  lower
+    int    dir       // 1 = bullish, -1 = bearish
+    int    createBar
+    bool   mitigated
+    box    fvgBox
+
+var array<FVG> fvgArray = array.new<FVG>()
+
+float fvgMinGap = atrValue * 0.3
+
+// Bullish FVG: current low > high[2]
+bool isBullFVG = low > high[2] and (low - high[2]) >= fvgMinGap
+// Bearish FVG: current high < low[2]
+bool isBearFVG = high < low[2] and (low[2] - high) >= fvgMinGap
+
+if showFVG and isBullFVG
+    FVG f = FVG.new()
+    f.upper     := low
+    f.lower     := high[2]
+    f.dir       := 1
+    f.createBar := bar_index
+    f.mitigated := false
+    f.fvgBox    := box.new(bar_index - 2, f.upper, bar_index + 20, f.lower, border_color=color.new(#00e676, 85), border_width=0, bgcolor=color.new(#00e676, 85))
+    array.push(fvgArray, f)
+    if array.size(fvgArray) > 10
+        FVG old = array.shift(fvgArray)
+        if not na(old.fvgBox)
+            box.delete(old.fvgBox)
+
+if showFVG and isBearFVG
+    FVG f = FVG.new()
+    f.upper     := low[2]
+    f.lower     := high
+    f.dir       := -1
+    f.createBar := bar_index
+    f.mitigated := false
+    f.fvgBox    := box.new(bar_index - 2, f.upper, bar_index + 20, f.lower, border_color=color.new(#ff1744, 85), border_width=0, bgcolor=color.new(#ff1744, 85))
+    array.push(fvgArray, f)
+    if array.size(fvgArray) > 10
+        FVG old = array.shift(fvgArray)
+        if not na(old.fvgBox)
+            box.delete(old.fvgBox)
+
+// FVG mitigation check + extend boxes
+var bool fvgNearSupport    = false
+var bool fvgNearResistance = false
+fvgNearSupport    := false
+fvgNearResistance := false
+
+if array.size(fvgArray) > 0
+    for i = array.size(fvgArray) - 1 to 0
+        FVG f = array.get(fvgArray, i)
+        if f.mitigated
+            continue
+        int age = bar_index - f.createBar
+        // Auto-remove after 20 bars
+        if age > 20
+            f.mitigated := true
+            if not na(f.fvgBox)
+                box.delete(f.fvgBox)
+            array.remove(fvgArray, i)
+            continue
+        // Mitigation: price fills the gap
+        bool filled = false
+        if f.dir == 1 and low <= f.lower
+            filled := true
+        if f.dir == -1 and high >= f.upper
+            filled := true
+        if filled
+            f.mitigated := true
+            if not na(f.fvgBox)
+                box.delete(f.fvgBox)
+            array.remove(fvgArray, i)
+            continue
+        // Extend box right edge
+        if not na(f.fvgBox)
+            box.set_right(f.fvgBox, math.min(bar_index + 5, f.createBar + 20))
+        // Track FVG near zones for assessment boost
+        if f.dir == 1 and close > f.lower and close < f.upper + atrValue
+            fvgNearSupport := true
+        if f.dir == -1 and close < f.upper and close > f.lower - atrValue
+            fvgNearResistance := true
+        array.set(fvgArray, i, f)
+
+// ============================================================================
+// MODULE: Order Block (OB) detection
+// ============================================================================
+
+type OB
+    float  upper
+    float  lower
+    int    dir        // 1 = bullish OB, -1 = bearish OB
+    int    createBar
+    bool   mitigated
+    int    confScore
+    box    obBox
+
+var array<OB> bullOBs = array.new<OB>()
+var array<OB> bearOBs = array.new<OB>()
+
+// Bullish OB: last DOWN candle before a bullish BOS
+if showOB and bullishBOS
+    // Look back to find most recent bearish candle before BOS bar
+    int obBar = -1
+    for lb = 1 to 10
+        if close[lb] < open[lb]
+            obBar := lb
+            break
+    if obBar > 0
+        OB ob = OB.new()
+        ob.upper     := high[obBar]
+        ob.lower     := low[obBar]
+        ob.dir       := 1
+        ob.createBar := bar_index - obBar
+        ob.mitigated := false
+        // Confluence scoring
+        int cs = 0
+        // Strong displacement: BOS candle range > 1.5 ATR
+        cs += candleATR >= 1.5 ? 30 : 0
+        // BOS confirmed
+        cs += 25
+        // FVG overlap check
+        bool fvgOverlap = false
+        if array.size(fvgArray) > 0
+            for fi = 0 to array.size(fvgArray) - 1
+                FVG f = array.get(fvgArray, fi)
+                if f.dir == 1 and not f.mitigated and f.upper >= ob.lower and f.lower <= ob.upper
+                    fvgOverlap := true
+                    break
+        cs += fvgOverlap ? 20 : 0
+        // High volume
+        cs += relVol >= 1.3 ? 15 : 0
+        ob.confScore := cs
+        ob.obBox     := box.new(ob.createBar, ob.upper, bar_index + 15, ob.lower, border_color=color.new(#00e676, 80), border_width=1, bgcolor=color.new(#00e676, 80))
+        array.push(bullOBs, ob)
+        if array.size(bullOBs) > 5
+            OB old = array.shift(bullOBs)
+            if not na(old.obBox)
+                box.delete(old.obBox)
+
+// Bearish OB: last UP candle before a bearish BOS
+if showOB and bearishBOS
+    int obBar = -1
+    for lb = 1 to 10
+        if close[lb] > open[lb]
+            obBar := lb
+            break
+    if obBar > 0
+        OB ob = OB.new()
+        ob.upper     := high[obBar]
+        ob.lower     := low[obBar]
+        ob.dir       := -1
+        ob.createBar := bar_index - obBar
+        ob.mitigated := false
+        int cs = 0
+        cs += candleATR >= 1.5 ? 30 : 0
+        cs += 25
+        bool fvgOverlap = false
+        if array.size(fvgArray) > 0
+            for fi = 0 to array.size(fvgArray) - 1
+                FVG f = array.get(fvgArray, fi)
+                if f.dir == -1 and not f.mitigated and f.upper >= ob.lower and f.lower <= ob.upper
+                    fvgOverlap := true
+                    break
+        cs += fvgOverlap ? 20 : 0
+        cs += relVol >= 1.3 ? 15 : 0
+        ob.confScore := cs
+        ob.obBox     := box.new(ob.createBar, ob.upper, bar_index + 15, ob.lower, border_color=color.new(#ff1744, 80), border_width=1, bgcolor=color.new(#ff1744, 80))
+        array.push(bearOBs, ob)
+        if array.size(bearOBs) > 5
+            OB old = array.shift(bearOBs)
+            if not na(old.obBox)
+                box.delete(old.obBox)
+
+// OB mitigation check + extend boxes
+var bool obNearSupport    = false
+var bool obNearResistance = false
+var int  obSupConfScore   = 0
+var int  obResConfScore   = 0
+obNearSupport    := false
+obNearResistance := false
+obSupConfScore   := 0
+obResConfScore   := 0
+
+if array.size(bullOBs) > 0
+    for i = array.size(bullOBs) - 1 to 0
+        OB ob = array.get(bullOBs, i)
+        if ob.mitigated
+            continue
+        // Mitigated when price touches the zone
+        if low <= ob.upper and high >= ob.lower
+            ob.mitigated := true
+            if not na(ob.obBox)
+                box.delete(ob.obBox)
+            array.set(bullOBs, i, ob)
+            continue
+        // Extend box
+        if not na(ob.obBox)
+            box.set_right(ob.obBox, bar_index + 5)
+        // OB proximity for zone assessment
+        float obDist = atrValue > 0 ? math.abs(close - (ob.upper + ob.lower) / 2.0) / atrValue : 999.0
+        if obDist < 2.0
+            obNearSupport := true
+            obSupConfScore := math.max(obSupConfScore, ob.confScore)
+        array.set(bullOBs, i, ob)
+
+if array.size(bearOBs) > 0
+    for i = array.size(bearOBs) - 1 to 0
+        OB ob = array.get(bearOBs, i)
+        if ob.mitigated
+            continue
+        if high >= ob.lower and low <= ob.upper
+            ob.mitigated := true
+            if not na(ob.obBox)
+                box.delete(ob.obBox)
+            array.set(bearOBs, i, ob)
+            continue
+        if not na(ob.obBox)
+            box.set_right(ob.obBox, bar_index + 5)
+        float obDist = atrValue > 0 ? math.abs(close - (ob.upper + ob.lower) / 2.0) / atrValue : 999.0
+        if obDist < 2.0
+            obNearResistance := true
+            obResConfScore := math.max(obResConfScore, ob.confScore)
+        array.set(bearOBs, i, ob)
+
+// ============================================================================
 // MODULE: zone management
 // ============================================================================
 
@@ -411,16 +668,20 @@ if showSwingZones and not na(majorPivotLo)
 
 if showSpringZones and isMajorSpring and not na(lastMajorSwingLow)
     int qual = lowerWickRatio >= 0.55 and candleATR >= 0.8 ? 3 : 2
+    qual := absNearSpring ? math.min(3, qual + 1) : qual
     addZone(3, math.max(low, lastMajorSwingLow), math.min(low, lastMajorSwingLow), 1, qual)
 else if showSpringZones and isSpring and not na(lastSwingLow)
     int qual = lowerWickRatio >= 0.55 and candleATR >= 0.8 ? 3 : lowerWickRatio >= minWickRatio ? 2 : 1
+    qual := absNearSpring ? math.min(3, qual + 1) : qual
     addZone(3, math.max(low, lastSwingLow), math.min(low, lastSwingLow), 1, qual)
 
 if showSpringZones and isMajorUpthrust and not na(lastMajorSwingHigh)
     int qual = upperWickRatio >= 0.55 and candleATR >= 0.8 ? 3 : 2
+    qual := absNearUpthrust ? math.min(3, qual + 1) : qual
     addZone(4, math.max(high, lastMajorSwingHigh), math.min(high, lastMajorSwingHigh), -1, qual)
 else if showSpringZones and isUpthrust and not na(lastSwingHigh)
     int qual = upperWickRatio >= 0.55 and candleATR >= 0.8 ? 3 : upperWickRatio >= minWickRatio ? 2 : 1
+    qual := absNearUpthrust ? math.min(3, qual + 1) : qual
     addZone(4, math.max(high, lastSwingHigh), math.min(high, lastSwingHigh), -1, qual)
 
 if showBOSFlips and majorBullBOS and not na(lastMajorSwingHigh)
@@ -565,6 +826,10 @@ if showRejection and isBearRejection and not isUpthrust and not isMajorUpthrust
     int q = bearRejQuality
     label.new(bar_index, high, f_qualityTag(q) + "rej", style=label.style_label_down, color=q == 3 ? color.new(#c62828, 10) : q == 2 ? color.new(#c62828, 30) : color.new(#c62828, 50), textcolor=color.white, size=size.tiny, tooltip="Bear Rejection [" + (q == 3 ? "STRONG" : q == 2 ? "normal" : "weak") + "]")
 
+// Absorption labels (Debug/Research only)
+if isDebug and absAtSwingLevel
+    label.new(bar_index, low - offsetUnit * 0.5, "ABS", style=label.style_label_up, color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny, tooltip="Absorption Detected\nEVR Norm: " + str.tostring(evrNorm, "#.00") + " | RelVol: " + str.tostring(relVol, "#.0") + "x")
+
 // Debug swing lines
 plot(isDebug ? lastSwingHigh : na, "Micro Swing High", color=color.new(#ef5350, 55), style=plot.style_stepline, linewidth=1)
 plot(isDebug ? lastSwingLow : na, "Micro Swing Low", color=color.new(#66bb6a, 55), style=plot.style_stepline, linewidth=1)
@@ -656,6 +921,11 @@ plot(clxState, "CLX State (0-5)", display=display.data_window, color=color.new(c
 plot(clxDirection, "CLX Dir (1=bull,-1=bear)", display=display.data_window, color=color.new(color.gray, 100))
 plot(clxConfirmed ? 1 : 0, "CLX Confirmed", display=display.data_window, color=color.new(color.gray, 100))
 plot(array.size(zones), "Total Zones", display=display.data_window, color=color.new(color.gray, 100))
+plot(absCondition ? 1 : 0, "Absorption", display=display.data_window, color=color.new(color.gray, 100))
+plot(evrNorm, "EVR Normalized", display=display.data_window, color=color.new(color.gray, 100))
+plot(isBullFVG ? 1 : isBearFVG ? -1 : 0, "FVG (1=bull,-1=bear)", display=display.data_window, color=color.new(color.gray, 100))
+plot(array.size(fvgArray), "Active FVGs", display=display.data_window, color=color.new(color.gray, 100))
+plot(array.size(bullOBs) + array.size(bearOBs), "Active OBs", display=display.data_window, color=color.new(color.gray, 100))
 
 // ============================================================================
 // MODULE: research table
@@ -697,7 +967,7 @@ if isResearch and barstate.islast
         else
             resistCount += 1
 
-    statsTable := table.new(position.top_right, 2, 12, bgcolor=color.new(#1a1a2e, 5), border_color=color.new(color.gray, 50), border_width=1, frame_color=color.new(color.gray, 50), frame_width=2)
+    statsTable := table.new(position.top_right, 2, 15, bgcolor=color.new(#1a1a2e, 5), border_color=color.new(color.gray, 50), border_width=1, frame_color=color.new(color.gray, 50), frame_width=2)
     table.cell(statsTable, 0, 0, "Vein Structure & Zones", text_color=color.white, text_size=size.normal)
     table.cell(statsTable, 1, 0, "v0.3", text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
     // Events
@@ -724,6 +994,13 @@ if isResearch and barstate.islast
     table.cell(statsTable, 1, 10, str.tostring(resistCount), text_color=resistColor, text_size=size.normal, text_halign=text.align_right)
     table.cell(statsTable, 0, 11, "Visible", text_color=color.new(color.white, 30), text_size=size.normal)
     table.cell(statsTable, 1, 11, str.tostring(renderCount), text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+    // FVG & OB
+    table.cell(statsTable, 0, 12, "─ SMC ─", text_color=color.new(color.white, 40), text_size=size.small)
+    table.cell(statsTable, 1, 12, "", text_size=size.small)
+    table.cell(statsTable, 0, 13, "Active FVGs", text_color=color.new(color.white, 30), text_size=size.normal)
+    table.cell(statsTable, 1, 13, str.tostring(array.size(fvgArray)), text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+    table.cell(statsTable, 0, 14, "Active OBs", text_color=color.new(color.white, 30), text_size=size.normal)
+    table.cell(statsTable, 1, 14, str.tostring(array.size(bullOBs) + array.size(bearOBs)), text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
 
 // ============================================================================
 // MODULE: zone assessment — nearest zone evaluation
@@ -874,6 +1151,12 @@ if (showAssessLabels or showAssessTable) and nearSupIdx >= 0 and nearSupIdx < ar
     supCA     := f_contextA(z)
     supReach  := f_reachL(nearSupDist, z)
     supHold   := f_holdL(supStruct, supResp, supAQ, supCA)
+    // FVG near zone boosts hold score
+    if fvgNearSupport
+        supHold := math.min(100.0, supHold + 5.0)
+    // OB proximity bonus (scaled by confluence score)
+    if obNearSupport
+        supHold := math.min(100.0, supHold + obSupConfScore * 0.1)
     supBreak  := f_breakL(supHold, supAQ, z)
     supState  := f_stateCalc(supHold, supBreak, supAQ, z)
     supType   := f_zoneTypeStr(z.zoneType)
@@ -889,6 +1172,12 @@ if (showAssessLabels or showAssessTable) and nearResIdx >= 0 and nearResIdx < ar
     resCA     := f_contextA(z)
     resReach  := f_reachL(nearResDist, z)
     resHold   := f_holdL(resStruct, resResp, resAQ, resCA)
+    // FVG near zone boosts hold score
+    if fvgNearResistance
+        resHold := math.min(100.0, resHold + 5.0)
+    // OB proximity bonus (scaled by confluence score)
+    if obNearResistance
+        resHold := math.min(100.0, resHold + obResConfScore * 0.1)
     resBreak  := f_breakL(resHold, resAQ, z)
     resState  := f_stateCalc(resHold, resBreak, resAQ, z)
     resType   := f_zoneTypeStr(z.zoneType)
