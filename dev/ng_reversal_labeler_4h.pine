@@ -29,6 +29,9 @@ float targetATR     = input.float(1.5, "Target Move (ATR multiple)", minval=0.1,
 float maxAdverseATR = input.float(0.6, "Max Adverse Move (ATR multiple)", minval=0.1, step=0.1, group=gLabel)
 bool  useClose      = input.bool(false, "Use Close instead of High/Low for targets", group=gLabel)
 
+var gCluster = "Cluster Filter"
+int   minGapBars = input.int(3, "Min Bars Between Labels (same direction)", minval=0, maxval=20, group=gCluster, tooltip="Suppresses repeated labels of the same type within N bars. 0 = no filter.")
+
 var gDisplay = "Display"
 string displayMode = input.string("Light", "Display Mode", options=["Light", "Debug", "Research"], group=gDisplay)
 bool   showLabels  = input.bool(true, "Show Chart Labels", group=gDisplay)
@@ -42,66 +45,108 @@ color  bearColor   = input.color(color.new(color.red, 0), "Bearish Label Color",
 // ATR calculation
 atrValue = ta.atr(atrLen)
 
-// Forward-looking reversal detection
-// NOTE: Lookahead is intentional for historical labeling purposes
-f_checkBullish(int bars, float atr, float target, float maxAdv, bool closeOnly) =>
-    float startLevel = close
-    bool  targetHit  = false
-    bool  stopHit    = false
-    if not na(atr) and atr > 0
-        for i = 1 to bars
-            float hi = closeOnly ? close[- i] : high[- i]
-            float lo = closeOnly ? close[- i] : low[- i]
-            if lo < startLevel - maxAdv * atr
-                stopHit := true
-                break
-            if hi >= startLevel + target * atr
-                targetHit := true
-                break
-    targetHit and not stopHit
+// ── Forward-looking reversal detection via backward evaluation ──
+// Pine cannot reference future bars with negative indices.
+// Strategy: each bar checks whether it was the START of a reversal
+// by looking BACK from later bars. We store per-bar reference data
+// in arrays and evaluate once enough bars have passed.
 
-f_checkBearish(int bars, float atr, float target, float maxAdv, bool closeOnly) =>
-    float startLevel = close
-    bool  targetHit  = false
-    bool  stopHit    = false
-    if not na(atr) and atr > 0
-        for i = 1 to bars
-            float hi = closeOnly ? close[- i] : high[- i]
-            float lo = closeOnly ? close[- i] : low[- i]
-            if hi > startLevel + maxAdv * atr
-                stopHit := true
-                break
-            if lo <= startLevel - target * atr
-                targetHit := true
-                break
-    targetHit and not stopHit
+// Rolling ring buffer of close/high/low/atr for the last forwardBars bars
+var array<float> bufClose = array.new_float(forwardBars + 1, na)
+var array<float> bufHigh  = array.new_float(forwardBars + 1, na)
+var array<float> bufLow   = array.new_float(forwardBars + 1, na)
+var array<float> bufATR   = array.new_float(forwardBars + 1, na)
 
-// We need enough future bars to evaluate — suppress labels near chart edge
-bool hasFutureBars = bar_index + forwardBars < last_bar_index
+// Shift buffer: remove oldest, append current
+array.shift(bufClose)
+array.push(bufClose, close)
+array.shift(bufHigh)
+array.push(bufHigh, high)
+array.shift(bufLow)
+array.push(bufLow, low)
+array.shift(bufATR)
+array.push(bufATR, atrValue)
 
-bool isBull = hasFutureBars ? f_checkBullish(forwardBars, atrValue, targetATR, maxAdverseATR, useClose) : false
-bool isBear = hasFutureBars ? f_checkBearish(forwardBars, atrValue, targetATR, maxAdverseATR, useClose) : false
+// Evaluate the bar that is forwardBars bars ago (index 0 in buffer)
+float startClose = array.get(bufClose, 0)
+float startATR   = array.get(bufATR, 0)
+bool  canEval    = not na(startClose) and not na(startATR) and startATR > 0 and bar_index >= forwardBars
+
+// Check bullish: from start bar, price must rise >= target*ATR
+// without first dropping > maxAdverse*ATR
+f_evalBull(array<float> hi, array<float> lo, array<float> cl, int bars, float refClose, float atr, float target, float maxAdv, bool closeOnly) =>
+    bool  tgtHit  = false
+    bool  stpHit  = false
+    for i = 1 to bars
+        float barHi = closeOnly ? array.get(cl, i) : array.get(hi, i)
+        float barLo = closeOnly ? array.get(cl, i) : array.get(lo, i)
+        if barLo < refClose - maxAdv * atr
+            stpHit := true
+            break
+        if barHi >= refClose + target * atr
+            tgtHit := true
+            break
+    tgtHit and not stpHit
+
+f_evalBear(array<float> hi, array<float> lo, array<float> cl, int bars, float refClose, float atr, float target, float maxAdv, bool closeOnly) =>
+    bool  tgtHit  = false
+    bool  stpHit  = false
+    for i = 1 to bars
+        float barHi = closeOnly ? array.get(cl, i) : array.get(hi, i)
+        float barLo = closeOnly ? array.get(cl, i) : array.get(lo, i)
+        if barHi > refClose + maxAdv * atr
+            stpHit := true
+            break
+        if barLo <= refClose - target * atr
+            tgtHit := true
+            break
+    tgtHit and not stpHit
+
+bool isBull = canEval ? f_evalBull(bufHigh, bufLow, bufClose, forwardBars, startClose, startATR, targetATR, maxAdverseATR, useClose) : false
+bool isBear = canEval ? f_evalBear(bufHigh, bufLow, bufClose, forwardBars, startClose, startATR, targetATR, maxAdverseATR, useClose) : false
 
 // If both trigger (rare), neutralize
-int reversalLabel = isBull and not isBear ? 1 : isBear and not isBull ? -1 : 0
+int rawLabel = isBull and not isBear ? 1 : isBear and not isBull ? -1 : 0
+
+// ── Cluster filter: suppress repeated labels within minGapBars ──
+var int barsSinceLastBull = 999
+var int barsSinceLastBear = 999
+
+barsSinceLastBull += 1
+barsSinceLastBear += 1
+
+int reversalLabel = rawLabel
+if minGapBars > 0
+    if rawLabel == 1 and barsSinceLastBull < minGapBars
+        reversalLabel := 0
+    if rawLabel == -1 and barsSinceLastBear < minGapBars
+        reversalLabel := 0
+
+if reversalLabel == 1
+    barsSinceLastBull := 0
+if reversalLabel == -1
+    barsSinceLastBear := 0
 
 // ============================================================================
 // MODULE: visuals
 // ============================================================================
 
 // Numeric label plot (always available in Data Window)
-plot(reversalLabel, "Reversal Label", color=color.new(color.gray, 100), display=display.data_window)
+// Note: plot is delayed by forwardBars so it aligns with the evaluated bar
+plot(reversalLabel, "Reversal Label", color=color.new(color.gray, 100), display=display.data_window, offset=-forwardBars)
 
-// Chart markers
+// Chart markers — placed on the start bar (forwardBars ago)
+int targetBarIdx = bar_index - forwardBars
+
 if showLabels and reversalLabel == 1
-    label.new(bar_index, low, "▲", style=label.style_label_up, color=bullColor, textcolor=color.white, size=size.tiny)
+    label.new(targetBarIdx, low[forwardBars], "▲", style=label.style_label_up, color=bullColor, textcolor=color.white, size=size.tiny)
 
 if showLabels and reversalLabel == -1
-    label.new(bar_index, high, "▼", style=label.style_label_down, color=bearColor, textcolor=color.white, size=size.tiny)
+    label.new(targetBarIdx, high[forwardBars], "▼", style=label.style_label_down, color=bearColor, textcolor=color.white, size=size.tiny)
 
-// Background highlight in Debug/Research mode
+// Background highlight in Debug/Research mode — shifted to start bar
 bool showBg = displayMode == "Debug" or displayMode == "Research"
-bgcolor(showBg and reversalLabel == 1 ? color.new(bullColor, 90) : showBg and reversalLabel == -1 ? color.new(bearColor, 90) : na)
+bgcolor(showBg and reversalLabel[forwardBars] == 1 ? color.new(bullColor, 90) : showBg and reversalLabel[forwardBars] == -1 ? color.new(bearColor, 90) : na, offset=-forwardBars)
 
 // ============================================================================
 // MODULE: debug
@@ -125,14 +170,34 @@ if reversalLabel == -1
 bool isResearch = displayMode == "Research"
 
 // Summary table in Research mode
+float bullPct = bar_index > 0 ? bullCount / (bar_index + 1) * 100 : 0.0
+float bearPct = bar_index > 0 ? bearCount / (bar_index + 1) * 100 : 0.0
+float neutralPct = 100.0 - bullPct - bearPct
+
 var table summaryTable = na
 if isResearch and barstate.islast
-    summaryTable := table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80), border_color=color.gray, border_width=1)
-    table.cell(summaryTable, 0, 0, "NG Labeler", text_color=color.white, text_size=size.small)
-    table.cell(summaryTable, 1, 0, "v0.1", text_color=color.gray, text_size=size.small)
-    table.cell(summaryTable, 0, 1, "Bull Labels", text_color=bullColor, text_size=size.small)
-    table.cell(summaryTable, 1, 1, str.tostring(bullCount), text_color=bullColor, text_size=size.small)
-    table.cell(summaryTable, 0, 2, "Bear Labels", text_color=bearColor, text_size=size.small)
-    table.cell(summaryTable, 1, 2, str.tostring(bearCount), text_color=bearColor, text_size=size.small)
-    table.cell(summaryTable, 0, 3, "Total Bars", text_color=color.gray, text_size=size.small)
-    table.cell(summaryTable, 1, 3, str.tostring(bar_index + 1), text_color=color.gray, text_size=size.small)
+    summaryTable := table.new(position.top_right, 3, 6, bgcolor=color.new(#1a1a2e, 5), border_color=color.new(color.gray, 50), border_width=1, frame_color=color.new(color.gray, 50), frame_width=2)
+    // Header
+    table.cell(summaryTable, 0, 0, "NG Reversal Labeler", text_color=color.white, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 0, "", text_color=color.gray, text_size=size.normal)
+    table.cell(summaryTable, 2, 0, "v0.1", text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
+    // Column headers
+    table.cell(summaryTable, 0, 1, "", text_size=size.normal)
+    table.cell(summaryTable, 1, 1, "Count", text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 1, "%", text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+    // Bull
+    table.cell(summaryTable, 0, 2, "Bull Labels", text_color=color.lime, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 2, str.tostring(bullCount), text_color=color.lime, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 2, str.tostring(bullPct, "#.0") + "%", text_color=color.lime, text_size=size.normal, text_halign=text.align_right)
+    // Bear
+    table.cell(summaryTable, 0, 3, "Bear Labels", text_color=color.red, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 3, str.tostring(bearCount), text_color=color.red, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 3, str.tostring(bearPct, "#.0") + "%", text_color=color.red, text_size=size.normal, text_halign=text.align_right)
+    // Neutral
+    table.cell(summaryTable, 0, 4, "Neutral", text_color=color.gray, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 4, str.tostring(bar_index + 1 - bullCount - bearCount), text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 4, str.tostring(neutralPct, "#.0") + "%", text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
+    // Total
+    table.cell(summaryTable, 0, 5, "Total Bars", text_color=color.white, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 5, str.tostring(bar_index + 1), text_color=color.white, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 5, "", text_size=size.normal)
