@@ -96,6 +96,7 @@ color resistColor   = input.color(color.new(#ff1744, 0), "Resistance Zone Color"
 color flipColor     = input.color(color.new(#ffab00, 0), "Flip Zone Color", group=gDisplay)
 bool showFVG        = input.bool(true, "Show FVG", group=gDisplay, tooltip="Fair Value Gaps — semi-transparent boxes")
 bool showOB         = input.bool(true, "Show Order Blocks", group=gDisplay, tooltip="Order Blocks — last opposing candle before BOS")
+bool showPOC        = input.bool(true, "Show POC Level", group=gDisplay, tooltip="Point of Control — highest volume/money flow price level.\nShown as dashed line. Zones near POC get hold bonus.")
 
 // ============================================================================
 // MODULE: base calculations
@@ -124,6 +125,85 @@ float effRatio      = pathLength10 > 0 ? priceChange10 / pathLength10 : 0.0
 bool  isTrendUp     = ema20 > ema50 and effRatio > 0.35
 bool  isTrendDown   = ema20 < ema50 and effRatio > 0.35
 bool  isRange       = effRatio <= 0.35
+
+// ============================================================================
+// MODULE: simplified volume profile — POC + Value Area
+// ============================================================================
+
+// Lightweight: 10 rows over lookback, no heavy loops on last bar
+int   vpLookback = 100
+int   vpRows     = 10
+float vpHigh     = ta.highest(high, vpLookback)
+float vpLow      = ta.lowest(low, vpLookback)
+float vpStep     = vpHigh > vpLow ? (vpHigh - vpLow) / vpRows : 0.0
+
+// Accumulate volume per row
+var float[] vpBins = array.new_float(vpRows, 0.0)
+
+// Reset and recalculate on each bar (rolling window)
+if vpStep > 0
+    for i = 0 to vpRows - 1
+        array.set(vpBins, i, 0.0)
+    for bk = 0 to math.min(vpLookback - 1, bar_index)
+        float bHi = high[bk]
+        float bLo = low[bk]
+        float bVol = nz(volume[bk])
+        if bVol > 0
+            for row = 0 to vpRows - 1
+                float rowLo = vpLow + row * vpStep
+                float rowHi = rowLo + vpStep
+                if bHi >= rowLo and bLo < rowHi
+                    // Proportional volume allocation
+                    float overlap = math.min(bHi, rowHi) - math.max(bLo, rowLo)
+                    float barRange = bHi - bLo
+                    float portion = barRange > 0 ? overlap / barRange : 1.0 / vpRows
+                    array.set(vpBins, row, array.get(vpBins, row) + bVol * portion)
+
+// Find POC (row with highest volume)
+int   pocRow   = 0
+float pocMax   = 0.0
+for i = 0 to vpRows - 1
+    if array.get(vpBins, i) > pocMax
+        pocMax := array.get(vpBins, i)
+        pocRow := i
+
+float pocLevel = vpLow + (pocRow + 0.5) * vpStep
+float totalVol = array.sum(vpBins)
+
+// Value Area: rows around POC covering ~70% of total volume
+float vaVol    = pocMax
+int   vaLow    = pocRow
+int   vaHigh   = pocRow
+for _iter = 0 to vpRows - 1
+    if vaVol >= totalVol * 0.70
+        break
+    float belowVol = vaLow > 0 ? array.get(vpBins, vaLow - 1) : 0.0
+    float aboveVol = vaHigh < vpRows - 1 ? array.get(vpBins, vaHigh + 1) : 0.0
+    if belowVol >= aboveVol and vaLow > 0
+        vaLow  := vaLow - 1
+        vaVol  := vaVol + belowVol
+    else if vaHigh < vpRows - 1
+        vaHigh := vaHigh + 1
+        vaVol  := vaVol + aboveVol
+    else if vaLow > 0
+        vaLow  := vaLow - 1
+        vaVol  := vaVol + belowVol
+    else
+        break
+
+float vaHighLevel = vpLow + (vaHigh + 1) * vpStep
+float vaLowLevel  = vpLow + vaLow * vpStep
+
+// Check if price is near POC or in Value Area
+float pocDistATR  = atrValue > 0 ? math.abs(close - pocLevel) / atrValue : 999.0
+bool  nearPOC     = pocDistATR < 0.5
+bool  inValueArea = close >= vaLowLevel and close <= vaHighLevel
+
+// POC line visualization
+var line pocLine = na
+if showPOC and barstate.islast
+    line.delete(pocLine)
+    pocLine := line.new(bar_index - vpLookback, pocLevel, bar_index + 5, pocLevel, color=color.new(#ffeb3b, 30), style=line.style_dashed, width=1)
 
 // ============================================================================
 // MODULE: swing detection — micro + major
@@ -926,6 +1006,11 @@ plot(evrNorm, "EVR Normalized", display=display.data_window, color=color.new(col
 plot(isBullFVG ? 1 : isBearFVG ? -1 : 0, "FVG (1=bull,-1=bear)", display=display.data_window, color=color.new(color.gray, 100))
 plot(array.size(fvgArray), "Active FVGs", display=display.data_window, color=color.new(color.gray, 100))
 plot(array.size(bullOBs) + array.size(bearOBs), "Active OBs", display=display.data_window, color=color.new(color.gray, 100))
+plot(pocLevel, "POC Level", display=display.data_window, color=color.new(color.gray, 100))
+plot(vaHighLevel, "VA High", display=display.data_window, color=color.new(color.gray, 100))
+plot(vaLowLevel, "VA Low", display=display.data_window, color=color.new(color.gray, 100))
+plot(nearPOC ? 1 : 0, "Near POC", display=display.data_window, color=color.new(color.gray, 100))
+plot(inValueArea ? 1 : 0, "In Value Area", display=display.data_window, color=color.new(color.gray, 100))
 
 // ============================================================================
 // MODULE: research table
@@ -1157,6 +1242,11 @@ if (showAssessLabels or showAssessTable) and nearSupIdx >= 0 and nearSupIdx < ar
     // OB proximity bonus (scaled by confluence score)
     if obNearSupport
         supHold := math.min(100.0, supHold + obSupConfScore * 0.1)
+    // POC proximity bonus — zone near highest volume level
+    if atrValue > 0 and math.abs(z.mid - pocLevel) / atrValue < 1.0
+        supHold := math.min(100.0, supHold + 7.0)
+    else if z.mid >= vaLowLevel and z.mid <= vaHighLevel
+        supHold := math.min(100.0, supHold + 3.0)
     supBreak  := f_breakL(supHold, supAQ, z)
     supState  := f_stateCalc(supHold, supBreak, supAQ, z)
     supType   := f_zoneTypeStr(z.zoneType)
@@ -1178,6 +1268,11 @@ if (showAssessLabels or showAssessTable) and nearResIdx >= 0 and nearResIdx < ar
     // OB proximity bonus (scaled by confluence score)
     if obNearResistance
         resHold := math.min(100.0, resHold + obResConfScore * 0.1)
+    // POC proximity bonus — zone near highest volume level
+    if atrValue > 0 and math.abs(z.mid - pocLevel) / atrValue < 1.0
+        resHold := math.min(100.0, resHold + 7.0)
+    else if z.mid >= vaLowLevel and z.mid <= vaHighLevel
+        resHold := math.min(100.0, resHold + 3.0)
     resBreak  := f_breakL(resHold, resAQ, z)
     resState  := f_stateCalc(resHold, resBreak, resAQ, z)
     resType   := f_zoneTypeStr(z.zoneType)
