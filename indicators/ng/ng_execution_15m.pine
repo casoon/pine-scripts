@@ -1,0 +1,516 @@
+//@version=6
+// ============================================================================
+// NG Execution 15m [WavesUnchained]
+// Version: 0.1.0
+// Author: WavesUnchained
+// ============================================================================
+// Lean 15m execution/timing overlay that works WITH the 4H system.
+// 4H = Context (where to look). 15m = Timing (when to act).
+//
+// Only activates when 4H has an interesting setup. Focuses on:
+//   ✓ Micro structure shifts (pivots, BOS, higher low / lower high)
+//   ✓ Liquidity sweeps (springs/upthrusts on 15m)
+//   ✓ Rejection candles + engulfing
+//   ✓ Follow-through / tempo validation
+//   ✓ Entry + invalidation signals
+//   ✓ Compact micro score (0-10)
+//
+// ============================================================================
+indicator("NG Execution 15m [WavesUnchained]", "NG Exec", overlay=true, max_labels_count=200, max_lines_count=50)
+
+// ============================================================================
+// MODULE: inputs
+// ============================================================================
+
+var gHTF = "4H Context"
+string htfTimeframe     = input.timeframe("240", "HTF Timeframe", group=gHTF)
+float  activationThresh = input.float(2.0, "Min 4H Setup Score to Activate", minval=0.5, maxval=5.0, step=0.5, group=gHTF, tooltip="15m only works when 4H setup >= this value")
+float  zoneProximityATR = input.float(0.8, "Zone Proximity (ATR)", minval=0.2, maxval=3.0, step=0.1, group=gHTF, tooltip="Max distance to 4H zone for 'near zone' bonus")
+
+var gMicro = "Micro Structure"
+int   microLeft      = input.int(2, "Micro Pivot Left Bars", minval=1, maxval=5, group=gMicro)
+int   microRight     = input.int(2, "Micro Pivot Right Bars", minval=1, maxval=5, group=gMicro)
+int   sweepLookback  = input.int(10, "Sweep: Lookback Bars", minval=3, maxval=30, group=gMicro)
+float sweepMinDepth  = input.float(0.1, "Sweep: Min Depth (ATR)", minval=0.0, maxval=1.0, step=0.05, group=gMicro)
+int   sweepMaxBars   = input.int(3, "Sweep: Max Bars to Reclaim", minval=1, maxval=8, group=gMicro)
+
+var gCandle = "Candle Behaviour"
+float rejWickThresh  = input.float(0.45, "Rejection: Min Wick Ratio", minval=0.2, maxval=0.8, step=0.05, group=gCandle)
+float engBodyRatio   = input.float(0.6, "Engulfing: Min Body Ratio", minval=0.3, maxval=0.9, step=0.05, group=gCandle)
+
+var gTempo = "Follow-Through"
+int   ftWindow       = input.int(4, "Follow-Through Window (Bars)", minval=2, maxval=8, group=gTempo)
+float ftMinMove      = input.float(0.3, "Follow-Through Min Move (ATR)", minval=0.1, maxval=1.0, step=0.1, group=gTempo)
+
+var gDisplay = "Display"
+string displayMode   = input.string("Light", "Display Mode", options=["Light", "Debug"], group=gDisplay)
+bool   showEntryLbl  = input.bool(true, "Show Entry Labels", group=gDisplay)
+bool   showInvalLbl  = input.bool(true, "Show Invalidation Labels", group=gDisplay)
+bool   showHTFLevels = input.bool(true, "Show 4H Reference Levels", group=gDisplay)
+bool   showTable     = input.bool(true, "Show Status Table", group=gDisplay)
+
+bool isDebug = displayMode == "Debug"
+
+// ============================================================================
+// MODULE: 4H context via request.security()
+// ============================================================================
+// Simplified 4H indicators — NOT a full replication of the score system.
+// We only need: trend bias, setup strength, and reference levels.
+
+// -- 4H indicators (will be evaluated on HTF bars) --
+htf_ema20_raw = ta.ema(close, 20)
+htf_ema50_raw = ta.ema(close, 50)
+htf_rsi_raw   = ta.rsi(close, 14)
+htf_mfi_raw   = ta.mfi(hlc3, 14)
+htf_atr_raw   = ta.atr(14)
+
+// Price extension
+htf_priceToEma_raw = htf_atr_raw > 0 ? (close - htf_ema20_raw) / htf_atr_raw : 0.0
+
+// Pivots for reference levels
+htf_pivHi_raw = ta.pivothigh(high, 3, 3)
+htf_pivLo_raw = ta.pivotlow(low, 3, 3)
+
+// Simplified bull setup score (0-5)
+htf_bullSetup_raw = 0.0
+htf_bullSetup_raw += (htf_rsi_raw < 35 ? 1.0 : 0.0)
+htf_bullSetup_raw += (htf_mfi_raw < 30 ? 1.0 : 0.0)
+htf_bullSetup_raw += (htf_priceToEma_raw < -1.0 ? 1.0 : htf_priceToEma_raw < -0.5 ? 0.5 : 0.0)
+htf_bullSetup_raw += (htf_ema20_raw < htf_ema50_raw and htf_rsi_raw < 40 ? 1.0 : 0.0)
+
+// Simplified bear setup score (0-5)
+htf_bearSetup_raw = 0.0
+htf_bearSetup_raw += (htf_rsi_raw > 65 ? 1.0 : 0.0)
+htf_bearSetup_raw += (htf_mfi_raw > 70 ? 1.0 : 0.0)
+htf_bearSetup_raw += (htf_priceToEma_raw > 1.0 ? 1.0 : htf_priceToEma_raw > 0.5 ? 0.5 : 0.0)
+htf_bearSetup_raw += (htf_ema20_raw > htf_ema50_raw and htf_rsi_raw > 60 ? 1.0 : 0.0)
+
+// Trend direction
+htf_trendUp_raw   = htf_ema20_raw > htf_ema50_raw
+htf_trendDown_raw = htf_ema20_raw < htf_ema50_raw
+
+// -- Pull via request.security() --
+[htfEma20, htfEma50, htfRsi, htfAtr, htfBullSetup, htfBearSetup, htfTrendUp, htfTrendDown] = request.security("", htfTimeframe, [htf_ema20_raw, htf_ema50_raw, htf_rsi_raw, htf_atr_raw, htf_bullSetup_raw, htf_bearSetup_raw, htf_trendUp_raw, htf_trendDown_raw], lookahead=barmerge.lookahead_off)
+
+[htfPivHi, htfPivLo, htfPriceToEma] = request.security("", htfTimeframe, [htf_pivHi_raw, htf_pivLo_raw, htf_priceToEma_raw], lookahead=barmerge.lookahead_off)
+
+// Persist last known 4H swing levels (pivots are sparse)
+var float htfSwingHi = na
+var float htfSwingLo = na
+if not na(htfPivHi)
+    htfSwingHi := htfPivHi
+if not na(htfPivLo)
+    htfSwingLo := htfPivLo
+
+// ============================================================================
+// MODULE: activation gate
+// ============================================================================
+
+bool htfHasBull = not na(htfBullSetup) and htfBullSetup >= activationThresh
+bool htfHasBear = not na(htfBearSetup) and htfBearSetup >= activationThresh
+bool isActive   = htfHasBull or htfHasBear
+
+// Bias: 1 = bull, -1 = bear, 0 = both/conflict
+int bias = htfHasBull and not htfHasBear ? 1 : htfHasBear and not htfHasBull ? -1 : htfHasBull and htfHasBear ? 0 : 0
+
+// ============================================================================
+// MODULE: 15m base calculations
+// ============================================================================
+
+float atr15m     = ta.atr(14)
+float ema9       = ta.ema(close, 9)
+float avgVol     = ta.sma(volume, 20)
+float relVol     = avgVol > 0 ? volume / avgVol : 1.0
+float candleRange = high - low
+float bodySize   = math.abs(close - open)
+float upperWick  = candleRange > 0 ? (high - math.max(close, open)) / candleRange : 0.0
+float lowerWick  = candleRange > 0 ? (math.min(close, open) - low) / candleRange : 0.0
+float bodyRatio  = candleRange > 0 ? bodySize / candleRange : 0.0
+bool  isBullBar  = close > open
+bool  isBearBar  = close < open
+
+// ============================================================================
+// MODULE: micro pivots & BOS
+// ============================================================================
+
+float microPivHi = ta.pivothigh(high, microLeft, microRight)
+float microPivLo = ta.pivotlow(low, microLeft, microRight)
+
+// Persist last swing levels
+var float lastMicroHi  = na
+var float lastMicroLo  = na
+var float prevMicroHi  = na
+var float prevMicroLo  = na
+
+if not na(microPivHi)
+    prevMicroHi := lastMicroHi
+    lastMicroHi := microPivHi
+if not na(microPivLo)
+    prevMicroLo := lastMicroLo
+    lastMicroLo := microPivLo
+
+// Micro BOS detection
+bool microBullBOS = not na(lastMicroHi) and close > lastMicroHi and close[1] <= lastMicroHi
+bool microBearBOS = not na(lastMicroLo) and close < lastMicroLo and close[1] >= lastMicroLo
+
+// Structure shift detection
+bool higherLow  = not na(microPivLo) and not na(prevMicroLo) and microPivLo > prevMicroLo
+bool lowerHigh  = not na(microPivHi) and not na(prevMicroHi) and microPivHi < prevMicroHi
+
+// ============================================================================
+// MODULE: liquidity sweep detection
+// ============================================================================
+
+// Find recent swing low/high within lookback for sweep reference
+var float sweepRefLo = na
+var float sweepRefHi = na
+
+// Use the last confirmed micro pivot as sweep reference
+sweepRefLo := nz(lastMicroLo, sweepRefLo)
+sweepRefHi := nz(lastMicroHi, sweepRefHi)
+
+// Bull sweep: wick below reference low, close back above
+bool sweepBullRaw = not na(sweepRefLo) and low < sweepRefLo and close > sweepRefLo
+float sweepBullDepth = sweepBullRaw and atr15m > 0 ? (sweepRefLo - low) / atr15m : 0.0
+bool sweepBull = sweepBullRaw and sweepBullDepth >= sweepMinDepth
+
+// Bear sweep: wick above reference high, close back below
+bool sweepBearRaw = not na(sweepRefHi) and high > sweepRefHi and close < sweepRefHi
+float sweepBearDepth = sweepBearRaw and atr15m > 0 ? (high - sweepRefHi) / atr15m : 0.0
+bool sweepBear = sweepBearRaw and sweepBearDepth >= sweepMinDepth
+
+// Track sweep confirmation (holds on next bars)
+var int  sweepBullAge = 999
+var int  sweepBearAge = 999
+var float sweepBullLevel = na
+var float sweepBearLevel = na
+
+if sweepBull
+    sweepBullAge   := 0
+    sweepBullLevel := low
+else
+    sweepBullAge += 1
+
+if sweepBear
+    sweepBearAge   := 0
+    sweepBearLevel := high
+else
+    sweepBearAge += 1
+
+bool sweepBullConfirmed = sweepBullAge >= 1 and sweepBullAge <= sweepMaxBars and close > nz(sweepRefLo)
+bool sweepBearConfirmed = sweepBearAge >= 1 and sweepBearAge <= sweepMaxBars and close < nz(sweepRefHi)
+
+// ============================================================================
+// MODULE: rejection & candle patterns
+// ============================================================================
+
+// Bull rejection: long lower wick, small body, bias-aligned
+bool bullRejection = lowerWick >= rejWickThresh and bodyRatio < 0.4 and (bias >= 0 or not isActive)
+// Bear rejection: long upper wick, small body
+bool bearRejection = upperWick >= rejWickThresh and bodyRatio < 0.4 and (bias <= 0 or not isActive)
+
+// Engulfing
+float prevBody = math.abs(close[1] - open[1])
+bool bullEngulfing = isBullBar and close > open[1] and open < close[1] and bodySize > prevBody * engBodyRatio and bodySize > candleRange * 0.5
+bool bearEngulfing = isBearBar and close < open[1] and open > close[1] and bodySize > prevBody * engBodyRatio and bodySize > candleRange * 0.5
+
+// Range expansion after BOS
+float avgRange = ta.sma(candleRange, 14)
+bool rangeExpansion = candleRange > avgRange * 1.3 and relVol > 1.0
+
+// ============================================================================
+// MODULE: follow-through / tempo
+// ============================================================================
+
+// Track triggers for follow-through check
+var int  bullTriggerAge = 999
+var float bullTriggerPrice = na
+var int  bearTriggerAge = 999
+var float bearTriggerPrice = na
+
+// A trigger fires on sweep or BOS in bias direction
+bool newBullTrigger = isActive and (bias >= 0) and (sweepBull or microBullBOS)
+bool newBearTrigger = isActive and (bias <= 0) and (sweepBear or microBearBOS)
+
+if newBullTrigger
+    bullTriggerAge   := 0
+    bullTriggerPrice := close
+else
+    bullTriggerAge += 1
+
+if newBearTrigger
+    bearTriggerAge   := 0
+    bearTriggerPrice := close
+else
+    bearTriggerAge += 1
+
+// Follow-through: price moved in signal direction within window
+bool bullFT = bullTriggerAge > 0 and bullTriggerAge <= ftWindow and not na(bullTriggerPrice) and atr15m > 0 and (close - bullTriggerPrice) / atr15m >= ftMinMove
+bool bearFT = bearTriggerAge > 0 and bearTriggerAge <= ftWindow and not na(bearTriggerPrice) and atr15m > 0 and (bearTriggerPrice - close) / atr15m >= ftMinMove
+
+// ============================================================================
+// MODULE: micro score (0-10)
+// ============================================================================
+
+// --- Setup component (max 3) — from 4H context ---
+float setupScore = 0.0
+float activeSetup = bias == 1 ? nz(htfBullSetup) : bias == -1 ? nz(htfBearSetup) : math.max(nz(htfBullSetup), nz(htfBearSetup))
+setupScore += activeSetup >= activationThresh ? 1.0 : 0.0
+setupScore += activeSetup >= activationThresh + 1.0 ? 1.0 : 0.0
+
+// Near 4H zone bonus
+float distToHTFSup = not na(htfSwingLo) and atr15m > 0 ? math.abs(close - htfSwingLo) / atr15m : 999.0
+float distToHTFRes = not na(htfSwingHi) and atr15m > 0 ? math.abs(close - htfSwingHi) / atr15m : 999.0
+bool nearHTFZone = (bias >= 0 and distToHTFSup <= zoneProximityATR) or (bias <= 0 and distToHTFRes <= zoneProximityATR)
+setupScore += nearHTFZone ? 1.0 : 0.0
+setupScore := math.min(setupScore, 3.0)
+
+// --- Structure component (max 4) — from 15m micro events ---
+float structScore = 0.0
+if bias >= 0
+    structScore += sweepBull ? 1.0 : 0.0
+    structScore += sweepBullConfirmed ? 1.0 : 0.0
+    structScore += microBullBOS ? 1.0 : 0.0
+    structScore += higherLow ? 1.0 : 0.0
+if bias <= 0
+    structScore += sweepBear ? 1.0 : 0.0
+    structScore += sweepBearConfirmed ? 1.0 : 0.0
+    structScore += microBearBOS ? 1.0 : 0.0
+    structScore += lowerHigh ? 1.0 : 0.0
+if bias == 0
+    structScore := structScore / 2.0  // dampen during conflict
+structScore := math.min(structScore, 4.0)
+
+// --- Behaviour component (max 2) — candle character ---
+float behScore = 0.0
+if bias >= 0
+    behScore += (bullRejection or bullEngulfing) ? 1.0 : 0.0
+    behScore += (isBullBar and rangeExpansion) ? 1.0 : 0.0
+if bias <= 0
+    behScore += (bearRejection or bearEngulfing) ? 1.0 : 0.0
+    behScore += (isBearBar and rangeExpansion) ? 1.0 : 0.0
+if bias == 0
+    behScore := behScore / 2.0
+behScore := math.min(behScore, 2.0)
+
+// --- Tempo component (max 1) — follow-through ---
+float tempoScore = 0.0
+if bias >= 0 and bullFT
+    tempoScore += 1.0
+if bias <= 0 and bearFT
+    tempoScore += 1.0
+tempoScore := math.min(tempoScore, 1.0)
+
+// --- Total micro score ---
+float microScore = isActive ? setupScore + structScore + behScore + tempoScore : 0.0
+
+// ============================================================================
+// MODULE: status logic
+// ============================================================================
+
+bool hasStructureTrigger = (bias >= 0 and (sweepBull or sweepBullConfirmed or microBullBOS)) or (bias <= 0 and (sweepBear or sweepBearConfirmed or microBearBOS))
+
+string microStatus = "QUIET"
+if not isActive
+    microStatus := "QUIET"
+else if microScore >= 7.0 and hasStructureTrigger
+    microStatus := "TRIGGER"
+else if microScore >= 5.0 and hasStructureTrigger
+    microStatus := "SETUP"
+else if microScore >= 3.0
+    microStatus := "WATCH"
+else
+    microStatus := "QUIET"
+
+// Effective direction for signals
+int signalDir = bias == 1 ? 1 : bias == -1 ? -1 : (nz(htfBullSetup) > nz(htfBearSetup) ? 1 : -1)
+
+// ============================================================================
+// MODULE: entry & invalidation signals
+// ============================================================================
+
+// Entry conditions
+bool entryBull = microStatus == "TRIGGER" and signalDir == 1 and (sweepBull or sweepBullConfirmed or microBullBOS) and (bullRejection or bullEngulfing or bullFT)
+bool entryBear = microStatus == "TRIGGER" and signalDir == -1 and (sweepBear or sweepBearConfirmed or microBearBOS) and (bearRejection or bearEngulfing or bearFT)
+
+// Track active entries for invalidation
+var bool  bullEntryActive = false
+var float bullEntryLevel  = na
+var float bullStopLevel   = na
+var bool  bearEntryActive = false
+var float bearEntryLevel  = na
+var float bearStopLevel   = na
+
+if entryBull and not entryBull[1]
+    bullEntryActive := true
+    bullEntryLevel  := close
+    bullStopLevel   := not na(sweepBullLevel) ? sweepBullLevel : nz(lastMicroLo)
+
+if entryBear and not entryBear[1]
+    bearEntryActive := true
+    bearEntryLevel  := close
+    bearStopLevel   := not na(sweepBearLevel) ? sweepBearLevel : nz(lastMicroHi)
+
+// Invalidation checks
+bool bullInval = bullEntryActive and (close < nz(bullStopLevel) or microBearBOS)
+bool bearInval = bearEntryActive and (close > nz(bearStopLevel) or microBullBOS)
+
+if bullInval
+    bullEntryActive := false
+if bearInval
+    bearEntryActive := false
+
+// Also expire entries after extended time without follow-through
+if bullEntryActive and not na(bullEntryLevel) and bar_index - ta.valuewhen(entryBull and not entryBull[1], bar_index, 0) > ftWindow * 3
+    bullEntryActive := false
+if bearEntryActive and not na(bearEntryLevel) and bar_index - ta.valuewhen(entryBear and not entryBear[1], bar_index, 0) > ftWindow * 3
+    bearEntryActive := false
+
+// ============================================================================
+// MODULE: labels
+// ============================================================================
+
+// Entry labels
+if showEntryLbl and entryBull and not entryBull[1]
+    label.new(bar_index, low, "ENTRY ▲", style=label.style_label_up, color=#00e676, textcolor=color.white, size=size.small)
+
+if showEntryLbl and entryBear and not entryBear[1]
+    label.new(bar_index, high, "ENTRY ▼", style=label.style_label_down, color=#ff1744, textcolor=color.white, size=size.small)
+
+// Invalidation labels
+if showInvalLbl and bullInval and not bullInval[1]
+    label.new(bar_index, high, "INVAL ✗", style=label.style_label_down, color=#ff6d00, textcolor=color.white, size=size.tiny)
+
+if showInvalLbl and bearInval and not bearInval[1]
+    label.new(bar_index, low, "INVAL ✗", style=label.style_label_up, color=#ff6d00, textcolor=color.white, size=size.tiny)
+
+// Debug: sweep + BOS labels
+if isDebug and sweepBull and bias >= 0 and isActive
+    label.new(bar_index, low, "SWP", style=label.style_label_up, color=color.new(#00e676, 50), textcolor=#00e676, size=size.tiny)
+
+if isDebug and sweepBear and bias <= 0 and isActive
+    label.new(bar_index, high, "SWP", style=label.style_label_down, color=color.new(#ff1744, 50), textcolor=#ff1744, size=size.tiny)
+
+if isDebug and microBullBOS and bias >= 0 and isActive
+    label.new(bar_index, low, "BOS↑", style=label.style_label_up, color=color.new(#00e676, 70), textcolor=#00e676, size=size.tiny)
+
+if isDebug and microBearBOS and bias <= 0 and isActive
+    label.new(bar_index, high, "BOS↓", style=label.style_label_down, color=color.new(#ff1744, 70), textcolor=#ff1744, size=size.tiny)
+
+// ============================================================================
+// MODULE: 4H reference levels overlay
+// ============================================================================
+
+var line htfHiLine = na
+var line htfLoLine = na
+var line htfEma20Line = na
+
+if showHTFLevels and barstate.islast
+    if not na(htfHiLine)
+        line.delete(htfHiLine)
+    if not na(htfLoLine)
+        line.delete(htfLoLine)
+    if not na(htfEma20Line)
+        line.delete(htfEma20Line)
+
+    if not na(htfSwingHi)
+        htfHiLine := line.new(bar_index - 50, htfSwingHi, bar_index + 5, htfSwingHi, color=color.new(#ff1744, 50), style=line.style_dashed, width=1)
+    if not na(htfSwingLo)
+        htfLoLine := line.new(bar_index - 50, htfSwingLo, bar_index + 5, htfSwingLo, color=color.new(#00e676, 50), style=line.style_dashed, width=1)
+    if not na(htfEma20)
+        htfEma20Line := line.new(bar_index - 50, htfEma20, bar_index + 5, htfEma20, color=color.new(#ffab00, 40), style=line.style_dotted, width=1)
+
+// ============================================================================
+// MODULE: background tint
+// ============================================================================
+
+color bgCol = microStatus == "TRIGGER" and signalDir == 1 ? color.new(#00e676, 92) : microStatus == "TRIGGER" and signalDir == -1 ? color.new(#ff1744, 92) : microStatus == "SETUP" ? color.new(#ffab00, 95) : na
+bgcolor(bgCol)
+
+// ============================================================================
+// MODULE: status table
+// ============================================================================
+
+var table statusTbl = na
+if showTable and barstate.islast
+    statusTbl := table.new(position.bottom_right, 2, 7, bgcolor=color.new(#1a1a2e, 5), border_color=color.new(color.gray, 50), border_width=1, frame_color=color.new(color.gray, 50), frame_width=2)
+
+    // Header
+    table.cell(statusTbl, 0, 0, "NG Exec 15m", text_color=color.white, text_size=size.normal)
+    color statusCol = microStatus == "TRIGGER" ? (signalDir == 1 ? #00e676 : #ff1744) : microStatus == "SETUP" ? #ffab00 : microStatus == "WATCH" ? color.new(color.white, 30) : color.gray
+    table.cell(statusTbl, 1, 0, microStatus, text_color=statusCol, text_size=size.normal, text_halign=text.align_right)
+
+    // 4H Context
+    string biasStr = bias == 1 ? "BULL" : bias == -1 ? "BEAR" : htfHasBull and htfHasBear ? "MIXED" : "QUIET"
+    color biasCol = bias == 1 ? #00e676 : bias == -1 ? #ff1744 : htfHasBull and htfHasBear ? #ffab00 : color.gray
+    table.cell(statusTbl, 0, 1, "4H Bias", text_color=color.new(color.white, 30), text_size=size.normal)
+    table.cell(statusTbl, 1, 1, biasStr + " " + str.tostring(math.max(nz(htfBullSetup), nz(htfBearSetup)), "#.0"), text_color=biasCol, text_size=size.normal, text_halign=text.align_right)
+
+    // Micro Score breakdown
+    table.cell(statusTbl, 0, 2, "Micro Score", text_color=color.new(color.white, 30), text_size=size.normal)
+    table.cell(statusTbl, 1, 2, str.tostring(microScore, "#.0") + " / 10", text_color=microScore >= 7 ? (signalDir == 1 ? #00e676 : #ff1744) : microScore >= 5 ? #ffab00 : color.gray, text_size=size.normal, text_halign=text.align_right)
+
+    // Components
+    table.cell(statusTbl, 0, 3, "Set|Str|Beh|Tmp", text_color=color.new(color.white, 50), text_size=size.normal)
+    table.cell(statusTbl, 1, 3, str.tostring(setupScore, "#") + " | " + str.tostring(structScore, "#") + " | " + str.tostring(behScore, "#") + " | " + str.tostring(tempoScore, "#"), text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+
+    // Interpretation line
+    string interpStr = ""
+    if not isActive
+        if htfTrendDown and nz(htfRsi) > 40
+            interpStr := "4H downtrend, no exhaustion — wait"
+        else if htfTrendUp and nz(htfRsi) < 60
+            interpStr := "4H uptrend, no overheating — wait"
+        else if nz(htfBullSetup) > 0 or nz(htfBearSetup) > 0
+            interpStr := "4H building (" + str.tostring(math.max(nz(htfBullSetup), nz(htfBearSetup)), "#.0") + ") — not yet active"
+        else
+            interpStr := "4H quiet — nothing to time"
+    else if microStatus == "TRIGGER"
+        interpStr := (signalDir == 1 ? "Bull" : "Bear") + " trigger: structure + behaviour confirmed"
+    else if microStatus == "SETUP"
+        interpStr := "Micro structure forming — waiting for confirmation"
+    else if microStatus == "WATCH"
+        interpStr := "4H active, 15m watching for structure shift"
+    else
+        interpStr := "Active but no micro signals yet"
+
+    color interpCol = microStatus == "TRIGGER" ? (signalDir == 1 ? #00e676 : #ff1744) : microStatus == "SETUP" ? #ffab00 : color.new(color.white, 40)
+    table.cell(statusTbl, 0, 4, interpStr, text_color=interpCol, text_size=size.normal)
+    table.cell(statusTbl, 1, 4, "", text_size=size.normal)
+
+    // Entry status
+    string entryStr = bullEntryActive ? "BULL ENTRY active" : bearEntryActive ? "BEAR ENTRY active" : "—"
+    color entryCol = bullEntryActive ? #00e676 : bearEntryActive ? #ff1744 : color.gray
+    table.cell(statusTbl, 0, 5, "Signal", text_color=color.new(color.white, 30), text_size=size.normal)
+    table.cell(statusTbl, 1, 5, entryStr, text_color=entryCol, text_size=size.normal, text_halign=text.align_right)
+
+    // 4H zone distance
+    float nearDist = bias >= 0 ? distToHTFSup : distToHTFRes
+    string distStr = nearDist < 999 ? str.tostring(nearDist, "#.1") + " ATR" : "—"
+    table.cell(statusTbl, 0, 6, "4H Zone", text_color=color.new(color.white, 30), text_size=size.normal)
+    table.cell(statusTbl, 1, 6, distStr, text_color=nearDist <= zoneProximityATR ? #00e676 : color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+
+// ============================================================================
+// MODULE: data window plots
+// ============================================================================
+
+plot(microScore, "Micro Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(setupScore, "Setup Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(structScore, "Structure Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(behScore, "Behaviour Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(tempoScore, "Tempo Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(nz(htfBullSetup), "4H Bull Setup [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(nz(htfBearSetup), "4H Bear Setup [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bias, "Bias [dw]", display=display.data_window, color=color.new(color.gray, 100))
+
+// ============================================================================
+// MODULE: alerts
+// ============================================================================
+
+alertcondition(microStatus == "TRIGGER" and signalDir == 1, "Bull Trigger", "NG 15m: Bull TRIGGER — micro structure confirmed in 4H setup zone")
+alertcondition(microStatus == "TRIGGER" and signalDir == -1, "Bear Trigger", "NG 15m: Bear TRIGGER — micro structure confirmed in 4H setup zone")
+alertcondition(entryBull and not entryBull[1], "Bull Entry", "NG 15m: BULL ENTRY — sweep/BOS + rejection/FT confirmed")
+alertcondition(entryBear and not entryBear[1], "Bear Entry", "NG 15m: BEAR ENTRY — sweep/BOS + rejection/FT confirmed")
+alertcondition(bullInval and not bullInval[1], "Bull Invalidation", "NG 15m: Bull entry INVALIDATED — stop breached or opposing BOS")
+alertcondition(bearInval and not bearInval[1], "Bear Invalidation", "NG 15m: Bear entry INVALIDATED — stop breached or opposing BOS")
+alertcondition(microStatus == "SETUP" and microStatus[1] != "SETUP", "Micro Setup", "NG 15m: Micro SETUP forming — structure building in 4H context")
