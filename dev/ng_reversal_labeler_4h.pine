@@ -1,19 +1,24 @@
 //@version=6
 // ============================================================================
 // NG Reversal Labeler 4H [WavesUnchained]
-// Version: 0.1.0
+// Version: 0.2.0
 // Author: WavesUnchained
 // ============================================================================
 // Objective historical labeling of bullish/bearish reversals on 4H NatGas.
-// Uses forward-looking ATR-based rules to define reversal bars.
+// Uses forward-looking ATR-based rules with quality grading.
 // Lookahead is intentional — this script is for research/labeling only.
 //
 // Features:
 //   ✓ ATR-based forward reversal detection
-//   ✓ Bullish / Bearish / Neutral labels per bar
-//   ✓ Configurable target and adverse move thresholds
+//   ✓ Quality grading: strong vs weak reversals
+//   ✓ Metrics: achieved move, bars to target, max adverse excursion
+//   ✓ Cluster filter
 //   ✓ Light / Debug / Research display modes
-//   ✓ Chart markers and numeric label plot
+//
+// Labels:
+//   +2 = bull_strong   -2 = bear_strong
+//   +1 = bull_weak     -1 = bear_weak
+//    0 = neutral
 //
 // ============================================================================
 indicator("NG Reversal Labeler 4H [WavesUnchained]", "NG Label", overlay=true, max_labels_count=500)
@@ -24,40 +29,38 @@ indicator("NG Reversal Labeler 4H [WavesUnchained]", "NG Label", overlay=true, m
 
 var gLabel = "Labeling Parameters"
 int   atrLen        = input.int(14, "ATR Length", minval=1, group=gLabel)
-int   forwardBars   = input.int(8, "Forward Bars", minval=1, maxval=50, group=gLabel)
-float targetATR     = input.float(1.5, "Target Move (ATR multiple)", minval=0.1, step=0.1, group=gLabel)
+int   forwardBars   = input.int(8, "Forward Bars (min target)", minval=1, maxval=50, group=gLabel)
+int   extendedBars  = input.int(16, "Extended Bars (strong target)", minval=2, maxval=80, group=gLabel, tooltip="Longer window for strong reversal classification")
+float targetATR     = input.float(1.5, "Weak Target (ATR multiple)", minval=0.1, step=0.1, group=gLabel)
+float strongATR     = input.float(2.5, "Strong Target (ATR multiple)", minval=0.5, step=0.1, group=gLabel, tooltip="Larger move = strong reversal")
 float maxAdverseATR = input.float(0.6, "Max Adverse Move (ATR multiple)", minval=0.1, step=0.1, group=gLabel)
 bool  useClose      = input.bool(false, "Use Close instead of High/Low for targets", group=gLabel)
 
+var gQuality = "Quality Criteria"
+int   fastBarsThresh   = input.int(4, "Fast Reversal: bars to target ≤", minval=1, maxval=20, group=gQuality, tooltip="Reaching target quickly is a quality bonus")
+float maeStrongThresh  = input.float(0.3, "Strong: Max Adverse ≤ ATR multiple", minval=0.0, step=0.1, group=gQuality, tooltip="Clean reversals have low adverse excursion")
+
 var gCluster = "Cluster Filter"
-int   minGapBars = input.int(3, "Min Bars Between Labels (same direction)", minval=0, maxval=20, group=gCluster, tooltip="Suppresses repeated labels of the same type within N bars. 0 = no filter.")
+int   minGapBars = input.int(3, "Min Bars Between Labels (same direction)", minval=0, maxval=20, group=gCluster)
 
 var gDisplay = "Display"
 string displayMode = input.string("Light", "Display Mode", options=["Light", "Debug", "Research"], group=gDisplay)
 bool   showLabels  = input.bool(true, "Show Chart Labels", group=gDisplay)
-color  bullColor   = input.color(color.new(color.lime, 0), "Bullish Label Color", group=gDisplay)
-color  bearColor   = input.color(color.new(color.red, 0), "Bearish Label Color", group=gDisplay)
 
 // ============================================================================
-// MODULE: core
+// MODULE: core — ring buffer
 // ============================================================================
 
-// ATR calculation
 atrValue = ta.atr(atrLen)
 
-// ── Forward-looking reversal detection via backward evaluation ──
-// Pine cannot reference future bars with negative indices.
-// Strategy: each bar checks whether it was the START of a reversal
-// by looking BACK from later bars. We store per-bar reference data
-// in arrays and evaluate once enough bars have passed.
+// Buffer size = max of forwardBars and extendedBars
+int bufSize = math.max(forwardBars, extendedBars) + 1
 
-// Rolling ring buffer of close/high/low/atr for the last forwardBars bars
-var array<float> bufClose = array.new_float(forwardBars + 1, na)
-var array<float> bufHigh  = array.new_float(forwardBars + 1, na)
-var array<float> bufLow   = array.new_float(forwardBars + 1, na)
-var array<float> bufATR   = array.new_float(forwardBars + 1, na)
+var array<float> bufClose = array.new_float(bufSize, na)
+var array<float> bufHigh  = array.new_float(bufSize, na)
+var array<float> bufLow   = array.new_float(bufSize, na)
+var array<float> bufATR   = array.new_float(bufSize, na)
 
-// Shift buffer: remove oldest, append current
 array.shift(bufClose)
 array.push(bufClose, close)
 array.shift(bufHigh)
@@ -67,137 +70,324 @@ array.push(bufLow, low)
 array.shift(bufATR)
 array.push(bufATR, atrValue)
 
-// Evaluate the bar that is forwardBars bars ago (index 0 in buffer)
+// We evaluate the bar at offset = extendedBars (oldest useful bar in buffer)
+int evalOffset = bufSize - 1
 float startClose = array.get(bufClose, 0)
 float startATR   = array.get(bufATR, 0)
-bool  canEval    = not na(startClose) and not na(startATR) and startATR > 0 and bar_index >= forwardBars
+bool  canEval    = not na(startClose) and not na(startATR) and startATR > 0 and bar_index >= evalOffset
 
-// Check bullish: from start bar, price must rise >= target*ATR
-// without first dropping > maxAdverse*ATR
-f_evalBull(array<float> hi, array<float> lo, array<float> cl, int bars, float refClose, float atr, float target, float maxAdv, bool closeOnly) =>
-    bool  tgtHit  = false
-    bool  stpHit  = false
+// ============================================================================
+// MODULE: core — multi-metric forward evaluation
+// ============================================================================
+
+// Returns: [targetHit, maxMove, maxAdverse, barsToTarget]
+f_evalBullMetrics(array<float> hi, array<float> lo, array<float> cl, int bars, float refClose, float atr, float target, float maxAdv, bool closeOnly) =>
+    float maxMove    = 0.0
+    float maxAdverse = 0.0
+    int   barsToTgt  = bars  // default: didn't reach
+    bool  tgtHit     = false
+    bool  stpHit     = false
     for i = 1 to bars
         float barHi = closeOnly ? array.get(cl, i) : array.get(hi, i)
         float barLo = closeOnly ? array.get(cl, i) : array.get(lo, i)
-        if barLo < refClose - maxAdv * atr
+        float moveUp   = barHi - refClose
+        float moveDown = refClose - barLo
+        maxMove    := math.max(maxMove, moveUp)
+        maxAdverse := math.max(maxAdverse, moveDown)
+        if not stpHit and moveDown > maxAdv * atr
             stpHit := true
-            break
-        if barHi >= refClose + target * atr
-            tgtHit := true
-            break
-    tgtHit and not stpHit
+        if not tgtHit and not stpHit and moveUp >= target * atr
+            tgtHit     := true
+            barsToTgt  := i
+    [tgtHit and not stpHit, maxMove, maxAdverse, barsToTgt]
 
-f_evalBear(array<float> hi, array<float> lo, array<float> cl, int bars, float refClose, float atr, float target, float maxAdv, bool closeOnly) =>
-    bool  tgtHit  = false
-    bool  stpHit  = false
+f_evalBearMetrics(array<float> hi, array<float> lo, array<float> cl, int bars, float refClose, float atr, float target, float maxAdv, bool closeOnly) =>
+    float maxMove    = 0.0
+    float maxAdverse = 0.0
+    int   barsToTgt  = bars
+    bool  tgtHit     = false
+    bool  stpHit     = false
     for i = 1 to bars
         float barHi = closeOnly ? array.get(cl, i) : array.get(hi, i)
         float barLo = closeOnly ? array.get(cl, i) : array.get(lo, i)
-        if barHi > refClose + maxAdv * atr
+        float moveDown = refClose - barLo
+        float moveUp   = barHi - refClose
+        maxMove    := math.max(maxMove, moveDown)
+        maxAdverse := math.max(maxAdverse, moveUp)
+        if not stpHit and moveUp > maxAdv * atr
             stpHit := true
-            break
-        if barLo <= refClose - target * atr
-            tgtHit := true
-            break
-    tgtHit and not stpHit
+        if not tgtHit and not stpHit and moveDown >= target * atr
+            tgtHit     := true
+            barsToTgt  := i
+    [tgtHit and not stpHit, maxMove, maxAdverse, barsToTgt]
 
-bool isBull = canEval ? f_evalBull(bufHigh, bufLow, bufClose, forwardBars, startClose, startATR, targetATR, maxAdverseATR, useClose) : false
-bool isBear = canEval ? f_evalBear(bufHigh, bufLow, bufClose, forwardBars, startClose, startATR, targetATR, maxAdverseATR, useClose) : false
+// ── Evaluate weak target (forwardBars window) ──
+var bool  bullWeakHit = false
+var float bullMaxMove = 0.0
+var float bullMAE = 0.0
+var int   bullBarsToTgt = 0
+var bool  bearWeakHit = false
+var float bearMaxMove = 0.0
+var float bearMAE = 0.0
+var int   bearBarsToTgt = 0
 
-// If both trigger (rare), neutralize
-int rawLabel = isBull and not isBear ? 1 : isBear and not isBull ? -1 : 0
+if canEval
+    [h1, m1, a1, b1] = f_evalBullMetrics(bufHigh, bufLow, bufClose, forwardBars, startClose, startATR, targetATR, maxAdverseATR, useClose)
+    bullWeakHit := h1
+    bullMaxMove := m1
+    bullMAE := a1
+    bullBarsToTgt := b1
+    [h2, m2, a2, b2] = f_evalBearMetrics(bufHigh, bufLow, bufClose, forwardBars, startClose, startATR, targetATR, maxAdverseATR, useClose)
+    bearWeakHit := h2
+    bearMaxMove := m2
+    bearMAE := a2
+    bearBarsToTgt := b2
+else
+    bullWeakHit := false
+    bullMaxMove := 0.0
+    bullMAE := 0.0
+    bullBarsToTgt := forwardBars
+    bearWeakHit := false
+    bearMaxMove := 0.0
+    bearMAE := 0.0
+    bearBarsToTgt := forwardBars
 
-// ── Cluster filter: suppress repeated labels within minGapBars ──
+// ── Evaluate strong target (extendedBars window) ──
+var bool  bullStrongHit = false
+var float bullExtMove = 0.0
+var float bullExtMAE = 0.0
+var int   bullExtBars = 0
+var bool  bearStrongHit = false
+var float bearExtMove = 0.0
+var float bearExtMAE = 0.0
+var int   bearExtBars = 0
+
+if canEval
+    [h3, m3, a3, b3] = f_evalBullMetrics(bufHigh, bufLow, bufClose, extendedBars, startClose, startATR, strongATR, maxAdverseATR, useClose)
+    bullStrongHit := h3
+    bullExtMove := m3
+    bullExtMAE := a3
+    bullExtBars := b3
+    [h4, m4, a4, b4] = f_evalBearMetrics(bufHigh, bufLow, bufClose, extendedBars, startClose, startATR, strongATR, maxAdverseATR, useClose)
+    bearStrongHit := h4
+    bearExtMove := m4
+    bearExtMAE := a4
+    bearExtBars := b4
+else
+    bullStrongHit := false
+    bullExtMove := 0.0
+    bullExtMAE := 0.0
+    bullExtBars := extendedBars
+    bearStrongHit := false
+    bearExtMove := 0.0
+    bearExtMAE := 0.0
+    bearExtBars := extendedBars
+
+// ============================================================================
+// MODULE: quality grading
+// ============================================================================
+
+// Strong bull: hits strong target OR (hits weak target fast + low MAE)
+bool bullIsStrong = bullStrongHit or (bullWeakHit and bullBarsToTgt <= fastBarsThresh and startATR > 0 and bullMAE <= maeStrongThresh * startATR)
+bool bullIsWeak   = bullWeakHit and not bullIsStrong
+
+// Strong bear: hits strong target OR (hits weak target fast + low MAE)
+bool bearIsStrong = bearStrongHit or (bearWeakHit and bearBarsToTgt <= fastBarsThresh and startATR > 0 and bearMAE <= maeStrongThresh * startATR)
+bool bearIsWeak   = bearWeakHit and not bearIsStrong
+
+// ── Timing classification ──
+// How quickly did the reversal reach its target?
+// Uses the best available barsToTarget (strong window if hit, else weak window)
+int bullBars = bullIsStrong and bullStrongHit ? bullExtBars : bullWeakHit ? bullBarsToTgt : forwardBars
+int bearBars = bearIsStrong and bearStrongHit ? bearExtBars : bearWeakHit ? bearBarsToTgt : forwardBars
+
+// Timing categories:
+//   1 = fast    — reached target within fastBarsThresh (default 4 bars)
+//   2 = normal  — reached within 2× fastBarsThresh
+//   3 = slow    — reached target but took long
+//   0 = none
+int bullTiming = bullIsStrong or bullIsWeak ? (bullBars <= fastBarsThresh ? 1 : bullBars <= fastBarsThresh * 2 ? 2 : 3) : 0
+int bearTiming = bearIsStrong or bearIsWeak ? (bearBars <= fastBarsThresh ? 1 : bearBars <= fastBarsThresh * 2 ? 2 : 3) : 0
+
+// Timing label strings
+f_timingStr(int t) =>
+    t == 1 ? "FAST" : t == 2 ? "normal" : t == 3 ? "slow" : "—"
+
+// Raw label: +2 strong bull, +1 weak bull, -1 weak bear, -2 strong bear
+int rawLabel = bullIsStrong ? 2 : bullIsWeak ? 1 : bearIsStrong ? -2 : bearIsWeak ? -1 : 0
+
+// Conflict: both directions trigger → neutralize
+if (bullIsStrong or bullIsWeak) and (bearIsStrong or bearIsWeak)
+    rawLabel := 0
+
+// ── Cluster filter ──
 var int barsSinceLastBull = 999
 var int barsSinceLastBear = 999
-
 barsSinceLastBull += 1
 barsSinceLastBear += 1
 
 int reversalLabel = rawLabel
 if minGapBars > 0
-    if rawLabel == 1 and barsSinceLastBull < minGapBars
+    if rawLabel > 0 and barsSinceLastBull < minGapBars
         reversalLabel := 0
-    if rawLabel == -1 and barsSinceLastBear < minGapBars
+    if rawLabel < 0 and barsSinceLastBear < minGapBars
         reversalLabel := 0
 
-if reversalLabel == 1
+if reversalLabel > 0
     barsSinceLastBull := 0
-if reversalLabel == -1
+if reversalLabel < 0
     barsSinceLastBear := 0
 
 // ============================================================================
 // MODULE: visuals
 // ============================================================================
 
-// Numeric label plot (always available in Data Window)
-// Note: plot is delayed by forwardBars so it aligns with the evaluated bar
-plot(reversalLabel, "Reversal Label", color=color.new(color.gray, 100), display=display.data_window, offset=-forwardBars)
+// Colors
+color bullStrongColor = color.new(#00e676, 0)
+color bullWeakColor   = color.new(#00e676, 50)
+color bearStrongColor = color.new(#ff1744, 0)
+color bearWeakColor   = color.new(#ff1744, 50)
 
-// Chart markers — placed on the start bar (forwardBars ago)
-int targetBarIdx = bar_index - forwardBars
+// Numeric label plot
+plot(reversalLabel, "Reversal Label", color=color.new(color.gray, 100), display=display.data_window, offset=-extendedBars)
 
+// Timing plot (1=fast, 2=normal, 3=slow, 0=none)
+int dispTiming = reversalLabel > 0 ? bullTiming : reversalLabel < 0 ? bearTiming : 0
+plot(dispTiming, "Timing (1=fast,2=normal,3=slow)", color=color.new(color.gray, 100), display=display.data_window, offset=-extendedBars)
+
+// Chart markers — placed on the evaluated bar
+int targetBarIdx = bar_index - evalOffset
+
+// Metrics for tooltip
+float dispMove = reversalLabel == 2 ? bullExtMove : reversalLabel == 1 ? bullMaxMove : reversalLabel == -2 ? bearExtMove : reversalLabel == -1 ? bearMaxMove : 0.0
+float dispMAE  = reversalLabel == 2 ? bullExtMAE : reversalLabel == 1 ? bullMAE : reversalLabel == -2 ? bearExtMAE : reversalLabel == -1 ? bearMAE : 0.0
+int   dispBars = reversalLabel == 2 ? bullExtBars : reversalLabel == 1 ? bullBarsToTgt : reversalLabel == -2 ? bearExtBars : reversalLabel == -1 ? bearBarsToTgt : 0
+float dispMoveATR = startATR > 0 ? dispMove / startATR : 0.0
+float dispMAEATR  = startATR > 0 ? dispMAE / startATR : 0.0
+string timingTag  = reversalLabel > 0 ? f_timingStr(bullTiming) : reversalLabel < 0 ? f_timingStr(bearTiming) : ""
+
+string ttip = reversalLabel != 0 ? "Move: " + str.tostring(dispMoveATR, "#.0") + " ATR\nMAE: " + str.tostring(dispMAEATR, "#.0") + " ATR\nBars: " + str.tostring(dispBars) + "\nTiming: " + timingTag : ""
+
+// Timing suffix for label text
+string bullTimingSuffix = bullTiming == 1 ? " ⚡" : bullTiming == 3 ? " ~" : ""
+string bearTimingSuffix = bearTiming == 1 ? " ⚡" : bearTiming == 3 ? " ~" : ""
+
+if showLabels and reversalLabel == 2
+    label.new(targetBarIdx, low[evalOffset], "▲▲" + bullTimingSuffix, style=label.style_label_up, color=bullStrongColor, textcolor=color.white, size=size.small, tooltip="STRONG BULL [" + timingTag + "]\n" + ttip)
 if showLabels and reversalLabel == 1
-    label.new(targetBarIdx, low[forwardBars], "▲", style=label.style_label_up, color=bullColor, textcolor=color.white, size=size.tiny)
-
+    label.new(targetBarIdx, low[evalOffset], "▲" + bullTimingSuffix, style=label.style_label_up, color=bullWeakColor, textcolor=color.white, size=size.tiny, tooltip="Weak bull [" + timingTag + "]\n" + ttip)
+if showLabels and reversalLabel == -2
+    label.new(targetBarIdx, high[evalOffset], "▼▼" + bearTimingSuffix, style=label.style_label_down, color=bearStrongColor, textcolor=color.white, size=size.small, tooltip="STRONG BEAR [" + timingTag + "]\n" + ttip)
 if showLabels and reversalLabel == -1
-    label.new(targetBarIdx, high[forwardBars], "▼", style=label.style_label_down, color=bearColor, textcolor=color.white, size=size.tiny)
+    label.new(targetBarIdx, high[evalOffset], "▼" + bearTimingSuffix, style=label.style_label_down, color=bearWeakColor, textcolor=color.white, size=size.tiny, tooltip="Weak bear [" + timingTag + "]\n" + ttip)
 
-// Background highlight in Debug/Research mode — shifted to start bar
-bool showBg = displayMode == "Debug" or displayMode == "Research"
-bgcolor(showBg and reversalLabel[forwardBars] == 1 ? color.new(bullColor, 90) : showBg and reversalLabel[forwardBars] == -1 ? color.new(bearColor, 90) : na, offset=-forwardBars)
+// Background highlight in Debug/Research mode
+bool showBgMode = displayMode == "Debug" or displayMode == "Research"
+color bgCol = na
+if showBgMode
+    if reversalLabel == 2
+        bgCol := color.new(bullStrongColor, 85)
+    else if reversalLabel == 1
+        bgCol := color.new(bullWeakColor, 92)
+    else if reversalLabel == -2
+        bgCol := color.new(bearStrongColor, 85)
+    else if reversalLabel == -1
+        bgCol := color.new(bearWeakColor, 92)
+bgcolor(bgCol, offset=-evalOffset)
 
 // ============================================================================
 // MODULE: debug
 // ============================================================================
 
-// Debug plots — ATR and target levels
 bool isDebug   = displayMode == "Debug" or displayMode == "Research"
 
-plot(isDebug ? atrValue : na, "ATR", color=color.new(color.orange, 60), display=display.data_window)
-plot(isDebug ? close + targetATR * atrValue : na, "Bull Target", color=color.new(bullColor, 80), style=plot.style_cross, display=display.data_window)
-plot(isDebug ? close - targetATR * atrValue : na, "Bear Target", color=color.new(bearColor, 80), style=plot.style_cross, display=display.data_window)
+plot(isDebug ? atrValue : na, "ATR", color=color.new(color.orange, 40), display=display.data_window)
+plot(isDebug ? close + strongATR * atrValue : na, "Strong Bull Target", color=color.new(bullStrongColor, 70), style=plot.style_cross, display=display.data_window)
+plot(isDebug ? close - strongATR * atrValue : na, "Strong Bear Target", color=color.new(bearStrongColor, 70), style=plot.style_cross, display=display.data_window)
 
-// Research mode: count labels
-var int bullCount = 0
-var int bearCount = 0
-if reversalLabel == 1
-    bullCount += 1
-if reversalLabel == -1
-    bearCount += 1
+// ============================================================================
+// MODULE: research table
+// ============================================================================
 
 bool isResearch = displayMode == "Research"
 
-// Summary table in Research mode
-float bullPct = bar_index > 0 ? bullCount / (bar_index + 1) * 100 : 0.0
-float bearPct = bar_index > 0 ? bearCount / (bar_index + 1) * 100 : 0.0
-float neutralPct = 100.0 - bullPct - bearPct
+var int bullStrongCount = 0
+var int bullWeakCount   = 0
+var int bearStrongCount = 0
+var int bearWeakCount   = 0
+var int fastCount       = 0
+var int normalCount     = 0
+var int slowCount       = 0
+
+if reversalLabel == 2
+    bullStrongCount += 1
+if reversalLabel == 1
+    bullWeakCount += 1
+if dispTiming == 1
+    fastCount += 1
+if dispTiming == 2
+    normalCount += 1
+if dispTiming == 3
+    slowCount += 1
+if reversalLabel == -2
+    bearStrongCount += 1
+if reversalLabel == -1
+    bearWeakCount += 1
+
+int totalLabels  = bullStrongCount + bullWeakCount + bearStrongCount + bearWeakCount
+int neutralCount = bar_index + 1 - totalLabels
 
 var table summaryTable = na
 if isResearch and barstate.islast
-    summaryTable := table.new(position.top_right, 3, 6, bgcolor=color.new(#1a1a2e, 5), border_color=color.new(color.gray, 50), border_width=1, frame_color=color.new(color.gray, 50), frame_width=2)
-    // Header
+    summaryTable := table.new(position.top_right, 3, 12, bgcolor=color.new(#1a1a2e, 5), border_color=color.new(color.gray, 50), border_width=1, frame_color=color.new(color.gray, 50), frame_width=2)
+
     table.cell(summaryTable, 0, 0, "NG Reversal Labeler", text_color=color.white, text_size=size.normal, text_halign=text.align_left)
-    table.cell(summaryTable, 1, 0, "", text_color=color.gray, text_size=size.normal)
-    table.cell(summaryTable, 2, 0, "v0.1", text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
-    // Column headers
+    table.cell(summaryTable, 1, 0, "", text_size=size.normal)
+    table.cell(summaryTable, 2, 0, "v0.2", text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
+
     table.cell(summaryTable, 0, 1, "", text_size=size.normal)
     table.cell(summaryTable, 1, 1, "Count", text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
     table.cell(summaryTable, 2, 1, "%", text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
-    // Bull
-    table.cell(summaryTable, 0, 2, "Bull Labels", text_color=color.lime, text_size=size.normal, text_halign=text.align_left)
-    table.cell(summaryTable, 1, 2, str.tostring(bullCount), text_color=color.lime, text_size=size.normal, text_halign=text.align_right)
-    table.cell(summaryTable, 2, 2, str.tostring(bullPct, "#.0") + "%", text_color=color.lime, text_size=size.normal, text_halign=text.align_right)
-    // Bear
-    table.cell(summaryTable, 0, 3, "Bear Labels", text_color=color.red, text_size=size.normal, text_halign=text.align_left)
-    table.cell(summaryTable, 1, 3, str.tostring(bearCount), text_color=color.red, text_size=size.normal, text_halign=text.align_right)
-    table.cell(summaryTable, 2, 3, str.tostring(bearPct, "#.0") + "%", text_color=color.red, text_size=size.normal, text_halign=text.align_right)
-    // Neutral
-    table.cell(summaryTable, 0, 4, "Neutral", text_color=color.gray, text_size=size.normal, text_halign=text.align_left)
-    table.cell(summaryTable, 1, 4, str.tostring(bar_index + 1 - bullCount - bearCount), text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
-    table.cell(summaryTable, 2, 4, str.tostring(neutralPct, "#.0") + "%", text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
-    // Total
-    table.cell(summaryTable, 0, 5, "Total Bars", text_color=color.white, text_size=size.normal, text_halign=text.align_left)
-    table.cell(summaryTable, 1, 5, str.tostring(bar_index + 1), text_color=color.white, text_size=size.normal, text_halign=text.align_right)
-    table.cell(summaryTable, 2, 5, "", text_size=size.normal)
+
+    float total = bar_index + 1
+    table.cell(summaryTable, 0, 2, "▲▲ Bull Strong", text_color=bullStrongColor, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 2, str.tostring(bullStrongCount), text_color=bullStrongColor, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 2, str.tostring(bullStrongCount / total * 100, "#.0") + "%", text_color=bullStrongColor, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(summaryTable, 0, 3, "▲  Bull Weak", text_color=bullWeakColor, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 3, str.tostring(bullWeakCount), text_color=bullWeakColor, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 3, str.tostring(bullWeakCount / total * 100, "#.0") + "%", text_color=bullWeakColor, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(summaryTable, 0, 4, "▼▼ Bear Strong", text_color=bearStrongColor, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 4, str.tostring(bearStrongCount), text_color=bearStrongColor, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 4, str.tostring(bearStrongCount / total * 100, "#.0") + "%", text_color=bearStrongColor, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(summaryTable, 0, 5, "▼  Bear Weak", text_color=bearWeakColor, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 5, str.tostring(bearWeakCount), text_color=bearWeakColor, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 5, str.tostring(bearWeakCount / total * 100, "#.0") + "%", text_color=bearWeakColor, text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(summaryTable, 0, 6, "Neutral", text_color=color.gray, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 6, str.tostring(neutralCount), text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 6, str.tostring(neutralCount / total * 100, "#.0") + "%", text_color=color.gray, text_size=size.normal, text_halign=text.align_right)
+
+    // Separator
+    table.cell(summaryTable, 0, 7, "─ TIMING ─", text_color=color.new(color.white, 40), text_size=size.small, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 7, "", text_size=size.small)
+    table.cell(summaryTable, 2, 7, "", text_size=size.small)
+
+    float totalSignals = totalLabels > 0 ? totalLabels : 1.0
+    table.cell(summaryTable, 0, 8, "⚡ Fast (≤" + str.tostring(fastBarsThresh) + " bars)", text_color=color.new(#ffab00, 0), text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 8, str.tostring(fastCount), text_color=color.new(#ffab00, 0), text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 8, str.tostring(fastCount / totalSignals * 100, "#.0") + "%", text_color=color.new(#ffab00, 0), text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(summaryTable, 0, 9, "Normal (≤" + str.tostring(fastBarsThresh * 2) + " bars)", text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 9, str.tostring(normalCount), text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 9, str.tostring(normalCount / totalSignals * 100, "#.0") + "%", text_color=color.new(color.white, 30), text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(summaryTable, 0, 10, "~ Slow (>" + str.tostring(fastBarsThresh * 2) + " bars)", text_color=color.new(color.gray, 20), text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 10, str.tostring(slowCount), text_color=color.new(color.gray, 20), text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 10, str.tostring(slowCount / totalSignals * 100, "#.0") + "%", text_color=color.new(color.gray, 20), text_size=size.normal, text_halign=text.align_right)
+
+    table.cell(summaryTable, 0, 11, "Total Bars", text_color=color.white, text_size=size.normal, text_halign=text.align_left)
+    table.cell(summaryTable, 1, 11, str.tostring(bar_index + 1), text_color=color.white, text_size=size.normal, text_halign=text.align_right)
+    table.cell(summaryTable, 2, 11, "", text_size=size.normal)
