@@ -127,85 +127,6 @@ bool  isTrendDown   = ema20 < ema50 and effRatio > 0.35
 bool  isRange       = effRatio <= 0.35
 
 // ============================================================================
-// MODULE: simplified volume profile — POC + Value Area
-// ============================================================================
-
-// Lightweight: 10 rows over lookback, no heavy loops on last bar
-int   vpLookback = 100
-int   vpRows     = 10
-float vpHigh     = ta.highest(high, vpLookback)
-float vpLow      = ta.lowest(low, vpLookback)
-float vpStep     = vpHigh > vpLow ? (vpHigh - vpLow) / vpRows : 0.0
-
-// Accumulate volume per row
-var float[] vpBins = array.new_float(vpRows, 0.0)
-
-// Reset and recalculate on each bar (rolling window)
-if vpStep > 0
-    for i = 0 to vpRows - 1
-        array.set(vpBins, i, 0.0)
-    for bk = 0 to math.min(vpLookback - 1, bar_index)
-        float bHi = high[bk]
-        float bLo = low[bk]
-        float bVol = nz(volume[bk])
-        if bVol > 0
-            for row = 0 to vpRows - 1
-                float rowLo = vpLow + row * vpStep
-                float rowHi = rowLo + vpStep
-                if bHi >= rowLo and bLo < rowHi
-                    // Proportional volume allocation
-                    float overlap = math.min(bHi, rowHi) - math.max(bLo, rowLo)
-                    float barRange = bHi - bLo
-                    float portion = barRange > 0 ? overlap / barRange : 1.0 / vpRows
-                    array.set(vpBins, row, array.get(vpBins, row) + bVol * portion)
-
-// Find POC (row with highest volume)
-int   pocRow   = 0
-float pocMax   = 0.0
-for i = 0 to vpRows - 1
-    if array.get(vpBins, i) > pocMax
-        pocMax := array.get(vpBins, i)
-        pocRow := i
-
-float pocLevel = vpLow + (pocRow + 0.5) * vpStep
-float totalVol = array.sum(vpBins)
-
-// Value Area: rows around POC covering ~70% of total volume
-float vaVol    = pocMax
-int   vaLow    = pocRow
-int   vaHigh   = pocRow
-for _iter = 0 to vpRows - 1
-    if vaVol >= totalVol * 0.70
-        break
-    float belowVol = vaLow > 0 ? array.get(vpBins, vaLow - 1) : 0.0
-    float aboveVol = vaHigh < vpRows - 1 ? array.get(vpBins, vaHigh + 1) : 0.0
-    if belowVol >= aboveVol and vaLow > 0
-        vaLow  := vaLow - 1
-        vaVol  := vaVol + belowVol
-    else if vaHigh < vpRows - 1
-        vaHigh := vaHigh + 1
-        vaVol  := vaVol + aboveVol
-    else if vaLow > 0
-        vaLow  := vaLow - 1
-        vaVol  := vaVol + belowVol
-    else
-        break
-
-float vaHighLevel = vpLow + (vaHigh + 1) * vpStep
-float vaLowLevel  = vpLow + vaLow * vpStep
-
-// Check if price is near POC or in Value Area
-float pocDistATR  = atrValue > 0 ? math.abs(close - pocLevel) / atrValue : 999.0
-bool  nearPOC     = pocDistATR < 0.5
-bool  inValueArea = close >= vaLowLevel and close <= vaHighLevel
-
-// POC line visualization
-var line pocLine = na
-if showPOC and barstate.islast
-    line.delete(pocLine)
-    pocLine := line.new(bar_index - vpLookback, pocLevel, bar_index + 5, pocLevel, color=color.new(#ffeb3b, 30), style=line.style_dashed, width=1)
-
-// ============================================================================
 // MODULE: swing detection — micro + major
 // ============================================================================
 
@@ -242,6 +163,122 @@ if isMajorSwingHigh
 if isMajorSwingLow
     lastMajorSwingLow := majorPivotLo
     lastMajorSwingLowBar := bar_index - majorRightBars
+
+// ============================================================================
+// MODULE: structure-based volume profile — POC + Value Area per swing leg
+// ============================================================================
+
+// Recalculates when a new major swing completes, profiling the last leg.
+int   vpRows = 15
+var float pocLevel    = na
+var float vaHighLevel = na
+var float vaLowLevel  = na
+var int   pocStartBar = na
+var float[] vpBins    = array.new_float(vpRows, 0.0)
+
+var int   prevMajorSHBar = na
+var int   prevMajorSLBar = na
+var float prevMajorSH    = na
+var float prevMajorSL    = na
+
+bool newMajorSH = isMajorSwingHigh and majorPivotHi != prevMajorSH
+bool newMajorSL = isMajorSwingLow and majorPivotLo != prevMajorSL
+bool vpTrigger  = newMajorSH or newMajorSL
+
+if newMajorSH
+    prevMajorSH    := majorPivotHi
+    prevMajorSHBar := bar_index - majorRightBars
+if newMajorSL
+    prevMajorSL    := majorPivotLo
+    prevMajorSLBar := bar_index - majorRightBars
+
+if vpTrigger
+    int legStart = na
+    int legEnd   = na
+    if newMajorSH and not na(prevMajorSLBar)
+        legStart := prevMajorSLBar
+        legEnd   := bar_index - majorRightBars
+        pocStartBar := legStart
+    else if newMajorSL and not na(prevMajorSHBar)
+        legStart := prevMajorSHBar
+        legEnd   := bar_index - majorRightBars
+        pocStartBar := legStart
+
+    if not na(legStart) and not na(legEnd) and legEnd > legStart
+        int legLen = legEnd - legStart
+        float legHigh = high
+        float legLow  = low
+        for bk = 0 to math.min(legLen, 200)
+            int offset = bar_index - legEnd + bk
+            if offset >= 0 and offset < 500
+                legHigh := math.max(legHigh, high[offset])
+                legLow  := math.min(legLow, low[offset])
+
+        float vpStep = legHigh > legLow ? (legHigh - legLow) / vpRows : 0.0
+        if vpStep > 0
+            for i = 0 to vpRows - 1
+                array.set(vpBins, i, 0.0)
+            for bk = 0 to math.min(legLen, 200)
+                int offset = bar_index - legEnd + bk
+                if offset >= 0 and offset < 500
+                    float bHi  = high[offset]
+                    float bLo  = low[offset]
+                    float bVol = nz(volume[offset])
+                    if bVol > 0
+                        for row = 0 to vpRows - 1
+                            float rowLo = legLow + row * vpStep
+                            float rowHi = rowLo + vpStep
+                            if bHi >= rowLo and bLo < rowHi
+                                float overlap = math.min(bHi, rowHi) - math.max(bLo, rowLo)
+                                float barRng  = bHi - bLo
+                                float portion = barRng > 0 ? overlap / barRng : 1.0 / vpRows
+                                array.set(vpBins, row, array.get(vpBins, row) + bVol * portion)
+
+            int   bestRow = 0
+            float bestVol = 0.0
+            for i = 0 to vpRows - 1
+                if array.get(vpBins, i) > bestVol
+                    bestVol := array.get(vpBins, i)
+                    bestRow := i
+            pocLevel := legLow + (bestRow + 0.5) * vpStep
+
+            float totVol = array.sum(vpBins)
+            float vaVol  = bestVol
+            int   vaLo   = bestRow
+            int   vaHi   = bestRow
+            for _iter = 0 to vpRows - 1
+                if vaVol >= totVol * 0.70
+                    break
+                float belowV = vaLo > 0 ? array.get(vpBins, vaLo - 1) : 0.0
+                float aboveV = vaHi < vpRows - 1 ? array.get(vpBins, vaHi + 1) : 0.0
+                if belowV >= aboveV and vaLo > 0
+                    vaLo := vaLo - 1
+                    vaVol := vaVol + belowV
+                else if vaHi < vpRows - 1
+                    vaHi := vaHi + 1
+                    vaVol := vaVol + aboveV
+                else if vaLo > 0
+                    vaLo := vaLo - 1
+                    vaVol := vaVol + belowV
+                else
+                    break
+            vaHighLevel := legLow + (vaHi + 1) * vpStep
+            vaLowLevel  := legLow + vaLo * vpStep
+
+float pocDistATR  = not na(pocLevel) and atrValue > 0 ? math.abs(close - pocLevel) / atrValue : 999.0
+bool  nearPOC     = pocDistATR < 0.5
+bool  inValueArea = not na(vaLowLevel) and not na(vaHighLevel) ? close >= vaLowLevel and close <= vaHighLevel : false
+
+var line pocLine   = na
+var line vaHiLine  = na
+var line vaLoLine  = na
+if showPOC and barstate.islast and not na(pocLevel) and not na(pocStartBar)
+    line.delete(pocLine)
+    line.delete(vaHiLine)
+    line.delete(vaLoLine)
+    pocLine  := line.new(pocStartBar, pocLevel, bar_index + 5, pocLevel, color=color.new(#ffeb3b, 30), style=line.style_dashed, width=2)
+    vaHiLine := line.new(pocStartBar, vaHighLevel, bar_index + 5, vaHighLevel, color=color.new(#ffeb3b, 70), style=line.style_dotted, width=1)
+    vaLoLine := line.new(pocStartBar, vaLowLevel, bar_index + 5, vaLowLevel, color=color.new(#ffeb3b, 70), style=line.style_dotted, width=1)
 
 // ============================================================================
 // MODULE: break of structure — micro + major
