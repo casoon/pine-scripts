@@ -217,7 +217,7 @@ Color logic reflects **current state** (not reversal opportunity):
 
 ### WaveTrend
 
-Full LazyBear WaveTrend implementation with:
+WaveTrend momentum oscillator with:
 - **Oscillator + Signal** lines with OB/OS levels (±60)
 - **Divergence Detection** — Regular + Hidden, Bull + Bear
 - **Composite Bias Score** (-7 to +7): Oscillator position + Momentum + Cross (with decay) + Divergence (with decay) + Regime → "S↑/↑/w↑/—/w↓/↓/S↓" with confidence %
