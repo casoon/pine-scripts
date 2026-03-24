@@ -2,7 +2,7 @@
 
 ## Overview
 
-The system consists of 5 indicators that work together on a NatGas chart.
+The system consists of 6 indicators that work together on a NatGas chart.
 
 | Script | Type | Timeframe | File |
 |--------|------|-----------|------|
@@ -10,9 +10,10 @@ The system consists of 5 indicators that work together on a NatGas chart.
 | NG Structure & Zones | Overlay | 4H | `ng_structure_zones_4h.pine` |
 | NG Feature Exporter | Panel | 4H | `ng_feature_exporter_core_4h.pine` |
 | NG Reversal Score | Panel | 4H | `ng_reversal_score_4h.pine` |
+| NG Accumulation Phase | Overlay | 4H | `ng_accumulation_phase_4h.pine` |
 | NG Execution 15m | Overlay | 15m | `ng_execution_15m.pine` |
 
-**Core principle:** 4H = Context (where to look). 15m = Timing (when to act).
+**Core principle:** 4H = Context (where to look). 15m = Timing (when to act). Accumulation = Patience (is a base forming?).
 
 ---
 
@@ -180,7 +181,7 @@ Based on 4 sub-scores:
 
 ## 3. NG Feature Exporter (Panel, 4H)
 
-Shows indicator values as an oscillator panel below the chart.
+Shows indicator values as an oscillator panel below the chart. Includes WaveTrend with divergence detection.
 
 **Plot group selectable via input "Plot Group":**
 
@@ -191,22 +192,39 @@ Shows indicator values as an oscillator panel below the chart.
 | Volatility | BB Width (orange), Candle/ATR (green), BB Distance (cyan) |
 | Trend | Price→EMA20 (yellow), EMA20→EMA50 (orange), Slope direction (dots) |
 | Candle | Body/Range % (yellow), Upper Wick % (red), Lower Wick % (green) |
+| WaveTrend | WT Oscillator (blue), WT Signal (orange), WT Histogram (green/red bars) |
 
-### Interpretation Table (top right)
+### Line Labels
 
-3-column layout showing each feature with current value + plain-language reading:
+Each plot group shows value labels at the right edge of the chart, directly on each line. Toggle via "Show Line Labels" (default: on). Hover shows interpretation tooltip.
 
-| Feature | Value | Reading |
-|---------|-------|---------|
-| RSI | 28.3 | RSI oversold — possible exhaustion |
-| StochRSI | K:12 D:18 | StochRSI low, K turns above D — possible reversal up |
-| MFI | 24.1 | MFI low — more money flowing out than in |
-| Trend | -1.8x | Price below EMA20 — overextended downside |
-| Volatility | BB:-2.1 | Price at lower Bollinger extreme |
-| Volume | 1.4x | Volume above average — elevated interest |
-| | | SUMMARY: Multiple indicators show oversold... |
+### Interpretation Table (top right, toggleable)
 
-Color-coded: green at bullish extremes, red at bearish, gray at neutral.
+Compact 4-column layout — two features per row with values. Hover any cell for full interpretation.
+
+| Left | Value | Right | Value |
+|------|-------|-------|-------|
+| RSI | 32.0 | Trend | -1.2x |
+| StchRSI | 15/22 | Volatil | -1.8 |
+| MFI | 28.0 | Volume | 1.1x |
+| WT | -45/-38 | WT Bias | ↓57% |
+
+Color logic reflects **current state** (not reversal opportunity):
+- Red = bearish pressure (low RSI falling, price below EMA)
+- Amber = transitional (turning)
+- Green = bullish pressure
+- chart.fg_color = neutral
+
+### WaveTrend
+
+Full LazyBear WaveTrend implementation with:
+- **Oscillator + Signal** lines with OB/OS levels (±60)
+- **Divergence Detection** — Regular + Hidden, Bull + Bear
+- **Composite Bias Score** (-7 to +7): Oscillator position + Momentum + Cross (with decay) + Divergence (with decay) + Regime → "S↑/↑/w↑/—/w↓/↓/S↓" with confidence %
+
+### Summary Line
+
+Bottom row shows overall assessment. Hover for full breakdown of all indicators.
 
 ---
 
@@ -279,18 +297,14 @@ After an event, checked within 2–4 bars:
 | EXPIRED | Event too old |
 | **FAILED** | **No follow-through or trigger lost** |
 
-### Interpretation (always visible in table, top right)
+### Table (top right)
 
-The table now explains the current state in plain language:
-
-**When a signal is active:**
-- "▲ Setup+Structure+FT confirmed"
-- "▼ Awaiting follow-through"
-
-**When NO signal is active (the common case):**
-- "▲ No bull setup — momentum still bearish"
-- "▼ RSI elevated but no overheating in money flow"
-- Context: "Downtrend | High volatility | RSI weak"
+Compact display with rich hover tooltips on every cell:
+- **NG Score** hover → full system explanation
+- **▲ S:3 C:1** hover → all bull setup/confirm components with ✓/·
+- **▼ S:2 C:0** hover → all bear components
+- **Context** hover → regime, multipliers, conflict details
+- **FT ✓/✗** hover → follow-through status, decay, event age
 
 ### Conflict Detection
 
@@ -320,14 +334,6 @@ Plus: **Trap Hint** when a failed reversal signals the opposite direction.
 | HIGH VOL | — | ×1.2 |
 | LOW VOL | — | ×0.8 |
 
-### Momentum Variants (switchable)
-
-| Variant | Components |
-|---------|----------|
-| **A: RSI+MFI+MACD** (Default) | Cleaner |
-| B: RSI+MFI+StochRSI | Faster |
-| C: All | For comparison |
-
 ### Background Color
 
 | Color | Meaning |
@@ -341,7 +347,90 @@ Plus: **Trap Hint** when a failed reversal signals the opposite direction.
 
 ---
 
-## 5. NG Execution 15m (Overlay, 15m)
+## 5. NG Accumulation Phase (Overlay, 4H)
+
+Detects bottom formation (accumulation) and top formation (distribution) as process states over time — not point signals.
+
+### Core Idea
+
+**"Is this just a bounce, or is a base actually forming?"**
+
+A bottom/top is not an event but a phase: trend weakens → range forms → volatility compresses → liquidity gets swept → structure shifts.
+
+### 5 Components (0–2 each, max 10)
+
+| Component | What it measures | Score 0 | Score 1 | Score 2 |
+|-----------|-----------------|---------|---------|---------|
+| **Trend Loss** | Downtrend/uptrend weakening | Still trending | Flattening | Clear loss |
+| **Range Formation** | Sideways consolidation | Trending (high ER) | Transitioning | Clear range (low ER) |
+| **Vol Compression** | Candles/BB/ATR shrinking | Volatile | Declining | Compressed |
+| **Liquidity** | Sweeps, springs, upthrusts | None | Single events | Multiple/repeated |
+| **Early Structure** | First HL/LH, micro BOS | Nothing | First hints | Repeated |
+
+### States
+
+| State | Score | Meaning |
+|-------|-------|---------|
+| none | < 3 | No phase detected |
+| transition | ≥ 3 | First signs, minimum duration not yet met |
+| early | ≥ 3 | Phase beginning after min duration met |
+| developing | ≥ 5 | Clear phase with multiple components |
+| mature | ≥ 6 | Strong phase, liquidity + range confirmed |
+| breakout_ready / breakdown_ready | ≥ 8 | Structure actively shifting |
+
+**Minimum duration:** 10 bars (configurable). Filters out V-reversals.
+
+### Both Directions
+
+The script detects both:
+- **Accumulation** (bottom) — after downtrend, bullish structure emerging
+- **Distribution** (top) — after uptrend, bearish structure emerging
+
+### Visualization
+
+| Element | Description |
+|---------|-------------|
+| **Background shading** | Gray → orange → green(accum)/red(distrib) → blue(breakout ready) |
+| **Phase label** | On chart: "ACCUMULATION (developing) Score: 6.8 \| 14 bars" |
+| **Tooltip on label** | Full component breakdown + metrics |
+
+### Status Table (top right)
+
+| Row | Content |
+|-----|---------|
+| Header | NG Accum + phase type (ACCUM/DISTRIB/NONE) + state |
+| Score | X / 10 + duration in bars + range width |
+| Interpretation | Plain-language: "Accumulation building — watch sweeps" |
+| Components | T:2 R:1 V:2 L:1 S:1 (hover for details) |
+| Context | ER, BBW ratio, ATR ratio values |
+
+Debug mode adds: separate Accum/Distrib scores, sweep/spring counts, HL/LL/LH flags.
+
+### Alerts
+
+| Alert | Trigger |
+|-------|---------|
+| Accum Developing | Phase enters "developing" |
+| Accum Mature | Phase enters "mature" |
+| Breakout Ready | Accumulation with bull structure shifting |
+| Distrib Developing | Distribution enters "developing" |
+| Distrib Mature | Distribution enters "mature" |
+| Breakdown Ready | Distribution with bear structure shifting |
+
+### Integration with Other Scripts
+
+The Accumulation Phase answers: **"Should I even be watching for a reversal here?"**
+
+| Accum State | Reversal Score says... | Action |
+|-------------|----------------------|--------|
+| none | CANDIDATE | Probably just a bounce — be cautious |
+| developing | SETUP | Building — patience, wait for confirmation |
+| mature | CANDIDATE | **High confidence** — structure + base align |
+| breakout_ready | TRIGGER (15m) | **Best case** — base formed, now timing the entry |
+
+---
+
+## 6. NG Execution 15m (Overlay, 15m)
 
 Lean execution/timing module. Only activates when 4H says "interesting".
 
@@ -375,26 +464,6 @@ The script pulls simplified 4H data:
 | **Behaviour** | 2 | Candle: rejection/engulfing (+1), range expansion + volume (+1) |
 | **Tempo** | 1 | Follow-through within 4 bars (+1) |
 
-### Micro Structure (15m)
-
-Detected with fast pivots (2/2):
-- **Micro BOS** — close breaks above last swing high (bull) or below last swing low (bear)
-- **Higher Low / Lower High** — structure shift in bias direction
-- **Liquidity Sweep** — wick below swing low + close back above (bull spring on 15m)
-- **Sweep Confirmed** — price holds above sweep level on following bars
-
-### Entry & Invalidation
-
-**Entry signal fires when:**
-- Status = TRIGGER (score ≥ 7)
-- Micro BOS or confirmed sweep in bias direction
-- Rejection, engulfing, or follow-through present
-
-**Invalidation fires when:**
-- Price breaks below sweep low (bull) or above sweep high (bear)
-- Opposing micro BOS
-- Entry expires after extended time without movement
-
 ### Status
 
 | Status | Score | Meaning |
@@ -414,7 +483,7 @@ Detected with fast pivots (2/2):
 | Background tint | Subtle green/red at TRIGGER, amber at SETUP |
 | SWP / BOS labels | Debug mode: micro events visible |
 
-### Status Table (bottom right)
+### Status Table (top right)
 
 | Row | Content |
 |-----|---------|
@@ -453,24 +522,68 @@ The 15m script has Light and Debug modes.
 
 ---
 
+## Table Design
+
+All tables follow consistent design:
+- **Transparent background** — no dark overlay, adapts to chart theme
+- **chart.fg_color** for labels — black on light theme, white on dark
+- **Signal colors:** green (#00e676) = bullish, red (#ff1744) = bearish, dark orange (#e65100) = warning/transition
+- **Rich tooltips** on all cells — hover for full interpretation, component breakdown, and explanations
+
+---
+
+## Alerts Summary
+
+### Recommended Alert Setup (3 alerts cover 90% of use)
+
+| Alert | Source | Purpose |
+|-------|--------|---------|
+| **Bull/Bear Review** | NG Score (4H) | "Something is building — look at chart" |
+| **Bull/Bear Trigger** | NG Execution (15m) | "Now it's getting concrete" |
+| **Bull/Bear Invalidation** | NG Score (4H) | "Cancel — signal failed" |
+
+### Full Alert List
+
+| Source | Alert | Condition |
+|--------|-------|-----------|
+| Score | Bull/Bear Review | Setup ≥ 4 + Conf ≥ 1.5 |
+| Score | Bull/Bear Action | Setup ≥ 5 + Conf ≥ 3 + FT |
+| Score | Bull/Bear Invalidation | Candidate → Failed |
+| Score | Bull/Bear Candidate | Status = CANDIDATE |
+| Score | Conflict | Significant conflict detected |
+| Score | Spring/Upthrust | Heuristic triggered |
+| Score | Major BOS | Major Break of Structure |
+| Score | Bull/Bear Trap | Failed reversal → opposite continuation |
+| Zones | Support/Resist Relevant | Zone within 1 ATR, Reach ≥ 60 |
+| Zones | Likely Hold/Break | Hold or Break ≥ 60 |
+| Execution | Bull/Bear Trigger | 15m status = TRIGGER |
+| Execution | Bull/Bear Entry | Entry signal confirmed |
+| Execution | Bull/Bear Invalidation | Entry invalidated |
+| Execution | Micro Setup | 15m status = SETUP |
+| Accum | Developing/Mature | Phase state change |
+| Accum | Breakout/Breakdown Ready | Structure shifting |
+
+---
+
 ## Workflow
 
 ### Daily Use (4H)
 
-1. Load **NG Structure & Zones** + **NG Reversal Score** on 4H NatGas
-2. Score table tells you: is anything building? Why or why not?
-3. Zones show: where would a reversal be meaningful?
-4. Wait for CANDIDATE or at minimum SETUP + structure event
+1. Load **NG Structure & Zones** + **NG Reversal Score** + **NG Accumulation Phase** on 4H NatGas
+2. Accumulation tells you: is a base forming, or just noise?
+3. Score table tells you: is anything building? Why or why not?
+4. Zones show: where would a reversal be meaningful?
+5. Wait for CANDIDATE or at minimum SETUP + structure event
 
 ### Timing (15m)
 
-5. When 4H shows active setup, switch to 15m with **NG Execution** loaded
-6. Wait for micro structure: sweep, BOS, rejection
-7. TRIGGER status + ENTRY label = consider acting
-8. INVAL label = abort, setup failed on micro level
+6. When 4H shows active setup, switch to 15m with **NG Execution** loaded
+7. Wait for micro structure: sweep, BOS, rejection
+8. TRIGGER status + ENTRY label = consider acting
+9. INVAL label = abort, setup failed on micro level
 
 ### Research
 
-9. Load **NG Labeler** to see where past reversals were (strong vs weak, fast vs slow)
-10. Load **NG Feature Exporter** to compare indicator readings at those points
-11. Use Research mode tables for parameter tuning
+10. Load **NG Labeler** to see where past reversals were (strong vs weak, fast vs slow)
+11. Load **NG Feature Exporter** to compare indicator readings at those points
+12. Use Research mode tables for parameter tuning

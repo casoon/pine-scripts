@@ -1,0 +1,520 @@
+//@version=6
+// ============================================================================
+// NG Accumulation Phase 4H [WavesUnchained]
+// Version: 0.1.0
+// ============================================================================
+// Detects bottom formation / accumulation phases on 4H NatGas.
+// Not a point signal — a process state over time.
+//
+// 5 Components (0-2 each, max 10):
+//   1. Trend Loss — downtrend weakening
+//   2. Range Formation — sideways consolidation
+//   3. Volatility Compression — candles getting tighter
+//   4. Liquidity Behaviour — sweeps, springs, tests
+//   5. Early Bull Structure — first bullish hints
+//
+// States: none → transition → early → developing → mature → breakout_ready
+// ============================================================================
+indicator("NG Accumulation Phase 4H [WavesUnchained]", "NG Accum", overlay=true, max_labels_count=50)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+var gCore = "Core Parameters"
+int   atrLen       = input.int(14, "ATR Length", minval=1, group=gCore)
+int   lookback     = input.int(20, "Phase Lookback Bars", minval=10, group=gCore)
+int   minPhaseBars = input.int(10, "Min Phase Duration", minval=3, group=gCore, tooltip="Minimum bars before phase is recognized.\nFilters out V-reversals.")
+
+var gSwing = "Swing Detection"
+int   pivotLeft  = input.int(3, "Pivot Left Bars", minval=1, group=gSwing)
+int   pivotRight = input.int(3, "Pivot Right Bars", minval=1, group=gSwing)
+
+var gThresh = "Thresholds"
+float erRangeThresh     = input.float(0.3, "Efficiency Ratio Range Threshold", minval=0.05, step=0.05, group=gThresh, tooltip="Below this = ranging. Above = trending.")
+float bbwCompressThresh = input.float(0.7, "BB Width Compression Ratio", minval=0.3, step=0.1, group=gThresh, tooltip="Current BBW / avg BBW. Below = compressed.")
+float atrCompressThresh = input.float(0.8, "ATR Compression Ratio", minval=0.3, step=0.1, group=gThresh, tooltip="Current ATR / avg ATR. Below = compressed.")
+
+var gDisplay = "Display"
+string displayMode = input.string("Light", "Display Mode", options=["Light", "Debug", "Research"], group=gDisplay)
+bool   showBgShading = input.bool(true, "Background Shading", group=gDisplay)
+bool   showTable     = input.bool(true, "Show Status Table", group=gDisplay)
+bool   showPhaseLabel = input.bool(true, "Show Phase Label on Chart", group=gDisplay)
+
+// ============================================================================
+// CALCULATIONS — Base indicators
+// ============================================================================
+
+float atr14      = ta.atr(atrLen)
+float atrAvg     = ta.sma(atr14, lookback)
+float atrRatio   = atrAvg > 0 ? atr14 / atrAvg : 1.0
+
+float ema20      = ta.ema(close, 20)
+float ema50      = ta.ema(close, 50)
+float ema20Slope = (ema20 - ema20[3]) / 3
+
+// Bollinger
+float bbBasis = ta.sma(close, 20)
+float bbDev   = ta.stdev(close, 20)
+float bbWidth = bbBasis > 0 ? (2 * bbDev * 2.0) / bbBasis : 0.0
+float bbwAvg  = ta.sma(bbWidth, lookback)
+float bbwRatio = bbwAvg > 0 ? bbWidth / bbwAvg : 1.0
+
+// Efficiency Ratio: net move / total path
+float netMove   = math.abs(close - close[lookback])
+float totalPath = math.sum(math.abs(close - close[1]), lookback)
+float effRatio  = totalPath > 0 ? netMove / totalPath : 1.0
+
+// Candle range compression
+float candleRange    = high - low
+float avgCandleRange = ta.sma(candleRange, lookback)
+float candleRatio    = avgCandleRange > 0 ? candleRange / avgCandleRange : 1.0
+
+// Range bounds
+float rangeHigh = ta.highest(high, lookback)
+float rangeLow  = ta.lowest(low, lookback)
+float rangeWidth = atr14 > 0 ? (rangeHigh - rangeLow) / atr14 : 0.0
+
+// RSI for momentum context
+float rsi14 = ta.rsi(close, 14)
+
+// ============================================================================
+// CALCULATIONS — Swing detection
+// ============================================================================
+
+float pivHigh = ta.pivothigh(high, pivotLeft, pivotRight)
+float pivLow  = ta.pivotlow(low, pivotLeft, pivotRight)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var float prevSwingHigh = na
+var float prevSwingLow  = na
+var int   lastSHBar     = na
+var int   lastSLBar     = na
+
+if not na(pivHigh)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := pivHigh
+    lastSHBar     := bar_index - pivotRight
+
+if not na(pivLow)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := pivLow
+    lastSLBar    := bar_index - pivotRight
+
+// ============================================================================
+// CALCULATIONS — Structure events (simplified)
+// ============================================================================
+
+// BOS detection
+bool bullBOS = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bool bearBOS = not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+
+// Spring: low below swing low, close back above
+bool isSpring = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+
+// Sweep: wick below swing low (broader than spring)
+bool isSweepLow = not na(lastSwingLow) and low < lastSwingLow
+
+// Higher Low detection
+bool hasHigherLow = not na(lastSwingLow) and not na(prevSwingLow) and lastSwingLow > prevSwingLow
+
+// Lower Low detection (trend still down)
+bool hasLowerLow = not na(lastSwingLow) and not na(prevSwingLow) and lastSwingLow < prevSwingLow
+
+// ============================================================================
+// COMPONENT 1: Trend Loss (0-2)
+// ============================================================================
+
+// Count bear BOS in lookback
+var int bearBOSCount = 0
+if bearBOS
+    bearBOSCount := bearBOSCount + 1
+// Decay over time
+if bar_index % lookback == 0
+    bearBOSCount := math.max(0, bearBOSCount - 1)
+
+// Recent bear BOS (last N bars)
+int recentBearBOS = 0
+for i = 0 to lookback - 1
+    if not na(lastSwingLow) and close[i] < nz(lastSwingLow) and close[i + 1] >= nz(lastSwingLow)
+        recentBearBOS := recentBearBOS + 1
+
+// EMA slope flattening
+bool slopeFlattening = ema20Slope > -0.0001 * close and ema20Slope < 0.0001 * close
+bool slopeWasDown    = ema20[lookback] < ema50[lookback]
+bool slopeNowFlat    = math.abs(ema20 - ema50) < atr14 * 0.5
+
+float trendLossScore = 0.0
+// Was in downtrend, now flattening
+if slopeWasDown and slopeNowFlat
+    trendLossScore := trendLossScore + 1.0
+// No recent bear BOS
+if slopeWasDown and not bearBOS and not hasLowerLow
+    trendLossScore := trendLossScore + 0.5
+// EMA slope actually flattening
+if slopeFlattening and slopeWasDown
+    trendLossScore := trendLossScore + 0.5
+trendLossScore := math.min(trendLossScore, 2.0)
+
+// ============================================================================
+// COMPONENT 2: Range Formation (0-2)
+// ============================================================================
+
+float rangeScore = 0.0
+// Efficiency ratio low = ranging
+if effRatio < erRangeThresh
+    rangeScore := rangeScore + 1.0
+if effRatio < erRangeThresh * 0.5
+    rangeScore := rangeScore + 0.5
+// Range width reasonable (not too wide = still trending)
+if rangeWidth > 2.0 and rangeWidth < 8.0
+    rangeScore := rangeScore + 0.5
+rangeScore := math.min(rangeScore, 2.0)
+
+// ============================================================================
+// COMPONENT 3: Volatility Compression (0-2)
+// ============================================================================
+
+float volCompScore = 0.0
+// BB width compressed
+if bbwRatio < bbwCompressThresh
+    volCompScore := volCompScore + 1.0
+// ATR compressed
+if atrRatio < atrCompressThresh
+    volCompScore := volCompScore + 0.5
+// Candle ranges shrinking
+if candleRatio < 0.7
+    volCompScore := volCompScore + 0.5
+volCompScore := math.min(volCompScore, 2.0)
+
+// ============================================================================
+// COMPONENT 4: Liquidity Behaviour (0-2)
+// ============================================================================
+
+// Track sweeps and springs over lookback
+var int sweepCount  = 0
+var int springCount = 0
+
+if isSweepLow
+    sweepCount := sweepCount + 1
+if isSpring
+    springCount := springCount + 1
+
+// Decay
+if bar_index % math.round(lookback / 2) == 0
+    sweepCount  := math.max(0, sweepCount - 1)
+    springCount := math.max(0, springCount - 1)
+
+float liqScore = 0.0
+if sweepCount >= 1
+    liqScore := liqScore + 0.5
+if sweepCount >= 2
+    liqScore := liqScore + 0.5
+if springCount >= 1
+    liqScore := liqScore + 0.5
+if springCount >= 2
+    liqScore := liqScore + 0.5
+liqScore := math.min(liqScore, 2.0)
+
+// ============================================================================
+// COMPONENT 5: Early Bull Structure (0-2)
+// ============================================================================
+
+float bullStructScore = 0.0
+// Higher Low
+if hasHigherLow
+    bullStructScore := bullStructScore + 1.0
+// Bull BOS
+if bullBOS
+    bullStructScore := bullStructScore + 1.0
+// RSI turning from oversold
+if rsi14 > 40 and rsi14[lookback] < 35
+    bullStructScore := bullStructScore + 0.5
+bullStructScore := math.min(bullStructScore, 2.0)
+
+// ============================================================================
+// TOTAL SCORE
+// ============================================================================
+
+float accumScore = trendLossScore + rangeScore + volCompScore + liqScore + bullStructScore
+
+// ============================================================================
+// PHASE DURATION TRACKING
+// ============================================================================
+
+var int phaseStartBar = na
+var int phaseDuration = 0
+var string prevState  = "none"
+
+bool isActive = accumScore >= 3.0
+if isActive and na(phaseStartBar)
+    phaseStartBar := bar_index
+if not isActive
+    phaseStartBar := na
+
+phaseDuration := not na(phaseStartBar) ? bar_index - phaseStartBar : 0
+bool meetsMinDuration = phaseDuration >= minPhaseBars
+
+// ============================================================================
+// STATE MACHINE
+// ============================================================================
+
+string accumState = "none"
+if not isActive
+    accumState := "none"
+else if not meetsMinDuration
+    accumState := "transition"
+else if accumScore >= 8.0 and bullStructScore >= 1.5
+    accumState := "breakout_ready"
+else if accumScore >= 6.0 and liqScore >= 1.0 and rangeScore >= 1.0
+    accumState := "mature"
+else if accumScore >= 5.0
+    accumState := "developing"
+else if accumScore >= 3.0
+    accumState := "early"
+else
+    accumState := "transition"
+
+// ============================================================================
+// DISTRIBUTION DETECTION (mirror)
+// ============================================================================
+
+// Higher High failing
+bool hasLowerHigh = not na(lastSwingHigh) and not na(prevSwingHigh) and lastSwingHigh < prevSwingHigh
+
+// Sweep above swing high
+bool isSweepHigh = not na(lastSwingHigh) and high > lastSwingHigh
+
+// Upthrust
+bool isUpthrust = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+
+var int sweepHighCount  = 0
+var int upthrustCount   = 0
+
+if isSweepHigh
+    sweepHighCount := sweepHighCount + 1
+if isUpthrust
+    upthrustCount := upthrustCount + 1
+
+if bar_index % math.round(lookback / 2) == 0
+    sweepHighCount  := math.max(0, sweepHighCount - 1)
+    upthrustCount   := math.max(0, upthrustCount - 1)
+
+// Distribution trend loss (uptrend weakening)
+bool distSlopeWasUp  = ema20[lookback] > ema50[lookback]
+bool distSlopeNowFlat = math.abs(ema20 - ema50) < atr14 * 0.5
+bool distSlopeFlattening = slopeFlattening and distSlopeWasUp
+
+float distTrendLoss = 0.0
+if distSlopeWasUp and distSlopeNowFlat
+    distTrendLoss := distTrendLoss + 1.0
+if distSlopeWasUp and not bullBOS and not (not na(lastSwingHigh) and not na(prevSwingHigh) and lastSwingHigh > prevSwingHigh)
+    distTrendLoss := distTrendLoss + 0.5
+if distSlopeFlattening
+    distTrendLoss := distTrendLoss + 0.5
+distTrendLoss := math.min(distTrendLoss, 2.0)
+
+// Distribution liquidity
+float distLiqScore = 0.0
+if sweepHighCount >= 1
+    distLiqScore := distLiqScore + 0.5
+if sweepHighCount >= 2
+    distLiqScore := distLiqScore + 0.5
+if upthrustCount >= 1
+    distLiqScore := distLiqScore + 0.5
+if upthrustCount >= 2
+    distLiqScore := distLiqScore + 0.5
+distLiqScore := math.min(distLiqScore, 2.0)
+
+// Early bear structure
+float bearStructScore = 0.0
+if hasLowerHigh
+    bearStructScore := bearStructScore + 1.0
+if bearBOS
+    bearStructScore := bearStructScore + 1.0
+if rsi14 < 60 and rsi14[lookback] > 65
+    bearStructScore := bearStructScore + 0.5
+bearStructScore := math.min(bearStructScore, 2.0)
+
+// Distribution total
+float distScore = distTrendLoss + rangeScore + volCompScore + distLiqScore + bearStructScore
+
+// Distribution state
+var int distStartBar = na
+var int distDuration = 0
+bool distActive = distScore >= 3.0
+if distActive and na(distStartBar)
+    distStartBar := bar_index
+if not distActive
+    distStartBar := na
+distDuration := not na(distStartBar) ? bar_index - distStartBar : 0
+bool distMeetsMin = distDuration >= minPhaseBars
+
+string distState = "none"
+if not distActive
+    distState := "none"
+else if not distMeetsMin
+    distState := "transition"
+else if distScore >= 8.0 and bearStructScore >= 1.5
+    distState := "breakdown_ready"
+else if distScore >= 6.0 and distLiqScore >= 1.0 and rangeScore >= 1.0
+    distState := "mature"
+else if distScore >= 5.0
+    distState := "developing"
+else if distScore >= 3.0
+    distState := "early"
+else
+    distState := "transition"
+
+// ============================================================================
+// VISUALIZATION — Background shading
+// ============================================================================
+
+color accumBg = accumState == "breakout_ready" ? color.new(#0ea5e9, 85) : accumState == "mature" ? color.new(#00e676, 88) : accumState == "developing" ? color.new(#e65100, 90) : accumState == "early" ? color.new(#e65100, 93) : accumState == "transition" ? color.new(color.gray, 93) : na
+
+color distBg = distState == "breakdown_ready" ? color.new(#0ea5e9, 85) : distState == "mature" ? color.new(#ff1744, 88) : distState == "developing" ? color.new(#e65100, 90) : distState == "early" ? color.new(#e65100, 93) : distState == "transition" ? color.new(color.gray, 93) : na
+
+bgcolor(showBgShading ? (accumBg != na ? accumBg : distBg) : na)
+
+// ============================================================================
+// VISUALIZATION — Phase label on chart
+// ============================================================================
+
+var label phaseLabel = na
+
+if showPhaseLabel and barstate.islast
+    label.delete(phaseLabel)
+
+    string activeState = accumState != "none" ? accumState : distState
+    float  activeScore = accumState != "none" ? accumScore : distScore
+    int    activeDur   = accumState != "none" ? phaseDuration : distDuration
+    bool   isAccum     = accumState != "none"
+    string phaseType   = isAccum ? "ACCUMULATION" : distState != "none" ? "DISTRIBUTION" : ""
+
+    if phaseType != ""
+        color lblCol = isAccum ? (accumState == "breakout_ready" ? #0ea5e9 : accumState == "mature" ? #00e676 : #e65100) : (distState == "breakdown_ready" ? #0ea5e9 : distState == "mature" ? #ff1744 : #e65100)
+
+        string lblText = phaseType + " (" + activeState + ")\nScore: " + str.tostring(activeScore, "#.0") + " | " + str.tostring(activeDur) + " bars"
+
+        phaseLabel := label.new(bar_index + 3, isAccum ? rangeLow - atr14 * 0.5 : rangeHigh + atr14 * 0.5, lblText, style=isAccum ? label.style_label_up : label.style_label_down, color=color.new(lblCol, 70), textcolor=lblCol, size=size.normal, tooltip=phaseType + "\n────────────────\nState: " + activeState + "\nTotal Score: " + str.tostring(activeScore, "#.1") + " / 10\nDuration: " + str.tostring(activeDur) + " bars\n\nComponents:\n• Trend Loss: " + str.tostring(isAccum ? trendLossScore : distTrendLoss, "#.1") + " / 2\n• Range: " + str.tostring(rangeScore, "#.1") + " / 2\n• Vol Compression: " + str.tostring(volCompScore, "#.1") + " / 2\n• Liquidity: " + str.tostring(isAccum ? liqScore : distLiqScore, "#.1") + " / 2\n• Structure: " + str.tostring(isAccum ? bullStructScore : bearStructScore, "#.1") + " / 2\n\nRange width: " + str.tostring(rangeWidth, "#.1") + " ATR\nEfficiency: " + str.tostring(effRatio, "#.2") + "\nBBW ratio: " + str.tostring(bbwRatio, "#.2"))
+
+// ============================================================================
+// VISUALIZATION — Status table
+// ============================================================================
+
+bool isDebug = displayMode == "Debug" or displayMode == "Research"
+
+var table statusTbl = na
+if showTable and barstate.islast
+    int rows = isDebug ? 9 : 5
+    statusTbl := table.new(position.top_right, 3, rows, bgcolor=color.new(color.white, 100), border_color=color.new(color.gray, 80), border_width=0, frame_color=color.new(color.gray, 80), frame_width=0)
+
+    // Determine which phase to show
+    bool showAccum = accumState != "none"
+    bool showDist  = distState != "none"
+    string activePhase = showAccum ? "ACCUM" : showDist ? "DISTRIB" : "NONE"
+    string activeStateTbl = showAccum ? accumState : showDist ? distState : "—"
+    float  activeScoreTbl = showAccum ? accumScore : showDist ? distScore : 0.0
+    int    activeDurTbl   = showAccum ? phaseDuration : showDist ? distDuration : 0
+
+    color phaseCol = activePhase == "ACCUM" ? (accumState == "breakout_ready" ? #0ea5e9 : accumState == "mature" ? #00e676 : accumState == "developing" ? #e65100 : chart.fg_color) : activePhase == "DISTRIB" ? (distState == "breakdown_ready" ? #0ea5e9 : distState == "mature" ? #ff1744 : distState == "developing" ? #e65100 : chart.fg_color) : color.new(chart.fg_color, 60)
+
+    // Row 0: Header
+    table.cell(statusTbl, 0, 0, "NG Accum", text_color=chart.fg_color, text_size=size.normal, tooltip="NG Accumulation / Distribution Phase Detector\n────────────────\nDetects bottom/top formation processes.\nNot a point signal — a state over time.\n\n5 Components (0-2 each, max 10):\n1. Trend Loss\n2. Range Formation\n3. Volatility Compression\n4. Liquidity Behaviour\n5. Early Structure\n\nStates: none → transition → early →\ndeveloping → mature → breakout/breakdown ready")
+    table.cell(statusTbl, 1, 0, activePhase, text_color=phaseCol, text_size=size.normal, text_halign=text.align_right, tooltip="Current phase type.\n\nACCUM = bottom formation (bullish)\nDISTRIB = top formation (bearish)\nNONE = no phase detected")
+    table.cell(statusTbl, 2, 0, activeStateTbl, text_color=phaseCol, text_size=size.normal, text_halign=text.align_right, tooltip="Phase state progression:\n\ntransition: first signs, min duration not met\nearly: phase beginning, score 3-4\ndeveloping: clear phase, score 5-6\nmature: strong phase, multiple confirms\nbreakout/breakdown_ready: structure shifting")
+
+    // Row 1: Score + Duration
+    table.cell(statusTbl, 0, 1, str.tostring(activeScoreTbl, "#.0") + " / 10", text_color=activeScoreTbl >= 7 ? #00e676 : activeScoreTbl >= 5 ? #e65100 : color.new(chart.fg_color, 40), text_size=size.normal, tooltip="Total phase score (0-10)\n\n0-2: no phase\n3-4: possible\n5-6: probable\n7-8: clear\n9-10: advanced")
+    table.cell(statusTbl, 1, 1, str.tostring(activeDurTbl) + " bars", text_color=meetsMinDuration or distMeetsMin ? chart.fg_color : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right, tooltip="Phase duration.\n\nMinimum required: " + str.tostring(minPhaseBars) + " bars\nCurrent: " + str.tostring(activeDurTbl) + " bars\n\nLonger duration = more reliable")
+    table.cell(statusTbl, 2, 1, rangeWidth > 0 ? str.tostring(rangeWidth, "#.0") + " ATR rng" : "", text_color=color.new(chart.fg_color, 40), text_size=size.normal, text_halign=text.align_right, tooltip="Range width in ATR.\n\n2-6 ATR: typical accumulation range\n> 8: too wide, likely still trending")
+
+    // Row 2: Interpretation
+    string interpStr = ""
+    if activePhase == "NONE"
+        if ema20 < ema50 and rsi14 > 40
+            interpStr := "Downtrend active, no accumulation"
+        else if ema20 > ema50 and rsi14 < 60
+            interpStr := "Uptrend active, no distribution"
+        else
+            interpStr := "No phase detected"
+    else if activeStateTbl == "transition"
+        interpStr := "First signs — needs more time"
+    else if activeStateTbl == "early"
+        interpStr := showAccum ? "Range forming after decline" : "Range forming after rally"
+    else if activeStateTbl == "developing"
+        interpStr := showAccum ? "Accumulation building — watch sweeps" : "Distribution building — watch upthrusts"
+    else if activeStateTbl == "mature"
+        interpStr := showAccum ? "Mature — spring/BOS expected" : "Mature — upthrust/BOS expected"
+    else if activeStateTbl == "breakout_ready" or activeStateTbl == "breakdown_ready"
+        interpStr := showAccum ? "Structure shifting bullish" : "Structure shifting bearish"
+    else
+        interpStr := "—"
+
+    color interpCol = activePhase == "NONE" ? color.new(chart.fg_color, 50) : phaseCol
+    table.cell(statusTbl, 0, 2, interpStr, text_color=interpCol, text_size=size.normal)
+    table.cell(statusTbl, 1, 2, "", text_size=size.normal)
+    table.cell(statusTbl, 2, 2, "", text_size=size.normal)
+
+    // Row 3: Component bars (visual)
+    string compStr = "T:" + str.tostring(showAccum ? trendLossScore : distTrendLoss, "#") + " R:" + str.tostring(rangeScore, "#") + " V:" + str.tostring(volCompScore, "#") + " L:" + str.tostring(showAccum ? liqScore : distLiqScore, "#") + " S:" + str.tostring(showAccum ? bullStructScore : bearStructScore, "#")
+    table.cell(statusTbl, 0, 3, compStr, text_color=color.new(chart.fg_color, 30), text_size=size.normal, tooltip="Component scores:\n\nT = Trend Loss (" + str.tostring(showAccum ? trendLossScore : distTrendLoss, "#.1") + "/2)\nR = Range (" + str.tostring(rangeScore, "#.1") + "/2)\nV = Volatility Compression (" + str.tostring(volCompScore, "#.1") + "/2)\nL = Liquidity (" + str.tostring(showAccum ? liqScore : distLiqScore, "#.1") + "/2)\nS = Structure (" + str.tostring(showAccum ? bullStructScore : bearStructScore, "#.1") + "/2)")
+    table.cell(statusTbl, 1, 3, "", text_size=size.normal)
+    table.cell(statusTbl, 2, 3, "", text_size=size.normal)
+
+    // Row 4: Context
+    string ctxStr = "ER:" + str.tostring(effRatio, "#.2") + " BBW:" + str.tostring(bbwRatio, "#.1") + " ATR:" + str.tostring(atrRatio, "#.1")
+    table.cell(statusTbl, 0, 4, ctxStr, text_color=color.new(chart.fg_color, 50), text_size=size.normal, tooltip="Market metrics:\n\nER (Efficiency Ratio): " + str.tostring(effRatio, "#.3") + "\n< " + str.tostring(erRangeThresh) + " = ranging\n\nBBW ratio: " + str.tostring(bbwRatio, "#.2") + "\n< " + str.tostring(bbwCompressThresh) + " = compressed\n\nATR ratio: " + str.tostring(atrRatio, "#.2") + "\n< " + str.tostring(atrCompressThresh) + " = compressed")
+    table.cell(statusTbl, 1, 4, "", text_size=size.normal)
+    table.cell(statusTbl, 2, 4, "", text_size=size.normal)
+
+    // Debug rows
+    if isDebug
+        table.cell(statusTbl, 0, 5, "─ ACCUM ─", text_color=color.new(chart.fg_color, 40), text_size=size.normal)
+        table.cell(statusTbl, 1, 5, str.tostring(accumScore, "#.0"), text_color=accumState != "none" ? #00e676 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+        table.cell(statusTbl, 2, 5, accumState, text_color=accumState != "none" ? #00e676 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+
+        table.cell(statusTbl, 0, 6, "─ DISTRIB ─", text_color=color.new(chart.fg_color, 40), text_size=size.normal)
+        table.cell(statusTbl, 1, 6, str.tostring(distScore, "#.0"), text_color=distState != "none" ? #ff1744 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+        table.cell(statusTbl, 2, 6, distState, text_color=distState != "none" ? #ff1744 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+
+        table.cell(statusTbl, 0, 7, "Sweeps↓ " + str.tostring(sweepCount) + " Spr " + str.tostring(springCount), text_color=color.new(chart.fg_color, 40), text_size=size.normal)
+        table.cell(statusTbl, 1, 7, "Sweeps↑ " + str.tostring(sweepHighCount), text_color=color.new(chart.fg_color, 40), text_size=size.normal, text_halign=text.align_right)
+        table.cell(statusTbl, 2, 7, "UT " + str.tostring(upthrustCount), text_color=color.new(chart.fg_color, 40), text_size=size.normal, text_halign=text.align_right)
+
+        table.cell(statusTbl, 0, 8, "HL:" + (hasHigherLow ? "✓" : "·") + " LL:" + (hasLowerLow ? "✓" : "·") + " LH:" + (hasLowerHigh ? "✓" : "·"), text_color=color.new(chart.fg_color, 40), text_size=size.normal)
+        table.cell(statusTbl, 1, 8, "", text_size=size.normal)
+        table.cell(statusTbl, 2, 8, "", text_size=size.normal)
+
+// ============================================================================
+// DATA WINDOW
+// ============================================================================
+
+plot(accumScore, "Accum Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(distScore, "Distrib Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(trendLossScore, "Trend Loss [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(rangeScore, "Range [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(volCompScore, "Vol Compress [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(liqScore, "Liquidity [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bullStructScore, "Bull Struct [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(effRatio, "Efficiency Ratio [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(bbwRatio, "BBW Ratio [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(atrRatio, "ATR Ratio [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(phaseDuration, "Accum Duration [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(distDuration, "Distrib Duration [dw]", display=display.data_window, color=color.new(color.gray, 100))
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(accumState == "developing" and prevState != "developing", "Accum Developing", "NG 4H: Accumulation phase developing — score " + str.tostring(accumScore, "#.0"))
+alertcondition(accumState == "mature" and prevState != "mature", "Accum Mature", "NG 4H: Accumulation phase mature — watch for breakout")
+alertcondition(accumState == "breakout_ready" and prevState != "breakout_ready", "Breakout Ready", "NG 4H: Accumulation breakout ready — bull structure emerging")
+alertcondition(distState == "developing" and prevState != "developing", "Distrib Developing", "NG 4H: Distribution phase developing — score " + str.tostring(distScore, "#.0"))
+alertcondition(distState == "mature" and prevState != "mature", "Distrib Mature", "NG 4H: Distribution phase mature — watch for breakdown")
+alertcondition(distState == "breakdown_ready" and prevState != "breakdown_ready", "Breakdown Ready", "NG 4H: Distribution breakdown ready — bear structure emerging")
+
+// Track previous state for alerts
+if barstate.isconfirmed
+    prevState := accumState != "none" ? accumState : distState
