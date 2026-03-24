@@ -1,4 +1,4 @@
-# NG Reversal System — Visual Guide
+# Vein Reversal System — Visual Guide
 
 ## Overview
 
@@ -6,18 +6,18 @@ The system consists of 6 indicators that work together on a NatGas chart.
 
 | Script | Type | Timeframe | File |
 |--------|------|-----------|------|
-| NG Reversal Labeler | Overlay | 4H | `ng_reversal_labeler_4h.pine` |
-| NG Structure & Zones | Overlay | 4H | `ng_structure_zones_4h.pine` |
-| NG Feature Exporter | Panel | 4H | `ng_feature_exporter_core_4h.pine` |
-| NG Reversal Score | Panel | 4H | `ng_reversal_score_4h.pine` |
-| NG Accumulation Phase | Overlay | 4H | `ng_accumulation_phase_4h.pine` |
-| NG Execution 15m | Overlay | 15m | `ng_execution_15m.pine` |
+| Vein Reversal Labeler | Overlay | 4H | `vein_reversal_labeler_4h.pine` |
+| Vein Structure & Zones | Overlay | 4H | `vein_structure_zones_4h.pine` |
+| Vein Feature Exporter | Panel | 4H | `vein_feature_exporter_core_4h.pine` |
+| Vein Reversal Score | Panel | 4H | `vein_reversal_score_4h.pine` |
+| Vein Accumulation Phase | Overlay | 4H | `vein_accumulation_phase_4h.pine` |
+| Vein Execution 15m | Overlay | 15m | `vein_execution_15m.pine` |
 
 **Core principle:** 4H = Context (where to look). 15m = Timing (when to act). Accumulation = Patience (is a base forming?).
 
 ---
 
-## 1. NG Reversal Labeler (Overlay, 4H)
+## 1. Vein Reversal Labeler (Overlay, 4H)
 
 Marks historical reversal points directly on chart — with quality and timing grading.
 
@@ -66,7 +66,7 @@ Two sections:
 
 ---
 
-## 2. NG Structure & Zones (Overlay, 4H)
+## 2. Vein Structure & Zones (Overlay, 4H)
 
 Combined structural event detection AND automatic S/R zones with integrated zone assessment.
 
@@ -179,7 +179,7 @@ Based on 4 sub-scores:
 
 ---
 
-## 3. NG Feature Exporter (Panel, 4H)
+## 3. Vein Feature Exporter (Panel, 4H)
 
 Shows indicator values as an oscillator panel below the chart. Includes WaveTrend with divergence detection.
 
@@ -228,7 +228,7 @@ Bottom row shows overall assessment. Hover for full breakdown of all indicators.
 
 ---
 
-## 4. NG Reversal Score (Panel, 4H)
+## 4. Vein Reversal Score (Panel, 4H)
 
 Two-layer scoring with regime filter, level context, follow-through, and conflict detection.
 
@@ -300,7 +300,7 @@ After an event, checked within 2–4 bars:
 ### Table (top right)
 
 Compact display with rich hover tooltips on every cell:
-- **NG Score** hover → full system explanation
+- **Vein Score** hover → full system explanation
 - **▲ S:3 C:1** hover → all bull setup/confirm components with ✓/·
 - **▼ S:2 C:0** hover → all bear components
 - **Context** hover → regime, multipliers, conflict details
@@ -347,7 +347,7 @@ Plus: **Trap Hint** when a failed reversal signals the opposite direction.
 
 ---
 
-## 5. NG Accumulation Phase (Overlay, 4H)
+## 5. Vein Accumulation Phase (Overlay, 4H)
 
 Detects bottom formation (accumulation) and top formation (distribution) as process states over time — not point signals.
 
@@ -398,7 +398,7 @@ The script detects both:
 
 | Row | Content |
 |-----|---------|
-| Header | NG Accum + phase type (ACCUM/DISTRIB/NONE) + state |
+| Header | Vein Accum + phase type (ACCUM/DISTRIB/NONE) + state |
 | Score | X / 10 + duration in bars + range width |
 | Interpretation | Plain-language: "Accumulation building — watch sweeps" |
 | Components | T:2 R:1 V:2 L:1 S:1 (hover for details) |
@@ -430,7 +430,7 @@ The Accumulation Phase answers: **"Should I even be watching for a reversal here
 
 ---
 
-## 6. NG Execution 15m (Overlay, 15m)
+## 6. Vein Execution 15m (Overlay, 15m)
 
 Lean execution/timing module. Only activates when 4H says "interesting".
 
@@ -487,7 +487,7 @@ The script pulls simplified 4H data:
 
 | Row | Content |
 |-----|---------|
-| Header | NG Exec 15m + Status (QUIET/WATCH/SETUP/TRIGGER) |
+| Header | Vein Exec + Status (QUIET/WATCH/SETUP/TRIGGER) |
 | 4H Bias | BULL/BEAR/MIXED/QUIET + setup score |
 | Micro Score | X / 10 with color coding |
 | Components | Set \| Str \| Beh \| Tmp breakdown |
@@ -538,9 +538,9 @@ All tables follow consistent design:
 
 | Alert | Source | Purpose |
 |-------|--------|---------|
-| **Bull/Bear Review** | NG Score (4H) | "Something is building — look at chart" |
-| **Bull/Bear Trigger** | NG Execution (15m) | "Now it's getting concrete" |
-| **Bull/Bear Invalidation** | NG Score (4H) | "Cancel — signal failed" |
+| **Bull/Bear Review** | Vein Score (4H) | "Something is building — look at chart" |
+| **Bull/Bear Trigger** | Vein Execution (15m) | "Now it's getting concrete" |
+| **Bull/Bear Invalidation** | Vein Score (4H) | "Cancel — signal failed" |
 
 ### Full Alert List
 
@@ -569,7 +569,7 @@ All tables follow consistent design:
 
 ### Daily Use (4H)
 
-1. Load **NG Structure & Zones** + **NG Reversal Score** + **NG Accumulation Phase** on 4H NatGas
+1. Load **Vein Structure & Zones** + **Vein Reversal Score** + **Vein Accumulation Phase** on 4H NatGas
 2. Accumulation tells you: is a base forming, or just noise?
 3. Score table tells you: is anything building? Why or why not?
 4. Zones show: where would a reversal be meaningful?
@@ -577,13 +577,13 @@ All tables follow consistent design:
 
 ### Timing (15m)
 
-6. When 4H shows active setup, switch to 15m with **NG Execution** loaded
+6. When 4H shows active setup, switch to 15m with **Vein Execution** loaded
 7. Wait for micro structure: sweep, BOS, rejection
 8. TRIGGER status + ENTRY label = consider acting
 9. INVAL label = abort, setup failed on micro level
 
 ### Research
 
-10. Load **NG Labeler** to see where past reversals were (strong vs weak, fast vs slow)
-11. Load **NG Feature Exporter** to compare indicator readings at those points
+10. Load **Vein Labeler** to see where past reversals were (strong vs weak, fast vs slow)
+11. Load **Vein Feature Exporter** to compare indicator readings at those points
 12. Use Research mode tables for parameter tuning
