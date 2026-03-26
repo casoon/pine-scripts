@@ -1,0 +1,1002 @@
+//@version=6
+// ============================================================================
+// Vein Trend [WavesUnchained]
+// Version: 0.1
+// ============================================================================
+// Signal aggregator for the Vein suite. Works on any timeframe.
+// Combines Setup Score, Confirmation Score, and Phase Score into a
+// composite bull/bear score. Fires ▲/▼ markers only when the composite
+// threshold is crossed — with cooldown, confirmation bars, score-delta,
+// and conflict guards to prevent premature, late, or over-frequent signals.
+//
+// Scoring layers (all self-contained, no external indicator dependency):
+//   Layer A  Setup Score   — momentum + overextension (RSI, MFI, MACD, price, wick)
+//   Layer B  Confirmation  — structure events (Spring/UT, BOS/CHoCH, Climax seq.)
+//   Layer C  Phase Score   — accumulation / distribution phase quality
+//
+// Signal guards:
+//   ✓ Cooldown             — min bars between signals of the same direction
+//   ✓ Confirmation bars    — score must hold above threshold for N consecutive bars
+//   ✓ Score delta          — bull score must exceed bear score by a margin (and v.v.)
+//   ✓ Conflict suppression — no signal when both sides are simultaneously active
+//   ✓ Follow-through gate  — signal only after at least one follow-through bar
+//
+// ============================================================================
+indicator("Vein: Trend [WavesUnchained]", "Vein Trend", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// INPUTS — Indicators
+// ============================================================================
+
+var gInd = "Indicator Parameters"
+int   emaFastLen     = input.int(20,    "EMA Fast",               minval=1,    group=gInd)
+int   emaSlowLen     = input.int(50,    "EMA Slow",               minval=1,    group=gInd)
+int   emaSlopeLen    = input.int(3,     "EMA Slope Lookback",     minval=1,    group=gInd)
+int   rsiLen         = input.int(14,    "RSI Length",             minval=1,    group=gInd)
+int   mfiLen         = input.int(14,    "MFI Length",             minval=1,    group=gInd)
+int   atrLen         = input.int(14,    "ATR Length",             minval=1,    group=gInd)
+int   bbLen          = input.int(20,    "BB Length",              minval=1,    group=gInd)
+float bbMult         = input.float(2.0, "BB Multiplier",          minval=0.5,  step=0.1, group=gInd)
+int   volAvgLen      = input.int(20,    "Volume Average Length",  minval=5,    group=gInd)
+int   stochRsiLen    = input.int(14,    "Stoch RSI Length",       minval=1,    group=gInd)
+int   stochK         = input.int(3,     "Stoch RSI K",            minval=1,    group=gInd)
+int   stochD         = input.int(3,     "Stoch RSI D",            minval=1,    group=gInd)
+
+// ============================================================================
+// INPUTS — Structure
+// ============================================================================
+
+var gSwing = "Swing / Structure"
+int   leftBars       = input.int(3,    "Micro Pivot Left",    minval=1,   group=gSwing)
+int   rightBars      = input.int(3,    "Micro Pivot Right",   minval=1,   group=gSwing)
+int   majLeftBars    = input.int(7,    "Major Pivot Left",    minval=3,   group=gSwing)
+int   majRightBars   = input.int(7,    "Major Pivot Right",   minval=3,   group=gSwing)
+float minWickRatio   = input.float(0.35, "Spring/UT Wick Ratio", minval=0.1, step=0.05, group=gSwing)
+float minCandleATR   = input.float(0.5,  "Spring/UT Candle/ATR", minval=0.1, step=0.1,  group=gSwing)
+float climaxRangeATR = input.float(1.8,  "Climax Range/ATR",     minval=1.0, step=0.1,  group=gSwing)
+float climaxVolFact  = input.float(1.8,  "Climax Vol Factor",    minval=1.0, step=0.1,  group=gSwing)
+
+// ============================================================================
+// INPUTS — Score Thresholds
+// ============================================================================
+
+var gScore = "Score Thresholds"
+float rsiBullThresh     = input.float(35.0, "RSI Bull Threshold",      minval=10, maxval=50,  group=gScore)
+float rsiBearThresh     = input.float(65.0, "RSI Bear Threshold",      minval=50, maxval=90,  group=gScore)
+float mfiBullThresh     = input.float(30.0, "MFI Bull Threshold",      minval=10, maxval=50,  group=gScore)
+float mfiBearThresh     = input.float(70.0, "MFI Bear Threshold",      minval=50, maxval=90,  group=gScore)
+float priceEmaATRThresh = input.float(1.5,  "Price→EMA20 ATR Dist",    minval=0.5, step=0.1,  group=gScore)
+float wickThresh        = input.float(0.4,  "Wick Ratio Threshold",    minval=0.1, maxval=0.8, step=0.05, group=gScore)
+float effFallBonus      = input.float(1.5,  "Efficiency Falling Bonus", minval=0, step=0.1,   group=gScore)
+float shockPenalty      = input.float(2.0,  "Shock Bar Penalty",        minval=0, step=0.5,   group=gScore)
+float shockRangeMult    = input.float(2.5,  "Shock Bar Range/ATR",      minval=1.5, step=0.1, group=gScore)
+float shockVolMult      = input.float(2.0,  "Shock Bar Vol Mult",       minval=1.0, step=0.1, group=gScore)
+
+// ============================================================================
+// INPUTS — Composite Weights
+// ============================================================================
+
+var gWeights = "Composite Weights"
+float wSetup  = input.float(1.0, "Setup Score Weight",        minval=0.0, maxval=3.0, step=0.1, group=gWeights, tooltip="Weight applied to Layer A (momentum setup)")
+float wConf   = input.float(1.5, "Confirmation Score Weight", minval=0.0, maxval=3.0, step=0.1, group=gWeights, tooltip="Weight applied to Layer B (structure events)")
+float wPhase  = input.float(0.5, "Phase Score Weight",        minval=0.0, maxval=3.0, step=0.1, group=gWeights, tooltip="Weight applied to Layer C (accumulation/distribution phase)")
+
+// ============================================================================
+// INPUTS — Signal Controls
+// ============================================================================
+
+var gSignal = "Signal Controls"
+float compositeThreshInput = input.float(6.0,  "Composite Threshold",     minval=1.0, maxval=20.0, step=0.5, group=gSignal, tooltip="Minimum composite score to generate a signal (used when Auto Timeframe Settings is off)")
+float scoreDelta      = input.float(2.0,  "Min Score Delta",          minval=0.0, maxval=10.0, step=0.5, group=gSignal, tooltip="Bull score must exceed Bear score by this margin (and vice versa)")
+float deltaVeryStrong = input.float(3.0,  "Strong Dominance Delta",   minval=0.5, maxval=10.0, step=0.5, group=gSignal, tooltip="Composite delta for 'Strong Active' candle state (darker color)")
+int   cooldownInput   = input.int(10,     "Cooldown (bars)",          minval=1,   maxval=100,            group=gSignal, tooltip="Minimum bars between signals of the same direction (used when Auto Timeframe Settings is off)")
+int   confirmInput    = input.int(1,      "Confirmation Bars",        minval=1,   maxval=10,             group=gSignal, tooltip="Score must stay above threshold for N consecutive bars before firing (used when Auto Timeframe Settings is off)")
+bool  requireFT       = input.bool(false, "Require Follow-Through",                                      group=gSignal, tooltip="Signal fires only after at least one follow-through bar post-event. Enable on 1H/4H to reduce false signals. On Daily leave off — follow-through takes too long.")
+bool  suppressConflict= input.bool(true,  "Suppress Conflicted Signals",                                 group=gSignal, tooltip="No signal when both bull and bear scores are simultaneously elevated")
+bool  trendFilter     = input.bool(true,  "Trend Alignment Filter",                                       group=gSignal, tooltip="Reversal signals only fire against the current EMA trend:\n  ▲ Bull arrow: allowed when EMA is bearish or flat (reversal FROM downtrend)\n  ▼ Bear arrow: allowed when EMA is bullish or flat (reversal FROM uptrend)\n\nPrevents false arrows mid-trend caused by overbought/oversold oscillators.")
+bool  autoTF          = input.bool(true,  "Auto Timeframe Settings",                                      group=gSignal, tooltip="Automatically adjusts Threshold, Cooldown, Confirmation Bars and Follow-Through based on the current timeframe.\n\nDaily:  threshold 5.5 · cooldown 5 · confirm 1 · FT off\n4H:     threshold 6.0 · cooldown 8 · confirm 1 · FT off\n1H:     threshold 6.5 · cooldown 12 · confirm 2 · FT on\n<1H:    threshold 7.0 · cooldown 15 · confirm 2 · FT on\n\nManual inputs above are used when this is off.")
+
+// ============================================================================
+// INPUTS — Display
+// ============================================================================
+
+var gDisplay = "Display"
+bool showTable        = input.bool(true,  "Show Score Table",    group=gDisplay)
+bool showCandleColors = input.bool(true,  "Candle Color Heatmap", group=gDisplay, tooltip="Colors candles by market state: No Trade (gray) → Watch → Active → Strong")
+bool showBgColor      = input.bool(false, "Background Shading",  group=gDisplay, tooltip="Light background tint when composite crosses threshold")
+color bullColor       = input.color(color.new(#00c853, 0), "Bull Triangle Color", group=gDisplay)
+color bearColor       = input.color(color.new(#d50000, 0), "Bear Triangle Color", group=gDisplay)
+int   labelSize       = input.int(1, "Label Size (1=Small 2=Normal 3=Large)", minval=1, maxval=3, group=gDisplay)
+
+// ============================================================================
+// TIMEFRAME-ADAPTIVE PARAMETERS
+// ============================================================================
+
+int tfSec = timeframe.in_seconds()  // daily=86400 · 4H=14400 · 1H=3600 · 15m=900
+
+float effThresh   = autoTF ? (tfSec >= 86400 ? 5.5 : tfSec >= 14400 ? 6.0 : tfSec >= 3600 ? 6.5 : 7.0) : compositeThreshInput
+int   effCooldown = autoTF ? (tfSec >= 86400 ? 5   : tfSec >= 14400 ? 8   : tfSec >= 3600 ? 12  : 15)  : cooldownInput
+int   effConfirm  = autoTF ? (tfSec >= 86400 ? 1   : tfSec >= 14400 ? 1   : 2)                          : confirmInput
+bool  effRequireFT= autoTF ? (tfSec >= 3600)                                                             : requireFT
+
+// ============================================================================
+// CALCULATIONS — Base Indicators
+// ============================================================================
+
+float ema20 = ta.ema(close, emaFastLen)
+float ema50 = ta.ema(close, emaSlowLen)
+float ema20Slope = (ema20 - ema20[emaSlopeLen]) / emaSlopeLen
+float atr14 = ta.atr(atrLen)
+float priceToEma20ATR = atr14 > 0 ? (close - ema20) / atr14 : 0.0
+
+float rsi14 = ta.rsi(close, rsiLen)
+float mfi14 = ta.mfi(hlc3, mfiLen)
+
+float stochRsiRaw = ta.stoch(rsi14, rsi14, rsi14, stochRsiLen)
+float stochRsiK   = ta.sma(stochRsiRaw, stochK)
+float stochRsiD   = ta.sma(stochRsiK, stochD)
+
+[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
+
+float avgVol = ta.sma(volume, volAvgLen)
+float relVol = avgVol > 0 ? volume / avgVol : 1.0
+
+float bbBasis = ta.sma(close, bbLen)
+float bbDev   = ta.stdev(close, bbLen) * bbMult
+float bbUpper = bbBasis + bbDev
+float bbLower = bbBasis - bbDev
+
+float candleRange    = high - low
+float upperWick      = high - math.max(open, close)
+float lowerWick      = math.min(open, close) - low
+float upperWickRatio = candleRange > 0 ? upperWick / candleRange : 0.0
+float lowerWickRatio = candleRange > 0 ? lowerWick / candleRange : 0.0
+float candleATR      = atr14 > 0 ? candleRange / atr14 : 0.0
+
+// Bar efficiency
+float barEfficiency  = candleRange > 0 ? math.abs(close - close[1]) / candleRange : 0.0
+float efficiencyEMA  = ta.ema(barEfficiency, 5)
+bool  effFalling     = ta.falling(efficiencyEMA, 3)
+bool  isShockBar     = candleATR > shockRangeMult and relVol > shockVolMult
+
+// Efficiency ratio (trend vs range)
+float netMove20   = math.abs(close - close[20])
+float totalPath20 = math.sum(math.abs(close - close[1]), 20)
+float effRatio    = totalPath20 > 0 ? netMove20 / totalPath20 : 0.5
+
+// ============================================================================
+// CALCULATIONS — Regime
+// ============================================================================
+
+float bbWidthRaw  = bbUpper - bbLower
+float bbWidthAvg  = ta.sma(bbWidthRaw, 50)
+float bbWidthRatio = bbWidthAvg > 0 ? bbWidthRaw / bbWidthAvg : 1.0
+
+bool isTrendUp   = ema20 > ema50 and effRatio > 0.35
+bool isTrendDown = ema20 < ema50 and effRatio > 0.35
+bool isRange     = effRatio <= 0.35
+bool isHighVol   = bbWidthRatio > 1.3
+bool isLowVol    = bbWidthRatio < 0.7
+
+float setupMult  = isRange ? 1.2 : (isTrendUp or isTrendDown) ? 0.8 : 1.0
+float confMult   = (isTrendUp or isTrendDown) ? 1.3 : 1.0
+float volBonus   = isHighVol ? 1.2 : isLowVol ? 0.8 : 1.0
+
+// ============================================================================
+// CALCULATIONS — Swing Detection
+// ============================================================================
+
+float pivotHi = ta.pivothigh(high, leftBars, rightBars)
+float pivotLo = ta.pivotlow(low, leftBars, rightBars)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(pivotHi)
+    lastSwingHigh := pivotHi
+if not na(pivotLo)
+    lastSwingLow := pivotLo
+
+float majorPivotHi = ta.pivothigh(high, majLeftBars, majRightBars)
+float majorPivotLo = ta.pivotlow(low, majLeftBars, majRightBars)
+
+var float lastMajorHigh = na
+var float lastMajorLow  = na
+var float prevMajorHigh = na
+var float prevMajorLow  = na
+var float prevSwingLow  = na
+var float prevSwingHigh = na
+
+if not na(majorPivotHi)
+    prevMajorHigh := lastMajorHigh
+    lastMajorHigh := majorPivotHi
+if not na(majorPivotLo)
+    prevMajorLow := lastMajorLow
+    lastMajorLow := majorPivotLo
+
+if not na(pivotHi)
+    prevSwingHigh := lastSwingHigh
+if not na(pivotLo)
+    prevSwingLow := lastSwingLow
+
+// ============================================================================
+// CALCULATIONS — Level Context
+// ============================================================================
+
+float range20High = ta.highest(high, 20)
+float range20Low  = ta.lowest(low, 20)
+float range20Span = range20High - range20Low
+
+bool nearRange20High = range20Span > 0 and (range20High - close) / range20Span < 0.15
+bool nearRange20Low  = range20Span > 0 and (close - range20Low) / range20Span < 0.15
+
+var float distToMajHighATR = na
+var float distToMajLowATR  = na
+distToMajHighATR := not na(lastMajorHigh) and atr14 > 0 ? (close - lastMajorHigh) / atr14 : na
+distToMajLowATR  := not na(lastMajorLow) and atr14 > 0 ? (close - lastMajorLow) / atr14 : na
+
+bool nearMajHigh = not na(distToMajHighATR) and math.abs(distToMajHighATR) < 0.5
+bool nearMajLow  = not na(distToMajLowATR) and math.abs(distToMajLowATR) < 0.5
+
+bool bullAtLevel = nearMajLow or nearRange20Low
+bool bearAtLevel = nearMajHigh or nearRange20High
+
+// Premium / Discount zone
+float pdRange        = not na(lastMajorHigh) and not na(lastMajorLow) ? lastMajorHigh - lastMajorLow : na
+float pdPremiumLine  = not na(pdRange) and pdRange > 0 ? lastMajorLow + pdRange * 0.75 : na
+float pdDiscountLine = not na(pdRange) and pdRange > 0 ? lastMajorLow + pdRange * 0.25 : na
+int   priceZone      = not na(pdPremiumLine) and not na(pdDiscountLine) ? (close >= pdPremiumLine ? 1 : close <= pdDiscountLine ? -1 : 0) : 0
+
+// ============================================================================
+// CALCULATIONS — Structure Events
+// ============================================================================
+
+// Micro BOS
+bool microBullBOS = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bool microBearBOS = not na(lastSwingLow)  and close < lastSwingLow  and close[1] >= lastSwingLow
+
+// Major BOS
+bool majorBullBOS = not na(lastMajorHigh) and close > lastMajorHigh and close[1] <= lastMajorHigh
+bool majorBearBOS = not na(lastMajorLow)  and close < lastMajorLow  and close[1] >= lastMajorLow
+
+// CHoCH tracking
+var int microTrend = 0
+var int majorTrend = 0
+
+bool microBullCHoCH = microBullBOS and microTrend == -1
+bool microBearCHoCH = microBearBOS and microTrend == 1
+bool majorBullCHoCH = majorBullBOS and majorTrend == -1
+bool majorBearCHoCH = majorBearBOS and majorTrend == 1
+
+if microBullBOS
+    microTrend := 1
+if microBearBOS
+    microTrend := -1
+if majorBullBOS
+    majorTrend := 1
+if majorBearBOS
+    majorTrend := -1
+
+// Fake breaks / Springs / Upthrsts
+bool fakeBreakout  = not na(lastSwingHigh) and high > lastSwingHigh and close <= lastSwingHigh
+bool fakeBreakdown = not na(lastSwingLow)  and low < lastSwingLow   and close >= lastSwingLow
+bool majFakeBreakout  = not na(lastMajorHigh) and high > lastMajorHigh and close <= lastMajorHigh
+bool majFakeBreakdown = not na(lastMajorLow)  and low < lastMajorLow  and close >= lastMajorLow
+
+bool isSpring         = fakeBreakdown and lowerWickRatio >= minWickRatio and candleATR >= minCandleATR
+bool isUpthrust       = fakeBreakout  and upperWickRatio >= minWickRatio and candleATR >= minCandleATR
+bool isMajorSpring    = majFakeBreakdown and lowerWickRatio >= minWickRatio and candleATR >= minCandleATR
+bool isMajorUpthrust  = majFakeBreakout  and upperWickRatio >= minWickRatio and candleATR >= minCandleATR
+
+// Climax detection
+bool isClimaxCandle   = candleATR >= climaxRangeATR and avgVol > 0 and volume >= climaxVolFact * avgVol
+bool isSellingClimax  = isClimaxCandle and close < open
+bool isBuyingClimax   = isClimaxCandle and close > open
+
+// Climax sequence state machine
+var int   clxState     = 0
+var int   clxDirection = 0
+var float clxClose     = na
+var float clxHigh      = na
+var float clxLow       = na
+var float clxRange     = na
+var float clxVolume    = na
+var int   clxBar       = na
+
+if isClimaxCandle
+    clxState     := 1
+    clxDirection := isSellingClimax ? 1 : isBuyingClimax ? -1 : 0
+    clxClose     := close
+    clxHigh      := high
+    clxLow       := low
+    clxRange     := candleRange
+    clxVolume    := volume
+    clxBar       := bar_index
+
+int  clxLookback   = 20
+bool hasActiveClx  = clxState >= 1 and not na(clxBar) and (bar_index - clxBar) <= clxLookback
+
+if hasActiveClx and clxState == 1
+    if clxDirection == 1 and close > clxClose
+        clxState := 2
+    if clxDirection == -1 and close < clxClose
+        clxState := 2
+
+if hasActiveClx and clxState == 2
+    bool clxReturning = false
+    if clxDirection == 1 and not na(clxClose) and atr14 > 0
+        clxReturning := close < clxClose + 1.5 * atr14 and close > clxLow - 0.5 * atr14
+    if clxDirection == -1 and not na(clxClose) and atr14 > 0
+        clxReturning := close > clxClose - 1.5 * atr14 and close < clxHigh + 0.5 * atr14
+    if clxReturning and (bar_index - clxBar) >= 2
+        clxState := 3
+
+if hasActiveClx and clxState == 3
+    bool clxTestBar_  = not na(clxRange) and not na(clxVolume) and candleRange <= clxRange * 0.6 and volume <= clxVolume * 0.7 and candleRange > 0
+    bool clxInZone    = not na(clxClose) and atr14 > 0 and math.abs(close - clxClose) <= 1.5 * atr14
+    if clxTestBar_ and clxInZone
+        clxState := 4
+
+if hasActiveClx and clxState == 4
+    if clxDirection == 1 and (microBullBOS or majorBullBOS)
+        clxState := 5
+    if clxDirection == -1 and (microBearBOS or majorBearBOS)
+        clxState := 5
+
+if hasActiveClx and not na(clxBar) and (bar_index - clxBar) > clxLookback
+    clxState := 0
+
+bool clxTestValid = clxState == 4 or clxState == 5
+bool clxConfirmed = clxState == 5
+
+// ============================================================================
+// SCORING HELPER
+// ============================================================================
+
+f_springScore(bool triggered, float wickR, float cATR, float rv, float sweep, bool isMajor) =>
+    float sc = 0.0
+    if triggered
+        int factors = 0
+        if wickR >= 0.55
+            factors += 1
+        if cATR >= 0.8
+            factors += 1
+        if rv >= 1.3
+            factors += 1
+        if sweep >= 0.15
+            factors += 1
+        float base = isMajor ? 3.0 : 1.5
+        sc := factors >= 3 ? base + 1.5 : factors >= 1 ? base + 0.5 : base
+    sc
+
+f_bosScore(bool triggered, float sweep, float rv, bool isMajor) =>
+    float sc = 0.0
+    if triggered
+        int factors = 0
+        if sweep >= 0.1
+            factors += 1
+        if sweep >= 0.3
+            factors += 1
+        if rv >= 1.3
+            factors += 1
+        float base = isMajor ? 2.0 : 0.5
+        sc := factors >= 2 ? base + 1.5 : factors >= 1 ? base + 0.5 : base
+    sc
+
+// ============================================================================
+// LAYER A — SETUP SCORE (bull)
+// ============================================================================
+
+float bullSetup = 0.0
+
+if rsi14 < rsiBullThresh
+    bullSetup += 1.0
+if rsi14 < rsiBullThresh + 10 and rsi14 > rsi14[1]
+    bullSetup += 0.5
+
+if mfi14 < mfiBullThresh
+    bullSetup += 1.0
+if mfi14 > mfi14[1] and mfi14[1] < mfiBullThresh + 10
+    bullSetup += 0.5
+
+if ta.crossover(stochRsiK, stochRsiD) and stochRsiK < 20
+    bullSetup += 1.0
+else if stochRsiK < 20
+    bullSetup += 0.5
+
+if macdHist > macdHist[1] and macdHist[1] < 0
+    bullSetup += 0.5
+
+if priceToEma20ATR < -priceEmaATRThresh
+    bullSetup += 1.0
+if priceToEma20ATR < -priceEmaATRThresh * 1.5
+    bullSetup += 0.5
+
+if low <= bbLower
+    bullSetup += 1.0
+if lowerWickRatio >= wickThresh
+    bullSetup += 1.0
+if bullAtLevel
+    bullSetup += 1.0
+if effFalling and close < ema20
+    bullSetup += effFallBonus
+
+if relVol < 0.6
+    bullSetup -= 0.5
+if not bullAtLevel and not na(distToMajLowATR) and distToMajLowATR > 2.0 and (range20Span > 0 and (close - range20Low) / range20Span > 0.5)
+    bullSetup -= 0.5
+if isShockBar
+    bullSetup -= shockPenalty
+
+bullSetup := math.max(0.0, bullSetup) * setupMult
+
+// ============================================================================
+// LAYER A — SETUP SCORE (bear)
+// ============================================================================
+
+float bearSetup = 0.0
+
+if rsi14 > rsiBearThresh
+    bearSetup += 1.0
+if rsi14 > rsiBearThresh - 10 and rsi14 < rsi14[1]
+    bearSetup += 0.5
+
+if mfi14 > mfiBearThresh
+    bearSetup += 1.0
+if mfi14 < mfi14[1] and mfi14[1] > mfiBearThresh - 10
+    bearSetup += 0.5
+
+if ta.crossunder(stochRsiK, stochRsiD) and stochRsiK > 80
+    bearSetup += 1.0
+else if stochRsiK > 80
+    bearSetup += 0.5
+
+if macdHist < macdHist[1] and macdHist[1] > 0
+    bearSetup += 0.5
+
+if priceToEma20ATR > priceEmaATRThresh
+    bearSetup += 1.0
+if priceToEma20ATR > priceEmaATRThresh * 1.5
+    bearSetup += 0.5
+
+if high >= bbUpper
+    bearSetup += 1.0
+if upperWickRatio >= wickThresh
+    bearSetup += 1.0
+if bearAtLevel
+    bearSetup += 1.0
+if effFalling and close > ema20
+    bearSetup += effFallBonus
+
+if relVol < 0.6
+    bearSetup -= 0.5
+if not bearAtLevel and not na(distToMajHighATR) and distToMajHighATR < -2.0 and (range20Span > 0 and (range20High - close) / range20Span > 0.5)
+    bearSetup -= 0.5
+if isShockBar
+    bearSetup -= shockPenalty
+
+bearSetup := math.max(0.0, bearSetup) * setupMult
+
+// ============================================================================
+// LAYER B — CONFIRMATION SCORE (bull)
+// ============================================================================
+
+float bullConf = 0.0
+
+float sprSweep    = isSpring and not na(lastSwingLow) and atr14 > 0 ? (lastSwingLow - low) / atr14 : 0.0
+float majSprSweep = isMajorSpring and not na(lastMajorLow) and atr14 > 0 ? (lastMajorLow - low) / atr14 : 0.0
+float bosSwBull   = microBullBOS and not na(lastSwingHigh) and atr14 > 0 ? (close - lastSwingHigh) / atr14 : 0.0
+float majBosBull  = majorBullBOS and not na(lastMajorHigh) and atr14 > 0 ? (close - lastMajorHigh) / atr14 : 0.0
+
+if isMajorSpring
+    bullConf += f_springScore(true, lowerWickRatio, candleATR, relVol, majSprSweep, true)
+else if isSpring
+    bullConf += f_springScore(true, lowerWickRatio, candleATR, relVol, sprSweep, false)
+
+if majorBullBOS
+    bullConf += f_bosScore(true, majBosBull, relVol, true)
+    if majorBullCHoCH
+        bullConf += 1.5
+else if microBullBOS
+    bullConf += f_bosScore(true, bosSwBull, relVol, false)
+    if microBullCHoCH
+        bullConf += 0.75
+
+if fakeBreakdown and not isSpring and not isMajorSpring
+    bullConf += 0.5
+if majFakeBreakdown and not isMajorSpring
+    bullConf += 1.0
+
+if isClimaxCandle and close < ema20
+    bullConf += 1.0
+if clxTestValid and clxDirection == 1
+    bullConf += 1.5
+if clxConfirmed and clxDirection == 1
+    bullConf += 2.5
+
+if priceZone == -1
+    bullConf += 1.0
+if priceZone == 1
+    bullConf -= 0.5
+
+bullConf := math.max(0.0, bullConf) * confMult * volBonus
+
+// ============================================================================
+// LAYER B — CONFIRMATION SCORE (bear)
+// ============================================================================
+
+float bearConf = 0.0
+
+float utSweep    = isUpthrust and not na(lastSwingHigh) and atr14 > 0 ? (high - lastSwingHigh) / atr14 : 0.0
+float majUtSweep = isMajorUpthrust and not na(lastMajorHigh) and atr14 > 0 ? (high - lastMajorHigh) / atr14 : 0.0
+float bosSwBear  = microBearBOS and not na(lastSwingLow) and atr14 > 0 ? (lastSwingLow - close) / atr14 : 0.0
+float majBosBear = majorBearBOS and not na(lastMajorLow) and atr14 > 0 ? (lastMajorLow - close) / atr14 : 0.0
+
+if isMajorUpthrust
+    bearConf += f_springScore(true, upperWickRatio, candleATR, relVol, majUtSweep, true)
+else if isUpthrust
+    bearConf += f_springScore(true, upperWickRatio, candleATR, relVol, utSweep, false)
+
+if majorBearBOS
+    bearConf += f_bosScore(true, majBosBear, relVol, true)
+    if majorBearCHoCH
+        bearConf += 1.5
+else if microBearBOS
+    bearConf += f_bosScore(true, bosSwBear, relVol, false)
+    if microBearCHoCH
+        bearConf += 0.75
+
+if fakeBreakout and not isUpthrust and not isMajorUpthrust
+    bearConf += 0.5
+if majFakeBreakout and not isMajorUpthrust
+    bearConf += 1.0
+
+if isClimaxCandle and close > ema20
+    bearConf += 1.0
+if clxTestValid and clxDirection == -1
+    bearConf += 1.5
+if clxConfirmed and clxDirection == -1
+    bearConf += 2.5
+
+if priceZone == 1
+    bearConf += 1.0
+if priceZone == -1
+    bearConf -= 0.5
+
+bearConf := math.max(0.0, bearConf) * confMult * volBonus
+
+// ============================================================================
+// LAYER C — PHASE SCORE (accumulation / distribution)
+// ============================================================================
+// Simplified 5-component phase score (0-10 scale → rescaled to 0-5 for weighting)
+
+int phLookback = 20
+
+// EMA cross and slope context
+bool slopeWasDown = ema20[phLookback] < ema50[phLookback]
+bool slopeWasUp   = ema20[phLookback] > ema50[phLookback]
+bool slopeNowFlat = math.abs(ema20 - ema50) < atr14 * 0.5
+
+// Accumulation phase components (bullish context)
+float phTrendLoss = 0.0
+if slopeWasDown and slopeNowFlat
+    phTrendLoss += 1.0
+if slopeWasDown and not microBearBOS and not majorBearBOS
+    phTrendLoss += 0.5
+phTrendLoss := math.min(phTrendLoss, 2.0)
+
+float phRange = 0.0
+if effRatio < 0.3
+    phRange += 1.0
+if effRatio < 0.15
+    phRange += 0.5
+phRange := math.min(phRange, 2.0)
+
+float phVolComp = 0.0
+float atrAvg20  = ta.sma(atr14, phLookback)
+float atrRatio  = atrAvg20 > 0 ? atr14 / atrAvg20 : 1.0
+if bbWidthRatio < 0.7
+    phVolComp += 1.0
+if atrRatio < 0.8
+    phVolComp += 0.5
+phVolComp := math.min(phVolComp, 2.0)
+
+// Higher low structure for bull phase
+bool hasHigherLow = not na(lastSwingLow) and not na(prevSwingLow) and lastSwingLow > prevSwingLow
+float phBullStruct = 0.0
+if hasHigherLow
+    phBullStruct += 1.0
+if microBullBOS or majorBullBOS
+    phBullStruct += 1.0
+phBullStruct := math.min(phBullStruct, 2.0)
+
+float accumScore = (phTrendLoss + phRange + phVolComp + phBullStruct) / 8.0 * 5.0  // rescaled 0-5
+
+// Distribution phase components (bearish context)
+bool slopeWasUp2 = ema20[phLookback] > ema50[phLookback]
+float phTrendLoss2 = 0.0
+if slopeWasUp2 and slopeNowFlat
+    phTrendLoss2 += 1.0
+if slopeWasUp2 and not microBullBOS and not majorBullBOS
+    phTrendLoss2 += 0.5
+phTrendLoss2 := math.min(phTrendLoss2, 2.0)
+
+bool hasLowerHigh = not na(lastSwingHigh) and not na(prevSwingHigh) and lastSwingHigh < prevSwingHigh
+float phBearStruct = 0.0
+if hasLowerHigh
+    phBearStruct += 1.0
+if microBearBOS or majorBearBOS
+    phBearStruct += 1.0
+phBearStruct := math.min(phBearStruct, 2.0)
+
+float distribScore = (phTrendLoss2 + phRange + phVolComp + phBearStruct) / 8.0 * 5.0  // rescaled 0-5
+
+// ============================================================================
+// EVENT TRACKING — Follow-Through
+// ============================================================================
+
+var float bullTriggerLevel = na
+var int   bullEventBar     = na
+var float bearTriggerLevel = na
+var int   bearEventBar     = na
+
+bool newBullEvent = isSpring or isMajorSpring or microBullBOS or majorBullBOS or (clxConfirmed and clxDirection == 1)
+bool newBearEvent = isUpthrust or isMajorUpthrust or microBearBOS or majorBearBOS or (clxConfirmed and clxDirection == -1)
+
+if newBullEvent
+    bullTriggerLevel := (isSpring or isMajorSpring) ? low : close
+    bullEventBar     := bar_index
+if newBearEvent
+    bearTriggerLevel := (isUpthrust or isMajorUpthrust) ? high : close
+    bearEventBar     := bar_index
+
+int bullEventAge = not na(bullEventBar) ? bar_index - bullEventBar : 999
+int bearEventAge = not na(bearEventBar) ? bar_index - bearEventBar : 999
+
+bool bullEventActive = bullEventAge >= 1 and bullEventAge <= 4 and not na(bullTriggerLevel)
+bool bearEventActive = bearEventAge >= 1 and bearEventAge <= 4 and not na(bearTriggerLevel)
+
+bool bullFollowThrough = bullEventActive and close > close[1] and close > bullTriggerLevel and not microBearBOS and not majorBearBOS
+bool bearFollowThrough = bearEventActive and close < close[1] and close < bearTriggerLevel and not microBullBOS and not majorBullBOS
+
+var bool bullFTAchieved = false
+var bool bearFTAchieved = false
+
+if newBullEvent
+    bullFTAchieved := false
+if newBearEvent
+    bearFTAchieved := false
+if bullFollowThrough
+    bullFTAchieved := true
+if bearFollowThrough
+    bearFTAchieved := true
+
+// ============================================================================
+// COMPOSITE SCORES
+// ============================================================================
+
+float bullComposite = wSetup * bullSetup + wConf * bullConf + wPhase * accumScore
+float bearComposite = wSetup * bearSetup + wConf * bearConf + wPhase * distribScore
+
+// ============================================================================
+// CANDLE STATE — Market condition heatmap
+// ============================================================================
+// Direction  → EMA alignment (ema20 vs ema50): the trend tells us the color
+// Intensity  → Efficiency Ratio: how strong / clean is the trend
+// Conflict   → Composite score opposing the EMA trend: trend is fragile
+// Range      → isRange + no strong opposing pressure
+//
+// Priority: Conflict → Range → Bull/Bear Strong → Active → Watch → No Trade
+
+float watchThresh  = effThresh * 0.75   // default 4.5
+
+// EMA trend direction
+bool emaBull = ema20 > ema50
+bool emaBear = ema20 < ema50
+
+// Conflict: opposing reversal score is building against the EMA trend,
+// or both scores are elevated with no clear edge (indecision)
+bool isStateConflict = (emaBull and bearComposite >= effThresh) or (emaBear and bullComposite >= effThresh) or (math.max(bullComposite, bearComposite) >= watchThresh and math.abs(bullComposite - bearComposite) < 1.0)
+
+// Range: no trend and scores below active level
+bool isStateRange = isRange and math.max(bullComposite, bearComposite) < effThresh and not isStateConflict
+
+// Bull states — direction from EMA, intensity from efficiency ratio
+bool isBullStrong = emaBull and not isRange and effRatio >= 0.5  and not isStateConflict
+bool isBullActive = emaBull and not isRange and effRatio >= 0.35 and effRatio < 0.5 and not isStateConflict
+bool isBullWatch  = emaBull and (isRange or effRatio < 0.35)     and not isStateConflict
+
+// Bear states — mirror
+bool isBearStrong = emaBear and not isRange and effRatio >= 0.5  and not isStateConflict
+bool isBearActive = emaBear and not isRange and effRatio >= 0.35 and effRatio < 0.5 and not isStateConflict
+bool isBearWatch  = emaBear and (isRange or effRatio < 0.35)     and not isStateConflict
+
+string candleState = isStateConflict ? "CONFLICT" : isStateRange ? "RANGE" : isBullStrong ? "BULL STRONG" : isBullActive ? "BULL ACTIVE" : isBullWatch ? "BULL WATCH" : isBearStrong ? "BEAR STRONG" : isBearActive ? "BEAR ACTIVE" : isBearWatch ? "BEAR WATCH" : "NO TRADE"
+
+// Candle colors — green spectrum / red spectrum / neutral
+color cBullStrong = color.new(#1b5e20, 0)    // deep green
+color cBullActive = color.new(#2e7d32, 0)    // strong green
+color cBullWatch  = color.new(#81c784, 50)   // pale green
+color cBearStrong = color.new(#7f0000, 0)    // deep red
+color cBearActive = color.new(#b71c1c, 0)    // strong red
+color cBearWatch  = color.new(#ef9a9a, 50)   // pale red
+color cConflict   = color.new(#e65100, 30)   // burnt orange
+color cRangeState = color.new(#9e8a00, 55)   // sand / dull yellow
+color cNoTrade    = color.new(#9e9e9e, 65)   // gray
+
+color stateColor = isStateConflict ? cConflict : isStateRange ? cRangeState : isBullStrong ? cBullStrong : isBullActive ? cBullActive : isBullWatch ? cBullWatch : isBearStrong ? cBearStrong : isBearActive ? cBearActive : isBearWatch ? cBearWatch : cNoTrade
+
+// ============================================================================
+// SIGNAL LOGIC
+// ============================================================================
+
+// Conflict: both composites elevated
+bool isConflict = suppressConflict and (bullComposite >= effThresh) and (bearComposite >= effThresh)
+
+// Score delta guard
+bool bullDeltaOk = bullComposite - bearComposite >= scoreDelta
+bool bearDeltaOk = bearComposite - bullComposite >= scoreDelta
+
+// Follow-through gate
+bool bullFTok = not effRequireFT or bullFTAchieved
+bool bearFTok = not effRequireFT or bearFTAchieved
+
+// Cooldown tracking
+var int lastBullSignalBar = na
+var int lastBearSignalBar = na
+
+bool bullCooldownOk = na(lastBullSignalBar) or (bar_index - lastBullSignalBar) >= effCooldown
+bool bearCooldownOk = na(lastBearSignalBar) or (bar_index - lastBearSignalBar) >= effCooldown
+
+// Confirmation bars: count consecutive bars where composite >= threshold
+var int bullConfCount = 0
+var int bearConfCount = 0
+
+if bullComposite >= effThresh
+    bullConfCount := bullConfCount + 1
+else
+    bullConfCount := 0
+
+if bearComposite >= effThresh
+    bearConfCount := bearConfCount + 1
+else
+    bearConfCount := 0
+
+// Trend alignment: reversals fire against the EMA trend, not with it
+// Bull arrow valid when NOT in confirmed uptrend (reversal FROM bearish/flat context)
+// Bear arrow valid when NOT in confirmed downtrend (reversal FROM bullish/flat context)
+bool bullTrendOk = not trendFilter or not (isTrendUp  and effRatio > 0.45)
+bool bearTrendOk = not trendFilter or not (isTrendDown and effRatio > 0.45)
+
+// Signal conditions
+bool bullSignalRaw = bullComposite >= effThresh and bullDeltaOk and bullFTok and bullCooldownOk and bullConfCount >= effConfirm and not isConflict and bullTrendOk
+bool bearSignalRaw = bearComposite >= effThresh and bearDeltaOk and bearFTok and bearCooldownOk and bearConfCount >= effConfirm and not isConflict and bearTrendOk
+
+// Fire signal only on the bar it first qualifies (edge detection)
+bool bullSignal = bullSignalRaw and not bullSignalRaw[1]
+bool bearSignal = bearSignalRaw and not bearSignalRaw[1]
+
+// Update cooldown on signal fire
+if bullSignal
+    lastBullSignalBar := bar_index
+if bearSignal
+    lastBearSignalBar := bar_index
+
+// ============================================================================
+// SIGNAL TOOLTIPS
+// ============================================================================
+
+string _sep     = "──────────────────"
+string _zoneStr = priceZone == 1 ? "Premium" : priceZone == -1 ? "Discount" : "Equilibrium"
+string _regStr  = isTrendUp ? "Trend ↑" : isTrendDown ? "Trend ↓" : "Range"
+string _volStr  = isHighVol ? "High Vol" : isLowVol ? "Low Vol" : "Normal Vol"
+
+// ── Bull reasons ──
+string _bs = ""
+if rsi14 < rsiBullThresh
+    _bs := _bs + "  RSI " + str.tostring(rsi14, "#") + " — oversold\n"
+if mfi14 < mfiBullThresh
+    _bs := _bs + "  MFI " + str.tostring(mfi14, "#") + " — money flow negative\n"
+if low <= bbLower
+    _bs := _bs + "  BB lower — price stretched\n"
+if lowerWickRatio >= wickThresh
+    _bs := _bs + "  Lower wick " + str.tostring(lowerWickRatio, "#%") + " — low rejected\n"
+if priceToEma20ATR < -priceEmaATRThresh
+    _bs := _bs + "  Below EMA20 — overextended\n"
+if effFalling and close < ema20
+    _bs := _bs + "  Momentum decelerating\n"
+if bullAtLevel
+    _bs := _bs + "  At key structural level\n"
+
+string _bc = ""
+if isMajorSpring
+    _bc := _bc + "  Major Spring — false break reclaimed\n"
+else if isSpring
+    _bc := _bc + "  Spring — wick below low, close above\n"
+if majorBullBOS
+    _bc := _bc + (majorBullCHoCH ? "  Major CHoCH — trend reversal\n" : "  Major BOS — broke major high\n")
+else if microBullBOS
+    _bc := _bc + (microBullCHoCH ? "  CHoCH — micro structure shifted\n" : "  Micro BOS — swing high taken\n")
+if clxConfirmed and clxDirection == 1
+    _bc := _bc + "  CLX sequence complete\n"
+else if clxTestValid and clxDirection == 1
+    _bc := _bc + "  CLX test held — watching BOS\n"
+else if isClimaxCandle and close < ema20
+    _bc := _bc + "  Selling climax detected\n"
+if fakeBreakdown and not isSpring and not isMajorSpring
+    _bc := _bc + "  Fake breakdown reclaimed\n"
+if priceZone == -1
+    _bc := _bc + "  Discount zone (lower 25%)\n"
+
+string _bp = ""
+if hasHigherLow
+    _bp := _bp + "  Higher low — bull structure\n"
+if phRange > 0
+    _bp := _bp + "  Consolidation in progress\n"
+if phVolComp > 0
+    _bp := _bp + "  Volatility compressed\n"
+if phTrendLoss > 0
+    _bp := _bp + "  Downtrend weakening\n"
+
+string bullTip = "▲  Bull Signal\n" + _sep + "\n" + "  Composite   " + str.tostring(bullComposite, "#.##") + "  /  " + str.tostring(effThresh, "#.#") + "\n" + "  Setup       " + str.tostring(bullSetup, "#.##") + "\n" + "  Confirm     " + str.tostring(bullConf, "#.##") + "\n" + "  Phase       " + str.tostring(accumScore, "#.##") + "\n" + _sep + "\n" + "▸ Setup\n" + (str.length(_bs) > 0 ? _bs : "  —\n") + "\n" + "▸ Confirmation\n" + (str.length(_bc) > 0 ? _bc : "  —\n") + "\n" + "▸ Phase\n" + (str.length(_bp) > 0 ? _bp : "  —\n") + _sep + "\n" + "  " + _regStr + "  ·  " + _volStr + "  ·  " + _zoneStr + (trendFilter and not bullTrendOk ? "\n⚠  Trend filter: EMA bullish — signal borderline" : "")
+
+// ── Bear reasons ──
+string _us = ""
+if rsi14 > rsiBearThresh
+    _us := _us + "  RSI " + str.tostring(rsi14, "#") + " — overbought\n"
+if mfi14 > mfiBearThresh
+    _us := _us + "  MFI " + str.tostring(mfi14, "#") + " — money flow elevated\n"
+if high >= bbUpper
+    _us := _us + "  BB upper — price stretched\n"
+if upperWickRatio >= wickThresh
+    _us := _us + "  Upper wick " + str.tostring(upperWickRatio, "#%") + " — high rejected\n"
+if priceToEma20ATR > priceEmaATRThresh
+    _us := _us + "  Above EMA20 — overextended\n"
+if effFalling and close > ema20
+    _us := _us + "  Momentum decelerating\n"
+if bearAtLevel
+    _us := _us + "  At key structural level\n"
+
+string _uc = ""
+if isMajorUpthrust
+    _uc := _uc + "  Major Upthrust — false break rejected\n"
+else if isUpthrust
+    _uc := _uc + "  Upthrust — wick above high, close below\n"
+if majorBearBOS
+    _uc := _uc + (majorBearCHoCH ? "  Major CHoCH — trend reversal\n" : "  Major BOS — broke major low\n")
+else if microBearBOS
+    _uc := _uc + (microBearCHoCH ? "  CHoCH — micro structure shifted\n" : "  Micro BOS — swing low taken\n")
+if clxConfirmed and clxDirection == -1
+    _uc := _uc + "  CLX sequence complete\n"
+else if clxTestValid and clxDirection == -1
+    _uc := _uc + "  CLX test held — watching BOS\n"
+else if isClimaxCandle and close > ema20
+    _uc := _uc + "  Buying climax detected\n"
+if fakeBreakout and not isUpthrust and not isMajorUpthrust
+    _uc := _uc + "  Fake breakout rejected\n"
+if priceZone == 1
+    _uc := _uc + "  Premium zone (upper 25%)\n"
+
+string _up = ""
+if hasLowerHigh
+    _up := _up + "  Lower high — bear structure\n"
+if phRange > 0
+    _up := _up + "  Consolidation in progress\n"
+if phVolComp > 0
+    _up := _up + "  Volatility compressed\n"
+if phTrendLoss2 > 0
+    _up := _up + "  Uptrend weakening\n"
+
+string bearTip = "▼  Bear Signal\n" + _sep + "\n" + "  Composite   " + str.tostring(bearComposite, "#.##") + "  /  " + str.tostring(effThresh, "#.#") + "\n" + "  Setup       " + str.tostring(bearSetup, "#.##") + "\n" + "  Confirm     " + str.tostring(bearConf, "#.##") + "\n" + "  Phase       " + str.tostring(distribScore, "#.##") + "\n" + _sep + "\n" + "▸ Setup\n" + (str.length(_us) > 0 ? _us : "  —\n") + "\n" + "▸ Confirmation\n" + (str.length(_uc) > 0 ? _uc : "  —\n") + "\n" + "▸ Phase\n" + (str.length(_up) > 0 ? _up : "  —\n") + _sep + "\n" + "  " + _regStr + "  ·  " + _volStr + "  ·  " + _zoneStr + (trendFilter and not bearTrendOk ? "\n⚠  Trend filter: EMA bearish — signal borderline" : "")
+
+// ============================================================================
+// PLOT — Triangle Markers
+// ============================================================================
+
+labelSize_  = labelSize == 1 ? size.small : labelSize == 2 ? size.normal : size.large
+
+if bullSignal
+    label.new(bar_index, low, "▲",
+         xloc=xloc.bar_index, yloc=yloc.belowbar,
+         color=color.new(bullColor, 90),
+         textcolor=bullColor,
+         style=label.style_label_up,
+         size=labelSize_,
+         tooltip=bullTip)
+
+if bearSignal
+    label.new(bar_index, high, "▼",
+         xloc=xloc.bar_index, yloc=yloc.abovebar,
+         color=color.new(bearColor, 90),
+         textcolor=bearColor,
+         style=label.style_label_down,
+         size=labelSize_,
+         tooltip=bearTip)
+
+// ============================================================================
+// CANDLE COLORING
+// ============================================================================
+
+barcolor(showCandleColors ? stateColor : na)
+
+// ============================================================================
+// BACKGROUND SHADING
+// ============================================================================
+
+bgcolor(showBgColor and bullComposite >= effThresh and not isConflict ? color.new(bullColor, 93) : na)
+bgcolor(showBgColor and bearComposite >= effThresh and not isConflict ? color.new(bearColor, 93) : na)
+
+// ============================================================================
+// STATUS TABLE
+// ============================================================================
+
+if showTable and barstate.islast
+    string regimeStr = isTrendUp ? "TREND ↑" : isTrendDown ? "TREND ↓" : "RANGE"
+    string volStr    = isHighVol ? "HIGH VOL" : isLowVol ? "LOW VOL" : "NORMAL"
+
+    string bullStatusStr = bullSignal ? "▲ SIGNAL" : bullSignalRaw ? "▲ ACTIVE" : bullComposite >= watchThresh ? "WATCH" : "—"
+    string bearStatusStr = bearSignal ? "▼ SIGNAL" : bearSignalRaw ? "▼ ACTIVE" : bearComposite >= watchThresh ? "WATCH" : "—"
+
+    color bullStatusCol = bullSignal ? color.new(#00c853, 10) : bullSignalRaw ? color.new(#00c853, 40) : isConflict ? color.new(#ff6f00, 10) : color.new(color.gray, 80)
+    color bearStatusCol = bearSignal ? color.new(#d50000, 10) : bearSignalRaw ? color.new(#d50000, 40) : isConflict ? color.new(#ff6f00, 10) : color.new(color.gray, 80)
+
+    color stateTableCol = isStateConflict ? color.new(#e65100, 20) : isStateRange ? color.new(#9e8a00, 40) : isBullStrong ? color.new(#1b5e20, 10) : isBullActive ? color.new(#2e7d32, 20) : isBullWatch ? color.new(#81c784, 50) : isBearStrong ? color.new(#7f0000, 10) : isBearActive ? color.new(#b71c1c, 20) : isBearWatch ? color.new(#ef9a9a, 50) : color.new(color.gray, 70)
+    color stateTextCol  = color.new(color.gray, 10)
+
+    var table t = table.new(position.top_right, 3, 9,
+         bgcolor=color.new(color.white, 5),
+         border_color=color.new(color.gray, 60),
+         border_width=1,
+         frame_color=color.new(color.gray, 40),
+         frame_width=1)
+
+    // Header
+    table.cell(t, 0, 0, "Vein Trend",    text_color=color.new(color.gray, 20), text_size=size.small, bgcolor=color.new(color.gray, 90))
+    table.cell(t, 1, 0, "Bull",          text_color=#00c853,                   text_size=size.small, bgcolor=color.new(color.gray, 90))
+    table.cell(t, 2, 0, "Bear",          text_color=#d50000,                   text_size=size.small, bgcolor=color.new(color.gray, 90))
+
+    // Composite
+    table.cell(t, 0, 1, "Composite",  text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(bullComposite, "#.##"), text_color=#00c853, text_size=size.small)
+    table.cell(t, 2, 1, str.tostring(bearComposite, "#.##"), text_color=#d50000, text_size=size.small)
+
+    // Threshold
+    table.cell(t, 0, 2, "Threshold",  text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(effThresh, "#.#"), text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 2, 2, str.tostring(effThresh, "#.#"), text_color=color.new(color.gray, 20), text_size=size.small)
+
+    // Setup / Conf / Phase
+    table.cell(t, 0, 3, "Setup",      text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(bullSetup, "#.##"),  text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 2, 3, str.tostring(bearSetup, "#.##"),  text_color=color.new(color.gray, 20), text_size=size.small)
+
+    table.cell(t, 0, 4, "Confirm",    text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(bullConf, "#.##"),   text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 2, 4, str.tostring(bearConf, "#.##"),   text_color=color.new(color.gray, 20), text_size=size.small)
+
+    table.cell(t, 0, 5, "Phase",      text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(accumScore, "#.##"),  text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 2, 5, str.tostring(distribScore, "#.##"), text_color=color.new(color.gray, 20), text_size=size.small)
+
+    // Status
+    table.cell(t, 0, 6, "Status",      text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 1, 6, bullStatusStr, text_color=color.new(color.gray, 10), bgcolor=bullStatusCol, text_size=size.small)
+    table.cell(t, 2, 6, bearStatusStr, text_color=color.new(color.gray, 10), bgcolor=bearStatusCol, text_size=size.small)
+
+    // Candle State (spans both columns)
+    table.cell(t, 0, 7, "State",      text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 1, 7, candleState,  text_color=stateTextCol, bgcolor=stateTableCol, text_size=size.small)
+    table.cell(t, 2, 7, "",           text_color=color.new(color.gray, 20), bgcolor=stateTableCol, text_size=size.small)
+
+    // Regime
+    table.cell(t, 0, 8, "Regime",     text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 1, 8, regimeStr,    text_color=color.new(color.gray, 20), text_size=size.small)
+    table.cell(t, 2, 8, volStr,       text_color=color.new(color.gray, 20), text_size=size.small)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(bullSignal, "Vein Trend: Bull Signal ▲", "Vein Trend: Bull reversal signal ▲ — composite score reached threshold")
+alertcondition(bearSignal, "Vein Trend: Bear Signal ▼", "Vein Trend: Bear reversal signal ▼ — composite score reached threshold")
+alertcondition(bullSignal or bearSignal, "Vein Trend: Any Signal", "Vein Trend: Reversal signal fired")
