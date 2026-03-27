@@ -1,0 +1,358 @@
+//@version=6
+// ============================================================================
+// Vein Pullback [WavesUnchained]
+// Version: 0.2
+// ============================================================================
+// Detects pullbacks (temporary counter-trend moves) and signals when they end.
+// Distinguishes pullbacks from reversals via weakness checks and structure gates.
+// Works on any timeframe — EMAs adapt automatically.
+//
+// Score layers (0–10):
+//   A  Trend quality    (0–2) — EMA alignment + directional efficiency
+//   B  Pullback active  (0–2) — price crossed EMA fast, bars elapsed
+//   C  Move weakness    (0–3) — RSI not extreme, low volume, small candles
+//   D  Structure intact (0–2) — no break of last confirmed swing low/high
+//   E  Optimal depth    (0–1) — 25–68% Fibonacci retracement (frozen references)
+//
+// Signals:
+//   ▲ score  Pullback End     — entry in trend direction (rejection or micro BOS)
+//   ◆        Structure Break  — pullback evolved into reversal
+//
+// ============================================================================
+indicator("Vein: Pullback [WavesUnchained]", "Vein Pullback", overlay=true, max_labels_count=300)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+var gTrend = "Trend"
+bool  autoTF      = input.bool(true,  "Auto EMA (adapt to timeframe)", group=gTrend, tooltip="Daily→50/200  4H→34/100  1H→21/55  <1H→20/50")
+int   emaFastLen  = input.int(20,  "EMA Fast (manual only)",          minval=1, group=gTrend)
+int   emaSlowLen  = input.int(50,  "EMA Slow (manual only)",          minval=1, group=gTrend)
+int   erLen       = input.int(10,  "Efficiency Ratio Length",         minval=3, group=gTrend)
+
+var gStructure = "Structure"
+int   swingLeft   = input.int(5,   "Swing Pivot Left Bars",  minval=2, maxval=15, group=gStructure)
+int   swingRight  = input.int(5,   "Swing Pivot Right Bars", minval=2, maxval=15, group=gStructure)
+
+var gWeak = "Weakness Detection"
+int   rsiLen      = input.int(14,  "RSI Length",              minval=1, group=gWeak)
+int   volLen      = input.int(20,  "Volume MA Length",        minval=5, group=gWeak)
+int   atrLen      = input.int(14,  "ATR Length",              minval=1, group=gWeak)
+float rsiBullMin  = input.float(38.0, "Bull PB: RSI floor",   minval=20, maxval=55, step=1, group=gWeak, tooltip="RSI must stay above this during a bull pullback — if it drops below, sellers are too aggressive (reversal, not pullback)")
+float rsiBearMax  = input.float(62.0, "Bear PB: RSI ceiling", minval=45, maxval=80, step=1, group=gWeak, tooltip="RSI must stay below this during a bear pullback")
+float volMult     = input.float(1.3,  "Max Volume Multiple",  minval=1.0, maxval=3.0, step=0.1, group=gWeak, tooltip="Volume during pullback must stay below volAvg × this (high volume = aggressive, not weak)")
+
+var gDepth = "Pullback Depth"
+float depthMin    = input.float(0.25, "Depth Min (Fib ratio)", minval=0.1, maxval=0.5, step=0.05, group=gDepth, tooltip="Minimum retracement — shallower moves are continuation flags, not pullbacks")
+float depthMax    = input.float(0.68, "Depth Max (Fib ratio)", minval=0.5, maxval=0.9, step=0.05, group=gDepth, tooltip="Beyond this → likely reversal, not pullback")
+
+var gSignal = "Signals"
+float scoreThresh = input.float(5.5, "Min Score for End Signal", minval=3.0, maxval=10.0, step=0.5, group=gSignal, tooltip="Pullback score must reach this to generate an entry signal")
+float wickMin     = input.float(0.38, "Rejection Wick Ratio",    minval=0.2, maxval=0.8, step=0.05, group=gSignal, tooltip="Minimum lower/upper wick ratio to count as a rejection candle")
+int   cdBars      = input.int(3,     "Signal Cooldown (bars)",   minval=1, maxval=20, group=gSignal, tooltip="Minimum bars between end signals in the same direction")
+int   pbTimeout   = input.int(40,    "Pullback Timeout (bars)",  minval=10, maxval=100, group=gSignal, tooltip="Pullback is invalidated if it has not resolved after this many bars")
+
+var gDisplay = "Display"
+bool  showTable   = input.bool(true,  "Show Score Table",         group=gDisplay)
+string tablePos   = input.string("top_right", "Table Position",   options=["top_left","top_center","top_right","middle_left","middle_center","middle_right","bottom_left","bottom_center","bottom_right"], group=gDisplay)
+bool  showBg      = input.bool(true,  "Show Pullback Background", group=gDisplay, tooltip="Light tint when pullback is active and structure intact")
+bool  showEMAs    = input.bool(true,  "Show EMAs",                group=gDisplay)
+bool  showEndSig  = input.bool(true,  "Show End Signals ▲▼",      group=gDisplay)
+bool  showBreak   = input.bool(true,  "Show Structure Breaks ◆",  group=gDisplay)
+
+// ============================================================================
+// BASE CALCULATIONS
+// ============================================================================
+
+int   tfSec       = timeframe.in_seconds()
+int   effFastLen  = autoTF ? (tfSec >= 86400 ? 50  : tfSec >= 14400 ? 34  : tfSec >= 3600 ? 21 : 20)  : emaFastLen
+int   effSlowLen  = autoTF ? (tfSec >= 86400 ? 200 : tfSec >= 14400 ? 100 : tfSec >= 3600 ? 55 : 50)  : emaSlowLen
+
+float emaFast = ta.ema(close, effFastLen)
+float emaSlow = ta.ema(close, effSlowLen)
+float rsi14   = ta.rsi(close, rsiLen)
+float atr14   = ta.atr(atrLen)
+float volAvg  = ta.sma(volume, volLen)
+float range_  = high - low
+
+// Efficiency Ratio — directional consistency of recent move
+float erMove   = math.abs(close - close[erLen])
+float erPath   = math.sum(math.abs(close - close[1]), erLen)
+float effRatio = erPath > 0 ? erMove / erPath : 0.0
+
+// Trend direction
+bool isBullTrend = emaFast > emaSlow
+bool isBearTrend = emaFast < emaSlow
+
+// Candle anatomy
+float bodyTop   = math.max(open, close)
+float bodyBot   = math.min(open, close)
+float lowerWick = range_ > 0 ? (bodyBot - low)  / range_ : 0.0
+float upperWick = range_ > 0 ? (high - bodyTop) / range_ : 0.0
+
+// Score bar utility (10-char unicode progress bar, scales s to maxVal)
+scoreBar(float s, float maxVal) =>
+    int n = int(math.round(math.min(s / maxVal * 10.0, 10.0)))
+    string r = ""
+    for i = 0 to 9
+        r += i < n ? "█" : "░"
+    r
+
+// ============================================================================
+// SWING STRUCTURE
+// ============================================================================
+
+float pivHigh = ta.pivothigh(high, swingLeft, swingRight)
+float pivLow  = ta.pivotlow(low,  swingLeft, swingRight)
+
+var float lastPivHigh = na
+var float lastPivLow  = na
+
+if not na(pivHigh)
+    lastPivHigh := pivHigh
+if not na(pivLow)
+    lastPivLow  := pivLow
+
+// Structure break: close breaks through the last confirmed swing on the wrong side
+bool bullStructBroken = isBullTrend and not na(lastPivLow)  and close < lastPivLow
+bool bearStructBroken = isBearTrend and not na(lastPivHigh) and close > lastPivHigh
+
+// ============================================================================
+// PULLBACK STATE MACHINE
+// ============================================================================
+
+// Pullback starts when price crosses EMA fast against the trend
+bool bullPBStart = isBullTrend and close < emaFast and close[1] >= emaFast[1]
+bool bearPBStart = isBearTrend and close > emaFast and close[1] <= emaFast[1]
+
+var bool  inBullPB     = false
+var bool  inBearPB     = false
+var int   pbStartBar   = na
+var float pbExtreme    = na   // lowest low during bull PB / highest high during bear PB
+var float pbOriginHigh = na   // swing high frozen at bull PB start (Fib upper reference)
+var float pbOriginLow  = na   // swing low  frozen at bear PB start (Fib lower reference)
+var float pbRefLow     = na   // swing low  frozen at bull PB start (Fib lower reference)
+var float pbRefHigh    = na   // swing high frozen at bear PB start (Fib upper reference)
+
+if bullPBStart
+    inBullPB     := true
+    inBearPB     := false
+    pbStartBar   := bar_index
+    pbExtreme    := low
+    pbOriginHigh := na(lastPivHigh) ? high[1] : lastPivHigh
+    pbRefLow     := na(lastPivLow)  ? low[1]  : lastPivLow   // freeze — do not update during PB
+
+if bearPBStart
+    inBearPB     := true
+    inBullPB     := false
+    pbStartBar   := bar_index
+    pbExtreme    := high
+    pbOriginLow  := na(lastPivLow)  ? low[1]  : lastPivLow
+    pbRefHigh    := na(lastPivHigh) ? high[1] : lastPivHigh   // freeze — do not update during PB
+
+// Track extreme during pullback
+if inBullPB
+    pbExtreme := math.min(pbExtreme, low)
+if inBearPB
+    pbExtreme := math.max(pbExtreme, high)
+
+// Pullback timeout
+bool bullPBTimeout = inBullPB and not na(pbStartBar) and (bar_index - pbStartBar) >= pbTimeout
+bool bearPBTimeout = inBearPB and not na(pbStartBar) and (bar_index - pbStartBar) >= pbTimeout
+
+// Pullback exit events (computed before state reset)
+bool bullPBReclaim = inBullPB and close > emaFast
+bool bearPBReclaim = inBearPB and close < emaFast
+bool bullPBBreak   = inBullPB and bullStructBroken
+bool bearPBBreak   = inBearPB and bearStructBroken
+
+// ============================================================================
+// SCORE  (computed before state reset so inBullPB/inBearPB are still valid)
+// ============================================================================
+
+// A. Trend quality (0–2): strong trend = high efficiency
+float scoreA = 0.0
+if isBullTrend or isBearTrend
+    scoreA := effRatio >= 0.45 ? 2.0 : effRatio >= 0.25 ? 1.0 : 0.5
+
+// B. Pullback active (0–2): reward pullbacks that have run for at least a few bars
+float scoreB = 0.0
+if inBullPB or inBearPB
+    int barsIn = na(pbStartBar) ? 0 : bar_index - pbStartBar
+    scoreB := barsIn >= 3 ? 2.0 : barsIn >= 1 ? 1.0 : 0.0
+
+// C. Move weakness (0–3): RSI not extreme + no volume spike + small candles
+float scoreC = 0.0
+if inBullPB
+    if rsi14 >= rsiBullMin
+        scoreC += 1.0
+    if volume <= volAvg * volMult
+        scoreC += 1.0
+    if range_ <= atr14
+        scoreC += 1.0
+if inBearPB
+    if rsi14 <= rsiBearMax
+        scoreC += 1.0
+    if volume <= volAvg * volMult
+        scoreC += 1.0
+    if range_ <= atr14
+        scoreC += 1.0
+
+// D. Structure intact (0–2)
+float scoreD = 0.0
+if inBullPB
+    if not bullStructBroken
+        scoreD := 2.0
+    else if not na(lastPivLow) and (close - lastPivLow) < atr14
+        scoreD := 1.0   // near breaking but not broken yet
+if inBearPB
+    if not bearStructBroken
+        scoreD := 2.0
+    else if not na(lastPivHigh) and (lastPivHigh - close) < atr14
+        scoreD := 1.0
+
+// E. Optimal Fibonacci depth (0–1): 25–68% retracement
+// Both reference points frozen at PB start — stable throughout the pullback
+float scoreE = 0.0
+if inBullPB and not na(pbOriginHigh) and not na(pbRefLow)
+    float swing = pbOriginHigh - pbRefLow
+    float depth = swing > 0 ? (pbOriginHigh - pbExtreme) / swing : 0.0
+    if depth >= depthMin and depth <= depthMax
+        scoreE := 1.0
+if inBearPB and not na(pbOriginLow) and not na(pbRefHigh)
+    float swing = pbRefHigh - pbOriginLow
+    float depth = swing > 0 ? (pbExtreme - pbOriginLow) / swing : 0.0
+    if depth >= depthMin and depth <= depthMax
+        scoreE := 1.0
+
+float pbScore = scoreA + scoreB + scoreC + scoreD + scoreE
+
+// ============================================================================
+// END SIGNAL — entry in trend direction
+// ============================================================================
+
+// Rejection candle at pullback extreme
+bool bullRej = inBullPB and lowerWick >= wickMin
+bool bearRej = inBearPB and upperWick >= wickMin
+
+// Micro BOS: must come from pullback zone (prev close still in pullback territory)
+// → prevents firing on any random up-close during the pullback
+bool bullMicroBOS = inBullPB and close[1] < emaFast[1] and close > high[1]
+bool bearMicroBOS = inBearPB and close[1] > emaFast[1] and close < low[1]
+
+// Cooldown
+var int lastBullEndBar = na
+var int lastBearEndBar = na
+bool bullCoolOk = na(lastBullEndBar) or (bar_index - lastBullEndBar) >= cdBars
+bool bearCoolOk = na(lastBearEndBar) or (bar_index - lastBearEndBar) >= cdBars
+
+// End signal fires on rejection OR micro BOS while pullback is valid
+bool bullEndRaw = inBullPB and pbScore >= scoreThresh and not bullStructBroken and not bullPBTimeout and bullCoolOk and (bullRej or bullMicroBOS)
+bool bearEndRaw = inBearPB and pbScore >= scoreThresh and not bearStructBroken and not bearPBTimeout and bearCoolOk and (bearRej or bearMicroBOS)
+
+// Edge detection
+bool bullEnd = bullEndRaw and not bullEndRaw[1]
+bool bearEnd = bearEndRaw and not bearEndRaw[1]
+
+if bullEnd
+    lastBullEndBar := bar_index
+if bearEnd
+    lastBearEndBar := bar_index
+
+// ============================================================================
+// STATE RESET (after signal computation)
+// ============================================================================
+
+if bullPBReclaim or bullPBBreak or bullPBTimeout
+    inBullPB := false
+if bearPBReclaim or bearPBBreak or bearPBTimeout
+    inBearPB := false
+
+// ============================================================================
+// DISPLAY
+// ============================================================================
+
+// Background tint during active pullback (suppressed when structure broken or timed out)
+bgcolor(showBg and inBullPB and not bullStructBroken ? color.new(#00c853, 92) : na)
+bgcolor(showBg and inBearPB and not bearStructBroken ? color.new(#d50000, 92) : na)
+
+// EMAs
+plot(showEMAs ? emaFast : na, "EMA Fast", color.new(#2196f3, 40), linewidth=1)
+plot(showEMAs ? emaSlow : na, "EMA Slow", color.new(#ff9800, 40), linewidth=1)
+
+// End signal labels with score value
+if showEndSig and bullEnd
+    label.new(bar_index, na, "▲ " + str.tostring(pbScore, "#.#"),
+              yloc=yloc.belowbar, style=label.style_label_up,
+              color=color.new(#00c853, 10), textcolor=color.white, size=size.small)
+
+if showEndSig and bearEnd
+    label.new(bar_index, na, "▼ " + str.tostring(pbScore, "#.#"),
+              yloc=yloc.abovebar, style=label.style_label_down,
+              color=color.new(#d50000, 10), textcolor=color.white, size=size.small)
+
+// Structure break — pullback became reversal
+plotshape(showBreak and bullPBBreak, "Bull Structure Break ◆", shape.diamond, location.belowbar, color.new(#ff6f00, 0), size=size.tiny)
+plotshape(showBreak and bearPBBreak, "Bear Structure Break ◆", shape.diamond, location.abovebar, color.new(#ff6f00, 0), size=size.tiny)
+
+// ============================================================================
+// TABLE
+// ============================================================================
+
+if showTable and barstate.islast
+    string trendStr = isBullTrend ? "BULL" : isBearTrend ? "BEAR" : "FLAT"
+    string pbStr    = inBullPB ? "BULL PB" : inBearPB ? "BEAR PB" : "—"
+    int    barsIn   = (inBullPB or inBearPB) and not na(pbStartBar) ? bar_index - pbStartBar : 0
+    string scoreStr = str.tostring(pbScore, "#.#")
+
+    color trendBg = isBullTrend ? color.new(#00c853, 20) : isBearTrend ? color.new(#d50000, 20) : color.new(color.gray, 50)
+    color pbBg    = inBullPB ? color.new(#00c853, 50) : inBearPB ? color.new(#d50000, 50) : color.new(color.gray, 70)
+    color scoreBg = pbScore >= 7.0 ? color.new(#00c853, 30) : pbScore >= scoreThresh ? color.new(#ffd600, 30) : color.new(color.gray, 60)
+
+    // Text colors — white on saturated backgrounds, dark on yellow/gray
+    color trendTc = (isBullTrend or isBearTrend) ? color.white : color.new(color.gray, 20)
+    color pbTc    = (inBullPB or inBearPB) ? color.white : color.new(color.gray, 20)
+    color scoreTc = pbScore >= 7.0 ? color.white : color.new(color.gray, 20)
+
+    color lc = color.new(color.gray, 20)
+
+    var table t = table.new(tablePos, 2, 8,
+         bgcolor=color.new(color.white, 5),
+         border_color=color.new(color.gray, 60),
+         border_width=1,
+         frame_color=color.new(color.gray, 40),
+         frame_width=1)
+
+    table.cell(t, 0, 0, "Vein Pullback", text_color=lc, text_size=size.small, bgcolor=color.new(color.gray, 90))
+    table.cell(t, 1, 0, "",              text_color=lc, text_size=size.small, bgcolor=color.new(color.gray, 90))
+
+    table.cell(t, 0, 1, "Trend",    text_color=lc,    text_size=size.small)
+    table.cell(t, 1, 1, trendStr,   text_color=trendTc, text_size=size.small, bgcolor=trendBg)
+
+    table.cell(t, 0, 2, "State",    text_color=lc, text_size=size.small)
+    table.cell(t, 1, 2, pbStr + (barsIn > 0 ? "  (" + str.tostring(barsIn) + "b)" : ""), text_color=pbTc, text_size=size.small, bgcolor=pbBg)
+
+    table.cell(t, 0, 3, "Score",    text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 3, scoreStr + "  " + scoreBar(pbScore, 10.0), text_color=scoreTc, text_size=size.tiny, bgcolor=scoreBg)
+
+    table.cell(t, 0, 4, "Trend Q",  text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(scoreA, "#.#") + "  " + scoreBar(scoreA, 2.0), text_color=lc, text_size=size.tiny)
+
+    table.cell(t, 0, 5, "Weakness", text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(scoreC, "#.#") + "  " + scoreBar(scoreC, 3.0), text_color=lc, text_size=size.tiny)
+
+    table.cell(t, 0, 6, "Structure",text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(scoreD, "#.#") + "  " + scoreBar(scoreD, 2.0), text_color=lc, text_size=size.tiny)
+
+    table.cell(t, 0, 7, "Depth",    text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(scoreE, "#.#") + "  " + scoreBar(scoreE, 1.0), text_color=lc, text_size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(bullEnd,      "Vein Pullback: Bull Entry ▲",            "Vein Pullback: Bull pullback ending — entry signal in trend direction")
+alertcondition(bearEnd,      "Vein Pullback: Bear Entry ▼",            "Vein Pullback: Bear pullback ending — entry signal in trend direction")
+alertcondition(bullPBBreak,  "Vein Pullback: Bull Structure Break ◆",  "Vein Pullback: Bull pullback became reversal — structure broken below last swing low")
+alertcondition(bearPBBreak,  "Vein Pullback: Bear Structure Break ◆",  "Vein Pullback: Bear pullback became reversal — structure broken above last swing high")

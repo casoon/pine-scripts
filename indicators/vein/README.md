@@ -587,3 +587,196 @@ All tables follow consistent design:
 10. Load **Vein Labeler** to see where past reversals were (strong vs weak, fast vs slow)
 11. Load **Vein Feature Exporter** to compare indicator readings at those points
 12. Use Research mode tables for parameter tuning
+
+---
+
+## Vein Adaptive Suite (v2)
+
+Three self-contained, timeframe-agnostic indicators that work on any chart. They can be used standalone or layered together as complementary perspectives.
+
+| Script | Purpose | File |
+|--------|---------|------|
+| Vein Trend | Composite reversal signal | `vein_trend.pine` |
+| Vein Pullback | Pullback vs. reversal detection | `vein_pullback.pine` |
+| Vein Exhaustion | Temporal + emotional overextension | `vein_exhaustion.pine` |
+
+**Three perspectives on the same question:**
+- **Trend** → "Is there a structural reversal signal right now?"
+- **Pullback** → "Is this counter-move a pullback (reentry) or a reversal (exit)?"
+- **Exhaustion** → "Is this move overextended emotionally, before structure confirms anything?"
+
+EMAs and scoring adapt automatically to the active timeframe. All three scripts are configurable as overlays with table position inputs.
+
+---
+
+## 7. Vein Trend (Overlay, any TF)
+
+Multi-layer composite score detecting high-probability reversal signals. Filters with structure gate, conflict detection, cooldown, and trend filter.
+
+### AutoTF Parameters
+
+| Timeframe | Threshold | Cooldown | Structure Gate | Delta |
+|-----------|-----------|----------|----------------|-------|
+| Daily | 5.5 | 7 bars | 2.0 (conf required) | 1.5 |
+| 4H | 5.0 | 5 bars | off | 1.5 |
+| 1H | 6.0 | 8 bars | off | 1.5 |
+| <1H | 7.5 | 25 bars | off | 2.0 |
+
+### Three Score Layers
+
+**Layer A — Setup Score:** Momentum signals (RSI, MFI, price distance from EMA, wick rejections). Fires early, before structure events.
+
+**Layer B — Confirmation Score:** Structure events with volume weighting: Springs, Upthrusts, BOS. Highest weight (1.5×) — signal requires structural evidence.
+
+**Layer C — Phase Score (0–5):** Accumulation/Distribution context. EMA slope loss, volume compression, range formation. Bonus weight (0.5×) for market context.
+
+**Composite = 1.0 × Setup + 1.5 × Confirm + 0.5 × Phase**
+
+The score bar in the table fills to threshold — full bar = signal condition met.
+
+### Guards
+
+| Guard | Purpose |
+|-------|---------|
+| **Threshold** | Composite must exceed effThresh |
+| **Delta** | Bull and bear scores must differ by ≥ effDelta (prevents ambiguous signals) |
+| **Structure Gate** | On Daily: Confirm score ≥ 2.0 required (zone alone not enough) |
+| **Cooldown** | Minimum bars between signals in same direction |
+| **Trend Filter** | On sub-1H: requires follow-through confirmation |
+| **Conflict** | Suppresses signal when both sides near threshold |
+
+### Debug Markers
+
+Colored dots when composite ≥ threshold but a guard blocks the signal:
+
+| Color | Blocking Guard |
+|-------|---------------|
+| 🟠 Orange | Conflict (both sides near threshold) |
+| 🟡 Yellow | Cooldown |
+| 🔵 Blue | Structure Gate |
+| 🟣 Purple | Trend Filter |
+| 🩵 Teal | Follow-Through |
+| ⚫ Gray | Delta |
+
+### Table (top right, configurable)
+
+Shows Composite (with progress bar to threshold), Threshold, Setup, Confirm, Phase, Status, Candle State, and Regime.
+
+---
+
+## 8. Vein Pullback (Overlay, any TF)
+
+Answers: "Is this counter-trend move a pullback (continue trend) or a reversal (change direction)?"
+
+### AutoTF EMAs
+
+| Timeframe | Fast EMA | Slow EMA |
+|-----------|----------|----------|
+| Daily | 50 | 200 |
+| 4H | 34 | 100 |
+| 1H | 21 | 55 |
+| <1H | 20 | 50 |
+
+### Score Layers (0–10)
+
+| Layer | Max | What it measures |
+|-------|-----|-----------------|
+| **Trend Quality** | 2 | EMA alignment + Efficiency Ratio — weak trend = weak pullback context |
+| **Pullback Active** | 2 | Bars elapsed since pullback start — reward pullbacks with some duration |
+| **Move Weakness** | 3 | RSI stays in safe zone + volume stays low + small candles |
+| **Structure Intact** | 2 | No break of frozen swing low/high reference |
+| **Fib Depth** | 1 | Retracement in 25–68% range (both references frozen at PB start) |
+
+### State Machine
+
+Pullback starts when price crosses EMA Fast against the trend. Active until one of:
+- **Reclaim** — price crosses back through EMA Fast (normal end)
+- **Structure Break** — close beyond frozen swing reference → signal ◆
+- **Timeout** — 40 bars without resolution → invalidated
+
+### End Signal
+
+Fires when score ≥ threshold AND (rejection candle OR micro BOS from pullback zone). Micro BOS requires the previous close to have been below EMA Fast — prevents firing on random up-closes mid-pullback.
+
+### Signals
+
+| Signal | Shape | Meaning |
+|--------|-------|---------|
+| `▲ 7.2` | Label below bar | Bull pullback ending — entry in trend direction |
+| `▼ 6.8` | Label above bar | Bear pullback ending — entry in trend direction |
+| ◆ | Diamond | Structure broken — pullback became reversal |
+
+### Table (configurable position)
+
+Shows Trend, State (with bar count), Score (with progress bar), Trend Q, Weakness, Structure, Depth.
+
+---
+
+## 9. Vein Exhaustion (Overlay, any TF)
+
+Detects when a move is overextended — temporally, emotionally, and through orderflow — before structure shows it.
+
+### AutoTF EMA
+
+| Timeframe | EMA |
+|-----------|-----|
+| Daily | 50 |
+| 4H | 34 |
+| 1H | 21 |
+| <1H | 20 |
+
+### Score Layers (0–10, separate for Bull and Bear)
+
+| Layer | Max | What it measures |
+|-------|-----|-----------------|
+| **Time** | 3 | Consecutive directional closes (grace: 1 bar tolerance before reset) |
+| **Overextension** | 3 | EMA distance in ATR units + RSI extreme + MFI extreme |
+| **Orderflow Proxy** | 2 | Directional absorption and capitulation/distribution |
+| **Volatility** | 2 | Directional ATR spike + climax bar (bull or bear only) |
+
+### Orderflow Events
+
+| Event | Side | Detection |
+|-------|------|-----------|
+| **Bear Absorption** | Bear exhaustion | Bearish bar + high vol + small range = buyers absorbing |
+| **Bull Absorption** | Bull exhaustion | Bullish bar + high vol + small range = sellers absorbing |
+| **Capitulation** | Bear exhaustion | Bearish bar + very high vol + large range + close near low |
+| **Distribution** | Bull exhaustion | Bearish close after up move + upper wick dominates + overextended |
+
+### Signals
+
+| Signal | Shape | Meaning |
+|--------|-------|---------|
+| `▼ 7.8` | Label above bar | Upward move exhausted — potential top |
+| `▲ 6.2` | Label below bar | Downward move exhausted — potential bottom |
+| ● cyan | Dot below bar | Bear absorption — buyers stepping in |
+| ● orange | Dot above bar | Bull absorption — sellers stepping in |
+| ★ | Cross below bar | Capitulation — panic low |
+
+### Score States
+
+| State | Score | Background |
+|-------|-------|-----------|
+| NORMAL | < 3 | None |
+| STRETCHED | ≥ 3 | Faint |
+| EXHAUSTED | ≥ threshold | Colored |
+| EXTREME | ≥ 8 | Strong |
+
+### Table (configurable position, default bottom right)
+
+Shows Status (color-coded), Score (with progress bar), Time, Overextension, Orderflow, Volatility, and Event for both Bull and Bear sides separately.
+
+---
+
+## Layered Reading
+
+The three v2 indicators answer different questions simultaneously:
+
+| Indicator | Reading | Interpretation |
+|-----------|---------|---------------|
+| Exhaustion: Bear EXTREME | Score 8.5 | Downmove very overextended, time + orderflow + vol all elevated |
+| Pullback: BEAR PB active | Score 6.2 | Counter-move active, structure still intact, weak move |
+| Trend: WATCH | Composite 5.8 | Approaching threshold but no signal yet |
+| → Combined | | High confidence: pullback ending soon, exhaustion at extremes, trend signal building |
+
+**Key rule:** Exhaustion fires first (leading). Pullback identifies context (reentry vs exit). Trend fires last (structural confirmation). All three together = highest confluence.

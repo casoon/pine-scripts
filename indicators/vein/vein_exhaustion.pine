@@ -1,0 +1,348 @@
+//@version=6
+// ============================================================================
+// Vein Exhaustion [WavesUnchained]
+// Version: 0.2
+// ============================================================================
+// Detects when a directional move is exhausted — before structure confirms it.
+// Complements vein_trend (which detects reversals from structure events) by
+// adding a second perspective: emotional/temporal overextension.
+//
+// Score layers (0–10, computed separately for bull and bear direction):
+//   A  Time Exhaustion  (0–3) — consecutive directional bars, move duration
+//   B  Overextension    (0–3) — EMA distance in ATR units + RSI/MFI extremes
+//   C  Orderflow Proxy  (0–2) — absorption, capitulation, exhaustion volume
+//   D  Volatility State (0–2) — directional ATR spike + climax candle
+//
+// Markers:
+//   ▼ score  Bull Exhaustion  — upward move overextended, potential top
+//   ▲ score  Bear Exhaustion  — downward move overextended, potential bottom
+//   ●        Absorption       — heavy selling/buying absorbed (cyan/orange)
+//   ★        Capitulation     — panic low, potential exhaustion bottom (yellow)
+//
+// ============================================================================
+indicator("Vein: Exhaustion [WavesUnchained]", "Vein Exhaust", overlay=true, max_labels_count=300)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+var gBase = "Base Indicators"
+bool  autoTF      = input.bool(true,  "Auto EMA (adapt to timeframe)",  group=gBase, tooltip="Daily→EMA50  4H→EMA34  1H→EMA21  <1H→EMA20")
+int   emaLen      = input.int(20,   "EMA Length (manual only)",         minval=1,   group=gBase)
+int   rsiLen      = input.int(14,   "RSI Length",                       minval=1,   group=gBase)
+int   mfiLen      = input.int(14,   "MFI Length",                       minval=1,   group=gBase)
+int   atrLen      = input.int(14,   "ATR Length",                       minval=1,   group=gBase)
+int   atrSmaLen   = input.int(20,   "ATR SMA Length",                   minval=5,   group=gBase, tooltip="Average ATR over this many bars — used to detect ATR spikes")
+int   volLen      = input.int(20,   "Volume MA Length",                 minval=5,   group=gBase)
+
+var gTime = "Time Exhaustion"
+int   consWarn    = input.int(6,    "Consecutive Bars: Warning",  minval=3, maxval=20, group=gTime, tooltip="Signals start appearing after this many consecutive directional bars")
+int   consHigh    = input.int(10,   "Consecutive Bars: High",     minval=5, maxval=30, group=gTime, tooltip="Full time exhaustion score after this many bars")
+
+var gOverext = "Overextension"
+float emaDistMed  = input.float(1.5, "EMA Distance Medium (ATR)", minval=0.5, maxval=3.0, step=0.1, group=gOverext, tooltip="Price distance from EMA in ATR multiples — medium overextension")
+float emaDistHigh = input.float(2.5, "EMA Distance High (ATR)",   minval=1.0, maxval=5.0, step=0.1, group=gOverext, tooltip="Price distance from EMA in ATR multiples — high overextension")
+float rsiExtreme  = input.float(72.0,"RSI Extreme Level",         minval=60,  maxval=85,  step=1,   group=gOverext, tooltip="RSI above this = bull extreme, below 100-this = bear extreme")
+float mfiExtreme  = input.float(75.0,"MFI Extreme Level",         minval=60,  maxval=90,  step=1,   group=gOverext, tooltip="MFI above this = overbought, below 100-this = oversold")
+
+var gOrderflow = "Orderflow Proxy"
+float absVolMult  = input.float(1.5, "Absorption: Min Volume Multiple",  minval=1.0, maxval=4.0, step=0.1, group=gOrderflow, tooltip="Volume must exceed volAvg × this to detect absorption")
+float absRangeMult= input.float(0.7, "Absorption: Max Range (ATR)",      minval=0.2, maxval=1.5, step=0.1, group=gOrderflow, tooltip="Candle range must be below ATR × this — absorption = high vol, small range")
+float capVolMult  = input.float(2.2, "Capitulation: Min Volume Multiple", minval=1.5, maxval=5.0, step=0.1, group=gOrderflow, tooltip="Panic bar requires volume > volAvg × this")
+float capRangeMult= input.float(1.5, "Capitulation: Min Range (ATR)",    minval=1.0, maxval=3.0, step=0.1, group=gOrderflow, tooltip="Panic bar requires range > ATR × this")
+
+var gVol = "Volatility"
+float atrSpikeMult= input.float(1.6, "ATR Spike Multiple",       minval=1.1, maxval=3.0, step=0.1, group=gVol, tooltip="ATR spike when current ATR > ATR_SMA × this")
+float climaxRange = input.float(2.0, "Climax Bar Range (ATR)",   minval=1.0, maxval=4.0, step=0.1, group=gVol, tooltip="Climax bar requires range > ATR × this")
+float climaxVol   = input.float(2.0, "Climax Bar Volume Multiple",minval=1.0, maxval=5.0, step=0.1, group=gVol, tooltip="Climax bar requires volume > volAvg × this")
+
+var gSignal = "Signals"
+float scoreThresh = input.float(5.5, "Min Score for Signal",  minval=3.0, maxval=10.0, step=0.5, group=gSignal)
+int   cdBars      = input.int(5,     "Signal Cooldown (bars)", minval=1, maxval=30,              group=gSignal)
+
+var gDisplay = "Display"
+bool  showTable   = input.bool(true,  "Show Score Table",               group=gDisplay)
+string tablePos   = input.string("bottom_right", "Table Position", options=["top_left","top_center","top_right","middle_left","middle_center","middle_right","bottom_left","bottom_center","bottom_right"], group=gDisplay)
+bool  showExhaust = input.bool(true,  "Show Exhaustion Signals ▲▼",    group=gDisplay)
+bool  showAbsorb  = input.bool(true,  "Show Absorption ●",              group=gDisplay)
+bool  showCap     = input.bool(true,  "Show Capitulation ★",            group=gDisplay)
+bool  showBg      = input.bool(true,  "Show Background when Exhausted", group=gDisplay)
+
+// ============================================================================
+// BASE CALCULATIONS
+// ============================================================================
+
+int   tfSec     = timeframe.in_seconds()
+int   effEmaLen = autoTF ? (tfSec >= 86400 ? 50 : tfSec >= 14400 ? 34 : tfSec >= 3600 ? 21 : 20) : emaLen
+
+float ema20   = ta.ema(close, effEmaLen)
+float rsi14   = ta.rsi(close, rsiLen)
+float mfi14   = ta.mfi(hlc3, mfiLen)
+float atr14   = ta.atr(atrLen)
+float atrSma  = ta.sma(atr14, atrSmaLen)
+float volAvg  = ta.sma(volume, volLen)
+float range_  = high - low
+
+// EMA distance in ATR units (signed: positive = above, negative = below)
+float emaDist = atr14 > 0 ? (close - ema20) / atr14 : 0.0
+
+// Candle anatomy
+float bodySize  = math.abs(close - open)
+float bodyRatio = range_ > 0 ? bodySize / range_ : 0.0
+bool  isBullBar = close > open
+bool  isBearBar = close < open
+
+// Upper / lower wick ratio
+float bodyTop   = math.max(open, close)
+float bodyBot   = math.min(open, close)
+float upperWick = range_ > 0 ? (high - bodyTop) / range_ : 0.0
+float lowerWick = range_ > 0 ? (bodyBot - low)  / range_ : 0.0
+
+// Score bar utility (10-char unicode progress bar)
+scoreBar(float s) =>
+    int n = int(math.round(math.min(s, 10.0)))
+    string r = ""
+    for i = 0 to 9
+        r += i < n ? "█" : "░"
+    r
+
+// ============================================================================
+// A — TIME EXHAUSTION
+// ============================================================================
+
+// Count consecutive directional bars with 1-bar grace period:
+// counter only resets after 2 consecutive non-directional closes
+var int consBull = 0
+var int consBear = 0
+consBull := close > close[1] ? consBull + 1 : (close[1] > close[2] ? consBull : 0)
+consBear := close < close[1] ? consBear + 1 : (close[1] < close[2] ? consBear : 0)
+
+// Bull time score: how many consecutive up-closes
+float bullTimeScore = consBull >= consHigh ? 3.0 :
+                      consBull >= consWarn + 2 ? 2.0 :
+                      consBull >= consWarn ? 1.0 : 0.0
+
+// Bear time score
+float bearTimeScore = consBear >= consHigh ? 3.0 :
+                      consBear >= consWarn + 2 ? 2.0 :
+                      consBear >= consWarn ? 1.0 : 0.0
+
+// ============================================================================
+// B — OVEREXTENSION
+// ============================================================================
+
+// Bull overextension: price far above EMA
+float bullEmaScore = emaDist >= emaDistHigh ? 2.0 : emaDist >= emaDistMed ? 1.0 : 0.0
+float bullRsiScore = rsi14 >= rsiExtreme ? 0.5 : 0.0
+float bullMfiScore = mfi14 >= mfiExtreme ? 0.5 : 0.0
+float bullOverextScore = math.min(bullEmaScore + bullRsiScore + bullMfiScore, 3.0)
+
+// Bear overextension: price far below EMA
+float bearEmaScore = emaDist <= -emaDistHigh ? 2.0 : emaDist <= -emaDistMed ? 1.0 : 0.0
+float bearRsiScore = rsi14 <= (100 - rsiExtreme) ? 0.5 : 0.0
+float bearMfiScore = mfi14 <= (100 - mfiExtreme) ? 0.5 : 0.0
+float bearOverextScore = math.min(bearEmaScore + bearRsiScore + bearMfiScore, 3.0)
+
+// ============================================================================
+// C — ORDERFLOW PROXY
+// ============================================================================
+
+// Bear-side absorption: heavy selling is being absorbed
+// → bearish bar + high volume + small range = buyers stepping in at lows
+bool isBearAbsorption = isBearBar and
+     volume >= volAvg * absVolMult and
+     range_ <= atr14 * absRangeMult
+
+// Bull-side absorption: heavy buying being absorbed at tops
+// → bullish bar + high volume + small range = sellers stepping in at highs
+bool isBullAbsorption = isBullBar and
+     volume >= volAvg * absVolMult and
+     range_ <= atr14 * absRangeMult
+
+// Capitulation / Panic selling: aggressive selling exhausts sellers
+// → bearish bar + very high volume + large range + closes near low
+bool isCapitulation = isBearBar and
+     volume >= volAvg * capVolMult and
+     range_ >= atr14 * capRangeMult and
+     lowerWick <= 0.2
+
+// Distribution bar at top: price pushed up but sellers dominate the close
+// → bearish bar + upper wick dominates + high volume + overextended
+bool isBullExhaustionBar = isBearBar and
+     upperWick >= 0.4 and
+     volume >= volAvg * 1.5 and
+     emaDist >= emaDistMed
+
+// Bear exhaustion orderflow: absorption or capitulation both signal potential bottom
+float bearAbsorbScore = isBearAbsorption ? 1.5 : 0.0
+float bearCapScore    = isCapitulation   ? 2.0 : 0.0
+float bearFlowScore   = math.min(bearAbsorbScore + bearCapScore, 2.0)
+
+// Bull exhaustion orderflow: distribution + bull-side absorption signal potential top
+float bullDistScore   = isBullExhaustionBar ? 1.5 : 0.0
+float bullAbsorbScore = isBullAbsorption    ? 1.5 : 0.0
+float bullFlowFinal   = math.min(bullDistScore + bullAbsorbScore, 2.0)
+
+// ============================================================================
+// D — VOLATILITY STATE (directional)
+// ============================================================================
+
+// ATR spike is only relevant in the direction of the exhausted move
+bool isAtrSpike = atr14 >= atrSma * atrSpikeMult
+
+bool isBullClimaxBar = range_ >= atr14 * climaxRange and volume >= volAvg * climaxVol and isBullBar
+bool isBearClimaxBar = range_ >= atr14 * climaxRange and volume >= volAvg * climaxVol and isBearBar
+
+// Bull exhaustion volatility: spike/climax in an upward move
+float bullVolScore = (isAtrSpike and isBullBar ? 1.0 : 0.0) + (isBullClimaxBar ? 1.0 : 0.0)
+
+// Bear exhaustion volatility: spike/climax in a downward move
+float bearVolScore = (isAtrSpike and isBearBar ? 1.0 : 0.0) + (isBearClimaxBar ? 1.0 : 0.0)
+
+// ============================================================================
+// COMPOSITE SCORES
+// ============================================================================
+
+float bullExhaustScore = bullTimeScore + bullOverextScore + bullFlowFinal + bullVolScore
+float bearExhaustScore = bearTimeScore + bearOverextScore + bearFlowScore + bearVolScore
+
+// Cap at 10
+bullExhaustScore := math.min(bullExhaustScore, 10.0)
+bearExhaustScore := math.min(bearExhaustScore, 10.0)
+
+// ============================================================================
+// SIGNALS
+// ============================================================================
+
+var int lastBullExBar = na
+var int lastBearExBar = na
+bool bullCdOk = na(lastBullExBar) or (bar_index - lastBullExBar) >= cdBars
+bool bearCdOk = na(lastBearExBar) or (bar_index - lastBearExBar) >= cdBars
+
+// Fire when score crosses threshold (edge detection)
+bool bullExhaustRaw = bullExhaustScore >= scoreThresh and bullCdOk
+bool bearExhaustRaw = bearExhaustScore >= scoreThresh and bearCdOk
+
+bool bullExhaustSignal = bullExhaustRaw and not bullExhaustRaw[1]
+bool bearExhaustSignal = bearExhaustRaw and not bearExhaustRaw[1]
+
+if bullExhaustSignal
+    lastBullExBar := bar_index
+if bearExhaustSignal
+    lastBearExBar := bar_index
+
+// ============================================================================
+// DISPLAY
+// ============================================================================
+
+// Background — two-tier: subtle when stretched, stronger when extreme
+bgcolor(showBg and bullExhaustScore >= 8.0          ? color.new(#d50000, 82) :
+        showBg and bullExhaustScore >= scoreThresh   ? color.new(#d50000, 92) : na)
+bgcolor(showBg and bearExhaustScore >= 8.0          ? color.new(#00c853, 82) :
+        showBg and bearExhaustScore >= scoreThresh   ? color.new(#00c853, 92) : na)
+
+// Exhaustion signal labels with score value
+if showExhaust and bullExhaustSignal
+    label.new(bar_index, na, "▼ " + str.tostring(bullExhaustScore, "#.#"),
+              yloc=yloc.abovebar, style=label.style_label_down,
+              color=color.new(#d50000, 10), textcolor=color.white, size=size.small)
+
+if showExhaust and bearExhaustSignal
+    label.new(bar_index, na, "▲ " + str.tostring(bearExhaustScore, "#.#"),
+              yloc=yloc.belowbar, style=label.style_label_up,
+              color=color.new(#00c853, 10), textcolor=color.white, size=size.small)
+
+// Bear-side absorption (buyers stepping in during selling)
+plotshape(showAbsorb and isBearAbsorption, "Bear Absorption ●", shape.circle, location.belowbar, color.new(#00bcd4, 20), size=size.tiny)
+
+// Bull-side absorption (sellers stepping in during buying)
+plotshape(showAbsorb and isBullAbsorption, "Bull Absorption ●", shape.circle, location.abovebar, color.new(#ff6f00, 20), size=size.tiny)
+
+// Capitulation (panic low — potential exhaustion bottom)
+plotshape(showCap and isCapitulation, "Capitulation ★", shape.cross, location.belowbar, color.new(#ffd600, 0), size=size.small)
+
+// EMA reference — labeled with effective length
+plot(ema20, "EMA", color.new(#2196f3, 50), linewidth=1)
+
+// ============================================================================
+// TABLE
+// ============================================================================
+
+if showTable and barstate.islast
+    string bullState = bullExhaustScore >= 8.0 ? "EXTREME" :
+                       bullExhaustScore >= scoreThresh ? "EXHAUSTED" :
+                       bullExhaustScore >= 3.0 ? "STRETCHED" : "NORMAL"
+    string bearState = bearExhaustScore >= 8.0 ? "EXTREME" :
+                       bearExhaustScore >= scoreThresh ? "EXHAUSTED" :
+                       bearExhaustScore >= 3.0 ? "STRETCHED" : "NORMAL"
+
+    color bullStateBg = bullExhaustScore >= 8.0 ? color.new(#d50000, 10) : bullExhaustScore >= scoreThresh ? color.new(#d50000, 40) : bullExhaustScore >= 3.0 ? color.new(#ff6f00, 50) : color.new(color.gray, 70)
+    color bearStateBg = bearExhaustScore >= 8.0 ? color.new(#00c853, 10) : bearExhaustScore >= scoreThresh ? color.new(#00c853, 40) : bearExhaustScore >= 3.0 ? color.new(#ffd600, 50) : color.new(color.gray, 70)
+
+    color tc = color.new(color.gray, 10)
+    color lc = color.new(color.gray, 20)
+
+    var table t = table.new(tablePos, 3, 8,
+         bgcolor=color.new(color.white, 5),
+         border_color=color.new(color.gray, 60),
+         border_width=1,
+         frame_color=color.new(color.gray, 40),
+         frame_width=1)
+
+    // Header
+    table.cell(t, 0, 0, "Vein Exhaustion", text_color=lc, text_size=size.small, bgcolor=color.new(color.gray, 90))
+    table.cell(t, 1, 0, "Bull ▼",          text_color=#d50000, text_size=size.small, bgcolor=color.new(color.gray, 90))
+    table.cell(t, 2, 0, "Bear ▲",          text_color=#00c853, text_size=size.small, bgcolor=color.new(color.gray, 90))
+
+    // Status — white on red/green/orange, dark on yellow/gray
+    color bullStateTextCol = bullExhaustScore >= 3.0 ? color.white : color.new(color.gray, 20)
+    color bearStateTextCol = bearExhaustScore >= scoreThresh ? color.white : color.new(color.gray, 20)
+    table.cell(t, 0, 1, "Status",    text_color=lc,             text_size=size.small)
+    table.cell(t, 1, 1, bullState,   text_color=bullStateTextCol, text_size=size.small, bgcolor=bullStateBg)
+    table.cell(t, 2, 1, bearState,   text_color=bearStateTextCol, text_size=size.small, bgcolor=bearStateBg)
+
+    // Total score with bar
+    table.cell(t, 0, 2, "Score",     text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 2, str.tostring(bullExhaustScore, "#.#") + "  " + scoreBar(bullExhaustScore), text_color=#d50000, text_size=size.tiny)
+    table.cell(t, 2, 2, str.tostring(bearExhaustScore, "#.#") + "  " + scoreBar(bearExhaustScore), text_color=#00c853, text_size=size.tiny)
+
+    // Time
+    table.cell(t, 0, 3, "Time",      text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 3, str.tostring(bullTimeScore, "#.#") + "  " + scoreBar(bullTimeScore * 10 / 3), text_color=lc, text_size=size.tiny)
+    table.cell(t, 2, 3, str.tostring(bearTimeScore, "#.#") + "  " + scoreBar(bearTimeScore * 10 / 3), text_color=lc, text_size=size.tiny)
+
+    // Overextension
+    table.cell(t, 0, 4, "Overext",   text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(bullOverextScore, "#.#") + "  " + scoreBar(bullOverextScore * 10 / 3), text_color=lc, text_size=size.tiny)
+    table.cell(t, 2, 4, str.tostring(bearOverextScore, "#.#") + "  " + scoreBar(bearOverextScore * 10 / 3), text_color=lc, text_size=size.tiny)
+
+    // Orderflow
+    table.cell(t, 0, 5, "Orderflow", text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(bullFlowFinal, "#.#") + "  " + scoreBar(bullFlowFinal * 5), text_color=lc, text_size=size.tiny)
+    table.cell(t, 2, 5, str.tostring(bearFlowScore, "#.#") + "  " + scoreBar(bearFlowScore * 5), text_color=lc, text_size=size.tiny)
+
+    // Volatility (now directional)
+    table.cell(t, 0, 6, "Volatility", text_color=lc, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(bullVolScore, "#.#") + "  " + scoreBar(bullVolScore * 5), text_color=lc, text_size=size.tiny)
+    table.cell(t, 2, 6, str.tostring(bearVolScore, "#.#") + "  " + scoreBar(bearVolScore * 5), text_color=lc, text_size=size.tiny)
+
+    // Orderflow events — separate bull / bear
+    string ofBullStr = isBullAbsorption ? "ABSORPTION" : isBullClimaxBar ? "CLIMAX" : "—"
+    string ofBearStr = isCapitulation   ? "CAPITULATION" : isBearAbsorption ? "ABSORPTION" : isBearClimaxBar ? "CLIMAX" : "—"
+    color  ofBullBg      = isBullAbsorption ? color.new(#ff6f00, 40) : color.new(color.gray, 70)
+    color  ofBearBg      = isCapitulation   ? color.new(#ffd600, 30) : isBearAbsorption ? color.new(#00bcd4, 40) : color.new(color.gray, 70)
+    color  ofBullTextCol = isBullAbsorption ? color.white : lc
+    color  ofBearTextCol = isBearAbsorption ? color.white : lc   // yellow (capitulation) → dark text
+    table.cell(t, 0, 7, "Event",     text_color=lc,          text_size=size.small)
+    table.cell(t, 1, 7, ofBullStr,   text_color=ofBullTextCol, text_size=size.small, bgcolor=ofBullBg)
+    table.cell(t, 2, 7, ofBearStr,   text_color=ofBearTextCol, text_size=size.small, bgcolor=ofBearBg)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(bullExhaustSignal,  "Vein Exhaustion: Bull Exhausted ▼",  "Vein Exhaustion: Upward move overextended — potential top forming")
+alertcondition(bearExhaustSignal,  "Vein Exhaustion: Bear Exhausted ▲",  "Vein Exhaustion: Downward move overextended — potential bottom forming")
+alertcondition(isBearAbsorption,   "Vein Exhaustion: Bear Absorption ●", "Vein Exhaustion: Heavy selling absorbed — buyers stepping in")
+alertcondition(isBullAbsorption,   "Vein Exhaustion: Bull Absorption ●", "Vein Exhaustion: Heavy buying absorbed — sellers stepping in")
+alertcondition(isCapitulation,     "Vein Exhaustion: Capitulation ★",    "Vein Exhaustion: Panic selling detected — potential exhaustion low")
