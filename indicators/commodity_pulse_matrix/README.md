@@ -1,5 +1,7 @@
 # Commodity Pulse Matrix v3
 
+**TradingView:** https://de.tradingview.com/script/aJmdpe8H/
+
 Commodity Pulse Matrix v3 is a comprehensive multi-timeframe confluence indicator designed for commodity trading. It aggregates signals across multiple timeframes into a single scored matrix, giving traders a clear read on setup quality, market regime, and entry timing from a unified view on the chart.
 
 ## Features
