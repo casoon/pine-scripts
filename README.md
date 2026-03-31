@@ -19,13 +19,32 @@ Scripts marked **`[RTA]`** require the RTA libraries to be published to your Tra
 
 ### Vein Adaptive Suite
 
-Three indicators designed to be used together — each covers one layer of market state and is meant to be read in combination.
+A set of composable indicators — the core three cover trend, pullback, and exhaustion and are designed to be read together. The remaining scripts are more specialized: focused on commodity futures (primarily NatGas 4H), execution timing, and research tooling.
+
+**Core**
 
 | Script | Focus |
 |--------|-------|
 | [`vein_trend.pine`](indicators/vein/vein_trend.pine) | Trend phase scoring — EMA structure, ADX, regime, composite score |
 | [`vein_pullback.pine`](indicators/vein/vein_pullback.pine) | Pullback quality — Fibonacci depth, volume, EMA proximity, micro BOS |
 | [`vein_exhaustion.pine`](indicators/vein/vein_exhaustion.pine) | Exhaustion detection — candle pressure, volume absorption, momentum streaks |
+
+**Commodity / NatGas focused**
+
+| Script | Focus |
+|--------|-------|
+| [`vein_accumulation_phase.pine`](indicators/vein/vein_accumulation_phase.pine) | 4H bottom formation and accumulation phase detection — 5-component process state |
+| [`vein_reversal_score.pine`](indicators/vein/vein_reversal_score.pine) | Two-layer reversal scoring (setup conditions + structural confirmation) |
+| [`vein_structure_zones.pine`](indicators/vein/vein_structure_zones.pine) | Swing detection, BOS, spring/upthrust, auto S/R zones with lifecycle tracking |
+| [`vein_execution.pine`](indicators/vein/vein_execution.pine) | 15m entry timing overlay — micro BOS, sweeps, rejection candles, follow-through |
+| [`vein_spread_context.pine`](indicators/vein/vein_spread_context.pine) | Commodity futures calendar spread context — bias and momentum modifier, not a signal |
+
+**Research / utility**
+
+| Script | Focus |
+|--------|-------|
+| [`vein_feature_exporter.pine`](indicators/vein/vein_feature_exporter.pine) | Bar-level feature calculation for reversal research — trend, momentum, volume, candle structure |
+| [`vein_reversal_labeler.pine`](indicators/vein/vein_reversal_labeler.pine) | Historical reversal labeling with forward-looking ATR rules — research and ML labeling only |
 
 → [`indicators/vein/README.md`](indicators/vein/README.md) — full documentation and layered reading guide
 
@@ -68,7 +87,7 @@ Three indicators designed to be used together — each covers one layer of marke
 |--------|--------------|
 | [`vwap_cross_visuals.pine`](indicators/liquidity/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
 | [`liquidity_hunter.pine`](indicators/liquidity/liquidity_hunter.pine) | Institutional liquidity zone mapping `[RTA]` |
-| [`smart_money_dashboard.pine`](indicators/liquidity/smart_money_dashboard.pine) | Order flow, SMC, and liquidity dashboard `[RTA]` |
+| [`smart_money_dashboard.pine`](indicators/liquidity/smart_money_dashboard.pine) | Order flow, SMC, and liquidity dashboard |
 
 ### Pattern & Wave Analysis
 

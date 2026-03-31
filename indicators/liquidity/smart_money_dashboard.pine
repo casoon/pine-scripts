@@ -1,254 +1,300 @@
 //@version=6
-indicator("Smart Money Dashboard [RTA]", "💎 Smart Money", overlay=true, max_boxes_count=100, max_lines_count=100, max_labels_count=50)
-
 // ============================================================================
-// SMART MONEY DASHBOARD - Comprehensive Institutional Analysis
+// Smart Money Dashboard [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
 // ============================================================================
-// @description
-// Combines Order Flow, Liquidity Mapping, and SMC Patterns for complete
-// institutional activity analysis.
+// Order flow, SMC patterns, and liquidity in a single dashboard with confluence scoring.
 //
 // Features:
-//   - Order Flow imbalances (buying/selling pressure)
-//   - Order Blocks (institutional entry zones)
-//   - Fair Value Gaps (price inefficiencies)
-//   - Equal Highs/Lows (liquidity pools)
-//   - Real-time dashboard with confluence scoring
+//   ✓ Order Flow imbalances (buying/selling pressure)
+//   ✓ Order Blocks (institutional entry zones)
+//   ✓ Fair Value Gaps (price inefficiencies)
+//   ✓ Equal Highs/Lows (liquidity pools)
+//   ✓ Real-time confluence score (0–100)
 //
-// @author Waves Unchained
-// @version 1.0.0
 // ============================================================================
 
-import WavesUnchained/RTAMarketStructure/1 as MS
-import WavesUnchained/RTAAdvanced/1 as ADV
+indicator("Smart Money Dashboard", "SMD", overlay=true, max_boxes_count=100, max_lines_count=100, max_labels_count=50)
 
 // ============================================================================
 // USER INPUTS
 // ============================================================================
 
-// --- Order Flow ---
-var g1 = "📊 Order Flow"
-enableOrderFlow = input.bool(true, "Show Order Flow", group=g1)
-flowThreshold = input.int(65, "Imbalance Threshold %", minval=50, maxval=90, group=g1)
+var g1 = "Order Flow"
+enableOrderFlow  = input.bool(true, "Show Order Flow",          group=g1)
+flowThreshold    = input.int(65,   "Imbalance Threshold %",     group=g1, minval=50, maxval=90)
+flowLen          = input.int(20,   "Order Flow Length",          group=g1, minval=5,  maxval=100)
 
-// --- SMC Patterns ---
-var g2 = "🎯 SMC Patterns"
-enableOrderBlocks = input.bool(true, "Show Order Blocks", group=g2)
-enableFVGs = input.bool(true, "Show Fair Value Gaps", group=g2)
-maxOBs = input.int(5, "Max Order Blocks", minval=1, maxval=20, group=g2)
-maxFVGs = input.int(3, "Max FVGs", minval=1, maxval=10, group=g2)
+var g2 = "SMC Patterns"
+enableOrderBlocks = input.bool(true,  "Show Order Blocks",       group=g2)
+enableFVGs        = input.bool(true,  "Show Fair Value Gaps",    group=g2)
+maxOBs            = input.int(5,      "Max Order Blocks",        group=g2, minval=1, maxval=20)
+maxFVGs           = input.int(3,      "Max FVGs",                group=g2, minval=1, maxval=10)
+obDispMult        = input.float(1.2,  "OB Displacement ATR ×",  group=g2, minval=0.5, maxval=3.0, step=0.1)
 
-// --- Liquidity ---
-var g3 = "💧 Liquidity"
-enableLiquidity = input.bool(true, "Show Equal Highs/Lows", group=g3)
-liquidityLookback = input.int(15, "Lookback Period", minval=5, maxval=50, group=g3)
+var g3 = "Liquidity"
+enableLiquidity   = input.bool(true, "Show Equal Highs/Lows",   group=g3)
+liquidityLookback = input.int(15,    "Lookback Period",          group=g3, minval=5, maxval=50)
+eqlTolerance      = input.float(0.05,"Equal Level Tolerance %", group=g3, minval=0.01, maxval=0.5, step=0.01)
 
-// --- Display ---
-var g4 = "🎨 Display"
-showDashboard = input.bool(true, "Show Dashboard", group=g4)
-showOrderFlowBG = input.bool(true, "Order Flow Background", group=g4)
-obColor = input.color(color.new(color.purple, 70), "Order Block", group=g4)
-fvgColor = input.color(color.new(color.blue, 80), "FVG", group=g4)
+var g4 = "Display"
+showDashboard    = input.bool(true, "Show Dashboard",            group=g4)
+showOrderFlowBG  = input.bool(true, "Order Flow Background",     group=g4)
 
 // ============================================================================
-// INITIALIZE STATES
+// TYPES
 // ============================================================================
 
-var orderFlow = MS.newOrderFlowState()
-var smcState = ADV.newSMCState()
-var liquidityState = MS.newLiquidityState()
+type OBLevel
+    int    barIdx
+    float  hi
+    float  lo
+    string obType
+    bool   mitigated
+
+type FVGLevel
+    int    barIdx
+    float  hi
+    float  lo
+    string fvgType
+    bool   filled
+
+type LiqLevel
+    float  price
+    int    lastBar
+    int    touchCount
+    bool   swept
 
 // ============================================================================
-// UPDATE ALL SYSTEMS
+// ORDER FLOW
 // ============================================================================
 
-// Order Flow
-MS.updateOrderFlow(orderFlow)
+bullVol    = close > open ? volume : 0.0
+bearVol    = close <= open ? volume : 0.0
+bullVolSum = math.sum(bullVol, flowLen)
+bearVolSum = math.sum(bearVol, flowLen)
+totalVol   = bullVolSum + bearVolSum
 
-// SMC Patterns
-smcConfig = ADV.newSMCConfig()
-smcConfig.maxOBs := maxOBs
-smcConfig.maxFVGs := maxFVGs
-ADV.updateSMCPatterns(smcState, smcConfig)
+imbalanceDirection = totalVol > 0 ? (bullVolSum > bearVolSum ? 1 : bullVolSum < bearVolSum ? -1 : 0) : 0
+imbalanceStrength  = totalVol > 0 ? math.round(math.max(bullVolSum, bearVolSum) / totalVol * 100) : 50
 
-// Liquidity Mapping
-MS.updateLiquidityMapping(liquidityState, liquidityLookback, 0.0005)
+// ============================================================================
+// ORDER BLOCKS
+// ============================================================================
+
+var array<OBLevel> obLevels = array.new<OBLevel>()
+
+atr14        = ta.atr(14)
+displacement = atr14 * obDispMult
+
+// Bullish OB: last bearish candle before a bullish impulse
+if close - close[1] > displacement and close[1] < open[1]
+    array.unshift(obLevels, OBLevel.new(bar_index - 1, high[1], low[1], "BULLISH", false))
+    if array.size(obLevels) > maxOBs * 2
+        array.pop(obLevels)
+
+// Bearish OB: last bullish candle before a bearish impulse
+if close[1] - close > displacement and close[1] > open[1]
+    array.unshift(obLevels, OBLevel.new(bar_index - 1, high[1], low[1], "BEARISH", false))
+    if array.size(obLevels) > maxOBs * 2
+        array.pop(obLevels)
+
+// Mitigate OBs
+for ob in obLevels
+    if not ob.mitigated
+        if ob.obType == "BULLISH" and low < ob.lo
+            ob.mitigated := true
+        else if ob.obType == "BEARISH" and high > ob.hi
+            ob.mitigated := true
+
+activeOBs() =>
+    result = array.new<OBLevel>()
+    count  = 0
+    for ob in obLevels
+        if not ob.mitigated and count < maxOBs
+            array.push(result, ob)
+            count += 1
+    result
+
+// ============================================================================
+// FAIR VALUE GAPS
+// ============================================================================
+
+var array<FVGLevel> fvgLevels = array.new<FVGLevel>()
+
+// Bullish FVG: gap between candle[2] high and candle[0] low
+if low > high[2]
+    array.unshift(fvgLevels, FVGLevel.new(bar_index - 1, low, high[2], "BULLISH", false))
+    if array.size(fvgLevels) > maxFVGs * 2
+        array.pop(fvgLevels)
+
+// Bearish FVG: gap between candle[2] low and candle[0] high
+if high < low[2]
+    array.unshift(fvgLevels, FVGLevel.new(bar_index - 1, low[2], high, "BEARISH", false))
+    if array.size(fvgLevels) > maxFVGs * 2
+        array.pop(fvgLevels)
+
+// Fill FVGs
+for fvg in fvgLevels
+    if not fvg.filled
+        if fvg.fvgType == "BULLISH" and low <= fvg.hi
+            fvg.filled := true
+        else if fvg.fvgType == "BEARISH" and high >= fvg.lo
+            fvg.filled := true
+
+unfilledFVGs() =>
+    result = array.new<FVGLevel>()
+    count  = 0
+    for fvg in fvgLevels
+        if not fvg.filled and count < maxFVGs
+            array.push(result, fvg)
+            count += 1
+    result
+
+// ============================================================================
+// EQUAL HIGHS / LOWS
+// ============================================================================
+
+var array<LiqLevel> equalHighs = array.new<LiqLevel>()
+var array<LiqLevel> equalLows  = array.new<LiqLevel>()
+
+tolerance  = close * eqlTolerance / 100
+swingHigh  = ta.pivothigh(high, liquidityLookback, liquidityLookback)
+swingLow   = ta.pivotlow(low,   liquidityLookback, liquidityLookback)
+
+if not na(swingHigh)
+    found = false
+    for lvl in equalHighs
+        if math.abs(lvl.price - swingHigh) <= tolerance
+            lvl.touchCount += 1
+            lvl.lastBar     := bar_index
+            found           := true
+            break
+    if not found
+        array.push(equalHighs, LiqLevel.new(swingHigh, bar_index, 1, false))
+    if array.size(equalHighs) > 20
+        array.shift(equalHighs)
+
+if not na(swingLow)
+    found = false
+    for lvl in equalLows
+        if math.abs(lvl.price - swingLow) <= tolerance
+            lvl.touchCount += 1
+            lvl.lastBar     := bar_index
+            found           := true
+            break
+    if not found
+        array.push(equalLows, LiqLevel.new(swingLow, bar_index, 1, false))
+    if array.size(equalLows) > 20
+        array.shift(equalLows)
+
+// Sweep detection
+for lvl in equalHighs
+    if not lvl.swept and high > lvl.price
+        lvl.swept := true
+for lvl in equalLows
+    if not lvl.swept and low < lvl.price
+        lvl.swept := true
+
+// Near liquidity
+nearLiquidityUp   = false
+nearLiquidityDown = false
+for lvl in equalHighs
+    if not lvl.swept and math.abs(close - lvl.price) <= atr14 * 1.5
+        nearLiquidityUp := true
+for lvl in equalLows
+    if not lvl.swept and math.abs(close - lvl.price) <= atr14 * 1.5
+        nearLiquidityDown := true
+
+// ============================================================================
+// CONFLUENCE SCORING
+// ============================================================================
+
+curActiveOBs  = activeOBs()
+curFVGs       = unfilledFVGs()
+
+confluenceScore = 0.0
+signals = 0
+
+if imbalanceStrength >= flowThreshold
+    confluenceScore += 25.0
+    signals         += 1
+
+if array.size(curActiveOBs) > 0
+    for i = 0 to array.size(curActiveOBs) - 1
+        ob = array.get(curActiveOBs, i)
+        if math.abs(close - ob.lo) / close < 0.02 or math.abs(close - ob.hi) / close < 0.02
+            confluenceScore += 25.0
+            signals         += 1
+            break
+
+if array.size(curFVGs) > 0
+    for i = 0 to array.size(curFVGs) - 1
+        fvg = array.get(curFVGs, i)
+        if low <= fvg.hi and high >= fvg.lo
+            confluenceScore += 25.0
+            signals         += 1
+            break
+
+if nearLiquidityUp or nearLiquidityDown
+    confluenceScore += 25.0
+    signals         += 1
 
 // ============================================================================
 // ORDER FLOW VISUALIZATION
 // ============================================================================
 
 if enableOrderFlow and showOrderFlowBG
-    // Background color based on imbalance
-    flowColor = orderFlow.imbalanceDirection == 1 ?
-        color.new(color.green, 92) :
-        orderFlow.imbalanceDirection == -1 ?
-        color.new(color.red, 92) : na
-
-    bgcolor(flowColor, title="Order Flow")
+    flowBgColor = imbalanceDirection == 1 ? color.new(color.green, 92) :
+         imbalanceDirection == -1 ? color.new(color.red, 92) : na
+    bgcolor(flowBgColor, title="Order Flow")
 
 // ============================================================================
-// ORDER BLOCKS VISUALIZATION
+// VISUALIZATIONS — drawn on last bar only to respect box/line limits
 // ============================================================================
 
-if enableOrderBlocks
-    activeOBs = ADV.getActiveOrderBlocks(smcState)
+if barstate.islast
 
-    if array.size(activeOBs) > 0
-        displayCount = math.min(array.size(activeOBs), maxOBs)
-
+    if enableOrderBlocks and array.size(curActiveOBs) > 0
+        displayCount = math.min(array.size(curActiveOBs), maxOBs)
         for i = 0 to displayCount - 1
-            ob = array.get(activeOBs, i)
+            ob    = array.get(curActiveOBs, i)
+            obCol = ob.obType == "BULLISH" ? color.new(color.green, 75) : color.new(color.red, 75)
+            box.new(ob.barIdx, ob.hi, bar_index + 10, ob.lo,
+                 border_color=obCol, bgcolor=obCol, border_width=2, extend=extend.right)
+            labelText = ob.obType == "BULLISH" ? "OB +" : "OB -"
+            label.new(ob.barIdx, ob.obType == "BULLISH" ? ob.lo : ob.hi, labelText,
+                 color=obCol, textcolor=color.white,
+                 style=ob.obType == "BULLISH" ? label.style_label_up : label.style_label_down,
+                 size=size.small)
 
-            obColor := ob.obType == "BULLISH" ?
-                color.new(color.green, 75) : color.new(color.red, 75)
-
-            // Draw OB box
-            box.new(
-                ob.obBar,
-                ob.obHigh,
-                bar_index + 10,
-                ob.obLow,
-                border_color=obColor,
-                bgcolor=obColor,
-                border_width=2,
-                extend=extend.right
-            )
-
-            // Label
-            if bar_index - ob.obBar < 3
-                labelText = ob.obType == "BULLISH" ? "OB 🟢" : "OB 🔴"
-                label.new(
-                    ob.obBar,
-                    ob.obType == "BULLISH" ? ob.obLow : ob.obHigh,
-                    labelText,
-                    color=obColor,
-                    textcolor=color.white,
-                    style=ob.obType == "BULLISH" ?
-                        label.style_label_up : label.style_label_down,
-                    size=size.small
-                )
-
-// ============================================================================
-// FAIR VALUE GAPS VISUALIZATION
-// ============================================================================
-
-if enableFVGs
-    unfilledFVGs = ADV.getUnfilledFVGs(smcState)
-
-    if array.size(unfilledFVGs) > 0
-        displayCount = math.min(array.size(unfilledFVGs), maxFVGs)
-
+    if enableFVGs and array.size(curFVGs) > 0
+        displayCount = math.min(array.size(curFVGs), maxFVGs)
         for i = 0 to displayCount - 1
-            fvg = array.get(unfilledFVGs, i)
+            fvg    = array.get(curFVGs, i)
+            fvgCol = fvg.fvgType == "BULLISH" ? color.new(color.blue, 85) : color.new(color.orange, 85)
+            box.new(fvg.barIdx, fvg.hi, bar_index + 10, fvg.lo,
+                 border_color=fvgCol, bgcolor=fvgCol, border_width=1,
+                 border_style=line.style_dashed, extend=extend.right)
+            label.new(fvg.barIdx, fvg.fvgType == "BULLISH" ? fvg.lo : fvg.hi, "FVG",
+                 color=fvgCol, textcolor=color.white,
+                 style=fvg.fvgType == "BULLISH" ? label.style_label_up : label.style_label_down,
+                 size=size.tiny)
 
-            fvgColor := fvg.fvgType == "BULLISH" ?
-                color.new(color.blue, 85) : color.new(color.orange, 85)
-
-            // Draw FVG box
-            box.new(
-                fvg.fvgBar,
-                fvg.fvgHigh,
-                bar_index + 10,
-                fvg.fvgLow,
-                border_color=fvgColor,
-                bgcolor=fvgColor,
-                border_width=1,
-                border_style=line.style_dashed,
-                extend=extend.right
-            )
-
-            // Label
-            if bar_index == fvg.fvgBar
-                label.new(
-                    fvg.fvgBar,
-                    fvg.fvgType == "BULLISH" ? fvg.fvgLow : fvg.fvgHigh,
-                    "FVG",
-                    color=fvgColor,
-                    textcolor=color.white,
-                    style=fvg.fvgType == "BULLISH" ?
-                        label.style_label_up : label.style_label_down,
-                    size=size.tiny
-                )
-
-// ============================================================================
-// EQUAL HIGHS/LOWS VISUALIZATION
-// ============================================================================
-
-if enableLiquidity
-    activeEqualHighs = MS.getActiveEqualHighs(liquidityState)
-    activeEqualLows = MS.getActiveEqualLows(liquidityState)
-
-    // Draw Equal Highs
-    if array.size(activeEqualHighs) > 0
-        for i = 0 to math.min(array.size(activeEqualHighs) - 1, 3)
-            level = array.get(activeEqualHighs, i)
-            if level.touchCount >= 2 and not level.swept
-                line.new(
-                    level.lastBar - liquidityLookback,
-                    level.price,
-                    bar_index + 5,
-                    level.price,
-                    color=color.new(color.red, 50),
-                    style=line.style_dashed,
-                    width=1
-                )
-
-    // Draw Equal Lows
-    if array.size(activeEqualLows) > 0
-        for i = 0 to math.min(array.size(activeEqualLows) - 1, 3)
-            level = array.get(activeEqualLows, i)
-            if level.touchCount >= 2 and not level.swept
-                line.new(
-                    level.lastBar - liquidityLookback,
-                    level.price,
-                    bar_index + 5,
-                    level.price,
-                    color=color.new(color.green, 50),
-                    style=line.style_dashed,
-                    width=1
-                )
-
-// ============================================================================
-// CONFLUENCE SCORING
-// ============================================================================
-
-// Calculate confluence score (0-100)
-confluenceScore = 0.0
-signals = 0
-
-// Order Flow confirmation
-if orderFlow.imbalanceStrength >= flowThreshold
-    confluenceScore += 25.0
-    signals += 1
-
-// Order Block nearby
-activeOBs = ADV.getActiveOrderBlocks(smcState)
-if array.size(activeOBs) > 0
-    for i = 0 to array.size(activeOBs) - 1
-        ob = array.get(activeOBs, i)
-        if math.abs(close - ob.obLow) / close < 0.02 or
-             math.abs(close - ob.obHigh) / close < 0.02
-            confluenceScore += 25.0
-            signals += 1
-            break
-
-// FVG nearby
-unfilledFVGs = ADV.getUnfilledFVGs(smcState)
-if array.size(unfilledFVGs) > 0
-    for i = 0 to array.size(unfilledFVGs) - 1
-        fvg = array.get(unfilledFVGs, i)
-        if low <= fvg.fvgHigh and high >= fvg.fvgLow
-            confluenceScore += 25.0
-            signals += 1
-            break
-
-// Liquidity nearby
-currentATR = ta.atr(14)
-[nearUp, nearDown] = MS.isNearLiquidity(liquidityState, currentATR, 1.5)
-if nearUp or nearDown
-    confluenceScore += 25.0
-    signals += 1
+    if enableLiquidity
+        if array.size(equalHighs) > 0
+            for i = 0 to math.min(array.size(equalHighs) - 1, 3)
+                lvl = array.get(equalHighs, i)
+                if lvl.touchCount >= 2 and not lvl.swept
+                    line.new(lvl.lastBar - liquidityLookback, lvl.price, bar_index + 5, lvl.price,
+                         color=color.new(color.red, 50), style=line.style_dashed, width=1)
+        if array.size(equalLows) > 0
+            for i = 0 to math.min(array.size(equalLows) - 1, 3)
+                lvl = array.get(equalLows, i)
+                if lvl.touchCount >= 2 and not lvl.swept
+                    line.new(lvl.lastBar - liquidityLookback, lvl.price, bar_index + 5, lvl.price,
+                         color=color.new(color.green, 50), style=line.style_dashed, width=1)
 
 // ============================================================================
 // DASHBOARD
@@ -256,108 +302,75 @@ if nearUp or nearDown
 
 if showDashboard and barstate.islast
     var table dashboard = table.new(position.top_right, 2, 10,
-        border_width=2,
-        border_color=color.new(color.gray, 50),
-        frame_width=1,
-        frame_color=color.new(color.gray, 70))
+         border_width=2, border_color=color.new(color.gray, 50),
+         frame_width=1,  frame_color=color.new(color.gray, 70))
 
-    // Header
-    table.cell(dashboard, 0, 0, "💎 SMART MONEY",
-        text_color=color.white,
-        bgcolor=color.new(color.purple, 20),
-        text_size=size.normal,
-        text_halign=text.align_center)
+    table.cell(dashboard, 0, 0, "SMART MONEY",
+         text_color=color.white, bgcolor=color.new(color.purple, 20),
+         text_size=size.normal, text_halign=text.align_center)
     table.merge_cells(dashboard, 0, 0, 1, 0)
 
-    // Order Flow
-    flowDirection = orderFlow.imbalanceDirection == 1 ? "BULLISH" :
-        orderFlow.imbalanceDirection == -1 ? "BEARISH" : "NEUTRAL"
-    flowColor := orderFlow.imbalanceDirection == 1 ? color.lime :
-        orderFlow.imbalanceDirection == -1 ? color.red : color.gray
+    flowDirText = imbalanceDirection == 1 ? "BULLISH" : imbalanceDirection == -1 ? "BEARISH" : "NEUTRAL"
+    flowDirCol  = imbalanceDirection == 1 ? color.lime : imbalanceDirection == -1 ? color.red : color.gray
+    table.cell(dashboard, 0, 1, "Order Flow",  text_color=color.gray,   text_size=size.small)
+    table.cell(dashboard, 1, 1, flowDirText,   text_color=flowDirCol,   text_size=size.small)
 
-    table.cell(dashboard, 0, 1, "Order Flow", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 1, 1, flowDirection, text_color=flowColor, text_size=size.small)
+    table.cell(dashboard, 0, 2, "Strength",    text_color=color.gray,   text_size=size.small)
+    table.cell(dashboard, 1, 2, str.tostring(imbalanceStrength, "#") + "%",
+         text_color=color.white, text_size=size.small)
 
-    // Imbalance Strength
-    table.cell(dashboard, 0, 2, "Strength", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 1, 2,
-        str.tostring(orderFlow.imbalanceStrength, "#") + "%",
-        text_color=color.white, text_size=size.small)
-
-    // Order Blocks
-    obCount = array.size(ADV.getActiveOrderBlocks(smcState))
-    table.cell(dashboard, 0, 3, "Order Blocks", text_color=color.gray, text_size=size.small)
+    obCount = array.size(curActiveOBs)
+    table.cell(dashboard, 0, 3, "Order Blocks", text_color=color.gray,  text_size=size.small)
     table.cell(dashboard, 1, 3, str.tostring(obCount),
-        text_color=obCount > 0 ? color.yellow : color.gray, text_size=size.small)
+         text_color=obCount > 0 ? color.yellow : color.gray, text_size=size.small)
 
-    // Fair Value Gaps
-    fvgCount = array.size(ADV.getUnfilledFVGs(smcState))
-    table.cell(dashboard, 0, 4, "FVGs", text_color=color.gray, text_size=size.small)
+    fvgCount = array.size(curFVGs)
+    table.cell(dashboard, 0, 4, "FVGs",         text_color=color.gray,  text_size=size.small)
     table.cell(dashboard, 1, 4, str.tostring(fvgCount),
-        text_color=fvgCount > 0 ? color.aqua : color.gray, text_size=size.small)
+         text_color=fvgCount > 0 ? color.aqua : color.gray, text_size=size.small)
 
-    // Equal Highs/Lows
-    eqhCount = array.size(MS.getActiveEqualHighs(liquidityState))
-    eqlCount = array.size(MS.getActiveEqualLows(liquidityState))
-    table.cell(dashboard, 0, 5, "Liquidity", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 1, 5,
-        str.format("↑{0} ↓{1}", eqhCount, eqlCount),
-        text_color=color.white, text_size=size.small)
+    eqhCount = 0
+    for lvl in equalHighs
+        if not lvl.swept
+            eqhCount += 1
+    eqlCount = 0
+    for lvl in equalLows
+        if not lvl.swept
+            eqlCount += 1
+    table.cell(dashboard, 0, 5, "Liquidity",   text_color=color.gray,   text_size=size.small)
+    table.cell(dashboard, 1, 5, str.format("↑{0} ↓{1}", eqhCount, eqlCount),
+         text_color=color.white, text_size=size.small)
 
-    // Separator
     table.cell(dashboard, 0, 6, "", bgcolor=color.new(color.gray, 80))
     table.merge_cells(dashboard, 0, 6, 1, 6)
 
-    // Confluence Score
-    scoreColor = confluenceScore >= 75 ? color.lime :
-        confluenceScore >= 50 ? color.yellow :
-        confluenceScore >= 25 ? color.orange : color.gray
+    scoreColor = confluenceScore >= 75 ? color.lime  : confluenceScore >= 50 ? color.yellow :
+         confluenceScore >= 25 ? color.orange : color.gray
+    table.cell(dashboard, 0, 7, "Confluence",  text_color=color.gray,   text_size=size.small)
+    table.cell(dashboard, 1, 7, str.format("{0}/100", str.tostring(confluenceScore, "#")),
+         text_color=scoreColor, text_size=size.normal)
 
-    table.cell(dashboard, 0, 7, "Confluence", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 1, 7,
-        str.format("{0}/100", str.tostring(confluenceScore, "#")),
-        text_color=scoreColor,
-        text_size=size.normal)
+    table.cell(dashboard, 0, 8, "Signals",     text_color=color.gray,   text_size=size.small)
+    table.cell(dashboard, 1, 8, str.format("{0}/4", signals),
+         text_color=color.white, text_size=size.small)
 
-    // Signal Count
-    table.cell(dashboard, 0, 8, "Signals", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 1, 8,
-        str.format("{0}/4", signals),
-        text_color=color.white, text_size=size.small)
-
-    // Recommendation
-    recommendation = confluenceScore >= 75 ? "🟢 STRONG" :
-        confluenceScore >= 50 ? "🟡 MODERATE" :
-        confluenceScore >= 25 ? "🟠 WEAK" : "⚪ NO SETUP"
-
-    recColor = confluenceScore >= 75 ? color.new(color.green, 30) :
-        confluenceScore >= 50 ? color.new(color.yellow, 30) :
-        confluenceScore >= 25 ? color.new(color.orange, 30) :
-        color.new(color.gray, 60)
-
-    table.cell(dashboard, 0, 9, "Setup", text_color=color.gray, text_size=size.small)
+    recommendation = confluenceScore >= 75 ? "STRONG"   : confluenceScore >= 50 ? "MODERATE" :
+         confluenceScore >= 25 ? "WEAK" : "NO SETUP"
+    recColor = confluenceScore >= 75 ? color.new(color.green,  30) :
+         confluenceScore >= 50 ? color.new(color.yellow, 30) :
+         confluenceScore >= 25 ? color.new(color.orange, 30) : color.new(color.gray, 60)
+    table.cell(dashboard, 0, 9, "Setup",       text_color=color.gray,   text_size=size.small)
     table.cell(dashboard, 1, 9, recommendation,
-        text_color=color.white,
-        bgcolor=recColor,
-        text_size=size.small,
-        text_halign=text.align_center)
+         text_color=color.white, bgcolor=recColor, text_size=size.small, text_halign=text.align_center)
 
 // ============================================================================
 // ALERTS
 // ============================================================================
 
-strongBullish = orderFlow.imbalanceDirection == 1 and
-     orderFlow.imbalanceStrength >= 75 and confluenceScore >= 75
+strongBullish = imbalanceDirection == 1  and imbalanceStrength >= 75 and confluenceScore >= 75
+strongBearish = imbalanceDirection == -1 and imbalanceStrength >= 75 and confluenceScore >= 75
 
-strongBearish = orderFlow.imbalanceDirection == -1 and
-     orderFlow.imbalanceStrength >= 75 and confluenceScore >= 75
-
-alertcondition(strongBullish, "Strong Bullish Setup",
-    "Smart Money: Strong bullish confluence detected")
-
-alertcondition(strongBearish, "Strong Bearish Setup",
-    "Smart Money: Strong bearish confluence detected")
-
-alertcondition(confluenceScore >= 75 and confluenceScore[1] < 75,
-    "High Confluence",
-    str.format("Smart Money: Confluence {0}/100", confluenceScore))
+alertcondition(strongBullish, "Strong Bullish Setup", "Smart Money: Strong bullish confluence detected")
+alertcondition(strongBearish, "Strong Bearish Setup", "Smart Money: Strong bearish confluence detected")
+alertcondition(confluenceScore >= 75 and confluenceScore[1] < 75, "High Confluence",
+     str.format("Smart Money: Confluence {0}/100", confluenceScore))
