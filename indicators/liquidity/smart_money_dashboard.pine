@@ -1,46 +1,68 @@
 //@version=6
 // ============================================================================
 // Smart Money Dashboard [WavesUnchained]
-// Version: 1.0.0
+// Version: 2.0.0
 // Author: WavesUnchained
 // ============================================================================
-// Order flow, SMC patterns, and liquidity in a single dashboard with confluence scoring.
+// Comprehensive smart money analysis combining CVD, structural patterns,
+// liquidity mapping, and multi-timeframe confluence into a directional bias.
 //
 // Features:
-//   ✓ Order Flow imbalances (buying/selling pressure)
-//   ✓ Order Blocks (institutional entry zones)
-//   ✓ Fair Value Gaps (price inefficiencies)
-//   ✓ Equal Highs/Lows (liquidity pools)
-//   ✓ Real-time confluence score (0–100)
+//   ✓ CVD with delta divergence detection
+//   ✓ Directional bias scoring (-100 to +100)
+//   ✓ Order Blocks with mitigation tracking
+//   ✓ Fair Value Gaps with fill tracking
+//   ✓ Equal Highs/Lows with sweep + reclaim signals
+//   ✓ Nearest-level awareness (distance in ATR)
+//   ✓ Session context (Asia range, London/NY kill zones)
+//   ✓ Multi-timeframe structural confluence
 //
 // ============================================================================
 
-indicator("Smart Money Dashboard", "SMD", overlay=true, max_boxes_count=100, max_lines_count=100, max_labels_count=50)
+indicator("Smart Money Dashboard [WavesUnchained]", "SMD v2", overlay=true,
+     max_boxes_count=200, max_lines_count=200, max_labels_count=100)
 
 // ============================================================================
 // USER INPUTS
 // ============================================================================
 
-var g1 = "Order Flow"
-enableOrderFlow  = input.bool(true, "Show Order Flow",          group=g1)
-flowThreshold    = input.int(65,   "Imbalance Threshold %",     group=g1, minval=50, maxval=90)
-flowLen          = input.int(20,   "Order Flow Length",          group=g1, minval=5,  maxval=100)
+var g1 = "CVD / Order Flow"
+enableCVD    = input.bool(true, "Enable CVD Analysis",    group=g1)
+cvdLen       = input.int(20,    "CVD EMA Length",          group=g1, minval=5,  maxval=100)
+divLookback  = input.int(20,    "Divergence Lookback",     group=g1, minval=10, maxval=50)
 
 var g2 = "SMC Patterns"
-enableOrderBlocks = input.bool(true,  "Show Order Blocks",       group=g2)
-enableFVGs        = input.bool(true,  "Show Fair Value Gaps",    group=g2)
-maxOBs            = input.int(5,      "Max Order Blocks",        group=g2, minval=1, maxval=20)
-maxFVGs           = input.int(3,      "Max FVGs",                group=g2, minval=1, maxval=10)
-obDispMult        = input.float(1.2,  "OB Displacement ATR ×",  group=g2, minval=0.5, maxval=3.0, step=0.1)
+enableOB     = input.bool(true,  "Show Order Blocks",      group=g2)
+enableFVG    = input.bool(true,  "Show Fair Value Gaps",   group=g2)
+maxOBs       = input.int(5,      "Max Order Blocks",       group=g2, minval=1,  maxval=20)
+maxFVGs      = input.int(3,      "Max FVGs",               group=g2, minval=1,  maxval=10)
+obDispMult   = input.float(1.2,  "OB Displacement ATR x",  group=g2, minval=0.5, maxval=3.0, step=0.1)
 
 var g3 = "Liquidity"
-enableLiquidity   = input.bool(true, "Show Equal Highs/Lows",   group=g3)
-liquidityLookback = input.int(15,    "Lookback Period",          group=g3, minval=5, maxval=50)
-eqlTolerance      = input.float(0.05,"Equal Level Tolerance %", group=g3, minval=0.01, maxval=0.5, step=0.01)
+enableLiq    = input.bool(true,  "Show Equal Highs/Lows",   group=g3)
+liqLookback  = input.int(15,     "Pivot Lookback",           group=g3, minval=5,  maxval=50)
+eqlTolerance = input.float(0.05, "Equal Level Tolerance %",  group=g3, minval=0.01, maxval=0.5, step=0.01)
+reclaimBars  = input.int(5,      "Reclaim Window (bars)",    group=g3, minval=1,  maxval=20)
 
-var g4 = "Display"
-showDashboard    = input.bool(true, "Show Dashboard",            group=g4)
-showOrderFlowBG  = input.bool(true, "Order Flow Background",     group=g4)
+var g4 = "Sessions"
+enableSessions = input.bool(true,    "Show Session Context",  group=g4)
+sessionTZ      = input.string("UTC", "Timezone",
+     options=["UTC","America/New_York","America/Chicago","Europe/London","Europe/Berlin","Asia/Tokyo"], group=g4)
+asiaStartH     = input.int(0,  "Asia Start Hour",    group=g4, minval=0, maxval=23)
+asiaEndH       = input.int(8,  "Asia End Hour",      group=g4, minval=0, maxval=23)
+londonKZStartH = input.int(7,  "London KZ Start",    group=g4, minval=0, maxval=23)
+londonKZEndH   = input.int(10, "London KZ End",      group=g4, minval=0, maxval=23)
+nyKZStartH     = input.int(12, "NY KZ Start",        group=g4, minval=0, maxval=23)
+nyKZEndH       = input.int(15, "NY KZ End",          group=g4, minval=0, maxval=23)
+
+var g5 = "Multi-Timeframe"
+enableHTF    = input.bool(true,       "Enable HTF Confluence", group=g5)
+htfTimeframe = input.timeframe("240", "HTF Timeframe",         group=g5)
+
+var g6 = "Display"
+showDashboard  = input.bool(true, "Show Dashboard",       group=g6)
+showFlowBG     = input.bool(true, "CVD Background",       group=g6)
+showAsiaRange  = input.bool(true, "Show Asia Range",      group=g6)
 
 // ============================================================================
 // TYPES
@@ -65,42 +87,52 @@ type LiqLevel
     int    lastBar
     int    touchCount
     bool   swept
+    int    sweepBar
+    bool   reclaimed
+    string reclaimDir
 
 // ============================================================================
-// ORDER FLOW
+// CVD + DELTA DIVERGENCE
 // ============================================================================
 
-bullVol    = close > open ? volume : 0.0
-bearVol    = close <= open ? volume : 0.0
-bullVolSum = math.sum(bullVol, flowLen)
-bearVolSum = math.sum(bearVol, flowLen)
-totalVol   = bullVolSum + bearVolSum
+barRange = high - low
+barDelta = barRange > 0 ? volume * (2.0 * (close - low) / barRange - 1.0) : 0.0
+cvd      = ta.cum(barDelta)
+cvdEMA   = ta.ema(cvd, cvdLen)
+cvdTrend = cvd > cvdEMA ? 1 : -1
 
-imbalanceDirection = totalVol > 0 ? (bullVolSum > bearVolSum ? 1 : bullVolSum < bearVolSum ? -1 : 0) : 0
-imbalanceStrength  = totalVol > 0 ? math.round(math.max(bullVolSum, bearVolSum) / totalVol * 100) : 50
+priceAtHigh = high >= ta.highest(high, divLookback)
+cvdAtHigh   = cvd  >= ta.highest(cvd,  divLookback)
+priceAtLow  = low  <= ta.lowest(low,   divLookback)
+cvdAtLow    = cvd  <= ta.lowest(cvd,   divLookback)
+
+bearishDiv = priceAtHigh and not cvdAtHigh
+bullishDiv = priceAtLow  and not cvdAtLow
+
+bullVolSum  = math.sum(close > open ? volume : 0.0, cvdLen)
+bearVolSum  = math.sum(close <= open ? volume : 0.0, cvdLen)
+totalVolSum = bullVolSum + bearVolSum
+flowPct     = totalVolSum > 0 ? math.round(math.max(bullVolSum, bearVolSum) / totalVolSum * 100) : 50
+flowDir     = totalVolSum > 0 ? (bullVolSum > bearVolSum ? 1 : -1) : 0
 
 // ============================================================================
 // ORDER BLOCKS
 // ============================================================================
 
 var array<OBLevel> obLevels = array.new<OBLevel>()
-
 atr14        = ta.atr(14)
 displacement = atr14 * obDispMult
 
-// Bullish OB: last bearish candle before a bullish impulse
 if close - close[1] > displacement and close[1] < open[1]
     array.unshift(obLevels, OBLevel.new(bar_index - 1, high[1], low[1], "BULLISH", false))
     if array.size(obLevels) > maxOBs * 2
         array.pop(obLevels)
 
-// Bearish OB: last bullish candle before a bearish impulse
 if close[1] - close > displacement and close[1] > open[1]
     array.unshift(obLevels, OBLevel.new(bar_index - 1, high[1], low[1], "BEARISH", false))
     if array.size(obLevels) > maxOBs * 2
         array.pop(obLevels)
 
-// Mitigate OBs
 for ob in obLevels
     if not ob.mitigated
         if ob.obType == "BULLISH" and low < ob.lo
@@ -123,19 +155,16 @@ activeOBs() =>
 
 var array<FVGLevel> fvgLevels = array.new<FVGLevel>()
 
-// Bullish FVG: gap between candle[2] high and candle[0] low
 if low > high[2]
     array.unshift(fvgLevels, FVGLevel.new(bar_index - 1, low, high[2], "BULLISH", false))
     if array.size(fvgLevels) > maxFVGs * 2
         array.pop(fvgLevels)
 
-// Bearish FVG: gap between candle[2] low and candle[0] high
 if high < low[2]
     array.unshift(fvgLevels, FVGLevel.new(bar_index - 1, low[2], high, "BEARISH", false))
     if array.size(fvgLevels) > maxFVGs * 2
         array.pop(fvgLevels)
 
-// Fill FVGs
 for fvg in fvgLevels
     if not fvg.filled
         if fvg.fvgType == "BULLISH" and low <= fvg.hi
@@ -153,15 +182,15 @@ unfilledFVGs() =>
     result
 
 // ============================================================================
-// EQUAL HIGHS / LOWS
+// EQUAL HIGHS / LOWS + SWEEP + RECLAIM
 // ============================================================================
 
 var array<LiqLevel> equalHighs = array.new<LiqLevel>()
 var array<LiqLevel> equalLows  = array.new<LiqLevel>()
 
-tolerance  = close * eqlTolerance / 100
-swingHigh  = ta.pivothigh(high, liquidityLookback, liquidityLookback)
-swingLow   = ta.pivotlow(low,   liquidityLookback, liquidityLookback)
+tolerance = close * eqlTolerance / 100
+swingHigh = ta.pivothigh(high, liqLookback, liqLookback)
+swingLow  = ta.pivotlow(low,   liqLookback, liqLookback)
 
 if not na(swingHigh)
     found = false
@@ -172,7 +201,7 @@ if not na(swingHigh)
             found           := true
             break
     if not found
-        array.push(equalHighs, LiqLevel.new(swingHigh, bar_index, 1, false))
+        array.push(equalHighs, LiqLevel.new(swingHigh, bar_index, 1, false, 0, false, ""))
     if array.size(equalHighs) > 20
         array.shift(equalHighs)
 
@@ -185,91 +214,218 @@ if not na(swingLow)
             found           := true
             break
     if not found
-        array.push(equalLows, LiqLevel.new(swingLow, bar_index, 1, false))
+        array.push(equalLows, LiqLevel.new(swingLow, bar_index, 1, false, 0, false, ""))
     if array.size(equalLows) > 20
         array.shift(equalLows)
 
-// Sweep detection
-for lvl in equalHighs
-    if not lvl.swept and high > lvl.price
-        lvl.swept := true
-for lvl in equalLows
-    if not lvl.swept and low < lvl.price
-        lvl.swept := true
+// Sweep + Reclaim detection
+sweepReclaimBull = false
+sweepReclaimBear = false
 
-// Near liquidity
-nearLiquidityUp   = false
-nearLiquidityDown = false
 for lvl in equalHighs
-    if not lvl.swept and math.abs(close - lvl.price) <= atr14 * 1.5
-        nearLiquidityUp := true
+    if not lvl.swept and lvl.touchCount >= 2 and high > lvl.price
+        lvl.swept    := true
+        lvl.sweepBar := bar_index
+    if lvl.swept and not lvl.reclaimed and bar_index > lvl.sweepBar and bar_index <= lvl.sweepBar + reclaimBars and close < lvl.price
+        lvl.reclaimed  := true
+        lvl.reclaimDir := "BEARISH"
+        sweepReclaimBear := true
+
 for lvl in equalLows
-    if not lvl.swept and math.abs(close - lvl.price) <= atr14 * 1.5
-        nearLiquidityDown := true
+    if not lvl.swept and lvl.touchCount >= 2 and low < lvl.price
+        lvl.swept    := true
+        lvl.sweepBar := bar_index
+    if lvl.swept and not lvl.reclaimed and bar_index > lvl.sweepBar and bar_index <= lvl.sweepBar + reclaimBars and close > lvl.price
+        lvl.reclaimed  := true
+        lvl.reclaimDir := "BULLISH"
+        sweepReclaimBull := true
 
 // ============================================================================
-// CONFLUENCE SCORING
+// SESSION CONTEXT
 // ============================================================================
 
-curActiveOBs  = activeOBs()
-curFVGs       = unfilledFVGs()
+curHour    = hour(time, sessionTZ)
+isAsia     = curHour >= asiaStartH and curHour < asiaEndH
+isLondonKZ = curHour >= londonKZStartH and curHour < londonKZEndH
+isNYKZ     = curHour >= nyKZStartH and curHour < nyKZEndH
+isKillZone = isLondonKZ or isNYKZ
 
-confluenceScore = 0.0
-signals = 0
+var float asiaHigh     = na
+var float asiaLow      = na
+var int   asiaBarStart = na
 
-if imbalanceStrength >= flowThreshold
-    confluenceScore += 25.0
-    signals         += 1
+if isAsia
+    if not isAsia[1]
+        asiaHigh     := high
+        asiaLow      := low
+        asiaBarStart := bar_index
+    else
+        asiaHigh := math.max(asiaHigh, high)
+        asiaLow  := math.min(asiaLow,  low)
 
+sessionName = isNYKZ ? "NY Kill Zone" :
+     isLondonKZ ? "London KZ" :
+     isAsia ? "Asia" :
+     curHour >= asiaEndH and curHour < londonKZStartH ? "Pre-London" :
+     curHour >= londonKZEndH and curHour < nyKZStartH ? "London" :
+     curHour >= nyKZEndH ? "NY" : "Off-Hours"
+
+// ============================================================================
+// MULTI-TIMEFRAME CONFLUENCE
+// ============================================================================
+
+f_htfData() =>
+    [close, open, ta.atr(14), ta.ema(close, 21)]
+
+[htfC, htfO, htfATR14, htfEMA21] = request.security(syminfo.tickerid, htfTimeframe,
+     f_htfData(), lookahead=barmerge.lookahead_off)
+
+htfTrend   = enableHTF ? (nz(htfC) > nz(htfEMA21) ? 1 : -1) : 0
+htfHasDisp = math.abs(nz(htfC) - nz(htfO)) > nz(htfATR14) * 1.0
+htfDispDir = enableHTF and htfHasDisp ? (htfC > htfO ? 1 : -1) : 0
+
+// ============================================================================
+// NEAREST LEVEL CALCULATION
+// ============================================================================
+
+curActiveOBs = activeOBs()
+curFVGs      = unfilledFVGs()
+
+nearestOBDist  = 999.0
+nearestOBType  = ""
 if array.size(curActiveOBs) > 0
     for i = 0 to array.size(curActiveOBs) - 1
-        ob = array.get(curActiveOBs, i)
-        if math.abs(close - ob.lo) / close < 0.02 or math.abs(close - ob.hi) / close < 0.02
-            confluenceScore += 25.0
-            signals         += 1
-            break
+        ob   = array.get(curActiveOBs, i)
+        mid  = (ob.hi + ob.lo) / 2
+        dist = math.abs(close - mid)
+        if atr14 > 0 and dist / atr14 < nearestOBDist
+            nearestOBDist := dist / atr14
+            nearestOBType := ob.obType
 
+nearestFVGDist = 999.0
+nearestFVGType = ""
 if array.size(curFVGs) > 0
     for i = 0 to array.size(curFVGs) - 1
-        fvg = array.get(curFVGs, i)
-        if low <= fvg.hi and high >= fvg.lo
-            confluenceScore += 25.0
-            signals         += 1
-            break
+        fvg  = array.get(curFVGs, i)
+        mid  = (fvg.hi + fvg.lo) / 2
+        dist = math.abs(close - mid)
+        if atr14 > 0 and dist / atr14 < nearestFVGDist
+            nearestFVGDist := dist / atr14
+            nearestFVGType := fvg.fvgType
 
-if nearLiquidityUp or nearLiquidityDown
-    confluenceScore += 25.0
-    signals         += 1
+nearestLiqUpDist = 999.0
+for lvl in equalHighs
+    if not lvl.swept and lvl.touchCount >= 2
+        dist = math.abs(close - lvl.price)
+        if atr14 > 0 and dist / atr14 < nearestLiqUpDist
+            nearestLiqUpDist := dist / atr14
+
+nearestLiqDnDist = 999.0
+for lvl in equalLows
+    if not lvl.swept and lvl.touchCount >= 2
+        dist = math.abs(close - lvl.price)
+        if atr14 > 0 and dist / atr14 < nearestLiqDnDist
+            nearestLiqDnDist := dist / atr14
 
 // ============================================================================
-// ORDER FLOW VISUALIZATION
+// DIRECTIONAL BIAS SCORING (-100 to +100)
 // ============================================================================
 
-if enableOrderFlow and showOrderFlowBG
-    flowBgColor = imbalanceDirection == 1 ? color.new(color.green, 92) :
-         imbalanceDirection == -1 ? color.new(color.red, 92) : na
-    bgcolor(flowBgColor, title="Order Flow")
+bias = 0.0
+
+// CVD trend (weight: 20)
+if enableCVD
+    bias += cvdTrend == 1 ? 20.0 : -20.0
+
+// Divergence override (weight: 15)
+if bearishDiv
+    bias -= 15.0
+if bullishDiv
+    bias += 15.0
+
+// Flow imbalance (weight: 10)
+if flowDir != 0 and flowPct >= 60
+    bias += flowDir == 1 ? 10.0 : -10.0
+
+// OB proximity (weight: 15)
+if nearestOBDist < 2.0
+    bias += nearestOBType == "BULLISH" ? 15.0 : -15.0
+
+// FVG proximity (weight: 10)
+if nearestFVGDist < 2.0
+    bias += nearestFVGType == "BULLISH" ? 10.0 : -10.0
+
+// Sweep + reclaim (weight: 15)
+if sweepReclaimBull
+    bias += 15.0
+if sweepReclaimBear
+    bias -= 15.0
+
+// Kill zone amplifier
+if isKillZone
+    bias *= 1.1
+
+// HTF alignment (weight: 15)
+if enableHTF and htfTrend != 0
+    bias += htfTrend == 1 ? 10.0 : -10.0
+    if htfDispDir != 0
+        bias += htfDispDir == 1 ? 5.0 : -5.0
+
+bias := math.max(-100.0, math.min(100.0, bias))
+
+biasDirection = bias >= 25 ? "BULLISH" : bias <= -25 ? "BEARISH" : "NEUTRAL"
+biasStrength  = math.abs(bias)
 
 // ============================================================================
-// VISUALIZATIONS — drawn on last bar only to respect box/line limits
+// SIGNAL GENERATION
+// ============================================================================
+
+strongBullish = bias >= 50 and isKillZone
+strongBearish = bias <= -50 and isKillZone
+sweepEntry    = (sweepReclaimBull and bias > 0) or (sweepReclaimBear and bias < 0)
+
+// ============================================================================
+// GLOBAL SCOPE VISUALS
+// ============================================================================
+
+bgcolor(enableCVD and showFlowBG ?
+     (cvdTrend == 1 ? color.new(color.green, 93) :
+      cvdTrend == -1 ? color.new(color.red, 93) : na) : na,
+     title="CVD Background")
+
+bgcolor(enableSessions and isKillZone ? color.new(color.orange, 95) : na,
+     title="Kill Zone")
+
+plotshape(sweepReclaimBull, "Sweep+Reclaim Bull", shape.labelup,
+     location.belowbar, #00bfa5, size=size.small, text="S+R", textcolor=color.white)
+plotshape(sweepReclaimBear, "Sweep+Reclaim Bear", shape.labeldown,
+     location.abovebar, #e040fb, size=size.small, text="S+R", textcolor=color.white)
+
+plotshape(enableCVD and bullishDiv, "Bull Divergence", shape.xcross,
+     location.belowbar, #0ea5e9, size=size.tiny)
+plotshape(enableCVD and bearishDiv, "Bear Divergence", shape.xcross,
+     location.abovebar, #0ea5e9, size=size.tiny)
+
+// ============================================================================
+// VISUALIZATIONS - drawn on last bar
 // ============================================================================
 
 if barstate.islast
 
-    if enableOrderBlocks and array.size(curActiveOBs) > 0
+    if enableOB and array.size(curActiveOBs) > 0
         displayCount = math.min(array.size(curActiveOBs), maxOBs)
         for i = 0 to displayCount - 1
             ob    = array.get(curActiveOBs, i)
             obCol = ob.obType == "BULLISH" ? color.new(color.green, 75) : color.new(color.red, 75)
             box.new(ob.barIdx, ob.hi, bar_index + 10, ob.lo,
                  border_color=obCol, bgcolor=obCol, border_width=2, extend=extend.right)
-            labelText = ob.obType == "BULLISH" ? "OB +" : "OB -"
+            labelText = ob.obType == "BULLISH" ? "OB+" : "OB-"
             label.new(ob.barIdx, ob.obType == "BULLISH" ? ob.lo : ob.hi, labelText,
                  color=obCol, textcolor=color.white,
                  style=ob.obType == "BULLISH" ? label.style_label_up : label.style_label_down,
                  size=size.small)
 
-    if enableFVGs and array.size(curFVGs) > 0
+    if enableFVG and array.size(curFVGs) > 0
         displayCount = math.min(array.size(curFVGs), maxFVGs)
         for i = 0 to displayCount - 1
             fvg    = array.get(curFVGs, i)
@@ -282,95 +438,172 @@ if barstate.islast
                  style=fvg.fvgType == "BULLISH" ? label.style_label_up : label.style_label_down,
                  size=size.tiny)
 
-    if enableLiquidity
+    if enableLiq
         if array.size(equalHighs) > 0
-            for i = 0 to math.min(array.size(equalHighs) - 1, 3)
+            for i = 0 to math.min(array.size(equalHighs) - 1, 4)
                 lvl = array.get(equalHighs, i)
                 if lvl.touchCount >= 2 and not lvl.swept
-                    line.new(lvl.lastBar - liquidityLookback, lvl.price, bar_index + 5, lvl.price,
+                    line.new(lvl.lastBar - liqLookback, lvl.price, bar_index + 5, lvl.price,
                          color=color.new(color.red, 50), style=line.style_dashed, width=1)
         if array.size(equalLows) > 0
-            for i = 0 to math.min(array.size(equalLows) - 1, 3)
+            for i = 0 to math.min(array.size(equalLows) - 1, 4)
                 lvl = array.get(equalLows, i)
                 if lvl.touchCount >= 2 and not lvl.swept
-                    line.new(lvl.lastBar - liquidityLookback, lvl.price, bar_index + 5, lvl.price,
+                    line.new(lvl.lastBar - liqLookback, lvl.price, bar_index + 5, lvl.price,
                          color=color.new(color.green, 50), style=line.style_dashed, width=1)
+
+    if enableSessions and showAsiaRange and not na(asiaHigh) and not na(asiaLow) and not na(asiaBarStart)
+        box.new(asiaBarStart, asiaHigh, bar_index, asiaLow,
+             border_color=color.new(color.blue, 60), bgcolor=color.new(color.blue, 92),
+             border_width=1, border_style=line.style_dotted, text="Asia Range",
+             text_color=color.new(color.blue, 40), text_size=size.tiny)
 
 // ============================================================================
 // DASHBOARD
 // ============================================================================
 
 if showDashboard and barstate.islast
-    var table dashboard = table.new(position.top_right, 2, 10,
-         border_width=2, border_color=color.new(color.gray, 50),
+    var table dash = table.new(position.top_right, 3, 14,
+         border_width=1, border_color=color.new(color.gray, 50),
          frame_width=1,  frame_color=color.new(color.gray, 70))
 
-    table.cell(dashboard, 0, 0, "SMART MONEY",
-         text_color=color.white, bgcolor=color.new(color.purple, 20),
+    // Row 0: Header
+    biasCol = biasDirection == "BULLISH" ? color.new(color.green, 20) :
+         biasDirection == "BEARISH" ? color.new(color.red, 20) : color.new(color.gray, 40)
+    table.cell(dash, 0, 0, "SMART MONEY",
+         text_color=color.white, bgcolor=biasCol,
          text_size=size.normal, text_halign=text.align_center)
-    table.merge_cells(dashboard, 0, 0, 1, 0)
+    table.merge_cells(dash, 0, 0, 2, 0)
 
-    flowDirText = imbalanceDirection == 1 ? "BULLISH" : imbalanceDirection == -1 ? "BEARISH" : "NEUTRAL"
-    flowDirCol  = imbalanceDirection == 1 ? color.lime : imbalanceDirection == -1 ? color.red : color.gray
-    table.cell(dashboard, 0, 1, "Order Flow",  text_color=color.gray,   text_size=size.small)
-    table.cell(dashboard, 1, 1, flowDirText,   text_color=flowDirCol,   text_size=size.small)
+    // Row 1: Directional Bias
+    table.cell(dash, 0, 1, "Bias", text_color=color.gray, text_size=size.small)
+    biasText = biasDirection + " " + str.tostring(math.round(bias))
+    table.cell(dash, 1, 1, biasText,
+         text_color=bias >= 25 ? color.lime : bias <= -25 ? color.red : color.gray,
+         text_size=size.small)
+    table.merge_cells(dash, 1, 1, 2, 1)
 
-    table.cell(dashboard, 0, 2, "Strength",    text_color=color.gray,   text_size=size.small)
-    table.cell(dashboard, 1, 2, str.tostring(imbalanceStrength, "#") + "%",
-         text_color=color.white, text_size=size.small)
+    // Row 2: CVD
+    cvdText = cvdTrend == 1 ? "RISING" : "FALLING"
+    divText = bearishDiv ? " [DIV]" : bullishDiv ? " [DIV]" : ""
+    table.cell(dash, 0, 2, "CVD", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 2, cvdText + divText,
+         text_color=cvdTrend == 1 ? color.lime : color.red,
+         text_size=size.small)
+    table.merge_cells(dash, 1, 2, 2, 2)
 
-    obCount = array.size(curActiveOBs)
-    table.cell(dashboard, 0, 3, "Order Blocks", text_color=color.gray,  text_size=size.small)
-    table.cell(dashboard, 1, 3, str.tostring(obCount),
-         text_color=obCount > 0 ? color.yellow : color.gray, text_size=size.small)
+    // Row 3: Flow
+    table.cell(dash, 0, 3, "Flow", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(flowPct) + "% " + (flowDir == 1 ? "BUY" : "SELL"),
+         text_color=flowDir == 1 ? color.lime : color.red,
+         text_size=size.small)
+    table.merge_cells(dash, 1, 3, 2, 3)
 
-    fvgCount = array.size(curFVGs)
-    table.cell(dashboard, 0, 4, "FVGs",         text_color=color.gray,  text_size=size.small)
-    table.cell(dashboard, 1, 4, str.tostring(fvgCount),
-         text_color=fvgCount > 0 ? color.aqua : color.gray, text_size=size.small)
+    // Row 4: Separator
+    table.cell(dash, 0, 4, "", bgcolor=color.new(color.gray, 80))
+    table.merge_cells(dash, 0, 4, 2, 4)
 
-    eqhCount = 0
-    for lvl in equalHighs
-        if not lvl.swept
-            eqhCount += 1
-    eqlCount = 0
-    for lvl in equalLows
-        if not lvl.swept
-            eqlCount += 1
-    table.cell(dashboard, 0, 5, "Liquidity",   text_color=color.gray,   text_size=size.small)
-    table.cell(dashboard, 1, 5, str.format("↑{0} ↓{1}", eqhCount, eqlCount),
-         text_color=color.white, text_size=size.small)
+    // Row 5: Nearest OB
+    table.cell(dash, 0, 5, "OB", text_color=color.gray, text_size=size.small)
+    if nearestOBDist < 999.0
+        obDistText = (nearestOBType == "BULLISH" ? "+" : "-") + " " + str.tostring(nearestOBDist, "#.#") + " ATR"
+        table.cell(dash, 1, 5, obDistText,
+             text_color=nearestOBType == "BULLISH" ? color.lime : color.red,
+             text_size=size.small)
+    else
+        table.cell(dash, 1, 5, "None", text_color=color.new(color.gray, 50), text_size=size.small)
+    table.merge_cells(dash, 1, 5, 2, 5)
 
-    table.cell(dashboard, 0, 6, "", bgcolor=color.new(color.gray, 80))
-    table.merge_cells(dashboard, 0, 6, 1, 6)
+    // Row 6: Nearest FVG
+    table.cell(dash, 0, 6, "FVG", text_color=color.gray, text_size=size.small)
+    if nearestFVGDist < 999.0
+        fvgDistText = (nearestFVGType == "BULLISH" ? "+" : "-") + " " + str.tostring(nearestFVGDist, "#.#") + " ATR"
+        table.cell(dash, 1, 6, fvgDistText,
+             text_color=nearestFVGType == "BULLISH" ? color.lime : color.red,
+             text_size=size.small)
+    else
+        table.cell(dash, 1, 6, "None", text_color=color.new(color.gray, 50), text_size=size.small)
+    table.merge_cells(dash, 1, 6, 2, 6)
 
-    scoreColor = confluenceScore >= 75 ? color.lime  : confluenceScore >= 50 ? color.yellow :
-         confluenceScore >= 25 ? color.orange : color.gray
-    table.cell(dashboard, 0, 7, "Confluence",  text_color=color.gray,   text_size=size.small)
-    table.cell(dashboard, 1, 7, str.format("{0}/100", str.tostring(confluenceScore, "#")),
-         text_color=scoreColor, text_size=size.normal)
+    // Row 7: Nearest Liquidity
+    table.cell(dash, 0, 7, "Liq", text_color=color.gray, text_size=size.small)
+    liqText  = ""
+    liqColor = color.gray
+    if nearestLiqUpDist < nearestLiqDnDist and nearestLiqUpDist < 999.0
+        liqText  := "EQH " + str.tostring(nearestLiqUpDist, "#.#") + " ATR"
+        liqColor := color.red
+    else if nearestLiqDnDist < 999.0
+        liqText  := "EQL " + str.tostring(nearestLiqDnDist, "#.#") + " ATR"
+        liqColor := color.green
+    else
+        liqText := "None"
+    table.cell(dash, 1, 7, liqText, text_color=liqColor, text_size=size.small)
+    table.merge_cells(dash, 1, 7, 2, 7)
 
-    table.cell(dashboard, 0, 8, "Signals",     text_color=color.gray,   text_size=size.small)
-    table.cell(dashboard, 1, 8, str.format("{0}/4", signals),
-         text_color=color.white, text_size=size.small)
+    // Row 8: Sweep+Reclaim
+    table.cell(dash, 0, 8, "S+R", text_color=color.gray, text_size=size.small)
+    srText = sweepReclaimBull ? "BULL RECLAIM" : sweepReclaimBear ? "BEAR RECLAIM" : "---"
+    srCol  = sweepReclaimBull ? color.lime : sweepReclaimBear ? color.red : color.new(color.gray, 50)
+    table.cell(dash, 1, 8, srText, text_color=srCol, text_size=size.small)
+    table.merge_cells(dash, 1, 8, 2, 8)
 
-    recommendation = confluenceScore >= 75 ? "STRONG"   : confluenceScore >= 50 ? "MODERATE" :
-         confluenceScore >= 25 ? "WEAK" : "NO SETUP"
-    recColor = confluenceScore >= 75 ? color.new(color.green,  30) :
-         confluenceScore >= 50 ? color.new(color.yellow, 30) :
-         confluenceScore >= 25 ? color.new(color.orange, 30) : color.new(color.gray, 60)
-    table.cell(dashboard, 0, 9, "Setup",       text_color=color.gray,   text_size=size.small)
-    table.cell(dashboard, 1, 9, recommendation,
-         text_color=color.white, bgcolor=recColor, text_size=size.small, text_halign=text.align_center)
+    // Row 9: Separator
+    table.cell(dash, 0, 9, "", bgcolor=color.new(color.gray, 80))
+    table.merge_cells(dash, 0, 9, 2, 9)
+
+    // Row 10: Session
+    table.cell(dash, 0, 10, "Session", text_color=color.gray, text_size=size.small)
+    sessCol = isKillZone ? color.new(color.orange, 20) : color.new(color.gray, 60)
+    table.cell(dash, 1, 10, sessionName,
+         text_color=color.white, bgcolor=sessCol,
+         text_size=size.small, text_halign=text.align_center)
+    table.merge_cells(dash, 1, 10, 2, 10)
+
+    // Row 11: HTF
+    if enableHTF
+        htfText = htfTrend == 1 ? "BULL" : "BEAR"
+        htfDispText = htfDispDir == 1 ? " [DISP+]" : htfDispDir == -1 ? " [DISP-]" : ""
+        table.cell(dash, 0, 11, "HTF " + htfTimeframe, text_color=color.gray, text_size=size.small)
+        table.cell(dash, 1, 11, htfText + htfDispText,
+             text_color=htfTrend == 1 ? color.lime : color.red,
+             text_size=size.small)
+    else
+        table.cell(dash, 0, 11, "", text_size=size.tiny)
+        table.cell(dash, 1, 11, "", text_size=size.tiny)
+    table.merge_cells(dash, 1, 11, 2, 11)
+
+    // Row 12: Separator
+    table.cell(dash, 0, 12, "", bgcolor=color.new(color.gray, 80))
+    table.merge_cells(dash, 0, 12, 2, 12)
+
+    // Row 13: Signal
+    signal = strongBullish ? "LONG SETUP" :
+         strongBearish ? "SHORT SETUP" :
+         sweepEntry ? "SWEEP ENTRY" :
+         biasStrength >= 50 ? "BUILDING" : "NO SETUP"
+    sigCol = strongBullish ? color.new(color.green, 20) :
+         strongBearish ? color.new(color.red, 20) :
+         sweepEntry ? color.new(color.purple, 20) :
+         biasStrength >= 50 ? color.new(color.yellow, 40) : color.new(color.gray, 60)
+    table.cell(dash, 0, 13, "Signal", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 13, signal,
+         text_color=color.white, bgcolor=sigCol,
+         text_size=size.normal, text_halign=text.align_center)
+    table.merge_cells(dash, 1, 13, 2, 13)
 
 // ============================================================================
 // ALERTS
 // ============================================================================
 
-strongBullish = imbalanceDirection == 1  and imbalanceStrength >= 75 and confluenceScore >= 75
-strongBearish = imbalanceDirection == -1 and imbalanceStrength >= 75 and confluenceScore >= 75
-
-alertcondition(strongBullish, "Strong Bullish Setup", "Smart Money: Strong bullish confluence detected")
-alertcondition(strongBearish, "Strong Bearish Setup", "Smart Money: Strong bearish confluence detected")
-alertcondition(confluenceScore >= 75 and confluenceScore[1] < 75, "High Confluence",
-     str.format("Smart Money: Confluence {0}/100", confluenceScore))
+alertcondition(strongBullish and not strongBullish[1],
+     "Strong Bullish Setup", "Smart Money: Strong bullish setup in kill zone")
+alertcondition(strongBearish and not strongBearish[1],
+     "Strong Bearish Setup", "Smart Money: Strong bearish setup in kill zone")
+alertcondition(sweepReclaimBull,
+     "Bullish Sweep Reclaim", "Smart Money: Bullish sweep and reclaim detected")
+alertcondition(sweepReclaimBear,
+     "Bearish Sweep Reclaim", "Smart Money: Bearish sweep and reclaim detected")
+alertcondition(bearishDiv and not bearishDiv[1],
+     "Bearish CVD Divergence", "Smart Money: Bearish CVD divergence at high")
+alertcondition(bullishDiv and not bullishDiv[1],
+     "Bullish CVD Divergence", "Smart Money: Bullish CVD divergence at low")

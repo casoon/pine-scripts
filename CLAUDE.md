@@ -51,6 +51,7 @@ Rules:
 - `//@version=6` is always the first line
 - The comment block always comes **before** the `indicator()` call
 - Script name in the comment block always ends with `[WavesUnchained]`
+- The `indicator()` title string also always ends with `[WavesUnchained]`
 - Features use `✓` prefix (not `-` or `*`)
 - `Build:` date is kept from the original; only update it when the script is actually modified
 - No `@description`, `@author`, `@version` JSDoc-style tags — use the structured fields above
