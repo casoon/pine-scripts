@@ -1,373 +1,537 @@
 //@version=6
 // ============================================================================
 // Liquidity Hunter [WavesUnchained]
-// Version: 1.0.0
+// Version: 2.2.0
 // Author: WavesUnchained
 // ============================================================================
-// Identifies and visualizes institutional liquidity zones where large orders cluster.
-// Based on Smart Money Concepts: price is magnetically attracted to liquidity.
+// Identifies and visualizes institutional liquidity zones where large orders
+// cluster. Based on Smart Money Concepts: price is magnetically attracted
+// to liquidity.
 //
 // Features:
-//   ✓ Equal Highs/Lows (liquidity pools)
+//   ✓ Equal Highs/Lows with strength scoring and stale cleanup
 //   ✓ Unfilled Gaps (magnet zones)
-//   ✓ Round Number Levels (psychological zones)
-//   ✓ Stop Hunt Detection (liquidity grabs)
+//   ✓ Round Number Levels with price labels
+//   ✓ Sweep markers + Stop Hunt detection against known levels
+//   ✓ Confluence scoring (EQH/EQL + Gaps)
 //   ✓ Real-time proximity alerts
 //
 // ============================================================================
 
-indicator("Liquidity Hunter [WavesUnchained]", "💧 Liquidity Hunter", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
-
-import WavesUnchained/RTAMarketStructure/1 as MS
+indicator("Liquidity Hunter [WavesUnchained]", "Liquidity Hunter", overlay=true,
+     max_boxes_count=200, max_lines_count=200, max_labels_count=200)
 
 // ============================================================================
 // USER INPUTS
 // ============================================================================
 
-// --- Equal Highs/Lows Settings ---
-var g1 = "🔹 Equal Highs/Lows"
-enableEqualLevels = input.bool(true, "Show Equal Highs/Lows", group=g1)
-lookbackPeriod = input.int(20, "Lookback Period", minval=5, maxval=100, group=g1)
-tolerancePercent = input.float(0.05, "Price Tolerance %", minval=0.01, maxval=1.0, step=0.01, group=g1) / 100
-minTouches = input.int(2, "Minimum Touches", minval=2, maxval=5, group=g1)
-showSweptLevels = input.bool(false, "Show Swept Levels", group=g1)
+var g1 = "Equal Highs/Lows"
+enableEqualLevels = input.bool(true, "Show Equal Highs/Lows", group=g1,
+     tooltip="Detect swing highs/lows that form at the same price — these are liquidity pools where stop orders cluster")
+lookbackPeriod    = input.int(20,    "Lookback Period",        group=g1, minval=5, maxval=100,
+     tooltip="Number of bars left and right for pivot detection — higher values find more significant swings but react slower")
+tolerancePercent  = input.float(0.05,"Price Tolerance %",      group=g1, minval=0.01, maxval=1.0, step=0.01,
+     tooltip="How close two swing points must be (as % of price) to count as equal — tighter values require more precise levels") / 100
+minTouches        = input.int(2,     "Minimum Touches",        group=g1, minval=2, maxval=5,
+     tooltip="Minimum number of touches before a level qualifies — more touches = stronger liquidity pool")
+showSweptLevels   = input.bool(false,"Show Swept Levels",      group=g1,
+     tooltip="Show levels that have already been swept as dotted lines — useful for seeing where liquidity was grabbed")
+maxLevelAge       = input.int(300,   "Max Level Age (bars)",   group=g1, minval=50, maxval=1000,
+     tooltip="Remove equal levels older than this many bars — keeps chart clean")
+maxLevelDist      = input.float(5.0, "Max Level Distance (ATR)", group=g1, minval=1.0, maxval=20.0, step=0.5,
+     tooltip="Remove equal levels farther than this from current price")
 
-// --- Gap Settings ---
-var g2 = "📊 Gap Detection"
-enableGaps = input.bool(true, "Show Unfilled Gaps", group=g2)
-maxGapsDisplay = input.int(5, "Max Gaps to Display", minval=1, maxval=20, group=g2)
-minGapSize = input.float(0.1, "Min Gap Size %", minval=0.0, maxval=5.0, step=0.1, group=g2) / 100
+var g2 = "Gap Detection"
+enableGaps     = input.bool(true, "Show Unfilled Gaps",  group=g2,
+     tooltip="Detect price gaps between consecutive bars — unfilled gaps act as magnets, price tends to return to fill them")
+maxGapsDisplay = input.int(5,     "Max Gaps to Display", group=g2, minval=1, maxval=20,
+     tooltip="Maximum number of unfilled gaps shown on chart")
+minGapSize     = input.float(0.1, "Min Gap Size %",      group=g2, minval=0.0, maxval=5.0, step=0.1,
+     tooltip="Minimum gap size as percentage of price — filters out tiny gaps") / 100
 
-// --- Round Numbers ---
-var g3 = "🎯 Round Numbers"
-enableRoundNumbers = input.bool(true, "Show Round Numbers", group=g3)
-numberOfLevels = input.int(5, "Levels Above/Below", minval=1, maxval=10, group=g3)
-maxDistancePercent = input.float(3.0, "Max Distance %", minval=0.5, maxval=10.0, step=0.5, group=g3) / 100
+var g3 = "Round Numbers"
+enableRoundNumbers = input.bool(true, "Show Round Numbers",  group=g3,
+     tooltip="Show psychological price levels — major and half levels")
+numberOfLevels     = input.int(5,     "Levels Above/Below",  group=g3, minval=1, maxval=10,
+     tooltip="How many round number levels to show above and below current price")
 
-// --- Stop Hunts ---
-var g4 = "⚡ Stop Hunts"
-enableStopHunts = input.bool(true, "Detect Stop Hunts", group=g4)
-showUnconfirmed = input.bool(false, "Show Unconfirmed Hunts", group=g4)
-maxHuntsDisplay = input.int(10, "Max Hunts to Show", minval=1, maxval=50, group=g4)
+var g4 = "Stop Hunts"
+enableStopHunts   = input.bool(true, "Detect Stop Hunts",        group=g4,
+     tooltip="Detect liquidity grabs: sweep of known EQH/EQL with volume spike + reversal close")
+huntVolMultiplier = input.float(1.5, "Volume Spike Multiplier",   group=g4, minval=1.0, maxval=5.0, step=0.1,
+     tooltip="Volume must exceed average × this to qualify as a stop hunt")
+maxHuntsDisplay   = input.int(10,    "Max Hunts to Show",         group=g4, minval=1, maxval=50,
+     tooltip="Maximum number of recent stop hunt labels on chart")
 
-// --- Alerts & Dashboard ---
-var g5 = "🔔 Alerts & Display"
-enableProximityAlerts = input.bool(true, "Proximity Alerts", group=g5)
-alertDistance = input.float(1.0, "Alert Distance (ATR)", minval=0.5, maxval=5.0, step=0.5, group=g5)
-showDashboard = input.bool(true, "Show Dashboard", group=g5)
-dashboardPosition = input.string("top_right", "Dashboard Position",
-     options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group=g5)
+var g5 = "Alerts / Display"
+alertDistance   = input.float(1.0, "Alert Distance (ATR)", group=g5, minval=0.5, maxval=5.0, step=0.5,
+     tooltip="Distance in ATR multiples — background highlights when price is within this range of an equal level")
+showDashboard  = input.bool(true, "Show Dashboard",      group=g5)
 
-// --- Styling ---
-var g6 = "🎨 Styling"
-equalHighColor = input.color(color.new(color.red, 20), "Equal Highs", group=g6)
-equalLowColor = input.color(color.new(color.green, 20), "Equal Lows", group=g6)
-gapBullishColor = input.color(color.new(color.blue, 80), "Bullish Gap", group=g6)
-gapBearishColor = input.color(color.new(color.orange, 80), "Bearish Gap", group=g6)
-roundNumberColor = input.color(color.new(color.gray, 60), "Round Numbers", group=g6)
-stopHuntColor = input.color(color.new(color.yellow, 70), "Stop Hunt", group=g6)
-
-// ============================================================================
-// INITIALIZE STATE
-// ============================================================================
-
-var liquidityState = MS.newLiquidityState()
-
-// ============================================================================
-// UPDATE LIQUIDITY MAPPING
-// ============================================================================
-
-MS.updateLiquidityMapping(liquidityState, lookbackPeriod, tolerancePercent)
+var g6 = "Styling"
+equalHighColor   = input.color(color.new(color.red, 20),    "Equal Highs",   group=g6)
+equalLowColor    = input.color(color.new(color.green, 20),  "Equal Lows",    group=g6)
+gapBullishColor  = input.color(color.new(color.blue, 80),   "Bullish Gap",   group=g6)
+gapBearishColor  = input.color(color.new(color.orange, 80), "Bearish Gap",   group=g6)
+roundNumberColor = input.color(color.new(color.gray, 60),   "Round Numbers", group=g6)
+stopHuntColor    = input.color(color.new(color.yellow, 30), "Stop Hunt",     group=g6)
 
 // ============================================================================
-// GET DATA
+// TYPES
 // ============================================================================
 
-activeEqualHighs = MS.getActiveEqualHighs(liquidityState)
-activeEqualLows = MS.getActiveEqualLows(liquidityState)
-unfilledGaps = MS.getUnfilledGaps(liquidityState)
-nearbyRoundNumbers = MS.getNearbyRoundNumbers(liquidityState, close * maxDistancePercent)
-recentHunts = MS.getRecentStopHunts(liquidityState, maxHuntsDisplay)
+type EqualLevel
+    float  price
+    int    lastBar
+    int    touchCount
+    bool   swept
 
-currentATR = ta.atr(14)
-[nearUp, nearDown] = MS.isNearLiquidity(liquidityState, currentATR, alertDistance)
+type GapLevel
+    int    gapBar
+    float  gapHigh
+    float  gapLow
+    float  gapSize
+    int    direction
 
-// ============================================================================
-// VISUALIZATION - EQUAL HIGHS/LOWS
-// ============================================================================
-
-if enableEqualLevels
-    // Draw Equal Highs
-    if array.size(activeEqualHighs) > 0
-        for i = 0 to math.min(array.size(activeEqualHighs) - 1, 19)
-            level = array.get(activeEqualHighs, i)
-
-            if level.touchCount >= minTouches
-                // Only show if not swept or if user wants swept levels
-                if not level.swept or showSweptLevels
-                    lineStyle = level.swept ? line.style_dotted : line.style_solid
-                    lineColor = level.swept ? color.new(equalHighColor, 70) : equalHighColor
-
-                    // Draw horizontal line
-                    line.new(
-                        level.lastBar - lookbackPeriod,
-                        level.price,
-                        bar_index + 10,
-                        level.price,
-                        color=lineColor,
-                        style=lineStyle,
-                        width=level.swept ? 1 : 2
-                    )
-
-                    // Add label
-                    if bar_index == level.lastBar or (bar_index - level.lastBar) % 20 == 0
-                        labelText = str.format("EQH {0}x", level.touchCount)
-                        label.new(
-                            level.lastBar,
-                            level.price,
-                            labelText,
-                            color=lineColor,
-                            textcolor=color.white,
-                            style=label.style_label_down,
-                            size=size.small
-                        )
-
-    // Draw Equal Lows
-    if array.size(activeEqualLows) > 0
-        for i = 0 to math.min(array.size(activeEqualLows) - 1, 19)
-            level = array.get(activeEqualLows, i)
-
-            if level.touchCount >= minTouches
-                if not level.swept or showSweptLevels
-                    lineStyle = level.swept ? line.style_dotted : line.style_solid
-                    lineColor = level.swept ? color.new(equalLowColor, 70) : equalLowColor
-
-                    line.new(
-                        level.lastBar - lookbackPeriod,
-                        level.price,
-                        bar_index + 10,
-                        level.price,
-                        color=lineColor,
-                        style=lineStyle,
-                        width=level.swept ? 1 : 2
-                    )
-
-                    if bar_index == level.lastBar or (bar_index - level.lastBar) % 20 == 0
-                        labelText = str.format("EQL {0}x", level.touchCount)
-                        label.new(
-                            level.lastBar,
-                            level.price,
-                            labelText,
-                            color=lineColor,
-                            textcolor=color.white,
-                            style=label.style_label_up,
-                            size=size.small
-                        )
+type StopHunt
+    int    huntBar
+    float  huntPrice
+    int    direction
+    float  volumeRatio
+    float  levelPrice
 
 // ============================================================================
-// VISUALIZATION - GAPS
+// COMMON
 // ============================================================================
 
-if enableGaps and array.size(unfilledGaps) > 0
-    displayCount = math.min(array.size(unfilledGaps), maxGapsDisplay)
-
-    for i = 0 to displayCount - 1
-        gap = array.get(unfilledGaps, i)
-        gapSizePercent = gap.gapSize / close * 100
-
-        if gapSizePercent >= (minGapSize * 100)
-            gapColor = gap.direction == 1 ? gapBullishColor : gapBearishColor
-
-            // Draw gap box
-            box.new(
-                gap.gapBar,
-                gap.gapHigh,
-                bar_index + 10,
-                gap.gapLow,
-                border_color=gapColor,
-                bgcolor=gapColor,
-                border_width=1,
-                border_style=line.style_dashed,
-                extend=extend.right
-            )
-
-            // Add gap label
-            if bar_index == gap.gapBar
-                gapLabel = gap.direction == 1 ? "GAP ⬆" : "GAP ⬇"
-                label.new(
-                    gap.gapBar,
-                    gap.direction == 1 ? gap.gapLow : gap.gapHigh,
-                    str.format("{0}\n{1}%", gapLabel, str.tostring(gapSizePercent, "#.##")),
-                    color=gapColor,
-                    textcolor=color.white,
-                    style=gap.direction == 1 ? label.style_label_up : label.style_label_down,
-                    size=size.small
-                )
+atr14  = ta.atr(14)
+avgVol = ta.sma(volume, 20)
+volRatio = avgVol > 0 ? volume / avgVol : 1.0
 
 // ============================================================================
-// VISUALIZATION - ROUND NUMBERS
+// EQUAL HIGHS / LOWS
 // ============================================================================
 
-if enableRoundNumbers and array.size(nearbyRoundNumbers) > 0
-    for i = 0 to array.size(nearbyRoundNumbers) - 1
-        rnLevel = array.get(nearbyRoundNumbers, i)
+var array<EqualLevel> equalHighs = array.new<EqualLevel>()
+var array<EqualLevel> equalLows  = array.new<EqualLevel>()
 
-        // Major levels (00) vs half levels (50)
-        lineWidth = rnLevel.level == 0 ? 2 : 1
-        lineStyle = rnLevel.tested ? line.style_dotted : line.style_dashed
-        lineColor = rnLevel.tested ? color.new(roundNumberColor, 80) : roundNumberColor
+tolerance = close * tolerancePercent
+pivotH    = ta.pivothigh(high, lookbackPeriod, lookbackPeriod)
+pivotL    = ta.pivotlow(low,   lookbackPeriod, lookbackPeriod)
 
-        // Draw round number line
-        line.new(
-            bar_index - 50,
-            rnLevel.price,
-            bar_index + 10,
-            rnLevel.price,
-            color=lineColor,
-            style=lineStyle,
-            width=lineWidth
-        )
+if not na(pivotH)
+    found = false
+    for lvl in equalHighs
+        if math.abs(lvl.price - pivotH) <= tolerance
+            lvl.touchCount += 1
+            lvl.lastBar     := bar_index
+            found           := true
+            break
+    if not found
+        array.push(equalHighs, EqualLevel.new(pivotH, bar_index, 1, false))
+    if array.size(equalHighs) > 30
+        array.shift(equalHighs)
 
-// ============================================================================
-// VISUALIZATION - STOP HUNTS
-// ============================================================================
+if not na(pivotL)
+    found = false
+    for lvl in equalLows
+        if math.abs(lvl.price - pivotL) <= tolerance
+            lvl.touchCount += 1
+            lvl.lastBar     := bar_index
+            found           := true
+            break
+    if not found
+        array.push(equalLows, EqualLevel.new(pivotL, bar_index, 1, false))
+    if array.size(equalLows) > 30
+        array.shift(equalLows)
 
-if enableStopHunts and array.size(recentHunts) > 0
-    for i = 0 to array.size(recentHunts) - 1
-        hunt = array.get(recentHunts, i)
+// Stale level cleanup
+if atr14 > 0 and array.size(equalHighs) > 0
+    for i = array.size(equalHighs) - 1 to 0
+        lvl = array.get(equalHighs, i)
+        if bar_index - lvl.lastBar > maxLevelAge or math.abs(close - lvl.price) / atr14 > maxLevelDist
+            array.remove(equalHighs, i)
 
-        // Only show confirmed hunts, unless user wants unconfirmed
-        if hunt.reversalConfirmed or showUnconfirmed
-            huntColor = hunt.reversalConfirmed ? stopHuntColor : color.new(stopHuntColor, 50)
-
-            // Highlight stop hunt candle
-            bgcolor(bar_index == hunt.huntBar ? huntColor : na)
-
-            // Add marker
-            if bar_index == hunt.huntBar
-                huntSymbol = hunt.direction == 1 ? "⚡ HUNT ⬆" : "⚡ HUNT ⬇"
-                huntInfo = str.format("{0}\nVol: {1}x", huntSymbol, str.tostring(hunt.volumeSpike, "#.#"))
-
-                label.new(
-                    hunt.huntBar,
-                    hunt.direction == 1 ? hunt.huntPrice : hunt.huntPrice,
-                    huntInfo,
-                    color=huntColor,
-                    textcolor=color.black,
-                    style=hunt.direction == 1 ? label.style_label_down : label.style_label_up,
-                    size=size.normal,
-                    textalign=text.align_center
-                )
+if atr14 > 0 and array.size(equalLows) > 0
+    for i = array.size(equalLows) - 1 to 0
+        lvl = array.get(equalLows, i)
+        if bar_index - lvl.lastBar > maxLevelAge or math.abs(close - lvl.price) / atr14 > maxLevelDist
+            array.remove(equalLows, i)
 
 // ============================================================================
-// PROXIMITY HIGHLIGHTS
+// SWEEP + STOP HUNT DETECTION
 // ============================================================================
 
-// Highlight when price is near liquidity
-nearLiquidityColor = nearUp ? color.new(color.red, 90) :
-     nearDown ? color.new(color.green, 90) : na
+var array<StopHunt> stopHunts = array.new<StopHunt>()
 
-bgcolor(nearLiquidityColor, title="Near Liquidity")
+sweepUp      = false
+sweepDown    = false
+upsideHunt   = false
+downsideHunt = false
+
+for lvl in equalHighs
+    if not lvl.swept and lvl.touchCount >= minTouches and high > lvl.price
+        lvl.swept := true
+        sweepUp   := true
+        // Stop hunt = sweep + reversal close + volume spike
+        if enableStopHunts and close < lvl.price and close < open and volRatio >= huntVolMultiplier
+            upsideHunt := true
+            array.unshift(stopHunts, StopHunt.new(bar_index, high, 1, volRatio, lvl.price))
+            if array.size(stopHunts) > maxHuntsDisplay
+                array.pop(stopHunts)
+
+for lvl in equalLows
+    if not lvl.swept and lvl.touchCount >= minTouches and low < lvl.price
+        lvl.swept  := true
+        sweepDown  := true
+        if enableStopHunts and close > lvl.price and close > open and volRatio >= huntVolMultiplier
+            downsideHunt := true
+            array.unshift(stopHunts, StopHunt.new(bar_index, low, -1, volRatio, lvl.price))
+            if array.size(stopHunts) > maxHuntsDisplay
+                array.pop(stopHunts)
+
+// ============================================================================
+// UNFILLED GAPS
+// ============================================================================
+
+var array<GapLevel> gapLevels = array.new<GapLevel>()
+
+if low > high[1]
+    gapSz = low - high[1]
+    if gapSz / close >= minGapSize
+        array.unshift(gapLevels, GapLevel.new(bar_index, low, high[1], gapSz, 1))
+        if array.size(gapLevels) > maxGapsDisplay * 3
+            array.pop(gapLevels)
+
+if high < low[1]
+    gapSz = low[1] - high
+    if gapSz / close >= minGapSize
+        array.unshift(gapLevels, GapLevel.new(bar_index, low[1], high, gapSz, -1))
+        if array.size(gapLevels) > maxGapsDisplay * 3
+            array.pop(gapLevels)
+
+for gap in gapLevels
+    if gap.gapSize > 0
+        if gap.direction == 1 and low <= gap.gapHigh
+            gap.gapSize := 0
+        else if gap.direction == -1 and high >= gap.gapLow
+            gap.gapSize := 0
+
+unfilledGaps() =>
+    result = array.new<GapLevel>()
+    count  = 0
+    for gap in gapLevels
+        if gap.gapSize > 0 and count < maxGapsDisplay
+            array.push(result, gap)
+            count += 1
+    result
+
+curGaps = unfilledGaps()
+
+// ============================================================================
+// ROUND NUMBERS
+// ============================================================================
+
+isForex = syminfo.type == "forex"
+roundStep = isForex ?
+     (close >= 50 ? 1.0 : 0.01) :
+     close >= 10000 ? 1000.0 :
+     close >= 1000 ? 100.0 :
+     close >= 100 ? 10.0 :
+     close >= 10 ? 1.0 :
+     close >= 1 ? 0.1 : 0.01
+halfStep = roundStep / 2.0
+
+// ============================================================================
+// PROXIMITY (EQH/EQL only for background — the meaningful signal)
+// ============================================================================
+
+nearUp           = false
+nearDown         = false
+nearestUpPrice   = float(na)
+nearestUpTouches = 0
+nearestDownPrice = float(na)
+nearestDownTouches = 0
+
+for lvl in equalHighs
+    if not lvl.swept and lvl.touchCount >= minTouches and lvl.price > close
+        dist = lvl.price - close
+        if dist <= atr14 * alertDistance
+            nearUp := true
+            if na(nearestUpPrice) or lvl.price < nearestUpPrice
+                nearestUpPrice   := lvl.price
+                nearestUpTouches := lvl.touchCount
+
+for lvl in equalLows
+    if not lvl.swept and lvl.touchCount >= minTouches and lvl.price < close
+        dist = close - lvl.price
+        if dist <= atr14 * alertDistance
+            nearDown := true
+            if na(nearestDownPrice) or lvl.price > nearestDownPrice
+                nearestDownPrice   := lvl.price
+                nearestDownTouches := lvl.touchCount
+
+// Gap proximity (for dashboard, not background)
+nearestGapAbovePrice = float(na)
+nearestGapBelowPrice = float(na)
+
+if array.size(curGaps) > 0
+    for i = 0 to array.size(curGaps) - 1
+        gap = array.get(curGaps, i)
+        if close > gap.gapHigh
+            if na(nearestGapBelowPrice) or gap.gapHigh > nearestGapBelowPrice
+                nearestGapBelowPrice := gap.gapHigh
+        else if close < gap.gapLow
+            if na(nearestGapAbovePrice) or gap.gapLow < nearestGapAbovePrice
+                nearestGapAbovePrice := gap.gapLow
+
+// Confluence: EQH/EQL + Gap clustering (not round numbers — they're always there)
+nearGapUp   = not na(nearestGapAbovePrice) and atr14 > 0 and (nearestGapAbovePrice - close) / atr14 <= alertDistance
+nearGapDown = not na(nearestGapBelowPrice) and atr14 > 0 and (close - nearestGapBelowPrice) / atr14 <= alertDistance
+
+confluenceUp   = (nearUp ? 1 : 0) + (nearGapUp ? 1 : 0)
+confluenceDown = (nearDown ? 1 : 0) + (nearGapDown ? 1 : 0)
+
+// Strongest active levels for dashboard
+strongestEQH      = ""
+strongestEQHCount = 0
+for lvl in equalHighs
+    if not lvl.swept and lvl.touchCount >= minTouches and lvl.touchCount > strongestEQHCount
+        strongestEQHCount := lvl.touchCount
+        strongestEQH      := str.format("{0}x @ {1}", lvl.touchCount, str.tostring(lvl.price, format.mintick))
+
+strongestEQL      = ""
+strongestEQLCount = 0
+for lvl in equalLows
+    if not lvl.swept and lvl.touchCount >= minTouches and lvl.touchCount > strongestEQLCount
+        strongestEQLCount := lvl.touchCount
+        strongestEQL      := str.format("{0}x @ {1}", lvl.touchCount, str.tostring(lvl.price, format.mintick))
+
+// Active counts
+eqhCount = 0
+for lvl in equalHighs
+    if lvl.touchCount >= minTouches and not lvl.swept
+        eqhCount += 1
+eqlCount = 0
+for lvl in equalLows
+    if lvl.touchCount >= minTouches and not lvl.swept
+        eqlCount += 1
+
+// ============================================================================
+// GLOBAL SCOPE VISUALS
+// ============================================================================
+
+// Background: only EQH/EQL proximity (the meaningful signal)
+// Stronger tint when closer
+nearUpClose   = not na(nearestUpPrice)   and atr14 > 0 and (nearestUpPrice - close) / atr14 <= alertDistance * 0.5
+nearDownClose = not na(nearestDownPrice) and atr14 > 0 and (close - nearestDownPrice) / atr14 <= alertDistance * 0.5
+
+bgcolor(nearUpClose   ? color.new(color.red, 85) :
+     nearUp           ? color.new(color.red, 93) :
+     nearDownClose    ? color.new(color.green, 85) :
+     nearDown         ? color.new(color.green, 93) : na,
+     title="Near Liquidity")
+
+// Sweep markers: level was taken out (triangle — always visible)
+plotshape(sweepUp and not upsideHunt, "Sweep Up", shape.triangledown,
+     location.abovebar, equalHighColor, size=size.tiny,
+     text="SWEEP", textcolor=equalHighColor)
+plotshape(sweepDown and not downsideHunt, "Sweep Down", shape.triangleup,
+     location.belowbar, equalLowColor, size=size.tiny,
+     text="SWEEP", textcolor=equalLowColor)
+
+// Stop hunt markers: sweep + volume reversal (premium signal — bigger, labeled)
+plotshape(upsideHunt, "Hunt Up", shape.xcross,
+     location.abovebar, stopHuntColor, size=size.small)
+plotshape(downsideHunt, "Hunt Down", shape.xcross,
+     location.belowbar, stopHuntColor, size=size.small)
+
+// ============================================================================
+// VISUALIZATIONS - drawn on last bar
+// ============================================================================
+
+if barstate.islast
+
+    // --- Equal Highs ---
+    if enableEqualLevels and array.size(equalHighs) > 0
+        for i = 0 to math.min(array.size(equalHighs) - 1, 19)
+            lvl = array.get(equalHighs, i)
+            if lvl.touchCount >= minTouches and (not lvl.swept or showSweptLevels)
+                lineStyle = lvl.swept ? line.style_dotted : line.style_solid
+                lineCol   = lvl.swept ? color.new(equalHighColor, 70) : equalHighColor
+                lineW     = lvl.swept ? 1 : math.min(lvl.touchCount, 4)
+                line.new(lvl.lastBar - lookbackPeriod, lvl.price, bar_index + 10, lvl.price,
+                     color=lineCol, style=lineStyle, width=lineW)
+                label.new(lvl.lastBar, lvl.price,
+                     str.format("EQH {0}x", lvl.touchCount),
+                     color=lineCol, textcolor=color.white,
+                     style=label.style_label_down, size=size.small)
+
+    // --- Equal Lows ---
+    if enableEqualLevels and array.size(equalLows) > 0
+        for i = 0 to math.min(array.size(equalLows) - 1, 19)
+            lvl = array.get(equalLows, i)
+            if lvl.touchCount >= minTouches and (not lvl.swept or showSweptLevels)
+                lineStyle = lvl.swept ? line.style_dotted : line.style_solid
+                lineCol   = lvl.swept ? color.new(equalLowColor, 70) : equalLowColor
+                lineW     = lvl.swept ? 1 : math.min(lvl.touchCount, 4)
+                line.new(lvl.lastBar - lookbackPeriod, lvl.price, bar_index + 10, lvl.price,
+                     color=lineCol, style=lineStyle, width=lineW)
+                label.new(lvl.lastBar, lvl.price,
+                     str.format("EQL {0}x", lvl.touchCount),
+                     color=lineCol, textcolor=color.white,
+                     style=label.style_label_up, size=size.small)
+
+    // --- Unfilled Gaps ---
+    if enableGaps and array.size(curGaps) > 0
+        for i = 0 to array.size(curGaps) - 1
+            gap    = array.get(curGaps, i)
+            gapCol = gap.direction == 1 ? gapBullishColor : gapBearishColor
+            pct    = gap.gapSize / close * 100
+            box.new(gap.gapBar, gap.gapHigh, bar_index + 10, gap.gapLow,
+                 border_color=gapCol, bgcolor=gapCol, border_width=1,
+                 border_style=line.style_dashed, extend=extend.right)
+            label.new(gap.gapBar,
+                 gap.direction == 1 ? gap.gapLow : gap.gapHigh,
+                 str.format("GAP {0}%", str.tostring(pct, "#.##")),
+                 color=gapCol, textcolor=color.white,
+                 style=gap.direction == 1 ? label.style_label_up : label.style_label_down,
+                 size=size.small)
+
+    // --- Round Numbers with labels ---
+    if enableRoundNumbers
+        baseLevel = math.floor(close / roundStep) * roundStep
+        for i = -numberOfLevels to numberOfLevels
+            majorPrice = baseLevel + i * roundStep
+            if math.abs(majorPrice - close) / close <= 0.03
+                line.new(bar_index - 50, majorPrice, bar_index + 10, majorPrice,
+                     color=roundNumberColor, style=line.style_dashed, width=2)
+                label.new(bar_index + 11, majorPrice,
+                     str.tostring(majorPrice, format.mintick),
+                     color=color.new(na, 100), textcolor=roundNumberColor,
+                     style=label.style_label_left, size=size.tiny)
+            halfPrice = baseLevel + i * roundStep + halfStep
+            if math.abs(halfPrice - close) / close <= 0.03
+                line.new(bar_index - 50, halfPrice, bar_index + 10, halfPrice,
+                     color=color.new(roundNumberColor, 40), style=line.style_dotted, width=1)
+
+    // --- Stop Hunt Labels ---
+    if enableStopHunts and array.size(stopHunts) > 0
+        for i = 0 to math.min(array.size(stopHunts) - 1, maxHuntsDisplay - 1)
+            hunt = array.get(stopHunts, i)
+            huntText = str.format("HUNT {0}x @ {1}",
+                 str.tostring(hunt.volumeRatio, "#.#"),
+                 str.tostring(hunt.levelPrice, format.mintick))
+            label.new(hunt.huntBar, hunt.huntPrice, huntText,
+                 color=stopHuntColor, textcolor=color.black,
+                 style=hunt.direction == 1 ? label.style_label_down : label.style_label_up,
+                 size=size.small)
 
 // ============================================================================
 // DASHBOARD
 // ============================================================================
 
 if showDashboard and barstate.islast
-    var table dashboard = table.new(
-        dashboardPosition == "top_left" ? position.top_left :
-        dashboardPosition == "top_center" ? position.top_center :
-        dashboardPosition == "top_right" ? position.top_right :
-        dashboardPosition == "middle_left" ? position.middle_left :
-        dashboardPosition == "middle_center" ? position.middle_center :
-        dashboardPosition == "middle_right" ? position.middle_right :
-        dashboardPosition == "bottom_left" ? position.bottom_left :
-        dashboardPosition == "bottom_center" ? position.bottom_center :
-        position.bottom_right,
-        7, 6,
-        border_width=2,
-        border_color=color.new(color.gray, 50),
-        frame_width=1,
-        frame_color=color.new(color.gray, 70)
-    )
+    color tc = color.new(color.gray, 20)
+    color hd = color.new(color.gray, 90)
 
-    // Header
-    table.cell(dashboard, 0, 0, "💧 Liquidity Hunter",
-        text_color=color.white, bgcolor=color.new(color.blue, 30),
-        text_size=size.normal, text_halign=text.align_center)
-    table.merge_cells(dashboard, 0, 0, 6, 0)
+    var table dash = table.new(position.top_right, 3, 8,
+         bgcolor=color.new(color.white, 5),
+         border_color=color.new(color.gray, 60),
+         border_width=1,
+         frame_color=color.new(color.gray, 40),
+         frame_width=1)
 
-    // Labels
-    table.cell(dashboard, 0, 1, "Metric", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 1, 1, "Count", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 2, 1, "Status", text_color=color.gray, text_size=size.small)
+    // Row 0: Header
+    table.cell(dash, 0, 0, "Liquidity Hunter", text_color=tc, text_size=size.small, bgcolor=hd)
+    table.cell(dash, 1, 0, "Strongest",        text_color=tc, text_size=size.small, bgcolor=hd)
+    table.cell(dash, 2, 0, "Active",           text_color=tc, text_size=size.small, bgcolor=hd)
 
-    // Equal Highs
-    eqHighCount = array.size(activeEqualHighs)
-    table.cell(dashboard, 0, 2, "Equal Highs", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 2, str.tostring(eqHighCount), text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 2, 2, eqHighCount > 3 ? "🔴 High" : "🟢 Normal",
-        text_color=color.white, text_size=size.small)
+    // Row 1: EQH — strongest + count
+    table.cell(dash, 0, 1, "EQH", text_color=#d50000, text_size=size.small)
+    table.cell(dash, 1, 1, strongestEQH != "" ? strongestEQH : "---",
+         text_color=strongestEQH != "" ? #d50000 : tc, text_size=size.tiny)
+    table.cell(dash, 2, 1, str.tostring(eqhCount),
+         text_color=eqhCount > 0 ? #d50000 : tc, text_size=size.small)
 
-    // Equal Lows
-    eqLowCount = array.size(activeEqualLows)
-    table.cell(dashboard, 0, 3, "Equal Lows", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 3, str.tostring(eqLowCount), text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 2, 3, eqLowCount > 3 ? "🟢 High" : "🔴 Normal",
-        text_color=color.white, text_size=size.small)
+    // Row 2: EQL — strongest + count
+    table.cell(dash, 0, 2, "EQL", text_color=#00c853, text_size=size.small)
+    table.cell(dash, 1, 2, strongestEQL != "" ? strongestEQL : "---",
+         text_color=strongestEQL != "" ? #00c853 : tc, text_size=size.tiny)
+    table.cell(dash, 2, 2, str.tostring(eqlCount),
+         text_color=eqlCount > 0 ? #00c853 : tc, text_size=size.small)
 
-    // Gaps
-    gapCount = array.size(unfilledGaps)
-    table.cell(dashboard, 0, 4, "Unfilled Gaps", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 4, str.tostring(gapCount), text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 2, 4, gapCount > 0 ? "🟡 Active" : "⚪ None",
-        text_color=color.white, text_size=size.small)
+    // Row 3: Gaps + Hunts
+    gapCount  = array.size(curGaps)
+    huntCount = array.size(stopHunts)
+    table.cell(dash, 0, 3, "Gaps / Hunts", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, str.format("{0} gaps", gapCount),
+         text_color=gapCount > 0 ? #ff6f00 : tc, text_size=size.small)
+    table.cell(dash, 2, 3, str.format("{0} hunts", huntCount),
+         text_color=huntCount > 0 ? color.new(#ffd600, 0) : tc, text_size=size.small)
 
-    // Stop Hunts
-    huntCount = array.size(recentHunts)
-    table.cell(dashboard, 0, 5, "Recent Hunts", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 5, str.tostring(huntCount), text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 2, 5, huntCount > 0 ? "⚡ Detected" : "⚪ None",
-        text_color=color.white, text_size=size.small)
+    // Row 4: Separator
+    table.cell(dash, 0, 4, "", bgcolor=color.new(color.gray, 80))
+    table.cell(dash, 1, 4, "", bgcolor=color.new(color.gray, 80))
+    table.cell(dash, 2, 4, "", bgcolor=color.new(color.gray, 80))
 
-    // Proximity Status
-    proximityStatus = nearUp ? "🔴 Near Resistance" :
-         nearDown ? "🟢 Near Support" : "⚪ Clear"
-    table.cell(dashboard, 3, 1, "Proximity", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 4, 1, proximityStatus, text_color=color.white, text_size=size.small)
-    table.merge_cells(dashboard, 3, 1, 6, 1)
+    // Row 5: Nearest EQH above
+    if not na(nearestUpPrice) and atr14 > 0
+        atrDist = (nearestUpPrice - close) / atr14
+        table.cell(dash, 0, 5, "Nearest EQH", text_color=tc, text_size=size.small)
+        table.cell(dash, 1, 5, str.format("{0}x  {1}",
+             nearestUpTouches, str.tostring(nearestUpPrice, format.mintick)),
+             text_color=#d50000, text_size=size.tiny)
+        table.cell(dash, 2, 5, str.format("{0} ATR", str.tostring(atrDist, "#.#")),
+             text_color=atrDist <= 1.0 ? color.white : tc,
+             bgcolor=atrDist <= 0.5 ? color.new(#d50000, 30) : atrDist <= 1.0 ? color.new(#d50000, 60) : color.new(color.gray, 80),
+             text_size=size.small)
+    else
+        table.cell(dash, 0, 5, "Nearest EQH", text_color=tc, text_size=size.small)
+        table.cell(dash, 1, 5, "---",         text_color=tc, text_size=size.small)
+        table.cell(dash, 2, 5, "",            text_color=tc, text_size=size.small)
 
-    // Nearest Liquidity Up
-    upText = not na(liquidityState.nearestLiquidityUp) ?
-        str.format("{0} (+{1}%)",
-            str.tostring(liquidityState.nearestLiquidityUp, format.mintick),
-            str.tostring((liquidityState.nearestLiquidityUp - close) / close * 100, "#.##")) :
-        "N/A"
-    table.cell(dashboard, 3, 2, "↑ Above", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 4, 2, upText, text_color=equalHighColor, text_size=size.small)
-    table.merge_cells(dashboard, 3, 2, 6, 2)
+    // Row 6: Nearest EQL below
+    if not na(nearestDownPrice) and atr14 > 0
+        atrDist = (close - nearestDownPrice) / atr14
+        table.cell(dash, 0, 6, "Nearest EQL", text_color=tc, text_size=size.small)
+        table.cell(dash, 1, 6, str.format("{0}x  {1}",
+             nearestDownTouches, str.tostring(nearestDownPrice, format.mintick)),
+             text_color=#00c853, text_size=size.tiny)
+        table.cell(dash, 2, 6, str.format("{0} ATR", str.tostring(atrDist, "#.#")),
+             text_color=atrDist <= 1.0 ? color.white : tc,
+             bgcolor=atrDist <= 0.5 ? color.new(#00c853, 30) : atrDist <= 1.0 ? color.new(#00c853, 60) : color.new(color.gray, 80),
+             text_size=size.small)
+    else
+        table.cell(dash, 0, 6, "Nearest EQL", text_color=tc, text_size=size.small)
+        table.cell(dash, 1, 6, "---",         text_color=tc, text_size=size.small)
+        table.cell(dash, 2, 6, "",            text_color=tc, text_size=size.small)
 
-    // Nearest Liquidity Down
-    downText = not na(liquidityState.nearestLiquidityDown) ?
-        str.format("{0} ({1}%)",
-            str.tostring(liquidityState.nearestLiquidityDown, format.mintick),
-            str.tostring((liquidityState.nearestLiquidityDown - close) / close * 100, "#.##")) :
-        "N/A"
-    table.cell(dashboard, 3, 3, "↓ Below", text_color=color.gray, text_size=size.small)
-    table.cell(dashboard, 4, 3, downText, text_color=equalLowColor, text_size=size.small)
-    table.merge_cells(dashboard, 3, 3, 6, 3)
+    // Row 7: Confluence status
+    maxConf = math.max(confluenceUp, confluenceDown)
+    confDir = confluenceUp > confluenceDown ? "R" : confluenceDown > confluenceUp ? "S" : "—"
+    confText = maxConf == 2 ? "EQH/EQL + GAP" : maxConf == 1 ? (nearUp or nearDown ? "EQH/EQL only" : "GAP only") : "No confluence"
+    confCol  = maxConf == 2 ? color.new(#ff6f00, 20) : color.new(color.gray, 80)
+    confTextCol = maxConf == 2 ? color.white : tc
+    table.cell(dash, 0, 7, "Confluence", text_color=tc,          text_size=size.small)
+    table.cell(dash, 1, 7, confText,     text_color=confTextCol, bgcolor=confCol, text_size=size.small)
+    table.cell(dash, 2, 7, confDir,      text_color=confTextCol, bgcolor=confCol, text_size=size.small)
 
 // ============================================================================
 // ALERTS
 // ============================================================================
 
-if enableProximityAlerts
-    alertcondition(nearUp, "Near Liquidity Above", "Price approaching liquidity resistance")
-    alertcondition(nearDown, "Near Liquidity Below", "Price approaching liquidity support")
-
-    if enableStopHunts and array.size(recentHunts) > 0
-        latestHunt = array.get(recentHunts, 0)
-        if latestHunt.reversalConfirmed and bar_index == latestHunt.huntBar
-            alertcondition(true, "Stop Hunt Confirmed",
-                str.format("Stop hunt confirmed: {0}",
-                    latestHunt.direction == 1 ? "Upside" : "Downside"))
+alertcondition(nearUp and not nearUp[1],
+     "Near EQH Above", "Price approaching equal high — liquidity resistance")
+alertcondition(nearDown and not nearDown[1],
+     "Near EQL Below", "Price approaching equal low — liquidity support")
+alertcondition(sweepUp,
+     "EQH Swept", "Equal high liquidity swept")
+alertcondition(sweepDown,
+     "EQL Swept", "Equal low liquidity swept")
+alertcondition(upsideHunt,
+     "Upside Stop Hunt", "Stop hunt: upside grab of known EQH with volume reversal")
+alertcondition(downsideHunt,
+     "Downside Stop Hunt", "Stop hunt: downside grab of known EQL with volume reversal")
+alertcondition(confluenceUp >= 2 or confluenceDown >= 2,
+     "Confluence Zone", "EQH/EQL + Gap clustering near price")

@@ -56,6 +56,39 @@ Rules:
 - `Build:` date is kept from the original; only update it when the script is actually modified
 - No `@description`, `@author`, `@version` JSDoc-style tags — use the structured fields above
 
+## Dashboard table style
+
+All indicator dashboards use the same light-theme table style. The reference implementation is `indicators/vein/vein_trend.pine`.
+
+### Table init
+
+```pine
+var table t = table.new(position, columns, rows,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+```
+
+### Color constants
+
+```pine
+color tc = color.new(color.gray, 20)   // standard text color (dark gray)
+color hd = color.new(color.gray, 90)   // header row background (very light gray)
+```
+
+### Cell rules
+
+- **Header row**: `text_color=tc`, `bgcolor=hd`, `text_size=size.small`
+- **Data labels** (left column): `text_color=tc`, no explicit bgcolor, `text_size=size.small` or `size.tiny`
+- **Data values**: `text_color=tc` (or accent color like `#00c853`, `#d50000`), no explicit bgcolor
+- **Status cells with state**: dynamic `bgcolor` (colored when active, `color.new(color.gray, 80)` when inactive), `text_color=color.white` when colored, `tc` when inactive
+- **Separator rows**: `bgcolor=color.new(color.gray, 80)`, empty text, one cell per column (no merge)
+- **Accent colors**: bullish `#00c853`, bearish `#d50000`, warning `#ff6f00`, alert `#ffd600`
+- No `merge_cells` for separator rows — set each cell individually
+- No dark-theme backgrounds (`#131722` etc.) — the light table works on both TradingView themes
+
 ## When adding a new indicator
 
 1. Create a subdirectory under `indicators/<name>/`
