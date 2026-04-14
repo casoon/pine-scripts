@@ -1,0 +1,300 @@
+//@version=6
+// ============================================================================
+// ZigZag Fibo Pullback Map [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2026-04-14 21:12:00
+// ============================================================================
+// Confirmed ZigZag pivots with pullback-to-fibo labeling and active fib fan.
+//
+// Features:
+//   ✓ Confirmed ZigZag pivot engine based on symmetric pivot detection
+//   ✓ Pullback-to-fibo labeling directly at completed ZigZag turning points
+//   ✓ Standard-fibo color coding for 0.236 / 0.382 / 0.500 / 0.618 / 0.786
+//   ✓ Live active swing projection with fib fan on the current unfinished leg
+//   ✓ Visual verification workflow without entry or signal clutter
+// ============================================================================
+indicator("ZigZag Fibo Pullback Map [WavesUnchained]", shorttitle="ZZ Fibo Map", overlay=true, max_lines_count=500, max_labels_count=500)
+
+groupZigZag = "ZigZag"
+pivotLen = input.int(8, "Pivot Length", minval=2, group=groupZigZag)
+maxPivots = input.int(80, "Max Stored Pivots", minval=20, maxval=200, group=groupZigZag)
+showZigZag = input.bool(true, "Draw ZigZag", group=groupZigZag)
+zigZagWidth = input.int(2, "ZigZag Width", minval=1, maxval=4, group=groupZigZag)
+upColor = input.color(color.lime, "Up Leg Color", group=groupZigZag, inline="zzc")
+downColor = input.color(color.red, "Down Leg Color", group=groupZigZag, inline="zzc")
+
+groupPB = "Pullback Labels"
+showPullbackLabels = input.bool(true, "Show Pullback Labels", group=groupPB)
+pullbackMaxRatio = input.float(1.0, "Max Ratio Counted as Pullback", minval=0.236, maxval=1.272, step=0.001, group=groupPB)
+matchTolerance = input.float(0.03, "Standard Fibo Match Tolerance", minval=0.001, maxval=0.100, step=0.001, group=groupPB)
+showActualRatio = input.bool(true, "Append Actual Retracement", group=groupPB)
+neutralPullbackColor = input.color(color.gray, "Non-Standard Label Color", group=groupPB)
+pullbackLabelSize = input.string("Normal", "Pullback Label Size", options=["Small", "Normal", "Large"], group=groupPB)
+
+groupFan = "Active Fan"
+showActiveFan = input.bool(true, "Show Active Fib Fan", group=groupFan)
+fanLabelSide = input.string("Right", "Fan Label Side", options=["Left", "Right"], group=groupFan)
+fanLabelOffset = input.int(20, "Fan Label Offset", minval=2, maxval=80, group=groupFan)
+fanLineWidth = input.int(1, "Fan Line Width", minval=1, maxval=3, group=groupFan)
+extendPastPivot = input.bool(true, "Draw One Level Beyond Latest Pivot", group=groupFan)
+showExtensions = input.bool(true, "Include Extensions", group=groupFan)
+fanLabelSize = input.string("Normal", "Fan Label Size", options=["Small", "Normal", "Large"], group=groupFan)
+showLiveRetracementLabel = input.bool(true, "Show Live Retracement Label", group=groupFan)
+
+groupStyle = "Style"
+textColor = input.color(color.white, "Text Color", group=groupStyle)
+fanExtensionColor = input.color(color.silver, "Extension Color", group=groupStyle)
+activeLegColor = input.color(color.rgb(244, 67, 54), "Active Leg Dashed Color", group=groupStyle)
+
+var float[] standardRatios = array.from(0.236, 0.382, 0.500, 0.618, 0.786)
+var float[] fanRatios = array.new_float()
+
+var float[] pivPrices = array.new_float()
+var int[] pivIndexes = array.new_int()
+var int[] pivTypes = array.new_int()  // 1 = high, -1 = low
+
+var line[] zigZagLines = array.new_line()
+var label[] pullbackPivotLabels = array.new_label()
+var line[] activeFanLines = array.new_line()
+var label[] activeFanLabels = array.new_label()
+var label[] activeStateLabels = array.new_label()
+
+if barstate.isfirst
+    array.push(fanRatios, 0.000)
+    for i = 0 to array.size(standardRatios) - 1
+        array.push(fanRatios, array.get(standardRatios, i))
+    if showExtensions
+        array.push(fanRatios, 1.000)
+        array.push(fanRatios, 1.272)
+        array.push(fanRatios, 1.414)
+        array.push(fanRatios, 1.618)
+        array.push(fanRatios, 2.000)
+        array.push(fanRatios, 2.272)
+        array.push(fanRatios, 2.618)
+
+f_clear_lines(line[] arr) =>
+    while array.size(arr) > 0
+        line.delete(array.pop(arr))
+
+f_clear_labels(label[] arr) =>
+    while array.size(arr) > 0
+        label.delete(array.pop(arr))
+
+f_trim_pivots() =>
+    while array.size(pivPrices) > maxPivots
+        array.shift(pivPrices)
+        array.shift(pivIndexes)
+        array.shift(pivTypes)
+
+f_level_color(float ratio) =>
+    if math.abs(ratio - 0.236) < 0.0005
+        color.rgb(0, 191, 165)
+    else if math.abs(ratio - 0.382) < 0.0005
+        color.rgb(33, 150, 243)
+    else if math.abs(ratio - 0.500) < 0.0005
+        color.rgb(76, 175, 80)
+    else if math.abs(ratio - 0.618) < 0.0005
+        color.rgb(255, 193, 7)
+    else if math.abs(ratio - 0.786) < 0.0005
+        color.rgb(255, 87, 34)
+    else
+        fanExtensionColor
+
+f_text_on_color(color bg) =>
+    float luminance = color.r(bg) * 0.299 + color.g(bg) * 0.587 + color.b(bg) * 0.114
+    luminance > 160 ? color.black : color.white
+
+f_label_size(string sizeName) =>
+    sizeName == "Large" ? size.large : sizeName == "Normal" ? size.normal : size.small
+
+f_is_standard(float ratio) =>
+    bool found = false
+    for i = 0 to array.size(standardRatios) - 1
+        found := found or math.abs(array.get(standardRatios, i) - ratio) < 0.0005
+    found
+
+f_nearest_standard(float ratio, float tolerance) =>
+    float best = na
+    float bestDist = 10.0
+    for i = 0 to array.size(standardRatios) - 1
+        float candidate = array.get(standardRatios, i)
+        float dist = math.abs(candidate - ratio)
+        if dist < bestDist
+            best := candidate
+            bestDist := dist
+    bestDist <= tolerance ? best : na
+
+f_reached_standard(float ratio) =>
+    float reached = na
+    for i = 0 to array.size(standardRatios) - 1
+        float candidate = array.get(standardRatios, i)
+        if ratio >= candidate
+            reached := candidate
+    reached
+
+f_pullback_text(float ratio, float matchedStandard, float reachedStandard) =>
+    string actual = str.tostring(ratio, "#.###")
+    if not na(matchedStandard)
+        showActualRatio ? "PB " + str.tostring(matchedStandard, "#.###") + " | " + actual : "PB " + str.tostring(matchedStandard, "#.###")
+    else if not na(reachedStandard)
+        showActualRatio ? "PB " + str.tostring(reachedStandard, "#.###") + "+ | " + actual : "PB " + str.tostring(reachedStandard, "#.###") + "+"
+    else
+        "PB " + actual
+
+f_push_pivot(int pIndex, float pPrice, int pType) =>
+    bool changed = false
+    int n = array.size(pivTypes)
+    if n > 0 and array.get(pivTypes, n - 1) == pType
+        float lastPrice = array.get(pivPrices, n - 1)
+        bool replace = pType == 1 ? pPrice > lastPrice : pPrice < lastPrice
+        if replace
+            array.set(pivPrices, n - 1, pPrice)
+            array.set(pivIndexes, n - 1, pIndex)
+            changed := true
+    else
+        array.push(pivPrices, pPrice)
+        array.push(pivIndexes, pIndex)
+        array.push(pivTypes, pType)
+        f_trim_pivots()
+        changed := true
+    changed
+
+float ph = ta.pivothigh(high, pivotLen, pivotLen)
+float pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+if not na(ph) or not na(pl)
+    int pBar = bar_index - pivotLen
+    if not na(ph) and not na(pl)
+        int lastType = array.size(pivTypes) > 0 ? array.get(pivTypes, array.size(pivTypes) - 1) : 0
+        if lastType == 1
+            f_push_pivot(pBar, pl, -1)
+            f_push_pivot(pBar, ph, 1)
+        else
+            f_push_pivot(pBar, ph, 1)
+            f_push_pivot(pBar, pl, -1)
+    else if not na(ph)
+        f_push_pivot(pBar, ph, 1)
+    else
+        f_push_pivot(pBar, pl, -1)
+
+if barstate.islast
+    f_clear_lines(zigZagLines)
+    f_clear_labels(pullbackPivotLabels)
+    f_clear_lines(activeFanLines)
+    f_clear_labels(activeFanLabels)
+    f_clear_labels(activeStateLabels)
+
+    int pivotCount = array.size(pivPrices)
+
+    if showZigZag and pivotCount >= 2
+        for i = 1 to pivotCount - 1
+            int x1 = array.get(pivIndexes, i - 1)
+            float y1 = array.get(pivPrices, i - 1)
+            int x2 = array.get(pivIndexes, i)
+            float y2 = array.get(pivPrices, i)
+            color segmentColor = y2 >= y1 ? upColor : downColor
+            array.push(zigZagLines, line.new(x1, y1, x2, y2, xloc=xloc.bar_index, color=segmentColor, width=zigZagWidth))
+
+    if showPullbackLabels and pivotCount >= 3
+        for i = 2 to pivotCount - 1
+            float a = array.get(pivPrices, i - 2)
+            float b = array.get(pivPrices, i - 1)
+            float c = array.get(pivPrices, i)
+            int cIndex = array.get(pivIndexes, i)
+            int cType = array.get(pivTypes, i)
+            float legSize = math.abs(b - a)
+            float pullbackSize = math.abs(c - b)
+            float ratio = legSize > 0.0 ? pullbackSize / legSize : na
+
+            if not na(ratio) and ratio >= array.get(standardRatios, 0) and ratio <= pullbackMaxRatio
+                float matched = f_nearest_standard(ratio, matchTolerance)
+                float reached = f_reached_standard(ratio)
+                string txt = f_pullback_text(ratio, matched, reached)
+                color labelColor = not na(matched) ? f_level_color(matched) : not na(reached) ? f_level_color(reached) : neutralPullbackColor
+                color labelTextColor = f_text_on_color(labelColor)
+                style = cType == 1 ? label.style_label_down : label.style_label_up
+                string tooltip = "Pullback pivot\n" +
+                     "Pivot index: " + str.tostring(cIndex) + "\n" +
+                     "Pivot price: " + str.tostring(c, format.mintick) + "\n" +
+                     "Reference leg: " + str.tostring(a, format.mintick) + " -> " + str.tostring(b, format.mintick) + "\n" +
+                     "Pullback size: " + str.tostring(pullbackSize, format.mintick) + "\n" +
+                     "Retracement: " + str.tostring(ratio, "#.###") +
+                     (not na(matched) ? "\nMatched standard fib: " + str.tostring(matched, "#.###") : not na(reached) ? "\nDeepest reached standard fib: " + str.tostring(reached, "#.###") : "\nNo standard fib match")
+                array.push(
+                     pullbackPivotLabels,
+                     label.new(
+                         cIndex,
+                         c,
+                         txt,
+                         xloc=xloc.bar_index,
+                         style=style,
+                         color=color.new(labelColor, 0),
+                         textcolor=labelTextColor,
+                         size=f_label_size(pullbackLabelSize),
+                         tooltip=tooltip))
+
+    if showActiveFan and pivotCount >= 3
+        float base0 = array.get(pivPrices, pivotCount - 3)
+        float base1 = array.get(pivPrices, pivotCount - 2)
+        int baseIndex = array.get(pivIndexes, pivotCount - 2)
+        int lastConfirmedType = array.get(pivTypes, pivotCount - 1)
+        int activeLookback = math.max(1, bar_index - baseIndex + 1)
+        float lastPivot = lastConfirmedType == -1 ? ta.highest(high, activeLookback) : ta.lowest(low, activeLookback)
+        int activeOffset = lastConfirmedType == -1 ? ta.highestbars(high, activeLookback) : ta.lowestbars(low, activeLookback)
+        int activeIndex = bar_index - activeOffset
+        float diff = base0 - base1
+        bool moveUp = lastPivot > base1
+        bool alreadyBeyondLatest = false
+        float activeMove = math.abs(lastPivot - base1)
+        float referenceMove = math.abs(base0 - base1)
+        float liveRatio = referenceMove > 0.0 ? activeMove / referenceMove : na
+        float liveMatched = not na(liveRatio) ? f_nearest_standard(liveRatio, matchTolerance) : na
+        float liveReached = not na(liveRatio) ? f_reached_standard(liveRatio) : na
+
+        if showZigZag and activeIndex > baseIndex and lastPivot != base1
+            array.push(zigZagLines, line.new(baseIndex, base1, activeIndex, lastPivot, xloc=xloc.bar_index, color=color.new(activeLegColor, 15), width=zigZagWidth, style=line.style_dashed))
+
+        if showLiveRetracementLabel and activeIndex > baseIndex and not na(liveRatio)
+            color liveBg = not na(liveMatched) ? f_level_color(liveMatched) : not na(liveReached) ? f_level_color(liveReached) : neutralPullbackColor
+            color liveText = f_text_on_color(liveBg)
+            string fibState = not na(liveMatched) ? "Matched " + str.tostring(liveMatched, "#.###") : not na(liveReached) ? "Reached " + str.tostring(liveReached, "#.###") : "Below 0.236"
+            string liveTextLabel = "LIVE " + str.tostring(liveRatio, "#.###") + "\n" + fibState
+            string liveTooltip = "Active unfinished leg\n" +
+                 "Base anchor: " + str.tostring(base1, format.mintick) + "\n" +
+                 "Reference swing: " + str.tostring(base0, format.mintick) + " -> " + str.tostring(base1, format.mintick) + "\n" +
+                 "Current extreme: " + str.tostring(lastPivot, format.mintick) + "\n" +
+                 "Current retracement ratio: " + str.tostring(liveRatio, "#.###") + "\n" +
+                 "State: " + fibState + "\n" +
+                 "This leg is live and can still extend until a pivot confirms."
+            array.push(activeStateLabels, label.new(activeIndex, lastPivot, liveTextLabel, xloc=xloc.bar_index, style=moveUp ? label.style_label_down : label.style_label_up, color=color.new(liveBg, 8), textcolor=liveText, size=f_label_size(fanLabelSize), tooltip=liveTooltip))
+
+        for i = 0 to array.size(fanRatios) - 1
+            float ratio = array.get(fanRatios, i)
+            float level = base1 + diff * ratio
+            bool beyondLatest = moveUp ? level > lastPivot : level < lastPivot
+
+            if beyondLatest and alreadyBeyondLatest and extendPastPivot
+                break
+            if beyondLatest and not extendPastPivot
+                break
+
+            color lineColor = f_is_standard(ratio) ? f_level_color(ratio) : fanExtensionColor
+            line fanLine = line.new(baseIndex, level, bar_index, level, xloc=xloc.bar_index, extend=extend.right, color=color.new(lineColor, 0), width=fanLineWidth)
+            array.push(activeFanLines, fanLine)
+
+            int labelX = fanLabelSide == "Left" ? baseIndex - 1 : bar_index + fanLabelOffset
+            string ratioText = str.tostring(ratio, "#.###")
+            string labelText = ratioText + " (" + str.tostring(level, format.mintick) + ")"
+            string fanTooltip = "Active fib level\n" +
+                 "Ratio: " + ratioText + "\n" +
+                 "Level price: " + str.tostring(level, format.mintick) + "\n" +
+                 "Base leg anchor: " + str.tostring(base0, format.mintick) + " -> " + str.tostring(base1, format.mintick) + "\n" +
+                 "Active extreme: " + str.tostring(lastPivot, format.mintick) + " at bar " + str.tostring(activeIndex) + "\n" +
+                 "Dashed leg direction: " + (moveUp ? "up" : "down") + "\n" +
+                 "Beyond current extreme: " + (beyondLatest ? "yes" : "no")
+            label fanLabel = label.new(labelX, level, labelText, xloc=xloc.bar_index, style=fanLabelSide == "Left" ? label.style_label_left : label.style_label_right, color=color.new(lineColor, 58), textcolor=f_text_on_color(lineColor), size=f_label_size(fanLabelSize), tooltip=fanTooltip)
+            array.push(activeFanLabels, fanLabel)
+
+            if beyondLatest
+                alreadyBeyondLatest := true
