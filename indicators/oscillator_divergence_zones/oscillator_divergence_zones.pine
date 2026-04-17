@@ -1,0 +1,292 @@
+//@version=6
+// ============================================================================
+// Oscillator Divergence Zones [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-04-17 00:00:00
+// ============================================================================
+// Detects regular and hidden divergences for RSI, CCI, or MFI.
+//
+// Features:
+//   ✓ Oscillator selector: RSI (default), CCI, MFI
+//   ✓ Regular divergence: price/oscillator structural opposition at pivots
+//   ✓ Hidden divergence: trend-continuation counterpart (toggle separately)
+//   ✓ OB/OS filter: suppress signals outside meaningful oscillator territory
+//   ✓ ATR-based zone width: band height locked to creation-time volatility
+//   ✓ Configurable break trigger: full-candle (default) or close-based
+//   ✓ Zone retest counter: touch count displayed at zone right edge
+//   ✓ Dual-pane visualization: oscillator pane markers and chart overlay
+//   ✓ Alert conditions for all four divergence types
+//
+// ============================================================================
+
+indicator("Oscillator Divergence Zones [WavesUnchained]", format=format.price, precision=2,
+     max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+g_osc    = "Oscillator"
+oscType  = input.string("RSI", "Type", options=["RSI", "CCI", "MFI"], group=g_osc)
+oscSrc   = input.source(close, "Source",                     group=g_osc)
+oscLen   = input.int(14,       "Length",       minval=2,     group=g_osc)
+obLevel  = input.int(70,       "Overbought",  minval=-500, maxval=500, group=g_osc,
+     tooltip="RSI / MFI: 70  |  CCI: 100")
+osLevel  = input.int(30,       "Oversold",    minval=-500, maxval=500, group=g_osc,
+     tooltip="RSI / MFI: 30  |  CCI: -100")
+
+g_div         = "Divergence"
+pivLeft       = input.int(5,   "Pivot Left Bars",           minval=1, group=g_div)
+pivRight      = input.int(5,   "Pivot Right Bars",          minval=1, group=g_div)
+minRange      = input.int(5,   "Min Bars Between Pivots",   minval=1, group=g_div)
+maxRange      = input.int(50,  "Max Bars Between Pivots",   minval=5, group=g_div)
+showHidden    = input.bool(false, "Show Hidden Divergence",            group=g_div)
+oscFilter     = input.bool(true,  "Filter by Oscillator Level",       group=g_div)
+bullFilterLvl = input.int(55,  "Max for Bull", minval=-500, maxval=500, group=g_div,
+     tooltip="Signal only below this level. RSI/MFI: 55  |  CCI: 25")
+bearFilterLvl = input.int(45,  "Min for Bear", minval=-500, maxval=500, group=g_div,
+     tooltip="Signal only above this level. RSI/MFI: 45  |  CCI: -25")
+
+g_zone       = "Zones"
+showZones    = input.bool(true,  "Show Zones on Chart",             group=g_zone)
+maxZones     = input.int(10,     "Max Active Zones", minval=1, maxval=50, group=g_zone)
+zoneExtend   = input.int(15,     "Zone Lookahead (bars)", minval=1,   group=g_zone)
+atrLen       = input.int(14,     "ATR Length (zone width)", minval=1, group=g_zone)
+zoneFactor   = input.float(0.25, "Zone Width (ATR×)", minval=0.05, maxval=3.0, step=0.05, group=g_zone)
+breakOnClose = input.bool(false, "Break on Close",                   group=g_zone)
+showTouches  = input.bool(true,  "Show Retest Count",                group=g_zone)
+
+g_col   = "Colors"
+bullCol = input.color(#26a69a, "Bullish", group=g_col)
+bearCol = input.color(#ef5350, "Bearish", group=g_col)
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+type Zone
+    line  edge
+    box   area
+    int   touches
+    label info
+    float halfW
+    bool  bull
+
+// ─── State ───────────────────────────────────────────────────────────────────
+var array<Zone> bullZones    = array.new<Zone>()
+var array<Zone> bearZones    = array.new<Zone>()
+var array<Zone> hidBullZones = array.new<Zone>()
+var array<Zone> hidBearZones = array.new<Zone>()
+
+var int   prevBullBar    = na
+var float prevBullOsc    = na
+var int   prevBearBar    = na
+var float prevBearOsc    = na
+var int   prevHidBullBar = na
+var float prevHidBullOsc = na
+var int   prevHidBearBar = na
+var float prevHidBearOsc = na
+
+// ─── Oscillator ──────────────────────────────────────────────────────────────
+atr         = ta.atr(atrLen)
+rsiSeries = ta.rsi(oscSrc, oscLen)
+cciSeries = ta.cci(oscSrc, oscLen)
+mfiSeries = ta.mfi(oscSrc, oscLen)
+
+oscVal = oscType == "CCI" ? cciSeries :
+         oscType == "MFI" ? mfiSeries : rsiSeries
+
+// CCI is centered on 0; all others on 50
+midLevel = oscType == "CCI" ? 0 : 50
+oscAtPiv = oscVal[pivRight]
+
+// ─── Pivots on price ─────────────────────────────────────────────────────────
+foundPL = not na(ta.pivotlow(low,   pivLeft, pivRight))
+foundPH = not na(ta.pivothigh(high, pivLeft, pivRight))
+
+pivBarIdx = bar_index - pivRight
+distL     = pivBarIdx - ta.valuewhen(foundPL, pivBarIdx, 1)
+distH     = pivBarIdx - ta.valuewhen(foundPH, pivBarIdx, 1)
+inRangeL  = distL >= minRange and distL <= maxRange
+inRangeH  = distH >= minRange and distH <= maxRange
+
+prevLowP  = ta.valuewhen(foundPL, low[pivRight],  1)
+prevLowO  = ta.valuewhen(foundPL, oscAtPiv,       1)
+prevHighP = ta.valuewhen(foundPH, high[pivRight], 1)
+prevHighO = ta.valuewhen(foundPH, oscAtPiv,       1)
+
+bullOk = not oscFilter or oscAtPiv < bullFilterLvl
+bearOk = not oscFilter or oscAtPiv > bearFilterLvl
+
+// Regular: price/oscillator oppose → reversal signal
+bullDiv = foundPL and low[pivRight]  < prevLowP  and oscAtPiv > prevLowO  and inRangeL and bullOk
+bearDiv = foundPH and high[pivRight] > prevHighP and oscAtPiv < prevHighO and inRangeH and bearOk
+
+// Hidden: price/oscillator diverge in trend direction → continuation signal
+bullHidDiv = showHidden and foundPL and low[pivRight]  > prevLowP  and oscAtPiv < prevLowO  and inRangeL and bullOk
+bearHidDiv = showHidden and foundPH and high[pivRight] < prevHighP and oscAtPiv > prevHighO and inRangeH and bearOk
+
+// ─── Zone functions ───────────────────────────────────────────────────────────
+_addZone(arr, col, priceLevel, isHidden, isBull) =>
+    halfW    = atr * zoneFactor / 2
+    x1       = bar_index - pivRight
+    x2       = bar_index + zoneExtend
+    // Label sits outside the zone box — below for bull, above for bear
+    labelY   = isBull ? priceLevel - halfW : priceLevel + halfW
+    edgeLine = line.new(x1, priceLevel, x2, priceLevel,
+         color=col, width=1,
+         style=isHidden ? line.style_dashed : line.style_solid,
+         force_overlay=true)
+    areaBox  = box.new(x1, priceLevel + halfW, x2, priceLevel - halfW,
+         border_color=color.new(col, 60),
+         bgcolor=isHidden ? color.new(col, 100) : color.new(col, 90),
+         force_overlay=true)
+    infoLbl  = label.new(x2, labelY, "",
+         xloc=xloc.bar_index, style=label.style_label_left,
+         color=color.new(col, 20), textcolor=color.white, size=size.small,
+         tooltip="Retest count: how many times price re-entered this zone without breaking it.",
+         force_overlay=true)
+    arr.push(Zone.new(edgeLine, areaBox, 0, infoLbl, halfW, isBull))
+    while arr.size() > maxZones
+        old = arr.shift()
+        old.edge.delete()
+        old.area.delete()
+        old.info.delete()
+
+_updateZones(arr, isBull) =>
+    if arr.size() > 0
+        toRemove = array.new<int>()
+        for i = 0 to arr.size() - 1
+            z       = arr.get(i)
+            lvl     = z.edge.get_y1()
+            broken  = breakOnClose ? (isBull ? close < lvl : close > lvl) : (isBull ? high <= lvl : low >= lvl)
+            touched = not broken and (isBull ? low <= lvl + z.halfW : high >= lvl - z.halfW)
+            if broken
+                z.edge.set_x2(bar_index)
+                z.edge.set_style(line.style_dotted)
+                z.area.set_right(bar_index)
+                z.area.set_bgcolor(color.new(color.gray, 94))
+                z.area.set_border_color(color.new(color.gray, 88))
+                z.info.delete()
+                toRemove.unshift(i)
+            else
+                z.edge.set_x2(bar_index + zoneExtend)
+                z.area.set_right(bar_index + zoneExtend)
+                if touched
+                    z.touches += 1
+                if showTouches and z.touches > 0
+                    z.info.set_x(bar_index + zoneExtend)
+                    z.info.set_text("×" + str.tostring(z.touches))
+        if toRemove.size() > 0
+            for j = 0 to toRemove.size() - 1
+                arr.remove(toRemove.get(j))
+
+// ─── Execute ─────────────────────────────────────────────────────────────────
+_updateZones(bullZones,    true)
+_updateZones(bearZones,    false)
+_updateZones(hidBullZones, true)
+_updateZones(hidBearZones, false)
+
+if showZones
+    if bullDiv
+        _addZone(bullZones,    bullCol, low[pivRight],  false, true)
+    if bearDiv
+        _addZone(bearZones,    bearCol, high[pivRight], false, false)
+    if bullHidDiv
+        _addZone(hidBullZones, bullCol, low[pivRight],  true,  true)
+    if bearHidDiv
+        _addZone(hidBearZones, bearCol, high[pivRight], true,  false)
+
+// Regular connector lines: dotted, full opacity
+if bullDiv
+    currBar = bar_index - pivRight
+    if not na(prevBullBar)
+        line.new(prevBullBar, prevBullOsc, currBar, oscAtPiv,
+             color=color.new(bullCol, 20), style=line.style_dotted, width=2)
+    prevBullBar := currBar
+    prevBullOsc := oscAtPiv
+
+if bearDiv
+    currBar = bar_index - pivRight
+    if not na(prevBearBar)
+        line.new(prevBearBar, prevBearOsc, currBar, oscAtPiv,
+             color=color.new(bearCol, 20), style=line.style_dotted, width=2)
+    prevBearBar := currBar
+    prevBearOsc := oscAtPiv
+
+// Hidden connector lines: dashed, reduced opacity
+if bullHidDiv
+    currBar = bar_index - pivRight
+    if not na(prevHidBullBar)
+        line.new(prevHidBullBar, prevHidBullOsc, currBar, oscAtPiv,
+             color=color.new(bullCol, 55), style=line.style_dashed, width=1)
+    prevHidBullBar := currBar
+    prevHidBullOsc := oscAtPiv
+
+if bearHidDiv
+    currBar = bar_index - pivRight
+    if not na(prevHidBearBar)
+        line.new(prevHidBearBar, prevHidBearOsc, currBar, oscAtPiv,
+             color=color.new(bearCol, 55), style=line.style_dashed, width=1)
+    prevHidBearBar := currBar
+    prevHidBearOsc := oscAtPiv
+
+// ─── Oscillator pane plots ───────────────────────────────────────────────────
+noneCol = color.new(color.white, 100)
+
+p_ob  = plot(obLevel,  "OB",  color=color.new(bearCol, 50))
+p_os  = plot(osLevel,  "OS",  color=color.new(bullCol, 50))
+p_mid = plot(midLevel, "Mid", color=color.new(color.gray, 70))
+p_osc = plot(oscVal, "Oscillator",
+     color=color.from_gradient(oscVal, osLevel, obLevel, bullCol, bearCol),
+     linewidth=2)
+
+fill(p_osc, p_mid, obLevel, osLevel, color.new(bearCol, 85), na)
+fill(p_osc, p_mid, obLevel, osLevel, na, color.new(bullCol, 85))
+
+plotshape(bullDiv ? oscAtPiv : na, offset=-pivRight,
+     title="Bull (pane)", style=shape.labelup, location=location.absolute,
+     color=bullCol, textcolor=color.white, text="▲", size=size.small)
+
+plotshape(bearDiv ? oscAtPiv : na, offset=-pivRight,
+     title="Bear (pane)", style=shape.labeldown, location=location.absolute,
+     color=bearCol, textcolor=color.white, text="▼", size=size.small)
+
+_hidDist = (obLevel - osLevel) * 0.08
+plotshape(bullHidDiv ? oscAtPiv - _hidDist : na, offset=-pivRight,
+     title="Bull hidden (pane)", style=shape.triangleup, location=location.absolute,
+     color=color.new(bullCol, 40), size=size.small)
+
+plotshape(bearHidDiv ? oscAtPiv + _hidDist : na, offset=-pivRight,
+     title="Bear hidden (pane)", style=shape.triangledown, location=location.absolute,
+     color=color.new(bearCol, 40), size=size.small)
+
+// ─── Chart overlay shapes ────────────────────────────────────────────────────
+plotshape(bullDiv ? low[pivRight] : na, offset=-pivRight,
+     title="Bull reversal (chart)", style=shape.labelup, location=location.absolute,
+     color=noneCol, textcolor=bullCol, text="▲\nReversal", force_overlay=true)
+
+plotshape(bearDiv ? high[pivRight] : na, offset=-pivRight,
+     title="Bear reversal (chart)", style=shape.labeldown, location=location.absolute,
+     color=noneCol, textcolor=bearCol, text="Reversal\n▼", force_overlay=true)
+
+plotshape(bullHidDiv ? low[pivRight] : na, offset=-pivRight,
+     title="Bull continuation (chart)", style=shape.labelup, location=location.absolute,
+     color=noneCol, textcolor=color.new(bullCol, 35), text="▲\nCont.", force_overlay=true)
+
+plotshape(bearHidDiv ? high[pivRight] : na, offset=-pivRight,
+     title="Bear continuation (chart)", style=shape.labeldown, location=location.absolute,
+     color=noneCol, textcolor=color.new(bearCol, 35), text="Cont.\n▼", force_overlay=true)
+
+// ─── Alerts ──────────────────────────────────────────────────────────────────
+// alertcondition: named alerts, require one setup per condition in the Alert dialog
+alertcondition(bullDiv,    "Bullish Divergence",        "Oscillator Divergence Zones: bullish divergence on {{ticker}} ({{interval}})")
+alertcondition(bearDiv,    "Bearish Divergence",        "Oscillator Divergence Zones: bearish divergence on {{ticker}} ({{interval}})")
+alertcondition(bullHidDiv, "Bullish Hidden Divergence", "Oscillator Divergence Zones: bullish hidden divergence on {{ticker}} ({{interval}})")
+alertcondition(bearHidDiv, "Bearish Hidden Divergence", "Oscillator Divergence Zones: bearish hidden divergence on {{ticker}} ({{interval}})")
+
+// alert(): all signals through a single "any alert() call" setup on the indicator
+_ticker = syminfo.tickerid + " (" + timeframe.period + ")"
+if bullDiv
+    alert("Bullish Divergence — " + _ticker + " | " + oscType, alert.freq_once_per_bar)
+if bearDiv
+    alert("Bearish Divergence — " + _ticker + " | " + oscType, alert.freq_once_per_bar)
+if bullHidDiv
+    alert("Bullish Hidden Divergence — " + _ticker + " | " + oscType, alert.freq_once_per_bar)
+if bearHidDiv
+    alert("Bearish Hidden Divergence — " + _ticker + " | " + oscType, alert.freq_once_per_bar)

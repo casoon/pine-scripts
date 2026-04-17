@@ -80,6 +80,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`market_stress_oscillator.pine`](indicators/momentum/market_stress_oscillator.pine) | Composite stress index — WVF with JMA and ADX filters |
 | [`market_exhaustion.pine`](indicators/momentum/market_exhaustion.pine) | Exhaustion signals via MFI and StochRSI with divergence detection |
 | [`candle_pressure_response_jma.pine`](indicators/momentum/candle_pressure_response_jma.pine) | JMA-smoothed candle pressure and response scoring |
+| [`oscillator_divergence_zones.pine`](indicators/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI; regular + hidden; ATR-wide zones with retest counter |
 
 ### Liquidity & Order Flow
 
