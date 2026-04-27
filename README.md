@@ -88,6 +88,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 
 | Script | What it does |
 |--------|--------------|
+| [`volume_strata_v1.pine`](indicators/volume_strata/volume_strata_v1.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN markers, info table |
 | [`vwap_cross_visuals.pine`](indicators/liquidity/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
 | [`liquidity_hunter.pine`](indicators/liquidity/liquidity_hunter.pine) | Institutional liquidity zone mapping `[RTA]` |
 | [`smart_money_dashboard.pine`](indicators/liquidity/smart_money_dashboard.pine) | Order flow, SMC, and liquidity dashboard |
