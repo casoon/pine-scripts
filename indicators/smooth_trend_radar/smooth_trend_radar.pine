@@ -1,0 +1,228 @@
+//@version=6
+// ============================================================================
+// Smooth Trend Radar [WavesUnchained]
+// Version: 1.1
+// Author: WavesUnchained
+// Build: 2026-04-27 00:00:00
+// ============================================================================
+// Double-smoothed Supertrend baseline for trend direction, with rejection
+// signals at the baseline and automatic SL/TP level visualization on flips.
+//
+// Features:
+//   ✓ Supertrend midline double-smoothed with WMA + EMA — fewer whipsaws
+//   ✓ Trend direction from baseline slope (rising = bullish, falling = bearish)
+//   ✓ Rejection: close-based with body filter — real rejections only, one signal
+//   ✓ Three SL methods: Flip Candle / Baseline ± ATR / Swing Structure
+//   ✓ SL/TP levels drawn automatically on each trend flip
+//   ✓ Risk/reward fill between entry–SL and entry–TP3
+//   ✓ Direction-aware alerts for flips, rejections, and TP/SL hits
+//
+// ============================================================================
+
+indicator("Smooth Trend Radar [WavesUnchained]", overlay=true)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+g_trend = "Trend"
+stFactor    = input.float(12, "Supertrend Factor",    minval=1, step=0.5, group=g_trend,
+     tooltip="ATR multiplier for the Supertrend bands. Higher = wider bands, fewer flips.")
+stAtrPeriod = input.int(90,   "Supertrend ATR Period", minval=1, group=g_trend,
+     tooltip="ATR lookback for the Supertrend. Longer = smoother, more lagging bands.")
+wmaLength   = input.int(40,   "WMA Length",            minval=1, group=g_trend,
+     tooltip="Weighted Moving Average applied to the Supertrend midline.")
+emaLength   = input.int(14,   "EMA Length",            minval=1, group=g_trend,
+     tooltip="EMA applied to the WMA output — second smoothing pass.")
+
+g_rej = "Rejection"
+contFactor = input.int(3, "Consecutive Bars", minval=1, group=g_rej,
+     tooltip="Number of consecutive valid rejection bars before the signal fires. Fires once when the count is reached, not on every subsequent bar.")
+
+g_tp = "Targets"
+showTargets   = input.bool(true,           "Show SL / TP Levels", group=g_tp)
+slMode        = input.string("Flip Candle", "SL Method",
+     options=["Flip Candle", "Baseline", "Swing"], group=g_tp,
+     tooltip="Flip Candle: low/high of the flip bar ± ATR. Baseline: smoothed baseline ± ATR. Swing: lowest low / highest high within lookback ± ATR.")
+swingLookback = input.int(20,  "Swing Lookback (bars)", minval=5, group=g_tp,
+     tooltip="Used only with SL Method = Swing. Bars to look back for the recent swing low/high.")
+atrPeriod     = input.int(14,  "ATR Period",            minval=1, group=g_tp)
+slMultiplier  = input.float(2.0, "SL ATR Multiplier",   minval=0.1, step=0.1, group=g_tp,
+     tooltip="ATR distance added to the SL reference point. Reduced default (2.0) works across all three SL methods.")
+tp1Multiplier = input.float(0.5, "TP1 Multiplier",      minval=0.1, step=0.1, group=g_tp)
+tp2Multiplier = input.float(1.0, "TP2 Multiplier",      minval=0.1, step=0.1, group=g_tp)
+tp3Multiplier = input.float(1.5, "TP3 Multiplier",      minval=0.1, step=0.1, group=g_tp)
+
+g_col = "Colors"
+bullCol = input.color(#26a69a, "Bullish", group=g_col)
+bearCol = input.color(#ef5350, "Bearish", group=g_col)
+
+g_alert = "Alerts"
+awaitConfirm = input.bool(true, "Await Bar Confirmation", group=g_alert)
+
+// ─── Supertrend midline ───────────────────────────────────────────────────────
+_supertrend(factor, atrPeriod) =>
+    atr       = ta.atr(atrPeriod)
+    upper     = hl2 + factor * atr
+    lower     = hl2 - factor * atr
+    prevLower = nz(lower[1])
+    prevUpper = nz(upper[1])
+    lower    := lower > prevLower or close[1] < prevLower ? lower : prevLower
+    upper    := upper < prevUpper or close[1] > prevUpper ? upper : prevUpper
+    [lower, upper]
+
+[lwr, upr] = _supertrend(stFactor, stAtrPeriod)
+tL = ta.ema(ta.wma(math.avg(lwr, upr), wmaLength), emaLength)
+
+// ─── Trend direction ─────────────────────────────────────────────────────────
+var int trend = 0
+if ta.crossover(tL, tL[1])
+    trend := 1
+if ta.crossunder(tL, tL[1])
+    trend := -1
+
+longSignal  = trend == 1  and trend[1] == -1
+shortSignal = trend == -1 and trend[1] == 1
+
+// ─── Rejection counter ───────────────────────────────────────────────────────
+// A valid rejection requires the bar to touch the baseline, close on the trend
+// side, and have a body in the trend direction (not just a wick touch).
+bullishRej = trend == 1  and low <= tL and close > tL and close > open
+bearishRej = trend == -1 and high >= tL and close < tL and close < open
+
+var int rejCount   = 0
+trendFlipped = longSignal or shortSignal
+
+if bullishRej or bearishRej
+    rejCount += 1
+if trendFlipped or (not bullishRej and not bearishRej and rejCount > 0)
+    rejCount := 0
+
+// Signal fires exactly once when the count is reached
+rejSignalBull = rejCount == contFactor and trend == 1
+rejSignalBear = rejCount == contFactor and trend == -1
+
+// ─── SL / TP levels ──────────────────────────────────────────────────────────
+volatility = ta.atr(atrPeriod)
+
+var float SL      = na
+var float TP1_lvl = na
+var float TP2_lvl = na
+var float TP3_lvl = na
+var int   tradeDir = 0
+
+var line  entry_line  = na
+var line  sl_line     = na
+var line  tp1_line    = na
+var line  tp2_line    = na
+var line  tp3_line    = na
+var label entry_label = na
+var label sl_label    = na
+var label tp1_label   = na
+var label tp2_label   = na
+var label tp3_label   = na
+var linefill lf_risk   = na
+var linefill lf_reward = na
+
+if showTargets
+    if longSignal or shortSignal
+        line.delete(entry_line)
+        line.delete(sl_line)
+        line.delete(tp1_line)
+        line.delete(tp2_line)
+        line.delete(tp3_line)
+        label.delete(entry_label)
+        label.delete(sl_label)
+        label.delete(tp1_label)
+        label.delete(tp2_label)
+        label.delete(tp3_label)
+        linefill.delete(lf_risk)
+        linefill.delete(lf_reward)
+
+        isBull   = longSignal
+        col      = isBull ? bullCol : bearCol
+        tradeDir := isBull ? 1 : -1
+
+        // SL method selection
+        float rawSL = na
+        if slMode == "Baseline"
+            rawSL := isBull ? tL - volatility * slMultiplier
+                            : tL + volatility * slMultiplier
+        else if slMode == "Swing"
+            rawSL := isBull ? ta.lowest(low,   swingLookback) - volatility * slMultiplier
+                            : ta.highest(high, swingLookback) + volatility * slMultiplier
+        else  // "Flip Candle"
+            rawSL := isBull ? low  - volatility * slMultiplier
+                            : high + volatility * slMultiplier
+
+        SL      := rawSL
+        slDist   = math.abs(close - SL)
+        TP1_lvl := isBull ? close + slDist * tp1Multiplier : close - slDist * tp1Multiplier
+        TP2_lvl := isBull ? close + slDist * tp2Multiplier : close - slDist * tp2Multiplier
+        TP3_lvl := isBull ? close + slDist * tp3Multiplier : close - slDist * tp3Multiplier
+
+        x2 = bar_index + 40
+        entry_line  := line.new(bar_index, close,   x2, close,   color=col,                    width=2)
+        sl_line     := line.new(bar_index, SL,      x2, SL,      color=color.new(bearCol, 50), width=1)
+        tp1_line    := line.new(bar_index, TP1_lvl, x2, TP1_lvl, color=color.new(bullCol, 60), width=1)
+        tp2_line    := line.new(bar_index, TP2_lvl, x2, TP2_lvl, color=color.new(bullCol, 40), width=1)
+        tp3_line    := line.new(bar_index, TP3_lvl, x2, TP3_lvl, color=bullCol,                width=1)
+        entry_label := label.new(x2, close,   "Entry " + str.tostring(close,   format.mintick), style=label.style_label_left, color=col,                    textcolor=color.white, size=size.small)
+        sl_label    := label.new(x2, SL,      "SL "    + str.tostring(SL,      format.mintick), style=label.style_label_left, color=color.new(bearCol, 50), textcolor=color.white, size=size.small)
+        tp1_label   := label.new(x2, TP1_lvl, "TP1 "   + str.tostring(TP1_lvl, format.mintick), style=label.style_label_left, color=color.new(bullCol, 60), textcolor=color.white, size=size.small)
+        tp2_label   := label.new(x2, TP2_lvl, "TP2 "   + str.tostring(TP2_lvl, format.mintick), style=label.style_label_left, color=color.new(bullCol, 40), textcolor=color.white, size=size.small)
+        tp3_label   := label.new(x2, TP3_lvl, "TP3 "   + str.tostring(TP3_lvl, format.mintick), style=label.style_label_left, color=bullCol,                textcolor=color.white, size=size.small)
+        lf_risk     := linefill.new(entry_line, sl_line,  color.new(bearCol, 93))
+        lf_reward   := linefill.new(entry_line, tp3_line, color.new(bullCol, 93))
+
+    else if not na(entry_line)
+        x2 = bar_index + 40
+        line.set_x2(entry_line,  x2)
+        line.set_x2(sl_line,     x2)
+        line.set_x2(tp1_line,    x2)
+        line.set_x2(tp2_line,    x2)
+        line.set_x2(tp3_line,    x2)
+        label.set_x(entry_label, x2)
+        label.set_x(sl_label,    x2)
+        label.set_x(tp1_label,   x2)
+        label.set_x(tp2_label,   x2)
+        label.set_x(tp3_label,   x2)
+
+// ─── Plots ───────────────────────────────────────────────────────────────────
+plot(tL, "Baseline", color=trend == 1 ? color.new(bullCol, 50) : color.new(bearCol, 50), linewidth=2)
+
+plotshape(longSignal  ? tL : na, "Bull Flip",
+     style=shape.labelup,   location=location.absolute, size=size.small,
+     color=bullCol, textcolor=color.white, text="▲")
+plotshape(shortSignal ? tL : na, "Bear Flip",
+     style=shape.labeldown, location=location.absolute, size=size.small,
+     color=bearCol, textcolor=color.white, text="▼")
+
+plotshape(rejSignalBull ? tL : na, "Bull Rejection",
+     style=shape.triangleup,   location=location.belowbar,
+     color=color.new(bullCol, 30), size=size.tiny)
+plotshape(rejSignalBear ? tL : na, "Bear Rejection",
+     style=shape.triangledown, location=location.abovebar,
+     color=color.new(bearCol, 30), size=size.tiny)
+
+barcolor(trend == 1 ? color.new(bullCol, 60) : color.new(bearCol, 60))
+
+// ─── Alerts ──────────────────────────────────────────────────────────────────
+await = awaitConfirm ? barstate.isconfirmed : true
+
+tp1Hit = showTargets and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP1_lvl)  : ta.crossunder(close, TP1_lvl))
+tp2Hit = showTargets and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP2_lvl)  : ta.crossunder(close, TP2_lvl))
+tp3Hit = showTargets and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP3_lvl)  : ta.crossunder(close, TP3_lvl))
+slHit  = showTargets and tradeDir != 0 and (tradeDir == 1 ? ta.crossunder(close, SL)      : ta.crossover(close, SL))
+
+alertcondition(longSignal    and await, "STR Buy Signal",     "Smooth Trend Radar buy — {{ticker}} ({{interval}})")
+alertcondition(shortSignal   and await, "STR Sell Signal",    "Smooth Trend Radar sell — {{ticker}} ({{interval}})")
+alertcondition(rejSignalBull and await, "STR Bull Rejection", "Smooth Trend Radar bull rejection — {{ticker}} ({{interval}})")
+alertcondition(rejSignalBear and await, "STR Bear Rejection", "Smooth Trend Radar bear rejection — {{ticker}} ({{interval}})")
+alertcondition(tp1Hit and await,        "STR TP1 Hit",        "Smooth Trend Radar TP1 hit — {{ticker}} ({{interval}})")
+alertcondition(tp2Hit and await,        "STR TP2 Hit",        "Smooth Trend Radar TP2 hit — {{ticker}} ({{interval}})")
+alertcondition(tp3Hit and await,        "STR TP3 Hit",        "Smooth Trend Radar TP3 hit — {{ticker}} ({{interval}})")
+alertcondition(slHit  and await,        "STR SL Hit",         "Smooth Trend Radar SL hit — {{ticker}} ({{interval}})")
+
+_ticker = syminfo.tickerid + " (" + timeframe.period + ")"
+if longSignal and await
+    alert("Smooth Trend Radar Buy — " + _ticker, alert.freq_once_per_bar_close)
+if shortSignal and await
+    alert("Smooth Trend Radar Sell — " + _ticker, alert.freq_once_per_bar_close)
