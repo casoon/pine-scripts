@@ -1,0 +1,188 @@
+//@version=6
+// ============================================================================
+// Chandelier Exit [WavesUnchained]
+// Version: 1.1
+// Author: WavesUnchained
+// Build: 2026-04-27 00:00:00
+// ============================================================================
+// ATR-based trailing stop with five-level trend state classification. Instead
+// of a binary flip indicator, trend weakening becomes visible before the actual
+// direction change through progressive bar coloring and warning zones.
+//
+// Features:
+//   ✓ Ratchet trailing stop (long stop ratchets up, short stop ratchets down)
+//   ✓ Close-based or wick-based extremum mode
+//   ✓ Five-state classification: strong / pullback / warning / danger / flip
+//   ✓ Progressive bar coloring: strong → faded → yellow → orange near flip
+//   ✓ Inactive stop visible in gray (see where the flip trigger is)
+//   ✓ Failed flip marker: wick crossed trigger but close held (stop hunt)
+//   ✓ Minimum body filter for flip confirmation (reduces noise)
+//   ✓ Optional adaptive ATR multiplier scaled to volatility regime
+//   ✓ Alert conditions and alert() calls for flips and failed flips
+//
+// ============================================================================
+
+indicator("Chandelier Exit [WavesUnchained]", overlay=true)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+g_calc = "Calculation"
+atrLen       = input.int(22,    "ATR Period",      minval=1,              group=g_calc)
+atrMult      = input.float(3.0, "ATR Multiplier",  minval=0.1, step=0.1,  group=g_calc)
+useClose     = input.bool(true,  "Use Close for Extremums", group=g_calc,
+     tooltip="On: highest/lowest close over the ATR period. Off: highest high / lowest low.")
+adaptiveMult = input.bool(false, "Adaptive ATR Multiplier", group=g_calc,
+     tooltip="Scales the multiplier up in high-volatility regimes and down in low-volatility ones. Useful for instruments with large volatility swings (e.g. Natural Gas).")
+bodyFilter   = input.float(0.25, "Min Body for Flip (ATR×)", minval=0.0, step=0.05, group=g_calc,
+     tooltip="Flip signal requires a minimum candle body relative to ATR. Set 0 to disable. Reduces noise from doji and inside-bar flips.")
+
+g_state = "State Thresholds"
+dangerDist = input.float(0.35, "Danger Zone (ATR×)", minval=0.05, step=0.05, group=g_state,
+     tooltip="Distance to the flip trigger below which bars turn orange. Measured in ATR multiples.")
+warnDist   = input.float(0.75, "Warning Zone (ATR×)", minval=0.1, step=0.05, group=g_state,
+     tooltip="Distance to the flip trigger below which bars turn yellow. Must be greater than Danger Zone.")
+
+g_vis = "Visuals"
+showInactive   = input.bool(true,  "Show Inactive Stop",  group=g_vis,
+     tooltip="Shows the opposing stop as a gray line — see how far price needs to move to flip direction.")
+showLabels     = input.bool(true,  "Show Flip Labels",    group=g_vis)
+showFailed     = input.bool(true,  "Show Failed Flips",   group=g_vis,
+     tooltip="Marks bars where price crossed the flip trigger intrabar but the close held — often a stop hunt or liquidity grab.")
+colorBars      = input.bool(true,  "Color Bars by State", group=g_vis)
+highlightState = input.bool(true,  "Highlight Fill",      group=g_vis)
+
+g_col = "Colors"
+bullCol   = input.color(#26a69a, "Bullish", group=g_col)
+bearCol   = input.color(#ef5350, "Bearish", group=g_col)
+warnCol   = input.color(#ffd600, "Warning", group=g_col)
+dangerCol = input.color(#ff6f00, "Danger",  group=g_col)
+
+g_alert = "Alerts"
+awaitConfirm = input.bool(true, "Await Bar Confirmation", group=g_alert,
+     tooltip="When enabled, alerts only fire on confirmed (closed) bars.")
+
+// ─── Calculation ─────────────────────────────────────────────────────────────
+atrRaw = ta.atr(atrLen)
+
+// Adaptive multiplier: scale with volatility regime relative to 100-bar average
+atrAvg   = ta.sma(atrRaw, 100)
+volRatio = atrRaw / atrAvg
+dynMult  = adaptiveMult ?
+     (volRatio > 1.3 ? atrMult * 1.2 : volRatio < 0.8 ? atrMult * 0.85 : atrMult) :
+     atrMult
+atr = dynMult * atrRaw
+
+// Trailing stops with ratchet mechanism
+longStop     = (useClose ? ta.highest(close, atrLen) : ta.highest(atrLen)) - atr
+longStopPrev = nz(longStop[1], longStop)
+longStop    := close[1] > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+shortStop     = (useClose ? ta.lowest(close, atrLen) : ta.lowest(atrLen)) + atr
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop    := close[1] < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+var int dir = 1
+dir := close > shortStopPrev ? 1 : close < longStopPrev ? -1 : dir
+
+// Flip signals — optional minimum body filter
+bodyOk     = bodyFilter <= 0.0 or math.abs(close - open) >= atrRaw * bodyFilter
+buySignal  = dir == 1  and dir[1] == -1 and bodyOk
+sellSignal = dir == -1 and dir[1] == 1  and bodyOk
+
+// Distance to the flip trigger in ATR units
+triggerStop   = dir == 1 ? shortStop : longStop
+distAtr       = math.abs(close - triggerStop) / atrRaw
+
+// Five-level state
+// +2  strong trend, price well away from trigger
+// +1  pullback or warning — trend intact but softening
+//  0  danger — close to flip trigger
+// -1  pullback or warning (short side)
+// -2  strong trend (short side)
+danger = distAtr < dangerDist
+warn   = not danger and distAtr < warnDist
+
+ema5          = ta.ema(close, 5)
+pullbackLong  = dir == 1  and close < ema5
+pullbackShort = dir == -1 and close > ema5
+
+state = danger      ? 0 :
+        dir == 1  and (warn or pullbackLong)  ? 1 :
+        dir == -1 and (warn or pullbackShort) ? -1 :
+        dir == 1  ? 2 : -2
+
+// Failed flip: intrabar wick crossed the trigger but close held
+failedBullFlip = dir == -1 and high > shortStopPrev and close <= shortStopPrev
+failedBearFlip = dir == 1  and low  < longStopPrev  and close >= longStopPrev
+
+// ─── State color ─────────────────────────────────────────────────────────────
+stateCol =
+     state ==  2 ? bullCol :
+     state ==  1 ? color.new(bullCol, 50) :
+     state ==  0 ? dangerCol :
+     state == -1 ? color.new(bearCol, 50) :
+                   bearCol
+
+warnBarCol =
+     warn and dir == 1  ? warnCol :
+     warn and dir == -1 ? warnCol :
+     stateCol
+
+// ─── Plots ───────────────────────────────────────────────────────────────────
+inactiveCol = color.new(color.gray, 55)
+
+longStopPlot  = plot(dir == 1  ? longStop  : na, "Long Stop",
+     color=stateCol, linewidth=2, style=plot.style_linebr)
+shortStopPlot = plot(dir == -1 ? shortStop : na, "Short Stop",
+     color=stateCol, linewidth=2, style=plot.style_linebr)
+
+plot(showInactive and dir == -1 ? longStop  : na, "Long Stop (inactive)",
+     color=inactiveCol, linewidth=1, style=plot.style_linebr)
+plot(showInactive and dir == 1  ? shortStop : na, "Short Stop (inactive)",
+     color=inactiveCol, linewidth=1, style=plot.style_linebr)
+
+midPricePlot = plot(ohlc4, display=display.none, editable=false)
+fill(midPricePlot, longStopPlot,  title="Long Fill",
+     color=highlightState and dir == 1  ? color.new(stateCol, 88) : na)
+fill(midPricePlot, shortStopPlot, title="Short Fill",
+     color=highlightState and dir == -1 ? color.new(stateCol, 88) : na)
+
+// Flip labels and dots
+plotshape(buySignal  ? longStop  : na, "Buy Dot",
+     style=shape.circle, location=location.absolute, size=size.tiny, color=bullCol)
+plotshape(sellSignal ? shortStop : na, "Sell Dot",
+     style=shape.circle, location=location.absolute, size=size.tiny, color=bearCol)
+plotshape(showLabels and buySignal  ? longStop  : na, "Buy Label",
+     style=shape.labelup,   location=location.absolute, size=size.tiny,
+     color=bullCol, textcolor=color.white, text="Buy")
+plotshape(showLabels and sellSignal ? shortStop : na, "Sell Label",
+     style=shape.labeldown, location=location.absolute, size=size.tiny,
+     color=bearCol, textcolor=color.white, text="Sell")
+
+// Failed flip markers — small triangles above/below the bar
+plotshape(showFailed and failedBullFlip ? low  : na, "Failed Bull Flip",
+     style=shape.triangleup,   location=location.absolute,
+     color=color.new(bullCol, 30), size=size.tiny)
+plotshape(showFailed and failedBearFlip ? high : na, "Failed Bear Flip",
+     style=shape.triangledown, location=location.absolute,
+     color=color.new(bearCol, 30), size=size.tiny)
+
+barcolor(colorBars ? warnBarCol : na)
+
+// ─── Alerts ──────────────────────────────────────────────────────────────────
+await = awaitConfirm ? barstate.isconfirmed : true
+
+alertcondition(dir != dir[1] and await,  "CE Direction Change",  "Chandelier Exit direction change — {{ticker}} ({{interval}})")
+alertcondition(buySignal  and await,     "CE Buy Signal",        "Chandelier Exit buy — {{ticker}} ({{interval}})")
+alertcondition(sellSignal and await,     "CE Sell Signal",       "Chandelier Exit sell — {{ticker}} ({{interval}})")
+alertcondition(failedBullFlip and await, "CE Failed Bull Flip",  "Chandelier Exit failed bull flip — {{ticker}} ({{interval}})")
+alertcondition(failedBearFlip and await, "CE Failed Bear Flip",  "Chandelier Exit failed bear flip — {{ticker}} ({{interval}})")
+
+_ticker = syminfo.tickerid + " (" + timeframe.period + ")"
+if buySignal and await
+    alert("Chandelier Exit Buy — " + _ticker, alert.freq_once_per_bar_close)
+if sellSignal and await
+    alert("Chandelier Exit Sell — " + _ticker, alert.freq_once_per_bar_close)
+if failedBullFlip and await
+    alert("Chandelier Exit Failed Bull Flip — " + _ticker, alert.freq_once_per_bar_close)
+if failedBearFlip and await
+    alert("Chandelier Exit Failed Bear Flip — " + _ticker, alert.freq_once_per_bar_close)

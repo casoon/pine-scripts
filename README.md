@@ -71,6 +71,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`relative_leg_efficiency.pine`](indicators/trend/relative_leg_efficiency.pine) | Efficiency ratio per price leg — how directional each move is |
 | [`relative_leg_efficiency_panel_chart.pine`](indicators/trend/relative_leg_efficiency_panel_chart.pine) | RLE in combined panel and chart overlay view |
 | [`mtf_trend_alignment.pine`](indicators/trend/mtf_trend_alignment.pine) | 4-timeframe Supertrend consensus dashboard `[RTA]` |
+| [`chandelier_exit.pine`](indicators/chandelier_exit/chandelier_exit.pine) | ATR trailing stop with ratchet mechanism — active + inactive stop visible, bar coloring, alerts |
 
 ### Momentum & Oscillators
 
