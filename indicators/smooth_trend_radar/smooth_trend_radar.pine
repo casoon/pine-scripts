@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Smooth Trend Radar [WavesUnchained]
-// Version: 1.3
+// Version: 1.4
 // Author: WavesUnchained
 // Build: 2026-04-27 00:00:00
 // ============================================================================
@@ -13,7 +13,8 @@
 //   ✓ Trend direction from baseline slope (rising = bullish, falling = bearish)
 //   ✓ Rejection: close-based with body filter — real rejections only, one signal
 //   ✓ Three SL methods: Flip Candle / Baseline ± ATR / Swing Structure
-//   ✓ SL/TP levels drawn automatically on each trend flip — TPs are ATR multiples from entry
+//   ✓ SL/TP levels drawn automatically on each trend flip
+//   ✓ Four TP modes: Pivot (R/S levels), R-Multiple, Fibonacci extension, ATR
 //   ✓ Risk/reward fill between entry–SL and entry–TP3
 //   ✓ Direction-aware alerts for flips, rejections, and TP/SL hits
 //
@@ -38,18 +39,32 @@ contFactor = input.int(3, "Consecutive Bars", minval=1, group=g_rej,
 
 g_tp = "Targets"
 showTargets   = input.bool(true,           "Show SL / TP Levels", group=g_tp)
+tpMode        = input.string("Pivot",      "TP Method",
+     options=["Pivot", "R-Multiple", "Fibonacci", "ATR"], group=g_tp,
+     tooltip="Pivot: nearest R/S pivot levels. R-Multiple: multiples of SL distance. Fibonacci: 0.618 / 1.0 / 1.618 of setup swing. ATR: multiples of long ATR.")
+
 slMode        = input.string("Flip Candle", "SL Method",
      options=["Flip Candle", "Baseline", "Swing"], group=g_tp,
      tooltip="Flip Candle: low/high of the flip bar ± ATR. Baseline: smoothed baseline ± ATR. Swing: lowest low / highest high within lookback ± ATR.")
 swingLookback = input.int(20,  "Swing Lookback (bars)", minval=5, group=g_tp,
-     tooltip="Used only with SL Method = Swing. Bars to look back for the recent swing low/high.")
+     tooltip="SL Method = Swing: bars to look back for swing low/high. Also used as the setup-swing lookback for TP Method = Fibonacci.")
 atrPeriod     = input.int(14,  "ATR Period",            minval=1, group=g_tp)
 slMultiplier  = input.float(2.0, "SL ATR Multiplier",   minval=0.1, step=0.1, group=g_tp,
-     tooltip="ATR distance added to the SL reference point. Reduced default (2.0) works across all three SL methods.")
-tp1Multiplier = input.float(1.0, "TP1 ATR Multiplier",  minval=0.1, step=0.1, group=g_tp,
-     tooltip="TP distance = entry ± ATR × multiplier. Independent of SL distance.")
-tp2Multiplier = input.float(2.0, "TP2 ATR Multiplier",  minval=0.1, step=0.1, group=g_tp)
-tp3Multiplier = input.float(3.0, "TP3 ATR Multiplier",  minval=0.1, step=0.1, group=g_tp)
+     tooltip="ATR distance added to the SL reference point.")
+
+pivotPeriod   = input.string("D", "Pivot Period",
+     options=["D", "W", "M"], group=g_tp,
+     tooltip="Timeframe for pivot calculation. Used with TP Method = Pivot.")
+pivotFormula  = input.string("Camarilla", "Pivot Formula",
+     options=["Classic", "Camarilla"], group=g_tp,
+     tooltip="Classic (Floor Trader): PP = (H+L+C)/3. Camarilla: tighter R/S bands scaled from close. Used with TP Method = Pivot.")
+
+tp1Multiplier = input.float(2.0, "TP1 Multiplier",      minval=0.1, step=0.1, group=g_tp,
+     tooltip="R-Multiple: × SL distance. ATR: × long ATR. Not used for Pivot or Fibonacci.")
+tp2Multiplier = input.float(4.0, "TP2 Multiplier",      minval=0.1, step=0.1, group=g_tp)
+tp3Multiplier = input.float(6.0, "TP3 Multiplier",      minval=0.1, step=0.1, group=g_tp)
+atrLongPeriod = input.int(50,    "ATR Long Period",      minval=1,             group=g_tp,
+     tooltip="ATR lookback for TP Method = ATR. Longer period = more stable volatility estimate.")
 
 g_col = "Colors"
 bullCol = input.color(#26a69a, "Bullish", group=g_col)
@@ -112,6 +127,27 @@ rejSignalBear = rejCount == contFactor and trend == -1
 
 // ─── SL / TP levels ──────────────────────────────────────────────────────────
 volatility = ta.atr(atrPeriod)
+atr_long   = ta.atr(atrLongPeriod)
+
+// Pivot data — previous completed period, no repainting
+[piv_h, piv_l, piv_c] = request.security(syminfo.tickerid, pivotPeriod,
+     [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+piv_range = piv_h - piv_l
+// Classic (Floor Trader)
+pp_c  = (piv_h + piv_l + piv_c) / 3
+r1_c  = 2 * pp_c - piv_l
+r2_c  = pp_c + piv_range
+r3_c  = piv_h + 2 * (pp_c - piv_l)
+s1_c  = 2 * pp_c - piv_h
+s2_c  = pp_c - piv_range
+s3_c  = piv_l - 2 * (piv_h - pp_c)
+// Camarilla
+r1_ca = piv_c + piv_range * 1.1 / 12
+r2_ca = piv_c + piv_range * 1.1 / 6
+r3_ca = piv_c + piv_range * 1.1 / 4
+s1_ca = piv_c - piv_range * 1.1 / 12
+s2_ca = piv_c - piv_range * 1.1 / 6
+s3_ca = piv_c - piv_range * 1.1 / 4
 
 var float SL      = na
 var float TP1_lvl = na
@@ -169,10 +205,28 @@ if showTargets
             rawSL := isBull ? low - volatility * slMultiplier : high + volatility * slMultiplier
 
         // Clamp SL to the correct side of entry
-        SL      := isBull ? math.min(rawSL, close - syminfo.mintick) : math.max(rawSL, close + syminfo.mintick)
-        TP1_lvl := isBull ? close + volatility * tp1Multiplier : close - volatility * tp1Multiplier
-        TP2_lvl := isBull ? close + volatility * tp2Multiplier : close - volatility * tp2Multiplier
-        TP3_lvl := isBull ? close + volatility * tp3Multiplier : close - volatility * tp3Multiplier
+        SL := isBull ? math.min(rawSL, close - syminfo.mintick) : math.max(rawSL, close + syminfo.mintick)
+
+        // TP levels by mode
+        if tpMode == "Pivot"
+            TP1_lvl := isBull ? (pivotFormula == "Classic" ? r1_c : r1_ca) : (pivotFormula == "Classic" ? s1_c : s1_ca)
+            TP2_lvl := isBull ? (pivotFormula == "Classic" ? r2_c : r2_ca) : (pivotFormula == "Classic" ? s2_c : s2_ca)
+            TP3_lvl := isBull ? (pivotFormula == "Classic" ? r3_c : r3_ca) : (pivotFormula == "Classic" ? s3_c : s3_ca)
+        else if tpMode == "R-Multiple"
+            slDist   = math.abs(close - SL)
+            TP1_lvl := isBull ? close + slDist * tp1Multiplier : close - slDist * tp1Multiplier
+            TP2_lvl := isBull ? close + slDist * tp2Multiplier : close - slDist * tp2Multiplier
+            TP3_lvl := isBull ? close + slDist * tp3Multiplier : close - slDist * tp3Multiplier
+        else if tpMode == "Fibonacci"
+            swing    = isBull ? ta.lowest(low, swingLookback) : ta.highest(high, swingLookback)
+            fibRange = math.abs(close - swing)
+            TP1_lvl := isBull ? close + fibRange * 0.618 : close - fibRange * 0.618
+            TP2_lvl := isBull ? close + fibRange * 1.0   : close - fibRange * 1.0
+            TP3_lvl := isBull ? close + fibRange * 1.618  : close - fibRange * 1.618
+        else  // ATR
+            TP1_lvl := isBull ? close + atr_long * tp1Multiplier : close - atr_long * tp1Multiplier
+            TP2_lvl := isBull ? close + atr_long * tp2Multiplier : close - atr_long * tp2Multiplier
+            TP3_lvl := isBull ? close + atr_long * tp3Multiplier : close - atr_long * tp3Multiplier
 
         x2 = bar_index + 40
         entry_line  := line.new(bar_index, close,   x2, close,   color=col,                    width=2)
