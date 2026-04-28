@@ -1,0 +1,462 @@
+//@version=6
+// ============================================================================
+// Auto Trendlines [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-04-28 19:00:00
+// ============================================================================
+// Detects trendlines through pivot points using two detection methods:
+//
+// Directional (default): for each consecutive pivot pair, only keep pairs with
+//   the natural slope direction (ascending for support, descending for resistance).
+//   The exact two-point line is used — no OLS — and validated by additional hits.
+//   This produces the clean "origin pivot → next directional pivot" lines that
+//   manual traders draw.
+//
+// Combinatorial: scans all pivot pairs with OLS refinement (optionally
+//   outer-shifted to envelope) and a composite quality score. More candidates,
+//   catches non-obvious multi-touch alignments.
+//
+// Both methods share the same scoring, filters, and greedy selection:
+//   Score = touches · span · extreme-bonus · recency · fit · violation-penalty
+//
+// Features:
+//   ✓ Directional mode: consecutive directional pairs, exact two-point fit
+//   ✓ Combinatorial mode: all-pairs OLS / outer-envelope fit
+//   ✓ Composite quality score: touches, span, recency, fit, violation penalty
+//   ✓ Greedy non-overlapping selection — clean, non-redundant output
+//   ✓ Trendlines / Near-horizontal / Both mode filter
+//   ✓ Active retest highlighting — closest line gets a label
+//   ✓ Optional convex-hull envelope (Andrew's monotone chain)
+//   ✓ Touch-count labels at the right end of each line
+//
+// ============================================================================
+
+indicator("Auto Trendlines [WavesUnchained]", overlay=true,
+     max_lines_count=100, max_labels_count=50, max_bars_back=1000)
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+g_pivot = "Pivots"
+pivLeft  = input.int(5, "Left Bars",  minval=1, group=g_pivot,
+     tooltip="Bars to the left a pivot must dominate. Larger = fewer / more significant pivots.")
+pivRight = input.int(5, "Right Bars", minval=1, group=g_pivot,
+     tooltip="Right confirmation bars. Pivot fires this many bars after the actual extreme — non-repainting.")
+
+g_line = "Trendlines"
+fitMode    = input.string("Outer", "Line Fit",          options=["OLS","Outer"], group=g_line,
+     tooltip="OLS = least-squares fit through inlier pivots (line may cut through). Outer = shifts the OLS line to the envelope so all inliers stay on the correct side (true S/R behavior).")
+lineMethod = input.string("Directional", "Detection Method", options=["Directional","Combinatorial"], group=g_line,
+     tooltip="Directional: consecutive pivot pairs with correct slope direction (ascending support / descending resistance) — cleaner, intuitive trendlines. Combinatorial: all pivot pairs with OLS refinement — more candidates, sometimes noisy.")
+minTouches = input.int(3,    "Min Touches",            minval=2, maxval=10, group=g_line,
+     tooltip="Minimum number of pivots on the line. Three is the classical threshold.")
+tolMult    = input.float(0.5, "Tolerance (× ATR)",      minval=0.05, step=0.05, group=g_line,
+     tooltip="A pivot counts as a touch if its vertical distance from the line is below tolerance × ATR(14). Higher = looser fit, more lines. For long macro trendlines on Daily charts, 1.0–1.5 is typical.")
+lookback   = input.int(500,  "Lookback (bars)",         minval=50, maxval=1000, group=g_line,
+     tooltip="How far back to consider pivots. Older pivots are dropped. On Daily charts use higher values (500–1000) to cover multi-year trendlines.")
+maxLines   = input.int(2,    "Max Lines per Direction", minval=1, maxval=10, group=g_line)
+maxPivots  = input.int(60,   "Max Pivots per Direction", minval=10, maxval=200, group=g_line,
+     tooltip="Cap on the pivot array size. Older pivots are dropped beyond this limit.")
+minSpan    = input.int(20,   "Min Line Span (bars)",    minval=1, group=g_line,
+     tooltip="Minimum bar distance between oldest and newest pivot on a line. Filters out tiny lines.")
+maxViolPct = input.float(20.0, "Max Violation %",       minval=0.0, maxval=50.0, step=0.5, group=g_line,
+     tooltip="Maximum percentage of bars between first and last touch where price goes through the line. Lower = stricter. For macro/multi-month lines that include outlier spikes (e.g. brief breakouts), use 15–25%.")
+violSrc    = input.string("Close", "Violation Source",  options=["Close","Wick"], group=g_line,
+     tooltip="Close: a bar is a violation if its close goes through the line. Wick: also wicks count (high for resistance, low for support).")
+projectBars = input.int(30,   "Bars past last touch",   minval=0, maxval=500, group=g_line,
+     tooltip="How many bars past the most recent pivot touch the line extends. Higher = more forward projection visible.")
+showMode    = input.string("Both", "Show",              options=["Sloped","Near-horizontal","Both"], group=g_line,
+     tooltip="Sloped: only trending lines. Near-horizontal: only flat lines (acts like S/R levels). Both: no filter.")
+levelThrATR = input.float(0.5, "Sloped / Flat Cutoff (× ATR over span)", minval=0.1, step=0.1, group=g_line,
+     tooltip="Threshold: how many ATR the line moves over its full span. Below = near-horizontal, above = sloped trendline.")
+relevanceATR = input.float(5.0, "Max current distance (× ATR)", minval=0.5, step=0.5, group=g_line,
+     tooltip="Skip lines whose current projection is more than this × ATR away from the close. Filters out far-drifted irrelevant lines.")
+
+g_retest = "Retest"
+showRetest  = input.bool(true,  "Highlight active retest", group=g_retest,
+     tooltip="When close is within retest distance, the line is drawn more visible (brighter and thicker) and a small label is shown.")
+retestThr   = input.float(1.0,  "Retest distance (× ATR)", minval=0.1, step=0.1, group=g_retest,
+     tooltip="A line is in active retest when |close − line| ≤ this × ATR.")
+retestLabel = input.bool(true,  "Show retest label",       group=g_retest)
+showCount  = input.bool(true, "Show touch-count label",  group=g_line)
+showHull   = input.bool(false, "Show convex-hull envelope", group=g_line,
+     tooltip="Strictest descending/ascending envelope through outermost pivots — no pivot lies beyond it. Drawn dotted in a separate color.")
+
+g_color = "Colors"
+resistCol      = input.color(#d50000,                  "Resistance lines", group=g_color)
+supportCol     = input.color(#00c853,                  "Support lines",    group=g_color)
+hullResistCol  = input.color(color.new(#d50000, 50),   "Hull resistance",  group=g_color)
+hullSupportCol = input.color(color.new(#00c853, 50),   "Hull support",     group=g_color)
+lineWidth      = input.int(2, "Line width", minval=1, maxval=5, group=g_color)
+lineStyleStr   = input.string("Solid", "Line style", options=["Solid","Dashed","Dotted"], group=g_color)
+lineStyleVal   = lineStyleStr == "Solid" ? line.style_solid : lineStyleStr == "Dashed" ? line.style_dashed : line.style_dotted
+
+// ── Pivot detection ──────────────────────────────────────────────────────────
+// ATR computed at top level so its bar-by-bar history is maintained.
+atr_14 = ta.atr(14)
+pivH = ta.pivothigh(high, pivLeft, pivRight)
+pivL = ta.pivotlow( low,  pivLeft, pivRight)
+
+var array<float> phPrices = array.new<float>()
+var array<int>   phBars   = array.new<int>()
+var array<float> plPrices = array.new<float>()
+var array<int>   plBars   = array.new<int>()
+
+if not na(pivH)
+    array.push(phPrices, pivH)
+    array.push(phBars,   bar_index - pivRight)
+if not na(pivL)
+    array.push(plPrices, pivL)
+    array.push(plBars,   bar_index - pivRight)
+
+while array.size(phBars) > 0 and (bar_index - array.get(phBars, 0) > lookback or array.size(phBars) > maxPivots)
+    array.shift(phPrices)
+    array.shift(phBars)
+while array.size(plBars) > 0 and (bar_index - array.get(plBars, 0) > lookback or array.size(plBars) > maxPivots)
+    array.shift(plPrices)
+    array.shift(plBars)
+
+// ── Persistent containers ────────────────────────────────────────────────────
+var array<line>  resistLines  = array.new<line>()
+var array<line>  supportLines = array.new<line>()
+var array<line>  hullLines    = array.new<line>()
+var array<label> touchLabels  = array.new<label>()
+var array<label> retestLabels = array.new<label>()
+
+// Retest tracking (one label total — the closest line in retest)
+var array<float> retestDist  = array.new<float>()
+var array<float> retestY     = array.new<float>()
+var array<color> retestCol   = array.new<color>()
+
+// ── Trendline finder: combinatorial pair scan + OLS refinement ───────────────
+findTrendlines(array<float> prices, array<int> bars, bool isResist, color lineCol, float atr) =>
+    n   = array.size(prices)
+    tol = atr * tolMult
+    if n >= minTouches and not na(tol) and tol > 0
+        // Top-N% pivot threshold: highest 15% (resistance) or lowest 15% (support).
+        // Lines that touch any of these "major" pivots get a score bonus per extreme touch.
+        sortedP = array.copy(prices)
+        array.sort(sortedP, isResist ? order.descending : order.ascending)
+        int   topNIdx     = math.max(0, math.floor(n * 0.15) - 1)
+        float topThresh   = array.get(sortedP, topNIdx)
+
+        cSlope     = array.new<float>()
+        cIntercept = array.new<float>()
+        cOldest    = array.new<int>()
+        cNewest    = array.new<int>()
+        cTouches   = array.new<int>()
+        cScore     = array.new<float>()
+
+        // ── Generate candidates ──
+        // For each pivot pair, fit OLS through anchor inliers, then re-evaluate.
+        // Pairs anchored at a TOP pivot (in the top 15%) use a wider tolerance —
+        // emulates the manual "anchor-first" approach: start at the highest /
+        // lowest pivot and accept pivots that broadly align, even if not millimeter-precise.
+        for i = 0 to n - 2
+            for j = i + 1 to n - 1
+                if lineMethod == "Directional" and j > i + 1
+                    break
+                xi = array.get(bars,   i)
+                yi = array.get(prices, i)
+                xj = array.get(bars,   j)
+                yj = array.get(prices, j)
+                bool anchorAtTop = (isResist and (yi >= topThresh or yj >= topThresh)) or (not isResist and (yi <= topThresh or yj <= topThresh))
+                float effTol     = anchorAtTop ? tol * 2.0 : tol
+                if xi != xj
+                    slope0     = (yj - yi) / (xj - xi)
+                    intercept0 = yi - slope0 * xi
+
+                    // Directional mode: only ascending support / descending resistance
+                    bool dirOK = lineMethod != "Directional" or (isResist ? slope0 <= 0.0 : slope0 >= 0.0)
+                    if dirOK
+                        float slope     = slope0
+                        float intercept = intercept0
+                        bool  runPass2  = lineMethod == "Directional"
+
+                        if lineMethod != "Directional"
+                            // Pass 1: collect inliers and OLS sums
+                            sumX  = 0.0
+                            sumY  = 0.0
+                            sumXY = 0.0
+                            sumX2 = 0.0
+                            cnt0  = 0
+                            for k = 0 to n - 1
+                                xk = array.get(bars,   k)
+                                yk = array.get(prices, k)
+                                expected = slope0 * xk + intercept0
+                                if math.abs(yk - expected) <= effTol
+                                    sumX  += xk
+                                    sumY  += yk
+                                    sumXY += xk * yk
+                                    sumX2 += xk * xk
+                                    cnt0  += 1
+
+                            if cnt0 >= 2
+                                // OLS: slope = (n·Σxy − Σx·Σy) / (n·Σx² − (Σx)²)
+                                denom = cnt0 * sumX2 - sumX * sumX
+                                if denom != 0
+                                    slope     := (cnt0 * sumXY - sumX * sumY) / denom
+                                    intercept := (sumY - slope * sumX) / cnt0
+
+                                    if fitMode == "Outer"
+                                        float maxResid  = 0.0
+                                        bool  firstInl  = true
+                                        for k = 0 to n - 1
+                                            xk = array.get(bars,   k)
+                                            yk = array.get(prices, k)
+                                            olsY = slope * xk + intercept
+                                            if math.abs(yk - olsY) <= tol
+                                                resid = yk - olsY
+                                                if firstInl
+                                                    maxResid := resid
+                                                    firstInl := false
+                                                else
+                                                    if isResist
+                                                        if resid > maxResid
+                                                            maxResid := resid
+                                                    else
+                                                        if resid < maxResid
+                                                            maxResid := resid
+                                        intercept := intercept + maxResid
+
+                                    runPass2 := true
+
+                        if runPass2
+                            // Pass 2: count touches on final line
+                            int   touches  = 0
+                            int   oldB     = 0
+                            int   newB     = 0
+                            float sumRes   = 0.0
+                            bool  firstHit = true
+                            for k = 0 to n - 1
+                                xk = array.get(bars,   k)
+                                yk = array.get(prices, k)
+                                expected = slope * xk + intercept
+                                residual = math.abs(yk - expected)
+                                if residual <= tol
+                                    sumRes += residual
+                                    if firstHit
+                                        oldB     := xk
+                                        newB     := xk
+                                        firstHit := false
+                                    else
+                                        if xk < oldB
+                                            oldB := xk
+                                        if xk > newB
+                                            newB := xk
+                                    touches += 1
+
+                            int span = newB - oldB
+                            if touches >= minTouches and span >= minSpan
+                                int violations = 0
+                                if span > 1
+                                    for off = 1 to span - 1
+                                        iBar   = oldB + off
+                                        period = bar_index - iBar
+                                        if period >= 0
+                                            float src = isResist ? (violSrc == "Wick" ? high[period] : close[period]) : (violSrc == "Wick" ? low[period] : close[period])
+                                            lineY = slope * iBar + intercept
+                                            if isResist
+                                                if src > lineY + tol
+                                                    violations += 1
+                                            else
+                                                if src < lineY - tol
+                                                    violations += 1
+                                float violPct = 100.0 * violations / math.max(1, span)
+                                float lineAtCur = slope * bar_index + intercept
+                                bool  relevant  = math.abs(lineAtCur - close) <= atr * relevanceATR
+                                float slopeATR  = math.abs(slope * span) / atr
+                                bool  modeOK    = showMode == "Both" or (showMode == "Sloped" and slopeATR >= levelThrATR) or (showMode == "Near-horizontal" and slopeATR < levelThrATR)
+                                int extremeTouches = 0
+                                for kx = 0 to n - 1
+                                    ykx = array.get(prices, kx)
+                                    xkx = array.get(bars,   kx)
+                                    lineYkx = slope * xkx + intercept
+                                    if math.abs(ykx - lineYkx) <= tol
+                                        if (isResist and ykx >= topThresh) or (not isResist and ykx <= topThresh)
+                                            extremeTouches += 1
+
+                                bool hasExtreme = extremeTouches >= 1
+                                bool violOK     = hasExtreme or violPct <= maxViolPct
+                                if violOK and relevant and modeOK
+                                    float avgRes   = touches > 0 ? sumRes / touches : tol
+                                    int   recency  = bar_index - newB
+                                    float recBonus = math.max(0.2, 1.0 - (recency * 1.0) / lookback)
+                                    float fitFact  = 1.0 / (1.0 + avgRes / tol)
+                                    float violPen  = 1.0 / (1.0 + violPct / 5.0)
+                                    float extBonus = extremeTouches == 0 ? 0.5 : math.pow(5.0, extremeTouches)
+                                    float score    = touches * span * extBonus * recBonus * fitFact * violPen
+
+                                    array.push(cSlope,     slope)
+                                    array.push(cIntercept, intercept)
+                                    array.push(cOldest,    oldB)
+                                    array.push(cNewest,    newB)
+                                    array.push(cTouches,   touches)
+                                    array.push(cScore,     score)
+
+        // ── Sort candidates by score (selection sort on indices) ──
+        nc = array.size(cScore)
+        if nc > 0
+            indices = array.new<int>()
+            for ii = 0 to nc - 1
+                array.push(indices, ii)
+            if nc >= 2
+                for ii = 0 to nc - 2
+                    int maxAt = ii
+                    for jj = ii + 1 to nc - 1
+                        if array.get(cScore, array.get(indices, jj)) > array.get(cScore, array.get(indices, maxAt))
+                            maxAt := jj
+                    if maxAt != ii
+                        tmp = array.get(indices, ii)
+                        array.set(indices, ii, array.get(indices, maxAt))
+                        array.set(indices, maxAt, tmp)
+
+            // ── Greedy non-overlapping selection ──
+            used  = array.new_bool(n, false)
+            int drawn = 0
+            for ii = 0 to nc - 1
+                if drawn >= maxLines
+                    break
+                ci = array.get(indices, ii)
+                slope     = array.get(cSlope,     ci)
+                intercept = array.get(cIntercept, ci)
+                oldB      = array.get(cOldest,    ci)
+                newB      = array.get(cNewest,    ci)
+
+                int unusedC = 0
+                toMark = array.new<int>()
+                for k = 0 to n - 1
+                    xk = array.get(bars,   k)
+                    yk = array.get(prices, k)
+                    expected = slope * xk + intercept
+                    if math.abs(yk - expected) <= tol and not array.get(used, k)
+                        unusedC += 1
+                        array.push(toMark, k)
+
+                if unusedC >= minTouches
+                    int   actualT = array.size(toMark)
+                    int   extraT  = actualT - minTouches
+                    int   scaledW = actualT >= 7 ? lineWidth + 2 : actualT >= 5 ? lineWidth + 1 : actualT >= 4 ? lineWidth : math.max(1, lineWidth - 1)
+                    int   transp  = math.max(0, 60 - extraT * 15)
+
+                    // Retest detection: close near line at current bar
+                    float lineAtNow = slope * bar_index + intercept
+                    float distATR   = math.abs(close - lineAtNow) / atr
+                    bool  inRetest  = showRetest and distATR <= retestThr
+                    if inRetest
+                        transp  := math.max(0, transp - 30)
+                        scaledW := scaledW + 1
+
+                    // Line extends to last pivot + projectBars, but always at least
+                    // to the current bar so lines don't end "in the air" mid-chart.
+                    int   endBar  = math.max(newB + projectBars, bar_index)
+                    float yOld    = slope * oldB   + intercept
+                    float yEnd    = slope * endBar + intercept
+
+                    ln = line.new(oldB, yOld, endBar, yEnd,
+                         color=color.new(lineCol, transp), width=scaledW, style=lineStyleVal)
+                    if isResist
+                        array.push(resistLines, ln)
+                    else
+                        array.push(supportLines, ln)
+
+                    if showCount
+                        lbl = label.new(endBar, yEnd, str.tostring(actualT),
+                             style=isResist ? label.style_label_down : label.style_label_up,
+                             color=color.new(lineCol, transp), textcolor=color.white, size=size.tiny)
+                        array.push(touchLabels, lbl)
+
+                    if inRetest and retestLabel
+                        array.push(retestDist, distATR)
+                        array.push(retestY,    lineAtNow)
+                        array.push(retestCol,  color.new(lineCol, transp))
+
+                    for kk = 0 to array.size(toMark) - 1
+                        array.set(used, array.get(toMark, kk), true)
+                    drawn += 1
+
+// ── Convex hull (Andrew's monotone chain) ────────────────────────────────────
+// isUpper=true builds the upper hull (resistance envelope through highs);
+// isUpper=false builds the lower hull (support envelope through lows).
+findHull(array<float> prices, array<int> bars, bool isUpper, color lineCol) =>
+    n = array.size(prices)
+    if n >= 2
+        hull = array.new<int>()
+        for i = 0 to n - 1
+            // Remove last while the cross product points the wrong way
+            cont = true
+            while cont and array.size(hull) >= 2
+                last  = array.get(hull, array.size(hull) - 1)
+                slast = array.get(hull, array.size(hull) - 2)
+                hax = array.get(bars,   slast)
+                hay = array.get(prices, slast)
+                hbx = array.get(bars,   last)
+                hby = array.get(prices, last)
+                hcx = array.get(bars,   i)
+                hcy = array.get(prices, i)
+                cross = (hbx - hax) * (hcy - hay) - (hby - hay) * (hcx - hax)
+                // Upper hull: pop if cross >= 0 (b is below/on line a→c)
+                // Lower hull: pop if cross <= 0
+                if (isUpper and cross >= 0) or (not isUpper and cross <= 0)
+                    array.pop(hull)
+                else
+                    cont := false
+            array.push(hull, i)
+
+        hn = array.size(hull)
+        if hn >= 2
+            for i = 0 to hn - 2
+                idxA = array.get(hull, i)
+                idxB = array.get(hull, i + 1)
+                xa = array.get(bars,   idxA)
+                ya = array.get(prices, idxA)
+                xb = array.get(bars,   idxB)
+                yb = array.get(prices, idxB)
+                isLast = i == hn - 2
+                int   xEnd = isLast ? xb + projectBars : xb
+                float yEnd = isLast and xb != xa ? ya + (yb - ya) * (xEnd - xa) / (xb - xa) : yb
+                ln = line.new(xa, ya, xEnd, yEnd,
+                     color=lineCol, width=1, style=line.style_dotted)
+                array.push(hullLines, ln)
+
+// ── Render ───────────────────────────────────────────────────────────────────
+if barstate.islast
+    for ln in resistLines
+        line.delete(ln)
+    array.clear(resistLines)
+    for ln in supportLines
+        line.delete(ln)
+    array.clear(supportLines)
+    for ln in hullLines
+        line.delete(ln)
+    array.clear(hullLines)
+    for lb in touchLabels
+        label.delete(lb)
+    array.clear(touchLabels)
+    for lb in retestLabels
+        label.delete(lb)
+    array.clear(retestLabels)
+    array.clear(retestDist)
+    array.clear(retestY)
+    array.clear(retestCol)
+
+    findTrendlines(phPrices, phBars, true,  resistCol,  atr_14)
+    findTrendlines(plPrices, plBars, false, supportCol, atr_14)
+    if showHull
+        findHull(phPrices, phBars, true,  hullResistCol)
+        findHull(plPrices, plBars, false, hullSupportCol)
+
+    // Pick only the closest line in retest across both directions
+    if array.size(retestDist) > 0
+        int   bestIdx  = 0
+        float bestDist = array.get(retestDist, 0)
+        if array.size(retestDist) > 1
+            for i = 1 to array.size(retestDist) - 1
+                d = array.get(retestDist, i)
+                if d < bestDist
+                    bestDist := d
+                    bestIdx  := i
+        rLbl = label.new(bar_index, array.get(retestY, bestIdx),
+             "Retest " + str.tostring(bestDist, "#.0#") + " ATR",
+             style=label.style_label_left,
+             color=array.get(retestCol, bestIdx), textcolor=color.white, size=size.tiny)
+        array.push(retestLabels, rLbl)
