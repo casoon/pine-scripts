@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Smooth Trend Radar [WavesUnchained]
-// Version: 3.1
+// Version: 3.3
 // Author: WavesUnchained
-// Build: 2026-04-28 12:00:00
+// Build: 2026-04-28 23:00:00
 // ============================================================================
 // Double-smoothed Supertrend baseline for trend direction, with pivot-based
 // rejection signals at the baseline, statistical overextension highlighting,
@@ -13,7 +13,8 @@
 //   ✓ Supertrend midline double-smoothed with WMA + EMA — fewer whipsaws
 //   ✓ Auto Timeframe Scaling — parameters self-adjust per chart timeframe
 //   ✓ Trend direction from baseline slope (rising = bullish, falling = bearish)
-//   ✓ Pivot-based rejection with slope filter and baseline-touch validation
+//   ✓ Pivot-based rejection with slope filter, baseline-touch validation,
+//       and optional bar-polarity filter (Body or Pressure)
 //   ✓ Three SL methods: Flip Candle / Baseline ± ATR / Swing Structure
 //   ✓ Four TP modes: Pivot (R/S levels), R-Multiple, Fibonacci extension, ATR
 //   ✓ Pivot TP auto-fallback to ATR when prior session levels are out of range
@@ -28,73 +29,100 @@
 
 indicator("Smooth Trend Radar [WavesUnchained]", overlay=true, max_labels_count=500)
 
+// ─── User-defined types ─────────────────────────────────────────────────────
+type bar
+    float o = open
+    float h = high
+    float l = low
+    float c = close
+
+bar b = bar.new()
+
+// Display flag for inputs — keeps the chart status line uncluttered
+disp = display.all - display.status_line
+
 // ─── Inputs ──────────────────────────────────────────────────────────────────
 g_trend = "Trend"
-autoScale   = input.bool(true, "Auto Timeframe Scaling", group=g_trend,
+autoScale   = input.bool(true, "Auto Timeframe Scaling", group=g_trend, display=disp,
      tooltip="Automatically selects Supertrend, WMA, and EMA periods for the active timeframe. Manual inputs below are ignored when enabled.")
-stFactor    = input.float(12, "Supertrend Factor",    minval=1, step=0.5, group=g_trend,
+stFactor    = input.float(12, "Supertrend Factor",    minval=1, step=0.5, group=g_trend, display=disp,
      tooltip="ATR multiplier for the Supertrend bands. Higher = wider bands, fewer flips.")
-stAtrPeriod = input.int(90,   "Supertrend ATR Period", minval=1, group=g_trend,
+stAtrPeriod = input.int(90,   "Supertrend ATR Period", minval=1, group=g_trend, display=disp,
      tooltip="ATR lookback for the Supertrend. Longer = smoother, more lagging bands.")
-wmaLength   = input.int(40,   "WMA Length",            minval=1, group=g_trend,
+wmaLength   = input.int(40,   "WMA Length",            minval=1, group=g_trend, display=disp,
      tooltip="Weighted Moving Average applied to the Supertrend midline.")
-emaLength   = input.int(14,   "EMA Length",            minval=1, group=g_trend,
+emaLength   = input.int(14,   "EMA Length",            minval=1, group=g_trend, display=disp,
      tooltip="EMA applied to the WMA output — second smoothing pass.")
 
 g_rej = "Rejection"
-contFactor    = input.int(2, "Min Baseline Touches", minval=1, maxval=5, group=g_rej,
+contFactor     = input.int(2, "Min Baseline Touches", minval=1, maxval=5, group=g_rej, display=disp,
      tooltip="Minimum number of bars touching the baseline in the pivot window. Filters out single-spike touches — requires sustained contact before the pivot.")
-slopeLookback = input.int(5, "Slope Lookback",       minval=1, group=g_rej,
+slopeLookback  = input.int(5, "Slope Lookback",       minval=1, group=g_rej, display=disp,
      tooltip="Rejection only fires when the baseline is trending in the signal direction over this many bars. Filters out signals in flat/choppy zones.")
+polarityMethod = input.string("Off", "Polarity Filter", options=["Off", "Body", "Pressure"], group=g_rej, display=disp,
+     tooltip="Extra filter at the pivot bar. Off: no filter. Body: pivot bar must be bullish/bearish (close > open). Pressure: close must be in the upper/lower half of the bar's range — more robust against doji bars and long wicks (e.g. NatGas).")
 g_overext = "Overextension"
-overextLookback  = input.int(100, "Lookback", minval=20, group=g_overext,
+overextLookback  = input.int(100, "Lookback", minval=20, group=g_overext, display=disp,
      tooltip="How far back to compare current distance from baseline. Self-adapts to symbol/timeframe characteristics.")
-overextThreshold = input.float(85, "Percentile Threshold", minval=50, maxval=99, step=1, group=g_overext,
+overextThreshold = input.float(85, "Percentile Threshold", minval=50, maxval=99, step=1, group=g_overext, display=disp,
      tooltip="Bars where the distance from baseline is in the top X% of the lookback window are flagged as overextended. 85 = top 15%, 95 = top 5%.")
-overextBullCol   = input.color(#9c27b0, "Bull-Side Overext (price below baseline)", group=g_overext,
+overextBullCol   = input.color(#9c27b0, "Bull-Side Overext (price below baseline)", group=g_overext, display=disp,
      tooltip="Color used when price is overextended below the baseline — potential reversal up.")
-overextBearCol   = input.color(#ff6f00, "Bear-Side Overext (price above baseline)", group=g_overext,
+overextBearCol   = input.color(#ff6f00, "Bear-Side Overext (price above baseline)", group=g_overext, display=disp,
      tooltip="Color used when price is overextended above the baseline — potential reversal down.")
 
 g_tp = "Targets"
-showTargets   = input.bool(true,           "Show SL / TP Levels", group=g_tp)
+showTargets   = input.bool(true,           "Show SL / TP Levels", group=g_tp, display=disp)
 tpMode        = input.string("Pivot",      "TP Method",
-     options=["Pivot", "R-Multiple", "Fibonacci", "ATR"], group=g_tp,
+     options=["Pivot", "R-Multiple", "Fibonacci", "ATR"], group=g_tp, display=disp,
      tooltip="Pivot: nearest R/S pivot levels. R-Multiple: multiples of SL distance. Fibonacci: 0.618 / 1.0 / 1.618 of setup swing. ATR: multiples of long ATR.")
 
 slMode        = input.string("Flip Candle", "SL Method",
-     options=["Flip Candle", "Baseline", "Swing"], group=g_tp,
+     options=["Flip Candle", "Baseline", "Swing"], group=g_tp, display=disp,
      tooltip="Flip Candle: low/high of the flip bar ± ATR. Baseline: smoothed baseline ± ATR. Swing: lowest low / highest high within lookback ± ATR.")
-swingLookback = input.int(20,  "Swing Lookback (bars)", minval=5, group=g_tp,
+swingLookback = input.int(20,  "Swing Lookback (bars)", minval=5, group=g_tp, display=disp,
      tooltip="SL Method = Swing: bars to look back for swing low/high. Also used as the setup-swing lookback for TP Method = Fibonacci.")
-atrPeriod     = input.int(14,  "ATR Period",            minval=1, group=g_tp)
-slMultiplier  = input.float(2.0, "SL ATR Multiplier",   minval=0.1, step=0.1, group=g_tp,
+atrPeriod     = input.int(14,  "ATR Period",            minval=1, group=g_tp, display=disp)
+slMultiplier  = input.float(2.0, "SL ATR Multiplier",   minval=0.1, step=0.1, group=g_tp, display=disp,
      tooltip="ATR distance added to the SL reference point.")
 
 pivotPeriod   = input.string("D", "Pivot Period",
-     options=["D", "W", "M"], group=g_tp,
+     options=["D", "W", "M"], group=g_tp, display=disp,
      tooltip="Timeframe for pivot calculation. Used with TP Method = Pivot.")
 pivotFormula  = input.string("Camarilla", "Pivot Formula",
-     options=["Classic", "Camarilla"], group=g_tp,
+     options=["Classic", "Camarilla"], group=g_tp, display=disp,
      tooltip="Classic (Floor Trader): PP = (H+L+C)/3. Camarilla: tighter R/S bands scaled from close. Used with TP Method = Pivot.")
 
-tp1Multiplier = input.float(2.0, "TP1 Multiplier",      minval=0.1, step=0.1, group=g_tp,
+tp1Multiplier = input.float(2.0, "TP1 Multiplier",      minval=0.1, step=0.1, group=g_tp, display=disp,
      tooltip="R-Multiple: × SL distance. ATR: × long ATR. Not used for Pivot or Fibonacci.")
-tp2Multiplier = input.float(4.0, "TP2 Multiplier",      minval=0.1, step=0.1, group=g_tp)
-tp3Multiplier = input.float(6.0, "TP3 Multiplier",      minval=0.1, step=0.1, group=g_tp)
-atrLongPeriod = input.int(50,    "ATR Long Period",      minval=1,             group=g_tp,
+tp2Multiplier = input.float(4.0, "TP2 Multiplier",      minval=0.1, step=0.1, group=g_tp, display=disp)
+tp3Multiplier = input.float(6.0, "TP3 Multiplier",      minval=0.1, step=0.1, group=g_tp, display=disp)
+atrLongPeriod = input.int(50,    "ATR Long Period",      minval=1,             group=g_tp, display=disp,
      tooltip="ATR lookback for TP Method = ATR. Longer period = more stable volatility estimate.")
-rejReentry = input.bool(true,  "Re-Entry on Rejection after SL Hit", group=g_tp,
+rejReentry = input.bool(true,  "Re-Entry on Rejection after SL Hit", group=g_tp, display=disp,
      tooltip="When the SL is hit but the trend direction is unchanged, the next confirmed rejection signal rebuilds the Entry/SL/TP setup at the current price.")
-trailBE    = input.bool(false, "Trail SL to Break-Even at TP1",      group=g_tp,
+trailBE    = input.bool(false, "Trail SL to Break-Even at TP1",      group=g_tp, display=disp,
      tooltip="When TP1 is reached, the SL moves to the entry price. The trade can no longer result in a loss.")
 
 g_col = "Colors"
-bullCol = input.color(#26a69a, "Bullish", group=g_col)
-bearCol = input.color(#ef5350, "Bearish", group=g_col)
+bullCol = input.color(#26a69a, "Bullish", group=g_col, display=disp)
+bearCol = input.color(#ef5350, "Bearish", group=g_col, display=disp)
+flipSizeStr = input.string("Small", "Flip Label Size",       options=["Tiny","Small","Normal"], group=g_col, display=disp)
+rejSizeStr  = input.string("Tiny",  "Rejection Label Size",  options=["Tiny","Small","Normal"], group=g_col, display=disp)
+
+// String → size helper
+f_gTS(string _t) =>
+    switch _t
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        => size.small
+
+flipSize = f_gTS(flipSizeStr)
+rejSize  = f_gTS(rejSizeStr)
 
 g_alert = "Alerts"
-awaitConfirm = input.bool(true, "Await Bar Confirmation", group=g_alert)
+awaitConfirm = input.bool(true, "Await Bar Confirmation", group=g_alert, display=disp)
 
 // ─── Timeframe-scaled parameters ─────────────────────────────────────────────
 _tf = timeframe.period
@@ -145,8 +173,16 @@ for i = _efPivBars to _efPivBars + contFactor - 1
     if trend[i] == -1 and high[i] >= tL[i]
         _bearTouches += 1
 
-rejSignalBull = not na(_pivLow)  and _pivLow  <= tL[_efPivBars] and trend[_efPivBars] == 1  and tL[_efPivBars] > tL[_efPivBars + slopeLookback] and _bullTouches >= contFactor
-rejSignalBear = not na(_pivHigh) and _pivHigh >= tL[_efPivBars] and trend[_efPivBars] == -1 and tL[_efPivBars] < tL[_efPivBars + slopeLookback] and _bearTouches >= contFactor
+// Polarity filter at the pivot bar
+_pivO = open[_efPivBars]
+_pivH = high[_efPivBars]
+_pivL = low[_efPivBars]
+_pivC = close[_efPivBars]
+bool _polBull = polarityMethod == "Off" or (polarityMethod == "Body" ? _pivC > _pivO : (_pivC - _pivL) > (_pivH - _pivC))
+bool _polBear = polarityMethod == "Off" or (polarityMethod == "Body" ? _pivC < _pivO : (_pivC - _pivL) < (_pivH - _pivC))
+
+rejSignalBull = not na(_pivLow)  and _pivLow  <= tL[_efPivBars] and trend[_efPivBars] == 1  and tL[_efPivBars] > tL[_efPivBars + slopeLookback] and _bullTouches >= contFactor and _polBull
+rejSignalBear = not na(_pivHigh) and _pivHigh >= tL[_efPivBars] and trend[_efPivBars] == -1 and tL[_efPivBars] < tL[_efPivBars + slopeLookback] and _bearTouches >= contFactor and _polBear
 
 // ─── SL / TP levels ──────────────────────────────────────────────────────────
 volatility = ta.atr(atrPeriod)
@@ -217,7 +253,7 @@ if showTargets
         isBull       = longSignal or bullRejRe
         col          = isBull ? bullCol : bearCol
         tradeDir    := isBull ? 1 : -1
-        entryPrice  := close
+        entryPrice  := b.c
         tp1Done  := false
         tp2Done  := false
         tp3Done  := false
@@ -230,10 +266,10 @@ if showTargets
         else if slMode == "Swing"
             rawSL := isBull ? ta.lowest(low, swingLookback) - volatility * slMultiplier : ta.highest(high, swingLookback) + volatility * slMultiplier
         else  // "Flip Candle"
-            rawSL := isBull ? low - volatility * slMultiplier : high + volatility * slMultiplier
+            rawSL := isBull ? b.l - volatility * slMultiplier : b.h + volatility * slMultiplier
 
         // Clamp SL to the correct side of entry
-        SL := isBull ? math.min(rawSL, close - syminfo.mintick) : math.max(rawSL, close + syminfo.mintick)
+        SL := isBull ? math.min(rawSL, b.c - syminfo.mintick) : math.max(rawSL, b.c + syminfo.mintick)
 
         // TP levels by mode
         if tpMode == "Pivot"
@@ -305,22 +341,25 @@ plot(tL, "Baseline", color=trend == 1 ? color.new(bullCol, 50) : color.new(bearC
 
 if longSignal
     label.new(bar_index, tL, "▲",
-         style=label.style_label_up, color=bullCol, textcolor=color.white, size=size.small,
+         style=label.style_label_up, color=bullCol, textcolor=color.white, size=flipSize,
          tooltip="Bull Flip\nKurs: " + str.tostring(close, format.mintick) + "\n" + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
 if shortSignal
     label.new(bar_index, tL, "▼",
-         style=label.style_label_down, color=bearCol, textcolor=color.white, size=size.small,
+         style=label.style_label_down, color=bearCol, textcolor=color.white, size=flipSize,
          tooltip="Bear Flip\nKurs: " + str.tostring(close, format.mintick) + "\n" + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
 if rejSignalBull
     label.new(bar_index - _efPivBars, low[_efPivBars], "",
-         style=label.style_triangleup, color=color.new(bullCol, 30), size=size.tiny,
+         style=label.style_triangleup, color=color.new(bullCol, 30), size=rejSize,
          tooltip="Bull Rejection\nTief: " + str.tostring(low[_efPivBars], format.mintick) + "\n" + str.format_time(time[_efPivBars], "yyyy-MM-dd HH:mm", syminfo.timezone))
 if rejSignalBear
     label.new(bar_index - _efPivBars, high[_efPivBars], "",
-         style=label.style_triangledown, color=color.new(bearCol, 30), size=size.tiny,
+         style=label.style_triangledown, color=color.new(bearCol, 30), size=rejSize,
          tooltip="Bear Rejection\nHoch: " + str.tostring(high[_efPivBars], format.mintick) + "\n" + str.format_time(time[_efPivBars], "yyyy-MM-dd HH:mm", syminfo.timezone))
 
-_barCol = isOverextBull ? overextBullCol : isOverextBear ? overextBearCol : trend == 1 ? color.new(bullCol, 60) : color.new(bearCol, 60)
+// Gradient-based overextension intensity: from threshold (faded) to 100% (full)
+_overextBullGrad = color.from_gradient(_distPctRank, overextThreshold, 100.0, color.new(overextBullCol, 60), color.new(overextBullCol, 0))
+_overextBearGrad = color.from_gradient(_distPctRank, overextThreshold, 100.0, color.new(overextBearCol, 60), color.new(overextBearCol, 0))
+_barCol = isOverextBull ? _overextBullGrad : isOverextBear ? _overextBearGrad : trend == 1 ? color.new(bullCol, 60) : color.new(bearCol, 60)
 barcolor(_barCol)
 
 // ─── Alerts ──────────────────────────────────────────────────────────────────
