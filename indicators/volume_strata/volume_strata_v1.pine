@@ -1,23 +1,27 @@
 //@version=6
 // ============================================================================
 // Volume Strata [WavesUnchained]
-// Version: 1.2
+// Version: 1.8
 // Author: WavesUnchained
-// Build: 2026-04-27 00:00:00
+// Build: 2026-04-28 18:00:00
 // ============================================================================
 // Fixed-range volume profile anchored to the right, with POC, VAH/VAL,
-// HVN/LVN markers, context table, and alerts.
+// HVN/LVN zones, Value Area fill, naked POC tracking, expanded context table,
+// and alerts.
 //
 // Features:
 //   ✓ Right-anchored bars — profile grows left into the candle range
-//   ✓ Up / down volume split per row, value area highlighted
+//   ✓ Up / down volume split per row, value area highlighted (blue / yellow)
 //   ✓ Point of Control (POC) – dashed line with right-side price label
 //   ✓ Value Area High / Low (VAH / VAL) – dotted lines with labels
-//   ✓ High Volume Node (HVN) – rows exceeding mean + 1σ
-//   ✓ Low Volume Node (LVN) – local minima below mean − 1σ
-//   ✓ Info table – levels, up-vol %, VA state, Virgin POC, developing POC, POC distance
+//   ✓ Value Area fill – light shaded zone between VAH and VAL across the lookback
+//   ✓ HVN zones – horizontal bands at high-volume nodes (mean + 1σ rows)
+//   ✓ LVN zones – horizontal bands at low-volume nodes (local minima below mean − 1σ)
+//   ✓ Naked POC tracking – previous POCs not yet retested, drawn until price touches them
+//   ✓ Info table – levels, VA width, range, POC strength, up-vol %, total volume,
+//                  shape (D/P/b/B), VA state, Virgin POC, developing POC, POC distance
 //   ✓ Alerts – POC cross, VA entry/exit, VAH/VAL touch
-//   ✓ Show Profile toggle – hide bars to display levels only
+//   ✓ All visual layers individually toggleable
 //
 // ============================================================================
 
@@ -38,28 +42,40 @@ poc_width   = input.int  (2,                          'Width',         inline='p
 va_color    = input.color(color.new(#9e9e9e, 0),      'VAH / VAL',                  group=G_COLORS)
 hvn_color   = input.color(#ffd600,                    'HVN',                        group=G_COLORS)
 lvn_color   = input.color(#4dd0e1,                    'LVN',                        group=G_COLORS)
-vup_color   = input.color(color.new(color.blue,   30),'Value Area Up',              group=G_COLORS)
-vdown_color = input.color(color.new(color.orange, 30),'Value Area Down',            group=G_COLORS)
-up_color    = input.color(color.new(color.blue,   75),'Outside Up',                 group=G_COLORS)
-down_color  = input.color(color.new(color.orange, 75),'Outside Down',               group=G_COLORS)
+vup_color   = input.color(color.new(#1e88e5, 30),'Value Area Up',                  group=G_COLORS)
+vdown_color = input.color(color.new(#fdd835, 30),'Value Area Down',                group=G_COLORS)
+up_color    = input.color(color.new(#1e88e5, 75),'Outside Up',                     group=G_COLORS)
+down_color  = input.color(color.new(#fdd835, 75),'Outside Down',                   group=G_COLORS)
 
-show_profile = input.bool(true, 'Show profile bars', group=G_DISPLAY)
-show_poc     = input.bool(true, 'POC label',         group=G_DISPLAY)
-show_va      = input.bool(true, 'VAH / VAL',         group=G_DISPLAY)
-show_hvn     = input.bool(true, 'HVN markers',       group=G_DISPLAY)
-show_lvn     = input.bool(true, 'LVN markers',       group=G_DISPLAY)
-show_table   = input.bool(true, 'Info table',        group=G_DISPLAY)
+show_profile    = input.bool(true, 'Show profile bars',     group=G_DISPLAY)
+show_poc        = input.bool(true, 'POC label',             group=G_DISPLAY)
+show_va         = input.bool(true, 'VAH / VAL',             group=G_DISPLAY)
+show_va_fill    = input.bool(true, 'Value Area fill',       group=G_DISPLAY,
+     tooltip='Light shaded zone between VAH and VAL across the lookback range — visualizes the fair value area at a glance.')
+show_hvn        = input.bool(true, 'HVN zones',             group=G_DISPLAY,
+     tooltip='Horizontal shaded bands at high-volume node levels across the lookback range — strong reaction zones.')
+show_lvn        = input.bool(true, 'LVN zones',             group=G_DISPLAY,
+     tooltip='Horizontal shaded bands at low-volume node levels — fast-move zones, price tends to skip through.')
+show_naked_poc  = input.bool(true, 'Naked POCs',            group=G_DISPLAY,
+     tooltip='Track previous POCs that have not been retested. Drawn as faint dashed lines; removed once price touches them. Tracks new naked POCs from script load.')
+show_table      = input.bool(true, 'Info table',            group=G_DISPLAY)
 
 // ── Persistent drawing objects ────────────────────────────────────────────────
-var vol_bars = array.new_box(cnum * 2, na)
-var hvn_bars = array.new_box(cnum,     na)
-var lvn_bars = array.new_box(cnum,     na)
+var vol_bars  = array.new_box(cnum * 2, na)
+var hvn_bars  = array.new_box(cnum,     na)
+var lvn_bars  = array.new_box(cnum,     na)
+var box   va_fill_box  = na
 var line  poc_line = na
 var label poc_lbl  = na
 var line  vah_line = na
 var line  val_line = na
 var label vah_lbl  = na
 var label val_lbl  = na
+
+// Naked POC tracking
+var array<float> naked_pocs    = array.new<float>()
+var array<line>  naked_poc_lns = array.new<line>()
+NAKED_POC_MAX = 8
 
 // Persisted levels (updated on barstate.islast, used by alertcondition)
 var float poc_lvl_p  = na
@@ -70,13 +86,28 @@ var float prev_poc_lvl = na
 color TC = color.new(color.gray, 20)
 color HD = color.new(color.gray, 90)
 color SEP = color.new(color.gray, 80)
-var table info_tbl = table.new(position.top_right, 2, 10,
+var table info_tbl = table.new(position.top_right, 2, 15,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60), border_width=1,
      frame_color=color.new(color.gray, 40), frame_width=1)
 
+// Volume formatting helper
+formatVol(float v) =>
+    v >= 1e9 ? str.tostring(v / 1e9, '0.##') + 'B' : v >= 1e6 ? str.tostring(v / 1e6, '0.##') + 'M' : v >= 1e3 ? str.tostring(v / 1e3, '0.##') + 'K' : str.tostring(math.round(v))
+
 // ── ATR (runs every bar for alert and table use) ───────────────────────────────
 atr_14 = ta.atr(14)
+
+// ── Naked POC touch check (runs every bar) ────────────────────────────────────
+if show_naked_poc and array.size(naked_pocs) > 0
+    int i = 0
+    while i < array.size(naked_pocs)
+        npoc = array.get(naked_pocs, i)
+        if high >= npoc and low <= npoc
+            array.remove(naked_pocs, i)
+            line.delete(array.remove(naked_poc_lns, i))
+        else
+            i += 1
 
 // ── Level grid ────────────────────────────────────────────────────────────────
 top  = ta.highest(bbars)
@@ -179,6 +210,19 @@ if barstate.islast
     // ── Context: Developing POC direction ──────────────────────────────────────
     poc_trend_str = na(prev_poc_lvl) ? '—' : poc_lvl > prev_poc_lvl ? '↑ Rising' : poc_lvl < prev_poc_lvl ? '↓ Falling' : '— Stable'
     poc_trend_col = na(prev_poc_lvl) ? TC : poc_lvl > prev_poc_lvl ? #00c853 : poc_lvl < prev_poc_lvl ? #d50000 : TC
+
+    // ── Naked POC: when POC moves, the previous level is added as candidate ────
+    // Only added if not touched on the current bar (otherwise it's already retested)
+    npoc_already_touched = high >= prev_poc_lvl and low <= prev_poc_lvl
+    if show_naked_poc and not na(prev_poc_lvl) and math.abs(poc_lvl - prev_poc_lvl) > syminfo.mintick and not npoc_already_touched
+        if array.size(naked_pocs) >= NAKED_POC_MAX
+            line.delete(array.shift(naked_poc_lns))
+            array.shift(naked_pocs)
+        array.push(naked_pocs, prev_poc_lvl)
+        npoc_line = line.new(bar_index - bbars + 1, prev_poc_lvl, bar_index, prev_poc_lvl,
+             extend=extend.right, color=color.new(poc_color, 50),
+             width=1, style=line.style_dashed)
+        array.push(naked_poc_lns, npoc_line)
     prev_poc_lvl := poc_lvl
 
     // ── Context: Value Area State ───────────────────────────────────────────────
@@ -189,6 +233,30 @@ if barstate.islast
     poc_dist_raw = atr_14 > 0 ? (close - poc_lvl) / atr_14 : 0.
     poc_dist_str = (poc_dist_raw >= 0 ? '+' : '') + str.tostring(math.round(poc_dist_raw, 2)) + ' ATR'
     poc_dist_col = poc_dist_raw >= 0 ? #00c853 : #d50000
+
+    // ── Range, VA Width, POC Strength, Total Volume, Shape ─────────────────────
+    range_str = str.tostring(math.round_to_mintick(rng))
+
+    va_width      = vah_lvl - val_lvl
+    va_width_pct  = rng > 0 ? va_width / rng * 100 : 0.
+    va_width_str  = str.tostring(math.round(va_width_pct, 1)) + '%'
+    va_width_col  = va_width_pct < 30 ? #00c853 : va_width_pct > 60 ? #ff6f00 : TC
+
+    vol_at_poc    = array.get(totalvols, poc)
+    poc_strength  = total_all > 0 ? vol_at_poc / total_all * 100 : 0.
+    poc_str_str   = str.tostring(math.round(poc_strength, 1)) + '%'
+    poc_str_col   = poc_strength >= 15 ? #00c853 : poc_strength <= 8 ? #d50000 : TC
+
+    total_vol_str = formatVol(total_all)
+
+    // Profile Shape: position of POC within range + HVN count
+    poc_pos = rng > 0 ? (poc_lvl - bot) / rng : 0.5
+    hvn_count = 0
+    for x = 0 to cnum - 1
+        if array.get(totalvols, x) >= hvn_thresh
+            hvn_count += 1
+    shape_str = hvn_count >= 3 ? 'B (Double)' : poc_pos > 0.66 ? 'P (Accum)' : poc_pos < 0.34 ? 'b (Distri)' : 'D (Balanced)'
+    shape_col = hvn_count >= 3 ? #ffd600       : poc_pos > 0.66 ? #00c853     : poc_pos < 0.34 ? #d50000      : TC
 
     // Persist levels for alert conditions
     poc_lvl_p := poc_lvl
@@ -214,33 +282,37 @@ if barstate.islast
                  bar_index + prof_offset - up_w - dn_w, lev_top, bar_index + prof_offset - up_w, lev_bot,
                  border_width=0, bgcolor=in_va ? vdown_color : down_color))
 
-    // ── HVN markers ────────────────────────────────────────────────────────────
+    // ── HVN zones (extended horizontal bands across lookback range) ────────────
     for x = 0 to cnum - 1
         box.delete(array.get(hvn_bars, x))
         lev_top = array.get(levels, x + 1) - dist
         lev_bot = array.get(levels, x)     + dist
         if show_hvn and array.get(totalvols, x) >= hvn_thresh
             array.set(hvn_bars, x, box.new(
-                 bar_index + prof_offset + 1, lev_top, bar_index + prof_offset + 3, lev_bot,
-                 border_width=0, bgcolor=color.new(hvn_color, 20)))
+                 bar_index - bbars + 1, lev_top, bar_index, lev_bot,
+                 border_width=0, bgcolor=color.new(hvn_color, 88)))
         else
             array.set(hvn_bars, x, na)
 
-    // ── LVN markers (local minima below mean − 1σ only) ────────────────────────
+    // ── LVN zones (local minima below mean − 1σ — fast-move zones) ─────────────
     for x = 0 to cnum - 1
         box.delete(array.get(lvn_bars, x))
         lev_top = array.get(levels, x + 1) - dist
         lev_bot = array.get(levels, x)     + dist
         vol_x   = array.get(totalvols, x)
-        is_local_min = x > 0 and x < cnum - 1 and
-                       vol_x < array.get(totalvols, x - 1) and
-                       vol_x < array.get(totalvols, x + 1)
+        is_local_min = x > 0 and x < cnum - 1 and vol_x < array.get(totalvols, x - 1) and vol_x < array.get(totalvols, x + 1)
         if show_lvn and is_local_min and vol_x <= lvn_thresh
             array.set(lvn_bars, x, box.new(
-                 bar_index + prof_offset + 1, lev_top, bar_index + prof_offset + 3, lev_bot,
-                 border_width=0, bgcolor=color.new(lvn_color, 20)))
+                 bar_index - bbars + 1, lev_top, bar_index, lev_bot,
+                 border_width=0, bgcolor=color.new(lvn_color, 88)))
         else
             array.set(lvn_bars, x, na)
+
+    // ── Value Area fill (light zone between VAH and VAL) ───────────────────────
+    box.delete(va_fill_box)
+    if show_va_fill
+        va_fill_box := box.new(bar_index - bbars + 1, vah_lvl, bar_index, val_lvl,
+             border_width=0, bgcolor=color.new(va_color, 92))
 
     // ── POC ────────────────────────────────────────────────────────────────────
     line.delete(poc_line)
@@ -292,23 +364,37 @@ if barstate.islast
         table.cell(info_tbl, 0, 3, 'VAL',    text_color=TC,       text_size=size.small)
         table.cell(info_tbl, 1, 3, str.tostring(math.round_to_mintick(val_lvl)),
                    text_color=TC, text_size=size.small)
-        table.cell(info_tbl, 0, 4, 'Up Vol', text_color=TC,       text_size=size.small)
-        table.cell(info_tbl, 1, 4, str.tostring(math.round(up_pct, 1)) + '%',
-                   text_color=up_col, text_size=size.small)
+        table.cell(info_tbl, 0, 4, 'VA Width', text_color=TC,       text_size=size.small)
+        table.cell(info_tbl, 1, 4, va_width_str,
+                   text_color=va_width_col, text_size=size.small)
+        table.cell(info_tbl, 0, 5, 'Range',    text_color=TC,       text_size=size.small)
+        table.cell(info_tbl, 1, 5, range_str,
+                   text_color=TC, text_size=size.small)
         // Separator
-        table.cell(info_tbl, 0, 5, '', bgcolor=SEP, text_size=size.tiny)
-        table.cell(info_tbl, 1, 5, '', bgcolor=SEP, text_size=size.tiny)
+        table.cell(info_tbl, 0, 6, '', bgcolor=SEP, text_size=size.tiny)
+        table.cell(info_tbl, 1, 6, '', bgcolor=SEP, text_size=size.tiny)
+        // Volume / structure
+        table.cell(info_tbl, 0, 7, 'POC Str',  text_color=TC,       text_size=size.small)
+        table.cell(info_tbl, 1, 7, poc_str_str, text_color=poc_str_col, text_size=size.small)
+        table.cell(info_tbl, 0, 8, 'Up Vol',   text_color=TC,       text_size=size.small)
+        table.cell(info_tbl, 1, 8, str.tostring(math.round(up_pct, 1)) + '%',
+                   text_color=up_col, text_size=size.small)
+        table.cell(info_tbl, 0, 9, 'Total Vol', text_color=TC,       text_size=size.small)
+        table.cell(info_tbl, 1, 9, total_vol_str,
+                   text_color=TC, text_size=size.small)
+        table.cell(info_tbl, 0, 10, 'Shape',   text_color=TC,           text_size=size.small)
+        table.cell(info_tbl, 1, 10, shape_str, text_color=shape_col,    text_size=size.small)
         // Context
-        table.cell(info_tbl, 0, 6, 'VA State', text_color=TC,           text_size=size.small)
-        table.cell(info_tbl, 1, 6, va_state,   text_color=va_state_col, text_size=size.small)
-        table.cell(info_tbl, 0, 7, 'POC',      text_color=TC,           text_size=size.small)
-        table.cell(info_tbl, 1, 7, vpoc_str,   text_color=vpoc_col,     text_size=size.small)
-        table.cell(info_tbl, 0, 8, 'Dev POC',  text_color=TC,           text_size=size.small)
-        table.cell(info_tbl, 1, 8, poc_trend_str, text_color=poc_trend_col, text_size=size.small)
-        table.cell(info_tbl, 0, 9, 'POC Dist', text_color=TC,           text_size=size.small)
-        table.cell(info_tbl, 1, 9, poc_dist_str, text_color=poc_dist_col, text_size=size.small)
+        table.cell(info_tbl, 0, 11, 'VA State',  text_color=TC,           text_size=size.small)
+        table.cell(info_tbl, 1, 11, va_state,    text_color=va_state_col, text_size=size.small)
+        table.cell(info_tbl, 0, 12, 'POC',       text_color=TC,           text_size=size.small)
+        table.cell(info_tbl, 1, 12, vpoc_str,    text_color=vpoc_col,     text_size=size.small)
+        table.cell(info_tbl, 0, 13, 'Dev POC',   text_color=TC,           text_size=size.small)
+        table.cell(info_tbl, 1, 13, poc_trend_str, text_color=poc_trend_col, text_size=size.small)
+        table.cell(info_tbl, 0, 14, 'POC Dist',  text_color=TC,           text_size=size.small)
+        table.cell(info_tbl, 1, 14, poc_dist_str, text_color=poc_dist_col, text_size=size.small)
     else
-        table.clear(info_tbl, 0, 0, 1, 9)
+        table.clear(info_tbl, 0, 0, 1, 14)
 
 // ── Alert conditions ──────────────────────────────────────────────────────────
 alertcondition(ta.cross(close, poc_lvl_p),
