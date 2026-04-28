@@ -72,7 +72,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`relative_leg_efficiency_panel_chart.pine`](indicators/trend/relative_leg_efficiency_panel_chart.pine) | RLE in combined panel and chart overlay view |
 | [`mtf_trend_alignment.pine`](indicators/trend/mtf_trend_alignment.pine) | 4-timeframe Supertrend consensus dashboard `[RTA]` |
 | [`chandelier_flip_radar.pine`](indicators/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips |
-| [`smooth_trend_radar.pine`](indicators/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — slope-based trend direction, rejection signals, automatic SL/TP levels on flips |
+| [`smooth_trend_radar.pine`](indicators/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — auto-scaled per timeframe, pivot-based rejections, statistical overextension via candle coloring, automatic SL/TP setup on flips |
 
 ### Momentum & Oscillators
 

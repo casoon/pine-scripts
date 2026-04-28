@@ -1,29 +1,37 @@
 //@version=6
 // ============================================================================
 // Smooth Trend Radar [WavesUnchained]
-// Version: 1.8
+// Version: 3.1
 // Author: WavesUnchained
-// Build: 2026-04-27 12:00:00
+// Build: 2026-04-28 12:00:00
 // ============================================================================
-// Double-smoothed Supertrend baseline for trend direction, with rejection
-// signals at the baseline and automatic SL/TP level visualization on flips.
+// Double-smoothed Supertrend baseline for trend direction, with pivot-based
+// rejection signals at the baseline, statistical overextension highlighting,
+// and automatic SL/TP level visualization on flips.
 //
 // Features:
 //   ✓ Supertrend midline double-smoothed with WMA + EMA — fewer whipsaws
+//   ✓ Auto Timeframe Scaling — parameters self-adjust per chart timeframe
 //   ✓ Trend direction from baseline slope (rising = bullish, falling = bearish)
-//   ✓ Rejection: close-based with body filter — real rejections only, one signal
+//   ✓ Pivot-based rejection with slope filter and baseline-touch validation
 //   ✓ Three SL methods: Flip Candle / Baseline ± ATR / Swing Structure
-//   ✓ SL/TP levels drawn automatically on each trend flip
 //   ✓ Four TP modes: Pivot (R/S levels), R-Multiple, Fibonacci extension, ATR
-//   ✓ Risk/reward fill between entry–SL and entry–TP3
+//   ✓ Pivot TP auto-fallback to ATR when prior session levels are out of range
+//   ✓ Re-Entry on rejection after SL hit (optional)
+//   ✓ Trail SL to break-even at TP1 (optional)
+//   ✓ Statistical overextension via percentile rank — candle coloring
+//   ✓ Risk/reward fill between entry–SL (red) and entry–TP3 (green)
+//   ✓ Hover tooltips on all signals — price, direction, timestamp
 //   ✓ Direction-aware alerts for flips, rejections, and TP/SL hits
 //
 // ============================================================================
 
-indicator("Smooth Trend Radar [WavesUnchained]", overlay=true)
+indicator("Smooth Trend Radar [WavesUnchained]", overlay=true, max_labels_count=500)
 
 // ─── Inputs ──────────────────────────────────────────────────────────────────
 g_trend = "Trend"
+autoScale   = input.bool(true, "Auto Timeframe Scaling", group=g_trend,
+     tooltip="Automatically selects Supertrend, WMA, and EMA periods for the active timeframe. Manual inputs below are ignored when enabled.")
 stFactor    = input.float(12, "Supertrend Factor",    minval=1, step=0.5, group=g_trend,
      tooltip="ATR multiplier for the Supertrend bands. Higher = wider bands, fewer flips.")
 stAtrPeriod = input.int(90,   "Supertrend ATR Period", minval=1, group=g_trend,
@@ -34,8 +42,19 @@ emaLength   = input.int(14,   "EMA Length",            minval=1, group=g_trend,
      tooltip="EMA applied to the WMA output — second smoothing pass.")
 
 g_rej = "Rejection"
-contFactor = input.int(3, "Consecutive Bars", minval=1, group=g_rej,
-     tooltip="Number of consecutive valid rejection bars before the signal fires. Fires once when the count is reached, not on every subsequent bar.")
+contFactor    = input.int(2, "Min Baseline Touches", minval=1, maxval=5, group=g_rej,
+     tooltip="Minimum number of bars touching the baseline in the pivot window. Filters out single-spike touches — requires sustained contact before the pivot.")
+slopeLookback = input.int(5, "Slope Lookback",       minval=1, group=g_rej,
+     tooltip="Rejection only fires when the baseline is trending in the signal direction over this many bars. Filters out signals in flat/choppy zones.")
+g_overext = "Overextension"
+overextLookback  = input.int(100, "Lookback", minval=20, group=g_overext,
+     tooltip="How far back to compare current distance from baseline. Self-adapts to symbol/timeframe characteristics.")
+overextThreshold = input.float(85, "Percentile Threshold", minval=50, maxval=99, step=1, group=g_overext,
+     tooltip="Bars where the distance from baseline is in the top X% of the lookback window are flagged as overextended. 85 = top 15%, 95 = top 5%.")
+overextBullCol   = input.color(#9c27b0, "Bull-Side Overext (price below baseline)", group=g_overext,
+     tooltip="Color used when price is overextended below the baseline — potential reversal up.")
+overextBearCol   = input.color(#ff6f00, "Bear-Side Overext (price above baseline)", group=g_overext,
+     tooltip="Color used when price is overextended above the baseline — potential reversal down.")
 
 g_tp = "Targets"
 showTargets   = input.bool(true,           "Show SL / TP Levels", group=g_tp)
@@ -77,6 +96,14 @@ bearCol = input.color(#ef5350, "Bearish", group=g_col)
 g_alert = "Alerts"
 awaitConfirm = input.bool(true, "Await Bar Confirmation", group=g_alert)
 
+// ─── Timeframe-scaled parameters ─────────────────────────────────────────────
+_tf = timeframe.period
+_efFactor    = autoScale ? (_tf == "1" ? 4.0 : _tf == "5" ? 5.0 : _tf == "15" ? 6.0 : _tf == "30" ? 7.0 : _tf == "60" ? 5.0 : _tf == "240" ? 10.0 : timeframe.isdaily ? 12.0 : timeframe.isweekly ? 14.0 : stFactor)    : stFactor
+_efAtrPeriod = autoScale ? (_tf == "1" ? 10   : _tf == "5" ? 14   : _tf == "15" ? 20   : _tf == "30" ? 25   : _tf == "60" ? 14   : _tf == "240" ? 50   : timeframe.isdaily ? 90   : timeframe.isweekly ? 120  : stAtrPeriod) : stAtrPeriod
+_efWma       = autoScale ? (_tf == "1" ? 8    : _tf == "5" ? 10   : _tf == "15" ? 15   : _tf == "30" ? 18   : _tf == "60" ? 10   : _tf == "240" ? 30   : timeframe.isdaily ? 40   : timeframe.isweekly ? 50   : wmaLength)   : wmaLength
+_efEma       = autoScale ? (_tf == "1" ? 3    : _tf == "5" ? 4    : _tf == "15" ? 5    : _tf == "30" ? 6    : _tf == "60" ? 3    : _tf == "240" ? 10   : timeframe.isdaily ? 14   : timeframe.isweekly ? 18   : emaLength)   : emaLength
+_efPivBars   = autoScale ? (_tf == "1" ? 2    : _tf == "5" ? 2    : _tf == "15" ? 2    : _tf == "30" ? 2    : _tf == "60" ? 2    : _tf == "240" ? 3    : timeframe.isdaily ? 5    : timeframe.isweekly ? 4    : 2) : 2
+
 // ─── Supertrend midline ───────────────────────────────────────────────────────
 _supertrend(factor, atrPeriod) =>
     atr       = ta.atr(atrPeriod)
@@ -88,8 +115,8 @@ _supertrend(factor, atrPeriod) =>
     upper    := upper < prevUpper or close[1] > prevUpper ? upper : prevUpper
     [lower, upper]
 
-[lwr, upr] = _supertrend(stFactor, stAtrPeriod)
-tL = ta.ema(ta.wma(math.avg(lwr, upr), wmaLength), emaLength)
+[lwr, upr] = _supertrend(_efFactor, _efAtrPeriod)
+tL = ta.ema(ta.wma(math.avg(lwr, upr), _efWma), _efEma)
 
 // ─── Trend direction ─────────────────────────────────────────────────────────
 var int trend = 0
@@ -101,33 +128,25 @@ if ta.crossunder(tL, tL[1])
 longSignal  = trend == 1  and trend[1] != 1
 shortSignal = trend == -1 and trend[1] != -1
 
-// ─── Rejection counter ───────────────────────────────────────────────────────
-// A valid rejection requires the bar to touch the baseline, close on the trend
-// side, and have a body in the trend direction (not just a wick touch).
-bullishRej = trend == 1  and low <= tL and close > tL and close > open
-bearishRej = trend == -1 and high >= tL and close < tL and close < open
+// ─── Rejection detection (pivot + touch validation) ──────────────────────────
+// Primary: confirmed swing low/high at the baseline (precise, non-repainting).
+// Secondary: at least contFactor bars in the pivot window touched the baseline
+// — filters single-spike touches and requires sustained price-baseline contact.
+_pivLow  = ta.pivotlow( low,  _efPivBars, _efPivBars)
+_pivHigh = ta.pivothigh(high, _efPivBars, _efPivBars)
 
-var int rejCount = 0
-var int rejDir   = 0
-trendFlipped = longSignal or shortSignal
-currRejDir   = bullishRej ? 1 : bearishRej ? -1 : 0
+var int _bullTouches = 0
+var int _bearTouches = 0
+_bullTouches := 0
+_bearTouches := 0
+for i = _efPivBars to _efPivBars + contFactor - 1
+    if trend[i] == 1  and low[i]  <= tL[i]
+        _bullTouches += 1
+    if trend[i] == -1 and high[i] >= tL[i]
+        _bearTouches += 1
 
-if trendFlipped
-    rejCount := 0
-    rejDir   := 0
-else if currRejDir != 0
-    if currRejDir == rejDir
-        rejCount += 1
-    else
-        rejCount := 1
-        rejDir   := currRejDir
-else
-    rejCount := 0
-    rejDir   := 0
-
-// Signal fires exactly once when the count is reached
-rejSignalBull = rejCount == contFactor and trend == 1
-rejSignalBear = rejCount == contFactor and trend == -1
+rejSignalBull = not na(_pivLow)  and _pivLow  <= tL[_efPivBars] and trend[_efPivBars] == 1  and tL[_efPivBars] > tL[_efPivBars + slopeLookback] and _bullTouches >= contFactor
+rejSignalBear = not na(_pivHigh) and _pivHigh >= tL[_efPivBars] and trend[_efPivBars] == -1 and tL[_efPivBars] < tL[_efPivBars + slopeLookback] and _bearTouches >= contFactor
 
 // ─── SL / TP levels ──────────────────────────────────────────────────────────
 volatility = ta.atr(atrPeriod)
@@ -271,24 +290,38 @@ if showTargets
         label.set_x(tp2_label,   x2)
         label.set_x(tp3_label,   x2)
 
+// ─── Overextension (statistical) ─────────────────────────────────────────────
+// Compares the current distance from the baseline against historical distances
+// over the lookback window. A bar is "overextended" when its distance is in the
+// top X% of all distances seen — self-adapts to symbol/timeframe.
+_distSigned   = close - tL
+_distAbs      = math.abs(_distSigned)
+_distPctRank  = ta.percentrank(_distAbs, overextLookback)
+isOverextBull = _distPctRank > overextThreshold and _distSigned < 0
+isOverextBear = _distPctRank > overextThreshold and _distSigned > 0
+
 // ─── Plots ───────────────────────────────────────────────────────────────────
 plot(tL, "Baseline", color=trend == 1 ? color.new(bullCol, 50) : color.new(bearCol, 50), linewidth=2)
 
-plotshape(longSignal  ? tL : na, "Bull Flip",
-     style=shape.labelup,   location=location.absolute, size=size.small,
-     color=bullCol, textcolor=color.white, text="▲")
-plotshape(shortSignal ? tL : na, "Bear Flip",
-     style=shape.labeldown, location=location.absolute, size=size.small,
-     color=bearCol, textcolor=color.white, text="▼")
+if longSignal
+    label.new(bar_index, tL, "▲",
+         style=label.style_label_up, color=bullCol, textcolor=color.white, size=size.small,
+         tooltip="Bull Flip\nKurs: " + str.tostring(close, format.mintick) + "\n" + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
+if shortSignal
+    label.new(bar_index, tL, "▼",
+         style=label.style_label_down, color=bearCol, textcolor=color.white, size=size.small,
+         tooltip="Bear Flip\nKurs: " + str.tostring(close, format.mintick) + "\n" + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
+if rejSignalBull
+    label.new(bar_index - _efPivBars, low[_efPivBars], "",
+         style=label.style_triangleup, color=color.new(bullCol, 30), size=size.tiny,
+         tooltip="Bull Rejection\nTief: " + str.tostring(low[_efPivBars], format.mintick) + "\n" + str.format_time(time[_efPivBars], "yyyy-MM-dd HH:mm", syminfo.timezone))
+if rejSignalBear
+    label.new(bar_index - _efPivBars, high[_efPivBars], "",
+         style=label.style_triangledown, color=color.new(bearCol, 30), size=size.tiny,
+         tooltip="Bear Rejection\nHoch: " + str.tostring(high[_efPivBars], format.mintick) + "\n" + str.format_time(time[_efPivBars], "yyyy-MM-dd HH:mm", syminfo.timezone))
 
-plotshape(rejSignalBull ? tL : na, "Bull Rejection",
-     style=shape.triangleup,   location=location.belowbar,
-     color=color.new(bullCol, 30), size=size.tiny)
-plotshape(rejSignalBear ? tL : na, "Bear Rejection",
-     style=shape.triangledown, location=location.abovebar,
-     color=color.new(bearCol, 30), size=size.tiny)
-
-barcolor(trend == 1 ? color.new(bullCol, 60) : color.new(bearCol, 60))
+_barCol = isOverextBull ? overextBullCol : isOverextBear ? overextBearCol : trend == 1 ? color.new(bullCol, 60) : color.new(bearCol, 60)
+barcolor(_barCol)
 
 // ─── Alerts ──────────────────────────────────────────────────────────────────
 await = awaitConfirm ? barstate.isconfirmed : true
