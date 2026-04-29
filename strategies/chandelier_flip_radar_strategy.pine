@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Chandelier Flip Radar [WavesUnchained] — Strategy (generated)
-// Version: 1.2
+// Version: 1.3
 // Author: WavesUnchained
-// Build: 2026-04-27 00:00:00
+// Build: 2026-04-29 00:00:00
 // ============================================================================
 // ATR-based trailing stop with five-level trend state classification. Trend
 // weakening becomes visible before the actual direction change through
@@ -17,7 +17,7 @@
 //   ✓ Distance measured to the real flip trigger (longStopPrev / shortStopPrev)
 //   ✓ Inactive stop visible in gray (see where the flip trigger sits)
 //   ✓ Bull trap / bear trap markers: wick crossed trigger but close held
-//   ✓ Optional adaptive ATR multiplier scaled to volatility regime
+//   ✓ Three adaptive modes: Off / Simple (vol-regime) / AI (K-means self-selects best factor)
 //   ✓ Alert conditions and alert() calls for flips and traps
 //
 // ============================================================================
@@ -33,8 +33,15 @@ atrLen       = input.int(30,    "ATR Period",      minval=1,             group=g
 atrMult      = input.float(3.5, "ATR Multiplier",  minval=0.1, step=0.1, group=g_calc)
 useClose     = input.bool(true,  "Use Close for Extremums", group=g_calc,
      tooltip="On: highest/lowest close over the ATR period. Off: highest high / lowest low (wick-based).")
-adaptiveMult = input.bool(false, "Adaptive ATR Multiplier", group=g_calc,
-     tooltip="Scales the multiplier up in high-volatility regimes and down in low-volatility ones. Useful for instruments with large volatility swings.")
+adaptMode  = input.string("Off", "Adaptive Multiplier",
+     options=["Off", "Simple", "AI (K-means)"], group=g_calc,
+     tooltip="Off: fixed multiplier. Simple: scales with volatility regime. AI: K-means clustering selects the best-performing factor automatically.")
+aiRange    = input.float(1.5, "AI Factor Range (±)", minval=0.5, step=0.5, group=g_calc,
+     tooltip="Search range around the ATR Multiplier. E.g. ±1.5 with multiplier 3.5 searches factors 2.0–5.0.")
+aiStep     = input.float(0.5, "AI Factor Step",      minval=0.1, step=0.1, group=g_calc,
+     tooltip="Step between factor candidates. Smaller = finer resolution, more CPU.")
+perfAlpha  = input.float(10,  "AI Performance Memory", minval=2, step=1, group=g_calc,
+     tooltip="EMA smoothing for each factor's performance tracking. Higher = slower adaptation.")
 bodyFilter   = input.float(0.80, "Min Body for Flip (ATR×)", minval=0.0, step=0.05, group=g_calc,
      tooltip="Direction only changes when the flipping candle has a minimum body relative to ATR. Set 0 to disable. Prevents doji and inside-bar flips from changing the trend state.")
 
@@ -66,11 +73,95 @@ awaitConfirm = input.bool(true, "Await Bar Confirmation", group=g_alert,
 // ─── Calculation ─────────────────────────────────────────────────────────────
 atrRaw = ta.atr(atrLen)
 
-// Adaptive multiplier: scale with volatility regime vs. 100-bar average
+// ── Simple adaptive: scale with volatility regime vs. 100-bar average ─────────
 atrAvg   = nz(ta.sma(atrRaw, 100), atrRaw)
 volRatio = atrRaw / atrAvg
-dynMult  = adaptiveMult ? (volRatio > 1.3 ? atrMult * 1.2 : volRatio < 0.8 ? atrMult * 0.85 : atrMult) : atrMult
-atr      = dynMult * atrRaw
+
+// ── AI (K-means): run multiple ST instances, cluster by performance ────────────
+type _STPerf
+    float upper
+    float lower
+    float output
+    float perf  = 0.0
+    float factor = 0.0
+    int   trend  = 1
+
+var array<_STPerf> _stInst    = array.new<_STPerf>()
+var array<float>   _stFactors = array.new<float>()
+
+if barstate.isfirst
+    _f = atrMult - aiRange
+    while _f <= atrMult + aiRange + aiStep * 0.01
+        _stFactors.push(_f)
+        _stInst.push(_STPerf.new(factor=_f))
+        _f += aiStep
+
+var float aiMult = atrMult
+
+if adaptMode == "AI (K-means)" and _stInst.size() > 0
+    // Update each instance
+    for _inst in _stInst
+        _up  = hl2 + atrRaw * _inst.factor
+        _dn  = hl2 - atrRaw * _inst.factor
+        _inst.upper  := na(_inst.upper)  ? _up : (close[1] < _inst.upper  ? math.min(_up, _inst.upper)  : _up)
+        _inst.lower  := na(_inst.lower)  ? _dn : (close[1] > _inst.lower  ? math.max(_dn, _inst.lower)  : _dn)
+        _inst.trend  := close > _inst.upper ? 1 : close < _inst.lower ? 0 : _inst.trend
+        _diff         = nz(math.sign(close[1] - nz(_inst.output, hl2)))
+        _inst.perf   += 2 / (perfAlpha + 1) * (nz(close - close[1]) * _diff - _inst.perf)
+        _inst.output := _inst.trend == 1 ? _inst.lower : _inst.upper
+
+    // Build perf + factor arrays for clustering
+    _pd = array.new<float>()
+    _fd = array.new<float>()
+    for _inst in _stInst
+        _pd.push(_inst.perf)
+        _fd.push(_inst.factor)
+
+    // K-means: 3 clusters, quartile-initialized centroids
+    _c = array.from(
+         _pd.percentile_linear_interpolation(25),
+         _pd.percentile_linear_interpolation(50),
+         _pd.percentile_linear_interpolation(75))
+
+    _cf0 = array.new<float>()
+    _cf1 = array.new<float>()
+    _cf2 = array.new<float>()
+    _cp0 = array.new<float>()
+    _cp1 = array.new<float>()
+    _cp2 = array.new<float>()
+
+    for _ = 0 to 49
+        _cf0.clear() ; _cf1.clear() ; _cf2.clear()
+        _cp0.clear() ; _cp1.clear() ; _cp2.clear()
+
+        for i = 0 to _pd.size() - 1
+            _d0 = math.abs(_pd.get(i) - _c.get(0))
+            _d1 = math.abs(_pd.get(i) - _c.get(1))
+            _d2 = math.abs(_pd.get(i) - _c.get(2))
+            _idx = _d0 <= _d1 and _d0 <= _d2 ? 0 : _d1 <= _d2 ? 1 : 2
+            switch _idx
+                0 => _cf0.push(_fd.get(i)) ; _cp0.push(_pd.get(i))
+                1 => _cf1.push(_fd.get(i)) ; _cp1.push(_pd.get(i))
+                2 => _cf2.push(_fd.get(i)) ; _cp2.push(_pd.get(i))
+
+        _n0 = _cp0.size() > 0 ? _cp0.avg() : _c.get(0)
+        _n1 = _cp1.size() > 0 ? _cp1.avg() : _c.get(1)
+        _n2 = _cp2.size() > 0 ? _cp2.avg() : _c.get(2)
+        if _n0 == _c.get(0) and _n1 == _c.get(1) and _n2 == _c.get(2)
+            break
+        _c.set(0, _n0) ; _c.set(1, _n1) ; _c.set(2, _n2)
+
+    // Pick factor avg from best-performing cluster
+    _bestC = _c.get(0) >= _c.get(1) and _c.get(0) >= _c.get(2) ? 0 :
+             _c.get(1) >= _c.get(2) ? 1 : 2
+    _bestFactors = _bestC == 0 ? _cf0 : _bestC == 1 ? _cf1 : _cf2
+    aiMult := _bestFactors.size() > 0 ? nz(_bestFactors.avg(), atrMult) : atrMult
+
+dynMult = switch adaptMode
+    "Simple"       => volRatio > 1.3 ? atrMult * 1.2 : volRatio < 0.8 ? atrMult * 0.85 : atrMult
+    "AI (K-means)" => aiMult
+    => atrMult
+atr = dynMult * atrRaw
 
 // Trailing stops with ratchet mechanism
 longStop     = (useClose ? ta.highest(close, atrLen) : ta.highest(high, atrLen)) - atr
