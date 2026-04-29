@@ -71,6 +71,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`relative_leg_efficiency.pine`](indicators/trend/relative_leg_efficiency.pine) | Efficiency ratio per price leg — how directional each move is |
 | [`relative_leg_efficiency_panel_chart.pine`](indicators/trend/relative_leg_efficiency_panel_chart.pine) | RLE in combined panel and chart overlay view |
 | [`mtf_trend_alignment.pine`](indicators/trend/mtf_trend_alignment.pine) | 4-timeframe Supertrend consensus dashboard `[RTA]` |
+| [`auto_trendlines.pine`](indicators/auto_trendlines/auto_trendlines.pine) | Combinatorial trendline detection with OLS refinement, quality scoring, and greedy selection |
 | [`chandelier_flip_radar.pine`](indicators/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips |
 | [`smooth_trend_radar.pine`](indicators/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — auto-scaled per timeframe, pivot-based rejections, statistical overextension via candle coloring, automatic SL/TP setup on flips |
 
@@ -88,7 +89,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 
 | Script | What it does |
 |--------|--------------|
-| [`volume_strata_v1.pine`](indicators/volume_strata/volume_strata_v1.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN markers, info table |
+| [`volume_strata.pine`](indicators/volume_strata/volume_strata.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN/LVN zones, naked POC tracking |
 | [`vwap_cross_visuals.pine`](indicators/liquidity/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
 | [`liquidity_hunter.pine`](indicators/liquidity/liquidity_hunter.pine) | Institutional liquidity zone mapping `[RTA]` |
 | [`smart_money_dashboard.pine`](indicators/liquidity/smart_money_dashboard.pine) | Order flow, SMC, and liquidity dashboard |
@@ -98,6 +99,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | Script | What it does |
 |--------|--------------|
 | [`zigzag_patterns_framework.pine`](indicators/patterns/zigzag_patterns_framework.pine) | ZigZag-based pattern detection — ABC, triangles, Wolfe waves |
+| [`zigzag_fibo_pullback_map.pine`](indicators/patterns/zigzag_fibo_pullback_map.pine) | Confirmed ZigZag pivots with pullback-to-Fibonacci labeling and active fib fan |
 | [`wave_navigator.pine`](indicators/patterns/wave_navigator.pine) | Elliott Wave recognition and labeling |
 | [`pattern_recognition.pine`](indicators/patterns/pattern_recognition.pine) | Geometric chart pattern detection with divergence analysis |
 | [`rj_wave.pine`](indicators/patterns/rj_wave.pine) | Fibonacci structure validator for RJ-Wave patterns |
@@ -106,12 +108,20 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 
 ## Strategies
 
-The goal is to eventually build properly backtested, executable strategies from these indicator signals. The two scripts here are early attempts — useful as a starting point, not a finished product.
+Strategy files are **auto-generated** from indicator source files via `scripts/build_strategies.py`. Never edit them directly. Each strategy adds a trade direction filter, confirmed-bar gate, cooldown, and optional break-even stop on top of the indicator logic.
 
-| Script | What it does |
-|--------|--------------|
-| [`flowzone_strategy.pine`](strategies/flowzone_strategy.pine) | Entry execution based on FlowZone confluence signals |
-| [`zigzag_corridors_strategy.pine`](strategies/zigzag_corridors_strategy.pine) | ZigZag corridor breakouts with Bollinger/Keltner squeeze |
+```bash
+python3 scripts/build_strategies.py          # rebuild all
+python3 scripts/build_strategies.py indicators/chandelier_flip_radar/
+```
+
+| Strategy | Based on | SL type | Backtest rating |
+|----------|----------|---------|-----------------|
+| [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising (PF 1.22, NatGas 4H) |
+| [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising (PF 1.14, NatGas 4H) |
+| [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (PF 1.13, NatGas 4H) |
+
+Full backtest results and parameter notes: `strategies/*_assessment.md`. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
 
 ---
 

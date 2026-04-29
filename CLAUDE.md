@@ -96,3 +96,53 @@ color hd = color.new(color.gray, 90)   // header row background (very light gray
 3. Write `README.md` following the structure above
 4. Write `DESCRIPTION_TV.bbcode` if the script is intended for TradingView publication
 5. Add an entry to the root `README.md` under the appropriate section with a one-line description
+
+## Strategy infrastructure
+
+Generated strategy files live in `strategies/`. Never edit them by hand — they are always regenerated from the indicator source.
+
+### Generator
+
+```bash
+python3 scripts/build_strategies.py                        # rebuild all
+python3 scripts/build_strategies.py indicators/foo/        # rebuild one
+```
+
+### @strategy-config annotation
+
+To make an indicator eligible for strategy generation, add a config block at the end of the `.pine` file (after all code). TradingView ignores these comment lines.
+
+```pine
+// @strategy-config
+// long:       longSignal
+// short:      shortSignal
+// sl_type:    trailing          // trailing | fixed | pivot_atr
+// sl_long:    longStop          // for sl_type: trailing
+// sl_short:   shortStop         // for sl_type: trailing
+// sl:         SL                // for sl_type: fixed
+// tp1:        TP1_lvl           // optional, for sl_type: fixed with TP levels
+// tp2:        TP2_lvl
+// tp3:        TP3_lvl
+// tp_default: TP1               // default TP level shown in strategy inputs
+// pivot_low:  low[pivRight]     // for sl_type: pivot_atr
+// pivot_high: high[pivRight]    // for sl_type: pivot_atr
+// @end-strategy-config
+```
+
+Multiple signals per direction: comma-separated (`long: sig1, sig2` → `sig1 or sig2`).
+
+### Generated strategy features (always included)
+
+Every generated strategy adds these inputs to the Strategy group:
+- **Trade Direction** — Both / Long Only / Short Only
+- **Entries on Confirmed Bar Only** (default: true) — prevents repainting
+- **Cooldown Bars After Exit** (default: 0) — whipsaw protection
+- **Break-Even Stop** (default: off) + **Break-Even Trigger (ATR×)**
+
+Commission default: 0.02% (realistic for CFD/futures).
+
+### Assessment files
+
+Each strategy has a `strategies/<name>_strategy_assessment.md` documenting backtest runs and verdict. The schema is defined in `strategies/ASSESSMENT_SCHEMA.md`.
+
+Ratings: **Not ready** (PF < 1.15 or Return/DD < 1.5) · **Promising** (PF ≥ 1.15, not yet out-of-sample validated) · **Ready** (PF ≥ 1.3, validated on ≥ 2 instruments)
