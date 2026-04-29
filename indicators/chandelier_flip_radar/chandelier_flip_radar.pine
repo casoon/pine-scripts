@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Chandelier Flip Radar [WavesUnchained]
-// Version: 1.3
+// Version: 1.4
 // Author: WavesUnchained
 // Build: 2026-04-29 00:00:00
 // ============================================================================
@@ -18,6 +18,8 @@
 //   ✓ Inactive stop visible in gray (see where the flip trigger sits)
 //   ✓ Bull trap / bear trap markers: wick crossed trigger but close held
 //   ✓ Three adaptive modes: Off / Simple (vol-regime) / AI (K-means self-selects best factor)
+//   ✓ AI cluster selector: Best / Average / Worst cluster as multiplier source
+//   ✓ AI Performance AMA: adaptive smoothed stop line weighted by cluster performance index
 //   ✓ Alert conditions and alert() calls for flips and traps
 //
 // ============================================================================
@@ -39,6 +41,8 @@ aiStep     = input.float(0.5, "AI Factor Step",      minval=0.1, step=0.1, group
      tooltip="Step between factor candidates. Smaller = finer resolution, more CPU.")
 perfAlpha  = input.float(10,  "AI Performance Memory", minval=2, step=1, group=g_calc,
      tooltip="EMA smoothing for each factor's performance tracking. Higher = slower adaptation.")
+aiCluster  = input.string("Best", "AI Cluster", options=["Best", "Average", "Worst"], group=g_calc,
+     tooltip="Which K-means cluster to use as the multiplier source. Best = highest recent performance. Average = middle cluster. Worst = lowest.")
 bodyFilter   = input.float(0.80, "Min Body for Flip (ATR×)", minval=0.0, step=0.05, group=g_calc,
      tooltip="Direction only changes when the flipping candle has a minimum body relative to ATR. Set 0 to disable. Prevents doji and inside-bar flips from changing the trend state.")
 
@@ -54,6 +58,8 @@ showInactive   = input.bool(true,  "Show Inactive Stop",  group=g_vis,
 showLabels     = input.bool(true,  "Show Flip Labels",    group=g_vis)
 showTraps      = input.bool(true,  "Show Traps",          group=g_vis,
      tooltip="Marks bars where a wick crossed the flip trigger but the close held — often a stop hunt or liquidity grab.")
+showAMA        = input.bool(true,  "Show AI AMA",         group=g_vis,
+     tooltip="Adaptive Moving Average of the active stop, weighted by cluster performance index. Only visible in AI (K-means) mode.")
 colorBars      = input.bool(true,  "Color Bars by State", group=g_vis)
 highlightState = input.bool(true,  "Highlight Fill",      group=g_vis)
 
@@ -93,7 +99,9 @@ if barstate.isfirst
         _stInst.push(_STPerf.new(factor=_f))
         _f += aiStep
 
-var float aiMult = atrMult
+var float aiMult     = atrMult
+var float aiPerfIdx  = 0.0
+var float aiAMA      = na
 
 if adaptMode == "AI (K-means)" and _stInst.size() > 0
     // Update each instance
@@ -128,8 +136,12 @@ if adaptMode == "AI (K-means)" and _stInst.size() > 0
     _cp2 = array.new<float>()
 
     for _ = 0 to 49
-        _cf0.clear() ; _cf1.clear() ; _cf2.clear()
-        _cp0.clear() ; _cp1.clear() ; _cp2.clear()
+        _cf0.clear()
+        _cf1.clear()
+        _cf2.clear()
+        _cp0.clear()
+        _cp1.clear()
+        _cp2.clear()
 
         for i = 0 to _pd.size() - 1
             _d0 = math.abs(_pd.get(i) - _c.get(0))
@@ -137,22 +149,39 @@ if adaptMode == "AI (K-means)" and _stInst.size() > 0
             _d2 = math.abs(_pd.get(i) - _c.get(2))
             _idx = _d0 <= _d1 and _d0 <= _d2 ? 0 : _d1 <= _d2 ? 1 : 2
             switch _idx
-                0 => _cf0.push(_fd.get(i)) ; _cp0.push(_pd.get(i))
-                1 => _cf1.push(_fd.get(i)) ; _cp1.push(_pd.get(i))
-                2 => _cf2.push(_fd.get(i)) ; _cp2.push(_pd.get(i))
+                0 =>
+                    _cf0.push(_fd.get(i))
+                    _cp0.push(_pd.get(i))
+                1 =>
+                    _cf1.push(_fd.get(i))
+                    _cp1.push(_pd.get(i))
+                2 =>
+                    _cf2.push(_fd.get(i))
+                    _cp2.push(_pd.get(i))
 
         _n0 = _cp0.size() > 0 ? _cp0.avg() : _c.get(0)
         _n1 = _cp1.size() > 0 ? _cp1.avg() : _c.get(1)
         _n2 = _cp2.size() > 0 ? _cp2.avg() : _c.get(2)
         if _n0 == _c.get(0) and _n1 == _c.get(1) and _n2 == _c.get(2)
             break
-        _c.set(0, _n0) ; _c.set(1, _n1) ; _c.set(2, _n2)
+        _c.set(0, _n0)
+        _c.set(1, _n1)
+        _c.set(2, _n2)
 
-    // Pick factor avg from best-performing cluster
-    _bestC = _c.get(0) >= _c.get(1) and _c.get(0) >= _c.get(2) ? 0 :
-             _c.get(1) >= _c.get(2) ? 1 : 2
-    _bestFactors = _bestC == 0 ? _cf0 : _bestC == 1 ? _cf1 : _cf2
-    aiMult := _bestFactors.size() > 0 ? nz(_bestFactors.avg(), atrMult) : atrMult
+    // Identify cluster ordering by centroid value
+    _c0v      = _c.get(0)
+    _c1v      = _c.get(1)
+    _c2v      = _c.get(2)
+    _bestIdx  = _c0v >= _c1v and _c0v >= _c2v ? 0 : _c1v >= _c2v ? 1 : 2
+    _worstIdx = _c0v <= _c1v and _c0v <= _c2v ? 0 : _c1v <= _c2v ? 1 : 2
+    _avgIdx   = math.max(0, math.min(2, 3 - _bestIdx - _worstIdx))
+    _tIdx     = aiCluster == "Best" ? _bestIdx : aiCluster == "Worst" ? _worstIdx : _avgIdx
+    _tFactors = _tIdx == 0 ? _cf0 : _tIdx == 1 ? _cf1 : _cf2
+    _tPerfs   = _tIdx == 0 ? _cp0 : _tIdx == 1 ? _cp1 : _cp2
+    aiMult   := _tFactors.size() > 0 ? nz(_tFactors.avg(), atrMult) : atrMult
+    // Normalize cluster perf for AMA smoothing factor
+    _den      = math.max(nz(ta.ema(math.abs(close - close[1]), int(perfAlpha)), 1e-10), 1e-10)
+    aiPerfIdx := _tPerfs.size() > 0 ? math.min(math.max(_tPerfs.avg(), 0.0) / _den, 1.0) : 0.0
 
 dynMult = switch adaptMode
     "Simple"       => volRatio > 1.3 ? atrMult * 1.2 : volRatio < 0.8 ? atrMult * 0.85 : atrMult
@@ -207,6 +236,13 @@ if not danger
 bullTrap = dir == -1 and high > shortStopPrev and close <= shortStopPrev
 bearTrap = dir == 1  and low  < longStopPrev  and close >= longStopPrev
 
+// Performance AMA: stop smoothed by cluster perf index (AI mode only)
+_activeStop = dir == 1 ? longStop : shortStop
+if na(aiAMA)
+    aiAMA := _activeStop
+else if adaptMode == "AI (K-means)"
+    aiAMA += aiPerfIdx * (_activeStop - aiAMA)
+
 // ─── Colors ──────────────────────────────────────────────────────────────────
 stateCol =
      state ==  2 ? bullCol :
@@ -229,6 +265,10 @@ plot(showInactive and dir == -1 ? longStop  : na, "Long Stop (inactive)",
      color=inactiveCol, linewidth=1, style=plot.style_linebr)
 plot(showInactive and dir == 1  ? shortStop : na, "Short Stop (inactive)",
      color=inactiveCol, linewidth=1, style=plot.style_linebr)
+
+plot(showAMA and adaptMode == "AI (K-means)" ? aiAMA : na, "AI AMA",
+     color=ta.cross(close, aiAMA) ? na : close > aiAMA ? color.new(bullCol, 45) : color.new(bearCol, 45),
+     linewidth=1, style=plot.style_linebr)
 
 midPricePlot = plot(ohlc4, display=display.none, editable=false)
 fill(midPricePlot, longStopPlot,  title="Long Fill",
