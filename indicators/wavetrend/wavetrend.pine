@@ -1,0 +1,1059 @@
+//@version=6
+// ============================================================================
+// WaveTrend [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-04-30 00:00:00
+// ============================================================================
+// WaveTrend momentum oscillator with cross signals, divergence detection,
+// overextension analysis, and configurable price-chart overlay.
+//
+// Features:
+//   ✓ WaveTrend Oscillator with cross signals (Strong / All / None)
+//   ✓ Divergence detection — regular and hidden, bullish and bearish
+//   ✓ Dual-pane markers: oscillator pane at osc value + price chart via force_overlay
+//   ✓ Analytics dashboard with composite bias scoring
+//   ✓ Extension A — Overextension duration: suppresses whipsaw crosses
+//   ✓ Extension B — Slope quality filter: velocity context on reversal signals
+//   ✓ Extension C — Zone persistence: sustained trend signal above/below zero
+//   ✓ Extension D — Wave anatomy: percentile rank, wave structure, correction depth
+//   ✓ Signal Generation — quality-scored long/short signals with alertconditions
+//
+// ============================================================================
+
+indicator('WaveTrend [WavesUnchained]', 'WT',
+     max_labels_count=500, max_lines_count=500, max_boxes_count=250, max_bars_back=500)
+
+// ─── Display mask ────────────────────────────────────────────────────────────
+
+display = display.all - display.status_line
+
+// ─── WaveTrend Engine ────────────────────────────────────────────────────────
+
+group_wave = 'WaveTrend Engine'
+
+tp_wave = 'WaveTrend — Momentum Oscillator\n────────────────────────────\n' +
+     'Measures price deviation from a smoothed equilibrium to identify momentum extremes and turning points.\n\n' +
+     'Cross Signals:\n' +
+     '• Strong → Crosses inside extreme zones\n' +
+     '• All → Every cross event\n' +
+     '• None → Markers disabled\n\n' +
+     'Strong crosses near extremes often precede reversals.\n' +
+     'Mid-zone crosses typically indicate continuation.'
+
+crosses = input.string('Strong', 'Cross Signals', display=display,
+     options=['Strong', 'All', 'None'], group=group_wave, tooltip=tp_wave)
+
+chLength  = input.int(10, '  Channel Length',  minval=1, group=group_wave, display=display,
+     tooltip='Controls oscillator sensitivity. Lower = faster and noisier. Higher = smoother with more lag.')
+avgLength = input.int(21, '  Average Length',  minval=1, group=group_wave, display=display,
+     tooltip='Smoothing applied to the oscillator core. Higher = cleaner trends, delayed turns.')
+sigLength = input.int(4,  '  Signal Length',   minval=1, group=group_wave, display=display,
+     tooltip='Signal line responsiveness. Lower = earlier crosses.')
+
+upperBand1 = input.int( 60, '  Upper Band 1', group=group_wave, display=display)
+upperBand2 = input.int( 53, '  Upper Band 2', group=group_wave, display=display)
+lowerBand2 = input.int(-53, '  Lower Band 2', group=group_wave, display=display)
+lowerBand1 = input.int(-60, '  Lower Band 1', group=group_wave, display=display)
+
+zoneMode = input.string('Fixed', 'Zone Mode', options=['Fixed', 'Adaptive (Percentile)'], group=group_wave, display=display,
+     tooltip='Fixed: uses the configured Upper/Lower Band values as OB/OS thresholds.\n\nAdaptive (Percentile): computes thresholds dynamically from the rolling 10th/90th percentile of the oscillator over the Percentile Lookback (Ext D). Adapts to instruments with extreme spikes (e.g. NatGas) where fixed bands miss many reversals.')
+
+showDashboard = input.bool(true, 'Show Dashboard', group=group_wave, inline='dash',
+     tooltip='Displays the analytics panel. Shows oscillator value, zone, momentum, cross, divergence, regime, extreme state, extension readings, and composite bias.')
+dashSizeInput = input.string('Tiny', '', inline='dash', group=group_wave, display=display,
+     options=['Tiny', 'Small', 'Normal'])
+
+useAutoCalibrate = input.bool(true, 'Auto-Calibrate by Timeframe', group=group_wave,
+     tooltip='When enabled, scales all bar-count parameters (chLength, sustainMin, percLookback, etc.) by the ratio of 4H baseline to the chart timeframe.\n\nThe displayed input values represent the 4H equivalent. On 1H, lengths quadruple; on 1D, they shrink ~6×.\n\nUse this when applying the strategy across multiple timeframes without re-tuning each parameter manually. Disable for fully manual control.')
+
+// ─── Extension A — Overextension Duration ────────────────────────────────────
+
+group_extA = 'Extension A — Overextension Duration'
+
+useExtA = input.bool(true, 'Enable', group=group_extA,
+     tooltip='Tracks consecutive bars in the OB/OS zone.\n\nWhen the count exceeds the threshold, weak and regular cross signals are suppressed to avoid chasing exits in trending conditions. Strong crosses (deep OB/OS) are never suppressed.')
+extDuration = input.int(5, '  Min Bars in Zone', minval=2, maxval=30, group=group_extA, display=display,
+     tooltip='Consecutive bars in OB or OS zone required to activate whipsaw suppression for non-strong crosses.')
+
+// ─── Extension B — Slope Quality Filter ──────────────────────────────────────
+
+group_extB = 'Extension B — Slope Quality Filter'
+
+useExtB = input.bool(true, 'Enable', group=group_extB,
+     tooltip='Measures the rate of change (velocity) of the WaveTrend oscillator.\n\nA flattening slope in an OB/OS zone indicates exhaustion and strengthens the case for reversal. A still-rising slope suggests trend continuation. Slope context appears in strong cross tooltips and the dashboard.')
+slopeLen = input.int(3, '  Slope Lookback', minval=1, maxval=10, group=group_extB, display=display,
+     tooltip='Number of bars over which the oscillator slope is measured.')
+
+// ─── Extension C — Zone Persistence ──────────────────────────────────────────
+
+group_extC = 'Extension C — Zone Persistence'
+
+useExtC = input.bool(true, 'Enable', group=group_extC,
+     tooltip='Tracks consecutive bars above or below the zero line.\n\nA sustained reading above zero signals bullish wave continuation. A sustained reading below zero signals bearish wave continuation. Useful for identifying trending conditions where counter-trend signals should be discounted.')
+sustainMin = input.int(8, '  Min Bars for Sustained Signal', minval=3, maxval=50, group=group_extC, display=display,
+     tooltip='Minimum consecutive bars above or below zero to activate the sustained trend signal.')
+
+// ─── Extension D — Wave Anatomy ──────────────────────────────────────────────
+
+group_extD = 'Extension D — Wave Anatomy'
+
+useExtD = input.bool(true, 'Enable', group=group_extD,
+     tooltip='Three metrics for reading wave maturity and correction depth.\n\n• Percentile — where the current WT value sits in its recent distribution (0 = lowest, 100 = highest)\n• Wave Structure — whether oscillator peaks and troughs are rising or falling\n• Correction — how deep the current pullback is relative to the last wave amplitude\n\nA correction above the warning threshold while percentile is falling = wave likely ending.')
+percLookback = input.int(100, '  Percentile Lookback', minval=50, maxval=500, group=group_extD, display=display,
+     tooltip='Bars used to calculate the percentile rank of the oscillator. Higher = longer memory.')
+wavePivLen = input.int(5, '  Pivot Window', minval=2, maxval=20, group=group_extD, display=display,
+     tooltip='Bars on each side required to confirm an oscillator peak or trough.')
+corrWarnPct = input.int(60, '  Correction Warning %', minval=20, maxval=90, group=group_extD, display=display,
+     tooltip='Correction depth that triggers a warning. Above this, the wave is likely exhausting.')
+
+// ─── Signal Generation ───────────────────────────────────────────────────────
+
+group_sig = 'Signal Generation'
+
+showSignals = input.bool(true, 'Show Signal Markers', group=group_sig,
+     tooltip='Displays ▲ L / ▼ S markers for confirmed long/short signals.\nSignal markers are distinct from cross markers and reflect the full enabled condition set.')
+
+// Long signal sources
+sigLongCross    = input.bool(true,  'Long: WT cross up',              inline='sl', group=group_sig)
+sigLongZero     = input.bool(false, 'Long: WT crosses above zero',    inline='sl', group=group_sig)
+sigLongPersist  = input.bool(true, 'Long: Sustained bull trigger',   inline='sl', group=group_sig,
+     tooltip='Fires on the first bar that Extension C sustained bull condition activates (osc above zero for sustainMin bars). Requires Extension C enabled.\n\nTrend-continuation signal — complements the cross-based mean-reversion signals. Empirically a strong addition for longs on NatGas (PF Long 1.38 → 2.54 when enabled).')
+
+// Short signal sources
+sigShortCross   = input.bool(true,  'Short: WT cross down',           inline='ss', group=group_sig)
+sigShortZero    = input.bool(false, 'Short: WT crosses below zero',   inline='ss', group=group_sig)
+sigShortPersist = input.bool(true, 'Short: Sustained bear trigger',  inline='ss', group=group_sig,
+     tooltip='Fires on the first bar that Extension C sustained bear condition activates (osc below zero for sustainMin bars). Requires Extension C enabled.\n\nNote: on NatGas 4H without auto-calibrate this can degrade short PF (1.56 → 1.01 in tests). Verify per instrument and timeframe.')
+
+// Optional gates (AND-combined with cross-based signals)
+sigGateZone      = input.bool(true, 'Gate: Require extreme zone',            group=group_sig, display=display,
+     tooltip='Cross-based signals only fire when WT is inside the OB or OS band.')
+sigGateSlope     = input.bool(true, 'Gate: Require slope confirmation',       group=group_sig, display=display,
+     tooltip='Cross-based signals only fire when slope direction matches the signal direction (Ext B).')
+sigGateExtA      = input.bool(true,  'Gate: Ext A suppression active',       group=group_sig, display=display,
+     tooltip='Suppress cross-based signals when Extension A overextension flag is set.')
+sigGateSustained = input.bool(true,  'Gate: Suppress in sustained trend',    group=group_sig, display=display,
+     tooltip='Suppresses cross-based long signals when Extension C sustained bear is active (oscillator has been below zero for at least the configured minimum), and vice versa for shorts.\n\nPrevents repeated false reversals during a locked downtrend or uptrend. Requires Extension C enabled.')
+sigGateVol   = input.bool(false, 'Gate: Range regime only',                  group=group_sig, display=display,
+     tooltip='Suppresses signals when ATR is above its N-bar moving average — i.e., in trending or expanding-volatility conditions where mean-reversion signals fail most often.\n\nOnly allows entries in quieter, range-bound phases. NOTE: empirically this filtered out 20 winning short signals on NatGas 4H (volatile rallies were exhaustion points, not regimes to avoid). Default off — enable selectively per instrument.')
+atrRegimeLen = input.int(50,   '  ATR Regime Length', minval=10, maxval=200, group=group_sig, display=display,
+     tooltip='Bars used to compute the ATR moving average for the regime gate. Higher = smoother regime classification.')
+divScoreWin  = input.int(8,    '  Divergence Score Window', minval=1, maxval=50, group=group_sig, display=display,
+     tooltip='A confirmed divergence (regular or hidden, any direction matching the signal) within this many bars adds 1 point to the quality score (component 6, max score 6).')
+divTypeBySource = input.bool(false, '  Divergence Type by Signal Source', group=group_sig, display=display,
+     tooltip='When enabled, the divergence score component is split by signal type:\n• Cross signals reward only REGULAR divergence (reversal-paired)\n• Persist signals reward only HIDDEN divergence (continuation-paired)\n• Zero-cross signals fall back to either type\n\nDefault off — any divergence type counts equally. Enable to test theoretical pairing on instruments where divergence quality matters.')
+deepExtremeMult = input.float(1.3, '  Deep Extreme Multiplier', minval=1.0, maxval=2.5, step=0.1, group=group_sig, display=display,
+     tooltip='Score component 7 — adds 1 point when the oscillator is deeper than threshold × this multiplier.\n\n• Long: wtOsc < lowerThreshold × mult (deeper OS)\n• Short: wtOsc > upperThreshold × mult (deeper OB)\n\nDefault 1.3 = 30% beyond the threshold. Higher = more extreme requirement.')
+persistOscBlock = input.float(1.5, '  Persist OS/OB Depth Block', minval=0.5, maxval=2.0, step=0.05, group=group_sig, display=display,
+     tooltip='Blocks Persist (sustained trigger) signals when the oscillator is too deep into the OB/OS extreme.\n\n• Short Persist blocked when wtOsc < lowerThreshold × mult\n• Long Persist blocked when wtOsc > upperThreshold × mult\n\nDefault 1.5 = effectively disabled (osc rarely reaches that depth). Was tested at 0.8 — helps on 4H but hurts on 1D with auto-calibrate (filters legitimate persist winners). Enable selectively per timeframe when filter activation patterns suit.')
+
+// Stop-loss for strategy generation
+atrLen  = input.int(14,   '  ATR Length',     minval=1,    group=group_sig, display=display)
+atrMult = input.float(3.0, '  ATR Multiplier', minval=0.1, step=0.1, group=group_sig, display=display)
+
+sigMinScoreLong  = input.int(1, '  Min Score — Long',  minval=0, maxval=5, group=group_sig, display=display,
+     tooltip='Only fire long signals when the quality score meets this threshold (0 = score gate disabled, 5 = maximum selectivity).\n\nScore measures bonus quality beyond the gate filters. Components (max 5):\n• Percentile ≤ 30%\n• Recent OS zone visit (≤ 2 bars)\n• OS zone held ≥ 2 bars before cross\n• Divergence within score window\n• Deep extreme (osc beyond threshold × multiplier)\n\nNote: zone and slope conditions are already enforced by their gates and not double-counted in the score.')
+sigMinScoreShort = input.int(1, '  Min Score — Short', minval=0, maxval=5, group=group_sig, display=display,
+     tooltip='Only fire short signals when the quality score meets this threshold (0 = score gate disabled, 5 = maximum selectivity).\n\nScore measures bonus quality beyond the gate filters. Components (max 5):\n• Percentile ≥ 70%\n• Recent OB zone visit (≤ 2 bars)\n• OB zone held ≥ 2 bars before cross\n• Divergence within score window\n• Deep extreme (osc beyond threshold × multiplier)\n\nNote: zone and slope conditions are already enforced by their gates and not double-counted in the score.')
+
+debugMode = input.bool(false, 'Debug Mode', group=group_sig,
+     tooltip='Activates:\n• Signal quality score on markers (0-5)\n• log.info() per signal in Pine editor console\n• Debug table (bottom-left) with live condition states\n\nDisable for production use.')
+
+// ─── StochRSI Trigger (optional) ─────────────────────────────────────────────
+
+group_stoch = 'StochRSI Trigger (optional)'
+
+useStochRSI = input.bool(false, 'Enable StochRSI Trigger', group=group_stoch,
+     tooltip='Adds StochRSI as an independent timing trigger. WaveTrend identifies the OS/OB context; StochRSI confirms the moment of momentum reversal.\n\nWhen Gate is enabled, WT cross signals only fire if StochRSI also produced a matching trigger within the configured window.')
+stochTF = input.timeframe('', '  Timeframe', group=group_stoch,
+     tooltip='Empty = chart timeframe. Use a LOWER TF (e.g., 5m on a 1H chart) for finer entry timing — sub-bar triggers are detected via request.security_lower_tf. Use a HIGHER TF (e.g., 4H on a 1H chart) for HTF context — uses request.security at TF close.')
+stochRsiLen   = input.int(14, '  RSI Length',     minval=1, group=group_stoch, display=display)
+stochLen      = input.int(14, '  Stoch Length',   minval=1, group=group_stoch, display=display)
+stochKSmooth  = input.int(3,  '  K Smoothing',    minval=1, group=group_stoch, display=display)
+stochDSmooth  = input.int(3,  '  D Smoothing',    minval=1, group=group_stoch, display=display)
+stochOS       = input.int(20, '  Oversold Level', minval=0, maxval=50, group=group_stoch, display=display)
+stochOB       = input.int(80, '  Overbought Level', minval=50, maxval=100, group=group_stoch, display=display)
+stochWindow   = input.int(3,  '  Trigger Window (bars)', minval=1, maxval=20, group=group_stoch, display=display,
+     tooltip='How many bars back the StochRSI trigger may have fired to still gate a WaveTrend signal. Higher = looser confirmation.')
+sigGateStochRSI = input.bool(false, 'Gate: Require StochRSI confirmation', group=group_stoch, display=display,
+     tooltip='When enabled, WaveTrend cross signals only fire if a matching StochRSI trigger occurred within the trigger window.\n\n• Long: StochRSI K crosses up through Oversold Level\n• Short: StochRSI K crosses down through Overbought Level')
+
+// ─── Divergence Detection ────────────────────────────────────────────────────
+
+group_diver = 'Divergence Detection'
+
+lbR            = input.int(5, 'Pivot Detection Window', group=group_diver, display=display)
+plotBull       = input.bool(true, 'Regular Bullish | Hidden Bullish', inline='bull', group=group_diver)
+plotHiddenBull = input.bool(true, '',                                  inline='bull', group=group_diver)
+plotBear       = input.bool(true, 'Regular Bearish | Hidden Bearish',  inline='bear', group=group_diver)
+plotHiddenBear = input.bool(true, '',                                  inline='bear', group=group_diver)
+
+// ─── Colors ──────────────────────────────────────────────────────────────────
+
+colorBull     = #16a34a
+colorBear     = #dc2626
+colorNeutral  = #6b7280
+colorBullWeak = color.new(colorBull, 40)
+colorBearWeak = color.new(colorBear, 40)
+colorOsc      = #0ea5e9
+colorSignal   = #f97316
+noColor       = #00000000
+
+color tc = color.new(color.gray, 20)
+
+dashTextSize =
+     dashSizeInput == 'Small'  ? size.small  :
+     dashSizeInput == 'Normal' ? size.normal : size.tiny
+
+// ─── TF Adaptive Scaling ─────────────────────────────────────────────────────
+// Anchor at 4H = 14400 seconds. _tfScale ≥ 1 on TFs lower than 4H, ≤ 1 on higher.
+
+_TF_ANCHOR_SEC = 14400.0
+_tfScaleRaw    = useAutoCalibrate ? _TF_ANCHOR_SEC / math.max(float(timeframe.in_seconds()), 60.0) : 1.0
+_tfScale       = math.max(_tfScaleRaw, 0.05)
+
+// Helper — scaled bar count with floor (returns simple int)
+_scaleBars(_n, _floor) =>
+    int(math.max(math.round(_n * _tfScale), _floor))
+
+// Pre-scale each bar-count parameter once
+_chLenA      = _scaleBars(chLength,    2)
+_avgLenA     = _scaleBars(avgLength,   2)
+_sigLenA     = _scaleBars(sigLength,   1)
+_extDurA     = _scaleBars(extDuration, 2)
+_slopeLenA   = _scaleBars(slopeLen,    1)
+_sustainMinA = _scaleBars(sustainMin,  2)
+_percLbA     = _scaleBars(percLookback,20)
+_wavePivA    = _scaleBars(wavePivLen,  2)
+_atrRegLenA  = _scaleBars(atrRegimeLen,10)
+_divScoreWinA= _scaleBars(divScoreWin, 2)
+_lbRA        = _scaleBars(lbR,         2)
+
+// Hardcoded thresholds previously inline (3-bar visit window, 2-bar zone hold, 2-bar recent visit)
+_visitWinA   = _scaleBars(3, 1)
+_recentVisitA= _scaleBars(2, 1)
+_zoneHoldA   = _scaleBars(2, 1)
+
+// ─── Functions ───────────────────────────────────────────────────────────────
+
+f_getWT(s, n1, n2, s1) =>
+    esa   = ta.ema(s, n1)
+    d     = ta.ema(math.abs(s - esa), n1)
+    ci    = (s - esa) / (0.015 * d)
+    wt    = ta.ema(ci, n2)
+    wtsig = ta.sma(wt, s1)
+    [wt, wtsig]
+
+alarm(_msg) =>
+    alert(syminfo.ticker + ' WT : ' + _msg + ', price (' + str.tostring(close, format.mintick) + ')')
+
+f_slopeCtx(slope, useB) =>
+    string r = ''
+    if useB
+        if slope > 1.5
+            r := '\nSlope: Rising ↑↑ (trend strength)'
+        else if slope > 0.3
+            r := '\nSlope: Rising ↑'
+        else if slope < -1.5
+            r := '\nSlope: Falling ↓↓ (exhaustion)'
+        else if slope < -0.3
+            r := '\nSlope: Falling ↓'
+        else
+            r := '\nSlope: Flat (momentum stalling)'
+    r
+
+// ─── Core Calculations ───────────────────────────────────────────────────────
+
+[wtOsc, wtSig] = f_getWT(hlc3, _chLenA, _avgLenA, _sigLenA)
+
+_fixedLower    = math.avg(lowerBand1, lowerBand2)
+_fixedUpper    = math.avg(upperBand1, upperBand2)
+_adaptiveLower = ta.percentile_linear_interpolation(wtOsc, _percLbA, 10)
+_adaptiveUpper = ta.percentile_linear_interpolation(wtOsc, _percLbA, 90)
+lowerThreshold = zoneMode == 'Adaptive (Percentile)' ? _adaptiveLower : _fixedLower
+upperThreshold = zoneMode == 'Adaptive (Percentile)' ? _adaptiveUpper : _fixedUpper
+
+// ─── Extension A — OB/OS bar counters ────────────────────────────────────────
+
+var int obBars = 0
+var int osBars = 0
+obBars := wtOsc > upperThreshold ? obBars + 1 : 0
+osBars := wtOsc < lowerThreshold ? osBars + 1 : 0
+
+// Extension A: was the oscillator in an extended zone before the current cross?
+prevObExtended = useExtA and obBars[1] >= _extDurA
+prevOsExtended = useExtA and osBars[1] >= _extDurA
+
+// ─── Extension B — Slope (rate of change) ────────────────────────────────────
+
+wtSlope = wtOsc - wtOsc[_slopeLenA]
+
+// ─── Extension C — Zero-line persistence counters ────────────────────────────
+
+var int aboveZeroBars = 0
+var int belowZeroBars = 0
+aboveZeroBars := wtOsc > 0 ? aboveZeroBars + 1 : 0
+belowZeroBars := wtOsc < 0 ? belowZeroBars + 1 : 0
+
+// ─── Extension D — Wave Anatomy ──────────────────────────────────────────────
+
+// D1: percentile rank — where current WT sits in its recent distribution (0–100)
+wtPercentile = ta.percentrank(wtOsc, _percLbA)
+
+// D2 + D3: oscillator pivot tracking with bar index for temporal ordering
+wtDPivHighFound = not na(ta.pivothigh(wtOsc, _wavePivA, _wavePivA))
+wtDPivLowFound  = not na(ta.pivotlow(wtOsc,  _wavePivA, _wavePivA))
+
+var float wtPeak1      = na
+var float wtPeak2      = na
+var int   wtPeak1Idx   = na
+var float wtTrough1    = na
+var float wtTrough2    = na
+var int   wtTrough1Idx = na
+
+if wtDPivHighFound
+    wtPeak2    := wtPeak1
+    wtPeak1    := wtOsc[_wavePivA]
+    wtPeak1Idx := bar_index - _wavePivA
+
+if wtDPivLowFound
+    wtTrough2    := wtTrough1
+    wtTrough1    := wtOsc[_wavePivA]
+    wtTrough1Idx := bar_index - _wavePivA
+
+// Wave amplitude: trough-to-peak distance, only valid when the trough preceded the peak
+troughBeforePeak = not na(wtPeak1Idx) and not na(wtTrough1Idx) and wtTrough1Idx < wtPeak1Idx
+waveAmp          = troughBeforePeak ? math.max(wtPeak1 - wtTrough1, 0.5) : na
+
+// Correction depth: how far current value has dropped from the last confirmed peak
+corrFromPeak = not na(wtPeak1) ? wtPeak1 - wtOsc : na
+corrDepth    = not na(waveAmp) and not na(corrFromPeak) ? math.max(0, math.round(corrFromPeak / waveAmp * 100)) : na
+
+// ─── StochRSI Trigger ────────────────────────────────────────────────────────
+// Lower-TF MTF: when stochTF is below the chart TF, request.security only
+// returns the closing value of each chart bar — sub-bar K crossovers are
+// invisible. request.security_lower_tf returns an array of all sub-bar values,
+// letting us detect whether any trigger fired during the current chart bar.
+
+f_stochRsi(_rsiLen, _stochLen, _kSm, _dSm) =>
+    _r = ta.rsi(close, _rsiLen)
+    _k = ta.sma(ta.stoch(_r, _r, _r, _stochLen), _kSm)
+    _d = ta.sma(_k, _dSm)
+    [_k, _d]
+
+f_stochRsi_lower(_rsiLen, _stochLen, _kSm, _osLevel, _obLevel) =>
+    _r = ta.rsi(close, _rsiLen)
+    _k = ta.sma(ta.stoch(_r, _r, _r, _stochLen), _kSm)
+    _longT  = ta.crossover(_k,  _osLevel)
+    _shortT = ta.crossunder(_k, _obLevel)
+    [_k, _longT, _shortT]
+
+// Lower-TF arrays — empty when stochTF is not lower than chart (ignored)
+[_kArrLow, _longArrLow, _shortArrLow] = request.security_lower_tf(
+     syminfo.tickerid, stochTF,
+     f_stochRsi_lower(stochRsiLen, stochLen, stochKSmooth, stochOS, stochOB),
+     ignore_invalid_timeframe = true)
+
+// Equal-or-higher-TF fallback (always evaluated; Pine doesn't support conditional security)
+[stochK_h, stochD_h] = request.security(syminfo.tickerid,
+     stochTF == "" ? timeframe.period : stochTF,
+     f_stochRsi(stochRsiLen, stochLen, stochKSmooth, stochDSmooth),
+     lookahead = barmerge.lookahead_off)
+
+// Detect lower-TF availability and pick the correct path
+_chartTFSec   = timeframe.in_seconds()
+_stochTFSec   = stochTF == "" ? _chartTFSec : timeframe.in_seconds(stochTF)
+_lowerTFValid = useStochRSI and _stochTFSec < _chartTFSec and array.size(_kArrLow) > 0
+
+stochK = _lowerTFValid ? array.last(_kArrLow) : stochK_h
+stochD = stochD_h  // D is informational only; lower-TF doesn't add precision here
+
+// Lower-TF: trigger fired if ANY sub-bar element is true
+_anyLongTrigLow  = _lowerTFValid and array.includes(_longArrLow,  true)
+_anyShortTrigLow = _lowerTFValid and array.includes(_shortArrLow, true)
+
+stochLongTrig  = useStochRSI and (_lowerTFValid ? _anyLongTrigLow  : (not na(stochK_h) and ta.crossover(stochK_h,  stochOS)))
+stochShortTrig = useStochRSI and (_lowerTFValid ? _anyShortTrigLow : (not na(stochK_h) and ta.crossunder(stochK_h, stochOB)))
+
+_barsSinceStochLong  = nz(ta.barssince(stochLongTrig),  999)
+_barsSinceStochShort = nz(ta.barssince(stochShortTrig), 999)
+
+// ─── Divergence Engine ───────────────────────────────────────────────────────
+
+osc = wtOsc
+
+plFound = not na(ta.pivotlow(osc,  _lbRA, _lbRA))
+phFound = not na(ta.pivothigh(osc, _lbRA, _lbRA))
+
+// Divergence labels are managed in a rolling buffer so they don't crowd out
+// signal markers (Pine v6 caps total labels at 500). Keep last 80 div labels.
+var array<label> _divLabels = array.new<label>()
+var array<line>  _divLines  = array.new<line>()
+_DIV_KEEP = 80
+
+drawDiv(x1, y1, x2, y2, txt, col, isUp, tip) =>
+    _l = label.new(x2, y2, txt,
+         style         = isUp ? label.style_label_up : label.style_label_down,
+         color         = col,
+         textcolor     = color.white,
+         size          = size.tiny,
+         tooltip       = tip,
+         force_overlay = true)
+    _ln = line.new(x1, y1, x2, y2, color=col, width=1, force_overlay=true)
+    array.push(_divLabels, _l)
+    array.push(_divLines,  _ln)
+    if array.size(_divLabels) > _DIV_KEEP
+        label.delete(array.shift(_divLabels))
+    if array.size(_divLines) > _DIV_KEEP
+        line.delete(array.shift(_divLines))
+
+var float prevLowPrice  = na
+var float prevLowOsc    = na
+var int   prevLowIndex  = na
+var float prevHighPrice = na
+var float prevHighOsc   = na
+var int   prevHighIndex = na
+
+var bool bullCond       = false
+var bool hiddenBullCond = false
+var bool bearCond       = false
+var bool hiddenBearCond = false
+
+bullCond       := false
+hiddenBullCond := false
+bearCond       := false
+hiddenBearCond := false
+
+if plFound
+    currPrice = low[_lbRA]
+    currOsc   = osc[_lbRA]
+    currIndex = bar_index - _lbRA
+
+    if not na(prevLowPrice)
+        priceLL = currPrice < prevLowPrice
+        oscHL   = currOsc   > prevLowOsc
+        priceHL = currPrice > prevLowPrice
+        oscLL   = currOsc   < prevLowOsc
+
+        if plotBull and priceLL and oscHL
+            bullCond := true
+            drawDiv(prevLowIndex, prevLowPrice, currIndex, currPrice, 'RB', color.new(color.green, 0), true,
+                 'Regular Bullish Divergence\nPrice: Lower Low\nOsc: Higher Low\n\nSignal: Potential upward reversal')
+
+        if plotHiddenBull and priceHL and oscLL
+            hiddenBullCond := true
+            drawDiv(prevLowIndex, prevLowPrice, currIndex, currPrice, 'HB', color.new(color.green, 50), true,
+                 'Hidden Bullish Divergence\nPrice: Higher Low\nOsc: Lower Low\n\nSignal: Trend continuation')
+
+    prevLowPrice := currPrice
+    prevLowOsc   := currOsc
+    prevLowIndex := currIndex
+
+if phFound
+    currPrice = high[_lbRA]
+    currOsc   = osc[_lbRA]
+    currIndex = bar_index - _lbRA
+
+    if not na(prevHighPrice)
+        priceHH = currPrice > prevHighPrice
+        oscLH   = currOsc   < prevHighOsc
+        priceLH = currPrice < prevHighPrice
+        oscHH   = currOsc   > prevHighOsc
+
+        if plotBear and priceHH and oscLH
+            bearCond := true
+            drawDiv(prevHighIndex, prevHighPrice, currIndex, currPrice, 'RS', color.new(color.red, 0), false,
+                 'Regular Bearish Divergence\nPrice: Higher High\nOsc: Lower High\n\nSignal: Potential downward reversal')
+
+        if plotHiddenBear and priceLH and oscHH
+            hiddenBearCond := true
+            drawDiv(prevHighIndex, prevHighPrice, currIndex, currPrice, 'HS', color.new(color.red, 50), false,
+                 'Hidden Bearish Divergence\nPrice: Lower High\nOsc: Higher High\n\nSignal: Trend continuation')
+
+    prevHighPrice := currPrice
+    prevHighOsc   := currOsc
+    prevHighIndex := currIndex
+
+// Divergence age: bars since last confirmed div, tracked separately by type so
+// the score can match div type to signal source (regular = reversal pairs with
+// Cross signals; hidden = continuation pairs with Persist signals).
+var int _regBullDivAge = 999
+var int _hidBullDivAge = 999
+var int _regBearDivAge = 999
+var int _hidBearDivAge = 999
+_regBullDivAge := bullCond       ? 0 : math.min(_regBullDivAge + 1, 999)
+_hidBullDivAge := hiddenBullCond ? 0 : math.min(_hidBullDivAge + 1, 999)
+_regBearDivAge := bearCond       ? 0 : math.min(_regBearDivAge + 1, 999)
+_hidBearDivAge := hiddenBearCond ? 0 : math.min(_hidBearDivAge + 1, 999)
+// Combined ages (any-type) — kept for the legacy score path
+_bullDivAge = math.min(_regBullDivAge, _hidBullDivAge)
+_bearDivAge = math.min(_regBearDivAge, _hidBearDivAge)
+
+// ─── Signal Generation ───────────────────────────────────────────────────────
+
+// Base events — cross must originate from extreme zone within last 3 bars
+_barsFromOS = nz(ta.barssince(wtOsc < lowerThreshold), 999)
+_barsFromOB = nz(ta.barssince(wtOsc > upperThreshold), 999)
+crossBull   = ta.crossover(wtOsc, wtSig)  and wtSig < 0 and _barsFromOS <= _visitWinA
+crossBear   = ta.crossunder(wtOsc, wtSig) and wtSig > 0 and _barsFromOB <= _visitWinA
+zeroCrossUp   = ta.crossover(wtOsc, 0)
+zeroCrossDown = ta.crossunder(wtOsc, 0)
+
+// Extension C persistence triggers — first bar the sustained condition activates
+persistBullTrig = aboveZeroBars == _sustainMinA
+persistBearTrig = belowZeroBars == _sustainMinA
+
+// Gate conditions (applied to cross-based signals only)
+sustainedBull = useExtC and aboveZeroBars >= _sustainMinA
+sustainedBear = useExtC and belowZeroBars >= _sustainMinA
+
+// Zone gate: cross must fire while oscillator is still inside the OB/OS band.
+// (Empirically on NatGas, "recent visit only" admitted too many late-zone shorts
+// that turn into losers; strict in-zone check filters better.)
+_gateZoneLong      = not sigGateZone      or wtOsc < lowerThreshold
+_gateZoneShort     = not sigGateZone      or wtOsc > upperThreshold
+_gateSlopeLong     = not sigGateSlope     or wtSlope > 0
+_gateSlopeShort    = not sigGateSlope     or wtSlope < 0
+// ExtA: suppress overextended crosses. Deep-extreme exception was tested — on
+// NatGas it admitted catastrophic late shorts (1D PF Short collapsed 1.88 → 0.57).
+// Reverted to strict suppression.
+_gateExtALong      = not sigGateExtA      or not prevOsExtended
+_gateExtAShort     = not sigGateExtA      or not prevObExtended
+_gateSustainedLong  = not sigGateSustained or not sustainedBear or wtOsc < lowerThreshold
+_gateSustainedShort = not sigGateSustained or not sustainedBull or wtOsc > upperThreshold
+_atrRegime     = ta.ema(ta.atr(atrLen), _atrRegLenA)
+_gateVolLong   = not sigGateVol or na(_atrRegime) or ta.atr(atrLen) <= _atrRegime
+_gateVolShort  = not sigGateVol or na(_atrRegime) or ta.atr(atrLen) <= _atrRegime
+_gateStochLong  = not sigGateStochRSI or (useStochRSI and _barsSinceStochLong  <= stochWindow)
+_gateStochShort = not sigGateStochRSI or (useStochRSI and _barsSinceStochShort <= stochWindow)
+
+// Per-source signals
+_longFromCross   = sigLongCross    and crossBull    and _gateZoneLong  and _gateSlopeLong  and _gateExtALong  and _gateSustainedLong  and _gateVolLong  and _gateStochLong
+_longFromZero    = sigLongZero     and zeroCrossUp
+_persistDepthOKLong  = wtOsc <= upperThreshold * persistOscBlock
+_persistDepthOKShort = wtOsc >= lowerThreshold * persistOscBlock
+_longFromPersist = sigLongPersist  and persistBullTrig and useExtC and _persistDepthOKLong
+
+_shortFromCross   = sigShortCross   and crossBear   and _gateZoneShort and _gateSlopeShort and _gateExtAShort and _gateSustainedShort and _gateVolShort and _gateStochShort
+_shortFromZero    = sigShortZero    and zeroCrossDown
+_shortFromPersist = sigShortPersist and persistBearTrig and useExtC and _persistDepthOKShort
+
+// ─── Signal Quality Scores ───────────────────────────────────────────────────
+// Score = bonus quality beyond the gate filters (zone + slope are gate-enforced
+// and intentionally not in the score to avoid double-counting). Max 5 points:
+// 1. Percentile historically low/high
+// 2. Was in OS/OB zone within last _recentVisitA bars (genuine zone visit, not a touch)
+// 3. Zone held ≥ _zoneHoldA consecutive bars before cross (OS for long, OB for short)
+// 4. Divergence within _divScoreWinA bars (structural confirmation)
+// 5. Deep extreme — osc beyond threshold × deepExtremeMult (exhaustion magnitude)
+
+// Divergence age used for the score: source-paired when divTypeBySource is on,
+// otherwise fall back to the combined any-type age.
+_longDivAge  = divTypeBySource ? (_longFromPersist  ? _hidBullDivAge : _regBullDivAge) : _bullDivAge
+_shortDivAge = divTypeBySource ? (_shortFromPersist ? _hidBearDivAge : _regBearDivAge) : _bearDivAge
+
+longScore  = (wtPercentile <= 30 ? 1 : 0) + (_barsFromOS <= _recentVisitA ? 1 : 0) +
+     (osBars[1] >= _zoneHoldA ? 1 : 0) + (_longDivAge <= _divScoreWinA ? 1 : 0) +
+     (wtOsc < lowerThreshold * deepExtremeMult ? 1 : 0)
+
+shortScore = (wtPercentile >= 70 ? 1 : 0) + (_barsFromOB <= _recentVisitA ? 1 : 0) +
+     (obBars[1] >= _zoneHoldA ? 1 : 0) + (_shortDivAge <= _divScoreWinA ? 1 : 0) +
+     (wtOsc > upperThreshold * deepExtremeMult ? 1 : 0)
+
+longSignal  = (_longFromCross  or _longFromZero  or _longFromPersist)  and longScore  >= sigMinScoreLong
+shortSignal = (_shortFromCross or _shortFromZero or _shortFromPersist) and shortScore >= sigMinScoreShort
+
+// ATR-based trailing stops (for strategy generation)
+atrVal    = ta.atr(atrLen)
+longStop  = low  - atrMult * atrVal
+shortStop = high + atrMult * atrVal
+
+// ─── Cross Signals ───────────────────────────────────────────────────────────
+
+if ta.crossover(wtOsc, wtSig) and wtSig < 0
+    if crosses != 'None' and not showSignals
+        if wtOsc < lowerThreshold
+            label.new(bar_index, low, '▲\n•', xloc.bar_index, yloc.price,
+                 noColor, label.style_label_up, colorBull, size.normal, text.align_center,
+                 'WaveTrend Strong Bullish Cross\n' + syminfo.tickerid +
+                 '\n────────────────────────────' +
+                 '\nOsc: '    + str.tostring(wtOsc, '#.##') +
+                 '\nSignal: ' + str.tostring(wtSig, '#.##') +
+                 '\nZone: Oversold' + f_slopeCtx(wtSlope, useExtB) +
+                 '\n\nMomentum reversal potential ↑',
+                 force_overlay=true)
+            alarm('strong cross below oversold threshold, bullish')
+
+        // Regular cross: negative territory but not yet extreme
+        if crosses != 'Strong' and not prevOsExtended
+            if wtOsc < 0 and wtOsc > lowerThreshold
+                label.new(bar_index, low, '▲', xloc.bar_index, yloc.price,
+                     noColor, label.style_label_up, colorBull, size.small, text.align_center,
+                     'WaveTrend Bullish Cross\n' + syminfo.tickerid +
+                     '\n────────────────────────────' +
+                     '\nOsc: '    + str.tostring(wtOsc, '#.##') +
+                     '\nSignal: ' + str.tostring(wtSig, '#.##') +
+                     '\nZone: Bearish (< 0)\n\nEarly bullish momentum shift',
+                     force_overlay=true)
+
+if ta.crossunder(wtOsc, wtSig) and wtSig > 0
+    if crosses != 'None' and not showSignals
+        if wtOsc > upperThreshold
+            label.new(bar_index, high, '•\n▼', xloc.bar_index, yloc.price,
+                 noColor, label.style_label_down, colorBear, size.normal, text.align_center,
+                 'WaveTrend Strong Bearish Cross\n' + syminfo.tickerid +
+                 '\n────────────────────────────' +
+                 '\nOsc: '    + str.tostring(wtOsc, '#.##') +
+                 '\nSignal: ' + str.tostring(wtSig, '#.##') +
+                 '\nZone: Overbought' + f_slopeCtx(wtSlope, useExtB) +
+                 '\n\nMomentum reversal potential ↓',
+                 force_overlay=true)
+            alarm('strong cross above overbought threshold, bearish')
+
+        // Regular cross: positive territory but not yet extreme
+        if crosses != 'Strong' and not prevObExtended
+            if wtOsc > 0 and wtOsc < upperThreshold
+                label.new(bar_index, high, '▼', xloc.bar_index, yloc.price,
+                     noColor, label.style_label_down, colorBear, size.small, text.align_center,
+                     'WaveTrend Bearish Cross\n' + syminfo.tickerid +
+                     '\n────────────────────────────' +
+                     '\nOsc: '    + str.tostring(wtOsc, '#.##') +
+                     '\nSignal: ' + str.tostring(wtSig, '#.##') +
+                     '\nZone: Bullish (> 0)\n\nEarly bearish momentum shift',
+                     force_overlay=true)
+
+// ─── Signal Markers & Alerts ─────────────────────────────────────────────────
+
+if showSignals and longSignal
+    _lSrc = _longFromCross ? 'Cross' : _longFromZero ? 'Zero X' : 'Persist'
+    _lTip = 'WaveTrend Long  ·  Score: ' + str.tostring(longScore) + '/5'
+         + '\n────────────────────────'
+         + '\nSource:   ' + _lSrc
+         + '\nOsc:      ' + str.tostring(wtOsc, '#.##')
+         + '\nSignal:   ' + str.tostring(wtSig, '#.##')
+         + '\nSlope:    ' + str.tostring(wtSlope, '#.##') + (wtSlope > 0 ? ' ↑' : ' ↓')
+         + '\nPct:      ' + str.tostring(math.round(wtPercentile)) + '%'
+         + '\nOS bars:  ' + str.tostring(osBars)
+         + '\nBelow 0:  ' + str.tostring(belowZeroBars) + ' bars'
+         + (not na(corrDepth) ? '\nCorr:     ' + str.tostring(corrDepth) + '%' : '')
+         + '\n────────────────────────'
+         + '\n' + (wtPercentile <= 30             ? '✓' : '✗') + '  Pct ≤ 30%'
+         + '\n' + (_barsFromOS <= _recentVisitA   ? '✓' : '✗') + '  Recent OS visit (≤' + str.tostring(_recentVisitA) + ' bars)'
+         + '\n' + (osBars[1] >= _zoneHoldA        ? '✓' : '✗') + '  OS zone held ≥' + str.tostring(_zoneHoldA) + ' bars'
+         + '\n' + (_longDivAge <= _divScoreWinA    ? '✓' : '✗') + '  ' + (divTypeBySource ? (_longFromPersist ? 'Hidden' : 'Regular') + ' bull div' : 'Divergence') + ' within ' + str.tostring(_divScoreWinA) + ' bars'
+         + '\n' + (wtOsc < lowerThreshold * deepExtremeMult ? '✓' : '✗') + '  Deep extreme (× ' + str.tostring(deepExtremeMult) + ')'
+    _lOff = na(atrVal) ? close * 0.005 : atrVal * 0.8
+    label.new(bar_index, low - _lOff,
+         xloc=xloc.bar_index, yloc=yloc.price,
+         text=str.tostring(longScore), style=label.style_label_up,
+         color=colorBull, textcolor=color.white,
+         size=size.normal, tooltip=_lTip, force_overlay=true)
+
+if showSignals and shortSignal
+    _sSrc = _shortFromCross ? 'Cross' : _shortFromZero ? 'Zero X' : 'Persist'
+    _sTip = 'WaveTrend Short  ·  Score: ' + str.tostring(shortScore) + '/5'
+         + '\n────────────────────────'
+         + '\nSource:   ' + _sSrc
+         + '\nOsc:      ' + str.tostring(wtOsc, '#.##')
+         + '\nSignal:   ' + str.tostring(wtSig, '#.##')
+         + '\nSlope:    ' + str.tostring(wtSlope, '#.##') + (wtSlope < 0 ? ' ↓' : ' ↑')
+         + '\nPct:      ' + str.tostring(math.round(wtPercentile)) + '%'
+         + '\nOB bars:  ' + str.tostring(obBars)
+         + '\nAbove 0:  ' + str.tostring(aboveZeroBars) + ' bars'
+         + (not na(corrDepth) ? '\nCorr:     ' + str.tostring(corrDepth) + '%' : '')
+         + '\n────────────────────────'
+         + '\n' + (wtPercentile >= 70             ? '✓' : '✗') + '  Pct ≥ 70%'
+         + '\n' + (_barsFromOB <= _recentVisitA   ? '✓' : '✗') + '  Recent OB visit (≤' + str.tostring(_recentVisitA) + ' bars)'
+         + '\n' + (obBars[1] >= _zoneHoldA        ? '✓' : '✗') + '  OB zone held ≥' + str.tostring(_zoneHoldA) + ' bars'
+         + '\n' + (_shortDivAge <= _divScoreWinA    ? '✓' : '✗') + '  ' + (divTypeBySource ? (_shortFromPersist ? 'Hidden' : 'Regular') + ' bear div' : 'Divergence') + ' within ' + str.tostring(_divScoreWinA) + ' bars'
+         + '\n' + (wtOsc > upperThreshold * deepExtremeMult ? '✓' : '✗') + '  Deep extreme (× ' + str.tostring(deepExtremeMult) + ')'
+    _sOff = na(atrVal) ? close * 0.005 : atrVal * 0.8
+    label.new(bar_index, high + _sOff,
+         xloc=xloc.bar_index, yloc=yloc.price,
+         text=str.tostring(shortScore), style=label.style_label_down,
+         color=colorBear, textcolor=color.white,
+         size=size.normal, tooltip=_sTip, force_overlay=true)
+
+alertcondition(longSignal,  'WT Long Signal',  'WaveTrend Long — {{ticker}} @ {{close}}')
+alertcondition(shortSignal, 'WT Short Signal', 'WaveTrend Short — {{ticker}} @ {{close}}')
+
+// ─── Debug Logging ───────────────────────────────────────────────────────────
+// Cross diagnostics: every raw cross, with each gate result
+if debugMode
+    _rawBull = ta.crossover(wtOsc, wtSig)
+    _rawBear = ta.crossunder(wtOsc, wtSig)
+    if _rawBull
+        _dir   = wtSig < 0                     ? 'dir=ok'   : 'dir=FAIL'
+        _rec   = _barsFromOS <= _visitWinA     ? 'recZ=ok'  : 'recZ=FAIL(' + str.tostring(_barsFromOS) + ')'
+        _zon   = _gateZoneLong                 ? 'zone=ok'  : 'zone=FAIL(osc=' + str.tostring(wtOsc, '#.##') + ')'
+        _slp   = _gateSlopeLong                ? 'slope=ok' : 'slope=FAIL(' + str.tostring(wtSlope, '#.##') + ')'
+        _extA  = _gateExtALong                 ? 'extA=ok'  : 'extA=FAIL(osBars[1]=' + str.tostring(osBars[1]) + ')'
+        _sus   = _gateSustainedLong            ? 'sust=ok'  : 'sust=FAIL'
+        _vol   = _gateVolLong                  ? 'vol=ok'   : 'vol=FAIL(atr/ema=' + str.tostring(ta.atr(atrLen)/_atrRegime, '#.##') + ')'
+        _stch  = _gateStochLong                ? 'stoch=ok' : 'stoch=FAIL'
+        _gsc   = longScore >= sigMinScoreLong  ? 'score=ok' : 'score=FAIL(' + str.tostring(longScore) + '<' + str.tostring(sigMinScoreLong) + ')'
+        log.info(str.format('CROSS BULL | bar={0} | osc={1} sig={2} | {3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} | {11} | fired={12}',
+             str.tostring(bar_index), str.tostring(wtOsc,'#.##'), str.tostring(wtSig,'#.##'),
+             _dir, _rec, _zon, _slp, _extA, _sus, _vol, _stch, _gsc, str.tostring(longSignal)))
+    if _rawBear
+        _dir   = wtSig > 0                     ? 'dir=ok'   : 'dir=FAIL'
+        _rec   = _barsFromOB <= _visitWinA     ? 'recZ=ok'  : 'recZ=FAIL(' + str.tostring(_barsFromOB) + ')'
+        _zon   = _gateZoneShort                ? 'zone=ok'  : 'zone=FAIL(osc=' + str.tostring(wtOsc, '#.##') + ')'
+        _slp   = _gateSlopeShort               ? 'slope=ok' : 'slope=FAIL(' + str.tostring(wtSlope, '#.##') + ')'
+        _extA  = _gateExtAShort                ? 'extA=ok'  : 'extA=FAIL(obBars[1]=' + str.tostring(obBars[1]) + ')'
+        _sus   = _gateSustainedShort           ? 'sust=ok'  : 'sust=FAIL'
+        _vol   = _gateVolShort                 ? 'vol=ok'   : 'vol=FAIL(atr/ema=' + str.tostring(ta.atr(atrLen)/_atrRegime, '#.##') + ')'
+        _stch  = _gateStochShort               ? 'stoch=ok' : 'stoch=FAIL'
+        _gsc   = shortScore >= sigMinScoreShort ? 'score=ok' : 'score=FAIL(' + str.tostring(shortScore) + '<' + str.tostring(sigMinScoreShort) + ')'
+        log.info(str.format('CROSS BEAR | bar={0} | osc={1} sig={2} | {3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} | {11} | fired={12}',
+             str.tostring(bar_index), str.tostring(wtOsc,'#.##'), str.tostring(wtSig,'#.##'),
+             _dir, _rec, _zon, _slp, _extA, _sus, _vol, _stch, _gsc, str.tostring(shortSignal)))
+
+// Signal fire logs: fired signal with full state + marker price
+if debugMode and longSignal
+    _dbgSrc = _longFromCross ? 'Cross' : _longFromZero ? 'Zero' : 'Persist'
+    log.info(str.format('WT LONG FIRED | bar={0} | src={1} | osc={2} | sig={3} | slope={4} | pct={5}% | osBars={6} | belowZ={7} | score={8}/5 | showSignals={9} | markerY={10}',
+         str.tostring(bar_index), _dbgSrc, str.tostring(wtOsc, '#.##'), str.tostring(wtSig, '#.##'),
+         str.tostring(wtSlope, '#.##'), str.tostring(math.round(wtPercentile)),
+         str.tostring(osBars), str.tostring(belowZeroBars), str.tostring(longScore),
+         str.tostring(showSignals), str.tostring(low, '#.####')))
+
+if debugMode and shortSignal
+    _dbgSrc = _shortFromCross ? 'Cross' : _shortFromZero ? 'Zero' : 'Persist'
+    log.info(str.format('WT SHORT FIRED | bar={0} | src={1} | osc={2} | sig={3} | slope={4} | pct={5}% | obBars={6} | aboveZ={7} | score={8}/5 | showSignals={9} | markerY={10}',
+         str.tostring(bar_index), _dbgSrc, str.tostring(wtOsc, '#.##'), str.tostring(wtSig, '#.##'),
+         str.tostring(wtSlope, '#.##'), str.tostring(math.round(wtPercentile)),
+         str.tostring(obBars), str.tostring(aboveZeroBars), str.tostring(shortScore),
+         str.tostring(showSignals), str.tostring(high, '#.####')))
+
+// ─── State tracking (top-level — runs every bar so decay history carries) ────
+// Bug fix: previously the assignments lived inside `if barstate.islast and showDashboard`,
+// which meant historical bars never updated state — the decay logic was broken.
+
+var float crossState = 0.0
+var float divState   = 0.0
+
+_stCrossUp   = wtOsc > wtSig and wtOsc[1] <= wtSig[1]
+_stCrossDown = wtOsc < wtSig and wtOsc[1] >= wtSig[1]
+_stDivBull   = bullCond or hiddenBullCond
+_stDivBear   = bearCond or hiddenBearCond
+
+if _stCrossUp
+    crossState := 1.0
+else if _stCrossDown
+    crossState := -1.0
+else
+    crossState := nz(crossState[1]) * 0.8
+
+if _stDivBull
+    divState := 2.0
+else if _stDivBear
+    divState := -2.0
+else
+    divState := nz(divState[1]) * 0.8
+
+// ─── Dashboard ───────────────────────────────────────────────────────────────
+
+var table dash = table.new(position.top_right, 4, 7,
+     bgcolor      = color.new(color.white, 5),
+     border_color = color.new(color.gray, 60),
+     border_width = 1,
+     frame_color  = color.new(color.gray, 40),
+     frame_width  = 1)
+
+spread    = math.abs(wtOsc - wtSig)
+spreadAvg = ta.ema(spread, 20)
+
+if barstate.islast and showDashboard
+
+    // Zone
+    zoneText =
+         wtOsc > upperThreshold ? 'Overbought' :
+         wtOsc < lowerThreshold ? 'Oversold'   :
+         wtOsc > 0              ? 'Bullish'     : 'Bearish'
+    zoneColor =
+         wtOsc > upperThreshold ? colorBear     :
+         wtOsc < lowerThreshold ? colorBull     :
+         wtOsc > 0              ? colorBullWeak : colorBearWeak
+
+    // Momentum
+    slopeBar     = wtOsc - wtOsc[1]
+    momentumUp   = slopeBar > 0 and wtOsc > wtSig
+    momentumDown = slopeBar < 0 and wtOsc < wtSig
+    momentumText  = momentumUp ? 'Rising ↑' : momentumDown ? 'Falling ↓' : 'Neutral'
+    momentumColor = momentumUp ? colorBull   : momentumDown ? colorBear   : colorNeutral
+
+    // Divergence
+    divBull  = bullCond or hiddenBullCond
+    divBear  = bearCond or hiddenBearCond
+    divText  = divBull and divBear ? 'Mixed' : divBull ? 'Bullish' : divBear ? 'Bearish' : 'None'
+    divColor = divBull ? colorBull : divBear ? colorBear : colorNeutral
+
+    // Regime
+    strongTrend = spread > spreadAvg
+    regimeText  =
+         wtOsc > 0 and wtSig > 0 and strongTrend ? 'Bull Trend' :
+         wtOsc < 0 and wtSig < 0 and strongTrend ? 'Bear Trend' : 'Transition'
+    regimeBias  = regimeText == 'Bull Trend' ? 2 : regimeText == 'Bear Trend' ? -2 : 0
+    regimeColor = wtOsc > 0 and wtSig > 0 ? colorBull : wtOsc < 0 and wtSig < 0 ? colorBear : colorNeutral
+
+    // Cross display (state updates already done at top-level above)
+    crossText  = _stCrossUp ? 'Bull' : _stCrossDown ? 'Bear' : 'None'
+    crossColor = _stCrossUp ? colorBull : _stCrossDown ? colorBear : colorNeutral
+    crossBias  = crossState > 0.2 ? 1 : crossState < -0.2 ? -1 : 0
+
+    // Extreme
+    extremeOB    = wtOsc > upperThreshold
+    extremeOS    = wtOsc < lowerThreshold
+    extremeText  = extremeOB ? 'OB ⚠' : extremeOS ? 'OS ⚠' : '—'
+    extremeColor = extremeOB ? colorBear : extremeOS ? colorBull : colorNeutral
+
+    // Composite bias (state updates already done at top-level)
+    oscBias = wtOsc > 0 ? 1 : wtOsc < 0 ? -1 : 0
+    momBias = momentumUp ? 1 : momentumDown ? -1 : oscBias * 0.5
+    divBias = divState > 0.2 ? math.round(divState) : divState < -0.2 ? math.round(divState) : 0
+
+    biasScore  = oscBias + momBias + crossBias + divBias + regimeBias
+    confidence = math.round(math.abs(biasScore) / 7.0 * 100)
+    biasText   =
+         biasScore >= 3  ? 'Strong Bull' :
+         biasScore == 2  ? 'Bull'        :
+         biasScore == 1  ? 'Weak Bull'   :
+         biasScore == 0  ? 'Neutral'     :
+         biasScore == -1 ? 'Weak Bear'   :
+         biasScore == -2 ? 'Bear'        : 'Strong Bear'
+    biasColor  = biasScore > 0 ? colorBull : biasScore < 0 ? colorBear : colorNeutral
+    biasText  += ' (' + str.tostring(confidence) + '%)'
+
+    // Extension A — OB/OS duration display
+    extAText =
+         not useExtA         ? '—' :
+         obBars >= _extDurA ? 'OB ' + str.tostring(obBars) + ' bars ⚑' :
+         osBars >= _extDurA ? 'OS ' + str.tostring(osBars) + ' bars ⚑' :
+         obBars > 0           ? 'OB ' + str.tostring(obBars) + ' bars' :
+         osBars > 0           ? 'OS ' + str.tostring(osBars) + ' bars' : '—'
+    extAColor =
+         not useExtA           ? colorNeutral :
+         obBars >= _extDurA ? colorBear    :
+         osBars >= _extDurA ? colorBull    :
+         obBars > 0            ? colorBearWeak :
+         osBars > 0            ? colorBullWeak : colorNeutral
+
+    // Extension B — slope quality display
+    extBText =
+         not useExtB    ? '—'          :
+         wtSlope >  1.5 ? 'Rising ↑↑'  :
+         wtSlope >  0.3 ? 'Rising ↑'   :
+         wtSlope < -1.5 ? 'Falling ↓↓' :
+         wtSlope < -0.3 ? 'Falling ↓'  : 'Flat →'
+    extBColor =
+         not useExtB    ? colorNeutral :
+         wtSlope >  0.3 ? colorBull    :
+         wtSlope < -0.3 ? colorBear    : colorNeutral
+
+    // Extension C — zone persistence display
+    extCText =
+         not useExtC   ? '—' :
+         sustainedBull ? 'Bull ' + str.tostring(aboveZeroBars) + ' bars' :
+         sustainedBear ? 'Bear ' + str.tostring(belowZeroBars) + ' bars' : '—'
+    extCColor =
+         not useExtC   ? colorNeutral :
+         sustainedBull ? colorBull    :
+         sustainedBear ? colorBear    : colorNeutral
+
+    // Table — 4-column layout: label | value | label | value
+    table.cell(dash, 0, 0, 'Osc',     text_color=tc,            text_size=dashTextSize, text_halign=text.align_left)
+    table.cell(dash, 1, 0, str.tostring(wtOsc, '#.##'),
+                           text_color=colorOsc,                 text_size=dashTextSize, text_halign=text.align_right)
+    table.cell(dash, 2, 0, 'Sig',     text_color=tc,            text_size=dashTextSize, text_halign=text.align_left)
+    table.cell(dash, 3, 0, str.tostring(wtSig, '#.##'),
+                           text_color=colorSignal,              text_size=dashTextSize, text_halign=text.align_right)
+
+    table.cell(dash, 0, 1, 'Zone',    text_color=tc,            text_size=dashTextSize, text_halign=text.align_left)
+    table.cell(dash, 1, 1, zoneText,  text_color=zoneColor,     text_size=dashTextSize, text_halign=text.align_right)
+    table.cell(dash, 2, 1, 'Mom',     text_color=tc,            text_size=dashTextSize, text_halign=text.align_left)
+    table.cell(dash, 3, 1, momentumText, text_color=momentumColor, text_size=dashTextSize, text_halign=text.align_right)
+
+    table.cell(dash, 0, 2, 'Cross',   text_color=tc,            text_size=dashTextSize, text_halign=text.align_left)
+    table.cell(dash, 1, 2, crossText, text_color=crossColor,    text_size=dashTextSize, text_halign=text.align_right)
+    table.cell(dash, 2, 2, 'Div',     text_color=tc,            text_size=dashTextSize, text_halign=text.align_left)
+    table.cell(dash, 3, 2, divText,   text_color=divColor,      text_size=dashTextSize, text_halign=text.align_right)
+
+    table.cell(dash, 0, 3, 'Regime',  text_color=tc,            text_size=dashTextSize, text_halign=text.align_left)
+    table.cell(dash, 1, 3, regimeText, text_color=regimeColor,  text_size=dashTextSize, text_halign=text.align_right)
+    table.cell(dash, 2, 3, 'Extreme', text_color=tc,            text_size=dashTextSize, text_halign=text.align_left)
+    table.cell(dash, 3, 3, extremeText, text_color=extremeColor, text_size=dashTextSize, text_halign=text.align_right)
+
+    table.cell(dash, 0, 4, 'Dur',     text_color=tc,            text_size=dashTextSize, text_halign=text.align_left,
+         tooltip='Extension A: consecutive bars in OB/OS zone.\nWhen threshold is reached (⚑), weak and regular crosses are suppressed.')
+    table.cell(dash, 1, 4, extAText,  text_color=extAColor,     text_size=dashTextSize, text_halign=text.align_right)
+    table.cell(dash, 2, 4, 'Slope',   text_color=tc,            text_size=dashTextSize, text_halign=text.align_left,
+         tooltip='Extension B: rate of change of the WaveTrend oscillator.\nFlat slope in OB/OS = exhaustion. Rising slope = trend strength.')
+    table.cell(dash, 3, 4, extBText,  text_color=extBColor,     text_size=dashTextSize, text_halign=text.align_right)
+
+    table.cell(dash, 0, 5, 'Sust',    text_color=tc,            text_size=dashTextSize, text_halign=text.align_left,
+         tooltip='Extension C: consecutive bars above or below the zero line.\nIndicates trending conditions where the oscillator is riding a wave.')
+    table.cell(dash, 1, 5, extCText,  text_color=extCColor,     text_size=dashTextSize, text_halign=text.align_right)
+
+    // Extension D — Wave Anatomy
+    peaksRising   = not na(wtPeak1) and not na(wtPeak2) and wtPeak1 > wtPeak2
+    peaksFalling  = not na(wtPeak1) and not na(wtPeak2) and wtPeak1 < wtPeak2
+    troughsRising = not na(wtTrough1) and not na(wtTrough2) and wtTrough1 > wtTrough2
+
+    extD1Text  = not useExtD ? '—' : str.tostring(math.round(wtPercentile)) + ' %'
+    extD1Color = not useExtD       ? colorNeutral :
+         wtPercentile >= 90        ? colorBear     :
+         wtPercentile >= 70        ? colorBearWeak :
+         wtPercentile <= 10        ? colorBull     :
+         wtPercentile <= 30        ? colorBullWeak : colorNeutral
+
+    string extD2Text = not useExtD ? '—' : na(wtPeak1) ? '...' : 'Flat'
+    color  extD2Color = colorNeutral
+    if useExtD and not na(wtPeak1)
+        if peaksRising and troughsRising
+            extD2Text  := 'Accel ↑↑'
+            extD2Color := colorBull
+        else if peaksRising
+            extD2Text  := 'Peaks up ↑'
+            extD2Color := colorBullWeak
+        else if peaksFalling and not troughsRising
+            extD2Text  := 'Fade ↓↓'
+            extD2Color := colorBear
+        else if peaksFalling
+            extD2Text  := 'Peaks down ↓'
+            extD2Color := colorBearWeak
+
+    string extD3Text = not useExtD ? '—' : na(corrDepth) ? '—' : str.tostring(corrDepth) + ' %'
+    color  extD3Color = colorNeutral
+    if useExtD and not na(corrDepth)
+        if corrDepth == 0
+            extD3Text  := 'At peak'
+            extD3Color := colorBull
+        else if corrDepth >= 100
+            extD3Text  := str.tostring(corrDepth) + ' % broken'
+            extD3Color := colorBear
+        else if corrDepth >= corrWarnPct
+            extD3Text  := str.tostring(corrDepth) + ' % ⚑'
+            extD3Color := colorBearWeak
+        else
+            extD3Color := colorNeutral
+
+    _extDColor = extD3Color != colorNeutral ? extD3Color : extD1Color != colorNeutral ? extD1Color : extD2Color
+    table.cell(dash, 2, 5, 'Anatomy', text_color=tc,            text_size=dashTextSize, text_halign=text.align_left,
+         tooltip='Extension D — Wave Anatomy\nPercentile: rank of oscillator in recent history (90%+ extreme high, 10%- extreme low)\nWave: peak/trough structure (Accel / Fade)\nCorrection: pullback depth as % of last wave amplitude')
+    table.cell(dash, 3, 5, extD1Text + ' ' + extD2Text + ' ' + extD3Text,
+                           text_color=_extDColor,               text_size=dashTextSize, text_halign=text.align_right)
+
+    table.cell(dash, 0, 6, 'Bias',    text_color=tc,            text_size=dashTextSize, text_halign=text.align_left,
+         tooltip='Composite directional bias. Combines oscillator position, momentum, cross state, divergence, and regime.')
+    table.cell(dash, 1, 6, biasText,  text_color=biasColor,     text_size=dashTextSize, text_halign=text.align_right)
+    table.cell(dash, 2, 6, '',        text_color=tc,            text_size=dashTextSize)
+    table.cell(dash, 3, 6, '',        text_color=tc,            text_size=dashTextSize)
+
+// ─── Oscillator Pane ─────────────────────────────────────────────────────────
+
+hline(upperBand1, 'OB1', color.new(colorBear, 50), linestyle=hline.style_solid)
+hline(upperBand2, 'OB2', color.new(colorBear, 75), linestyle=hline.style_dotted)
+hline(0,          'Mid', color.new(color.gray, 40), linestyle=hline.style_solid)
+hline(lowerBand2, 'OS2', color.new(colorBull, 75), linestyle=hline.style_dotted)
+hline(lowerBand1, 'OS1', color.new(colorBull, 50), linestyle=hline.style_solid)
+
+p_osc  = plot(wtOsc, 'Oscillator',
+     color.from_gradient(wtOsc, lowerBand1, upperBand1, colorBull, colorBear),
+     linewidth=2)
+p_sig  = plot(wtSig, 'Signal', color.new(colorSignal, 20), linewidth=1)
+p_mid  = plot(0, display=display.none)
+plot(wtOsc - wtSig, 'Histogram', color.new(colorOsc, 50), style=plot.style_histogram, linewidth=1)
+fill(p_osc, p_mid, upperBand1, 0,          color.new(colorBear, 88), color.new(colorBear, 100))
+fill(p_osc, p_mid, 0,          lowerBand1, color.new(colorBull, 100), color.new(colorBull, 88))
+
+// ─── Logo ────────────────────────────────────────────────────────────────────
+
+var table logo = table.new(position.bottom_right, 1, 1)
+if barstate.islast
+    table.cell(logo, 0, 0, '☼☾  ', text_size=size.normal, text_color=color.teal, tooltip='WavesUnchained')
+
+// ─── Debug Table ─────────────────────────────────────────────────────────────
+
+var table debugTable = table.new(position.bottom_left, 2, 17,
+     bgcolor      = color.new(color.white, 5),
+     border_color = color.new(color.gray, 60),
+     border_width = 1,
+     frame_color  = color.new(color.gray, 40),
+     frame_width  = 1)
+
+if barstate.islast and debugMode
+    hd = color.new(color.gray, 90)
+    gc = color.new(color.gray, 80)
+
+    table.cell(debugTable, 0,  0, 'DEBUG',         text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  0, 'bar ' + str.tostring(bar_index), text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(debugTable, 0,  1, 'Osc',           text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  1, str.tostring(wtOsc, '#.##'), text_color=colorOsc, text_size=size.small)
+
+    table.cell(debugTable, 0,  2, 'Slope',         text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  2, str.tostring(wtSlope, '#.##'), text_color=wtSlope > 0 ? colorBull : colorBear, text_size=size.small)
+
+    table.cell(debugTable, 0,  3, 'Percentile',    text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  3, str.tostring(math.round(wtPercentile)) + '%', text_color=tc, text_size=size.small)
+
+    table.cell(debugTable, 0,  4, 'Correction',    text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  4, na(corrDepth) ? '—' : str.tostring(corrDepth) + '%', text_color=tc, text_size=size.small)
+
+    table.cell(debugTable, 0,  5, 'OB/OS bars',    text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  5, str.tostring(obBars) + ' / ' + str.tostring(osBars), text_color=tc, text_size=size.small)
+
+    table.cell(debugTable, 0,  6, 'Above/Below 0', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  6, str.tostring(aboveZeroBars) + ' / ' + str.tostring(belowZeroBars), text_color=tc, text_size=size.small)
+
+    table.cell(debugTable, 0,  7, '', bgcolor=gc, text_size=size.small)
+    table.cell(debugTable, 1,  7, '', bgcolor=gc, text_size=size.small)
+
+    table.cell(debugTable, 0,  8, 'L: Cross',      text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  8, _longFromCross ? '✓' : '✗',     text_color=_longFromCross ? colorBull : colorBear, text_size=size.small)
+
+    table.cell(debugTable, 0,  9, 'L: Zero',       text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1,  9, _longFromZero ? '✓' : '✗',      text_color=_longFromZero ? colorBull : colorBear, text_size=size.small)
+
+    table.cell(debugTable, 0, 10, 'L: Persist',    text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1, 10, _longFromPersist ? '✓' : '✗',   text_color=_longFromPersist ? colorBull : colorBear, text_size=size.small)
+
+    table.cell(debugTable, 0, 11, 'S: Cross',      text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1, 11, _shortFromCross ? '✓' : '✗',    text_color=_shortFromCross ? colorBull : colorBear, text_size=size.small)
+
+    table.cell(debugTable, 0, 12, 'S: Zero',       text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1, 12, _shortFromZero ? '✓' : '✗',     text_color=_shortFromZero ? colorBull : colorBear, text_size=size.small)
+
+    table.cell(debugTable, 0, 13, 'S: Persist',    text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1, 13, _shortFromPersist ? '✓' : '✗',  text_color=_shortFromPersist ? colorBull : colorBear, text_size=size.small)
+
+    table.cell(debugTable, 0, 14, '', bgcolor=gc, text_size=size.small)
+    table.cell(debugTable, 1, 14, '', bgcolor=gc, text_size=size.small)
+
+    table.cell(debugTable, 0, 15, 'LONG',
+         text_color = longSignal ? color.white : tc,
+         bgcolor    = longSignal ? colorBull : gc,
+         text_size  = size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1, 15, 'score ' + str.tostring(longScore) + '/5',
+         text_color = longSignal ? color.white : tc,
+         bgcolor    = longSignal ? colorBull : gc,
+         text_size  = size.small)
+
+    table.cell(debugTable, 0, 16, 'SHORT',
+         text_color = shortSignal ? color.white : tc,
+         bgcolor    = shortSignal ? colorBear : gc,
+         text_size  = size.small, text_halign=text.align_left)
+    table.cell(debugTable, 1, 16, 'score ' + str.tostring(shortScore) + '/5',
+         text_color = shortSignal ? color.white : tc,
+         bgcolor    = shortSignal ? colorBear : gc,
+         text_size  = size.small)
+
+// @strategy-config
+// long:     longSignal
+// short:    shortSignal
+// sl_type:  trailing
+// sl_long:  longStop
+// sl_short: shortStop
+// @end-strategy-config

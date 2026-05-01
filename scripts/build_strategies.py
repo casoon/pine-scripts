@@ -39,7 +39,7 @@ beATRInput    = input.float(1.0,  "Break-Even Trigger (ATR×)", minval=0.1, step
      tooltip="ATR distance from entry that triggers the break-even move.")
 
 var int _lastExitBar = na
-_justClosed = strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(0) == bar_index
+_justClosed = strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
 if _justClosed
     _lastExitBar := bar_index
 _inCooldown = cooldownBars > 0 and not na(_lastExitBar) and (bar_index - _lastExitBar) < cooldownBars
@@ -59,7 +59,10 @@ tpRRInput  = input.float(2.0, "TP R:R Ratio",      minval=0.5, step=0.5, group=g
      tooltip="Take profit at this R:R multiple of the SL distance from entry.")
 """
 
-# sl_type: trailing — separate long/short trailing stops
+# sl_type: trailing — per-bar ATR volatility envelope + integrated break-even
+# Ratcheting was tested but on NatGas it tightened too aggressively and cut
+# winning trades short during normal retracements (1D PF 2.42 → 1.35).
+# The "loose" envelope works better empirically for this kind of indicator.
 _EXEC_TRAILING = """\
 
 // ─── Strategy execution (generated) ──────────────────────────────────────────
@@ -71,10 +74,18 @@ if ({long}) and _canLong and _canEntry
 if ({short}) and _canShort and _canEntry
     strategy.entry("Short", strategy.short)
 
+// Break-even integrated into the same exit (single stop level — no exit races)
+_beAtr   = ta.atr(14) * beATRInput
+_beLong  = enableBE and strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
+_beShort = enableBE and strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
+
+_finalLongStop  = _beLong  ? math.max({sl_long},  strategy.position_avg_price) : {sl_long}
+_finalShortStop = _beShort ? math.min({sl_short}, strategy.position_avg_price) : {sl_short}
+
 if strategy.position_size > 0
-    strategy.exit("Long Exit", "Long", stop={sl_long})
+    strategy.exit("Long Exit", "Long", stop=_finalLongStop)
 if strategy.position_size < 0
-    strategy.exit("Short Exit", "Short", stop={sl_short})
+    strategy.exit("Short Exit", "Short", stop=_finalShortStop)
 """
 
 # sl_type: fixed, no pre-computed TP
@@ -237,8 +248,9 @@ def build_strategy_call(ind: dict) -> str:
 
     strat_title = title if "— Strategy" in title else title + " — Strategy"
 
+    extras_filtered = [e for e in extras if not e.startswith("max_bars_back")]
     parts = [f'strategy("{strat_title}", overlay={overlay}']
-    parts += [f"     {e}" for e in extras]
+    parts += [f"     {e}" for e in extras_filtered]
     parts += [
         "     default_qty_type=strategy.percent_of_equity, default_qty_value=10",
         "     commission_type=strategy.commission.percent, commission_value=0.02",
@@ -365,7 +377,10 @@ def generate(pine_path: Path) -> tuple[str, str] | None:
     out += _STRATEGY_HEADER
     out += extra_inputs
     out += exec_block
-    out += _EXEC_RISK_MANAGEMENT
+    # Trailing template integrates BE into the main exit; only fixed/pivot need
+    # the separate BE management block.
+    if sl_type != "trailing":
+        out += _EXEC_RISK_MANAGEMENT
 
     out_name = pine_path.stem + "_strategy.pine"
     return out_name, out

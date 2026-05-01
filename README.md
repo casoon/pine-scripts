@@ -79,6 +79,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 
 | Script | What it does |
 |--------|--------------|
+| [`wavetrend.pine`](indicators/wavetrend/wavetrend.pine) | WaveTrend oscillator — cross signals, divergence, overextension duration, slope quality filter, zone persistence |
 | [`flow_bias.pine`](indicators/momentum/flow_bias.pine) | Directional flow bias from CMF, volume delta, Stochastic, Ultimate Oscillator |
 | [`market_stress_oscillator.pine`](indicators/momentum/market_stress_oscillator.pine) | Composite stress index — WVF with JMA and ADX filters |
 | [`market_exhaustion.pine`](indicators/momentum/market_exhaustion.pine) | Exhaustion signals via MFI and StochRSI with divergence detection |
@@ -120,6 +121,7 @@ python3 scripts/build_strategies.py indicators/chandelier_flip_radar/
 | [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising (PF 1.22, NatGas 4H) |
 | [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising (PF 1.14, NatGas 4H) |
 | [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (PF 1.13, NatGas 4H) |
+| [`wavetrend_strategy.pine`](strategies/wavetrend_strategy.pine) | WaveTrend | Trailing | Promising (PF 2.42, +52.6%, NatGas 1D — best in repo) |
 
 Full backtest results and parameter notes: `strategies/*_assessment.md`. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
 
