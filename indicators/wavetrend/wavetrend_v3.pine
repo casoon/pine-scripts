@@ -1,0 +1,1352 @@
+//@version=6
+// ============================================================================
+// WaveTrend v3 [Experimental — Composite]
+// Version: 3.2-experimental
+// Build: 2026-05-02
+// ============================================================================
+// Composite-Indikator. Nicht mehr "WaveTrend optimiert" sondern ein eigenes
+// Konzept das mehrere Bausteine kombiniert:
+//
+//   1. WaveTrend Oscillator (mit v2-Formel-Verbesserungen)
+//   2. Market Structure (HH/HL/LH/LL aus Price Pivots)
+//   3. Volumen-Kontext (POC ± Standard-Abweichungen, Volume-Spike)
+//   4. Multi-Timeframe Trend (Setup-HTF + Anchor-HTF)
+//   5. Setup-Familien (Range-Reversal + Pullback-Continuation)
+//
+// Signal-Logik = Trigger + ALIGNMENT-SCORE: WT-Reversal als Timing,
+// mehrstufige MTF-/Kontext-Bestätigung als Qualitätsfilter.
+// ============================================================================
+
+indicator('WaveTrend v3 [Composite]', 'WT3',
+     max_labels_count=500, max_lines_count=500, max_boxes_count=250, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1 — WaveTrend Oscillator (v2 formula)
+// ═══════════════════════════════════════════════════════════════════════════
+
+g_wt = '1. WaveTrend Engine'
+
+chLength  = input.int(10, 'Channel Length',  minval=2, group=g_wt)
+avgLength = input.int(21, 'Average Length',  minval=2, group=g_wt)
+sigLength = input.int(4,  'Signal Length',   minval=1, group=g_wt)
+ciConst   = input.float(0.015, 'CI Constant', minval=0.001, maxval=0.5, step=0.001, group=g_wt,
+     tooltip='Channel Index normalization constant. Default 0.015 (Lambert/CCI). Higher for high-vol instruments.')
+wtEnginePreset = input.string('Classic Stable', 'WT Engine Preset', options=['Classic Stable', 'Custom'], group=g_wt,
+     tooltip='Classic Stable forces classic WT normalization and EMA smoothing, regardless of older saved chart inputs. Use Custom to test ATR/HMA/JMA variants.')
+normMode  = input.string('Mean Abs Dev', 'Custom Volatility Norm', options=['Mean Abs Dev', 'ATR'], group=g_wt,
+     tooltip='Mean Abs Dev is the classic WaveTrend normalization. ATR is gap-aware but can compress oscillator extremes after wide candles.')
+smoothType= input.string('EMA', 'Custom Smoothing', options=['EMA', 'RMA', 'SMA', 'WMA', 'HMA', 'JMA'], group=g_wt,
+     tooltip='EMA is the classic WaveTrend smoother and the default baseline. HMA is faster but can overshoot/ring on oscillators.')
+jmaPhase  = input.int(50, '  JMA Phase', minval=-100, maxval=100, group=g_wt)
+jmaPower  = input.float(2.0, '  JMA Power', minval=1.0, maxval=4.0, step=0.25, group=g_wt)
+
+upperBand = input.int(56, 'OB Threshold', group=g_wt)
+lowerBand = input.int(-56, 'OS Threshold', group=g_wt)
+zoneExitWindow = input.int(4, 'Zone Exit Trigger Window', minval=0, maxval=20, group=g_wt,
+     tooltip='How many bars after an OB/OS visit a WT cross may still count as a valid reversal trigger. 0 = cross must happen inside the zone.')
+useAutoTF = input.bool(true, 'Auto-Calibrate Time Windows', group=g_wt,
+     tooltip='Scales time-based bar windows from a 4H baseline. WT engine lengths are not scaled because they control oscillator shape.')
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2 — Market Structure (HH / HL / LH / LL)
+// ═══════════════════════════════════════════════════════════════════════════
+
+g_struct = '2. Market Structure'
+
+structPivLen = input.int(5, 'Swing Pivot Length', minval=2, maxval=20, group=g_struct,
+     tooltip='Bars on each side required to confirm a price swing high/low.')
+structLookback = input.int(50, 'Structure Lookback', minval=20, maxval=200, group=g_struct,
+     tooltip='How far back to scan for the most recent confirmed swings to define current structure.')
+
+showStructure = input.bool(true, 'Show Structure Labels', group=g_struct)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3 — Volume Context
+// ═══════════════════════════════════════════════════════════════════════════
+
+g_vol = '3. Volume Context'
+
+volMALen     = input.int(50, 'Volume MA Length', minval=10, maxval=200, group=g_vol)
+volSpikeMult = input.float(1.5, 'Volume Spike Multiplier', minval=1.0, maxval=5.0, step=0.1, group=g_vol,
+     tooltip='Volume spike = current volume > MA × this multiplier. Used as conviction signal.')
+useVolPOC    = input.bool(true, 'Use Volume Profile (POC)', group=g_vol,
+     tooltip='Compute the Point of Control (POC) at two horizons. Local POC drives the entry-context score (reclaim/reject). Macro POC is shown as a longer-term magnet/bias reference.')
+pocLookback  = input.int(100, '  Local POC Lookback', minval=30, maxval=500, group=g_vol,
+     tooltip='Short-horizon POC used for the score component (pocReclaim / pocReject). Closer to current price action; reacts faster to regime change.')
+pocMacroLookback = input.int(300, '  Macro POC Lookback', minval=50, maxval=1000, group=g_vol,
+     tooltip='Long-horizon POC shown as bias/magnet. Not used for entry score by default; informational on chart and in dashboard.')
+pocBins      = input.int(20, '  POC Bins', minval=10, maxval=50, group=g_vol,
+     tooltip='Number of price bins for both POC computations. Higher = more precise but slower.')
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4 — Multi-Timeframe Trend
+// ═══════════════════════════════════════════════════════════════════════════
+
+g_htf = '4. Multi-Timeframe Trend'
+
+htfTimeframe = input.timeframe('', 'HTF (auto if empty)', group=g_htf,
+     tooltip='Setup timeframe for trend context. Empty = auto (~4× chart TF; 1H→4H, 4H→D).')
+anchorTimeframe = input.timeframe('', 'Anchor HTF (auto if empty)', group=g_htf,
+     tooltip='Higher anchor timeframe for directional bias. Empty = auto (~24× chart TF; 1H→D, 4H→W).')
+htfWeight    = input.float(1.0, 'HTF Score Weight', minval=0.0, maxval=2.0, step=0.5, group=g_htf,
+     tooltip='Weight of setup HTF trend in the composite context score. If the setup HTF is used as a hard gate, it is not scored again.')
+anchorWeight = input.float(1.0, 'Anchor HTF Score Weight', minval=0.0, maxval=2.0, step=0.5, group=g_htf,
+     tooltip='Weight of anchor timeframe trend in the composite context score. 0 = ignore this timeframe.')
+mtfGateMode = input.string('None', 'Hard MTF Gate',
+     options=['None', 'Setup Only', 'Setup + Anchor'], group=g_htf,
+     tooltip='Hard MTF entry gate. Default None means HTF is context/score only, not a hard blocker. Use hard gates only after logs show they help a specific timeframe.')
+anchorScoreMode = input.string('Contrarian', 'Anchor Score Mode',
+     options=['Ignore', 'Alignment', 'Contrarian'], group=g_htf,
+     tooltip='How the anchor timeframe contributes to score. Contrarian rewards early reversals where setup HTF has turned but anchor HTF has not yet followed. Alignment rewards full MTF trend continuation.')
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5 — Setup Gate
+// ═══════════════════════════════════════════════════════════════════════════
+
+g_setup = '5. Setup Gate'
+
+useSetupGate = input.bool(true, 'Require Setup Location + Room', group=g_setup,
+     tooltip='Setup-first mode. Signals only pass when price is near a useful range edge and has enough room to a structure/range target.')
+setupRangeLen = input.int(120, 'Setup Range Lookback', minval=30, maxval=500, group=g_setup,
+     tooltip='Range used to define whether price is near the lower/upper part of the chart. 1H: about several trading days; 4H: several weeks.')
+setupEdgePct = input.float(0.35, 'Range Edge Percent', minval=0.10, maxval=0.50, step=0.05, group=g_setup,
+     tooltip='Longs require price in the lower part of the setup range; shorts require price in the upper part. 0.35 means bottom/top 35%.')
+swingProximityATR = input.float(1.5, 'Swing Proximity (ATR×)', minval=0.25, maxval=10.0, step=0.25, group=g_setup,
+     tooltip='Alternative setup location: allow entries near the latest confirmed swing support/resistance even if the larger range edge is not reached. This is important for lower-high shorts in downtrends.')
+volumeGateMode = input.string('Lower TF Only', 'Volume Gate Mode',
+     options=['Off', 'Lower TF Only', 'All TF', 'Reversal Only', 'Pullback Only'], group=g_setup,
+     tooltip='When/where directional volume spike is required as part of setup gate.\n• Off: never required\n• Lower TF Only: required only on chart TFs ≤1H (legacy default)\n• All TF: required for every entry\n• Reversal Only / Pullback Only: required only for that family.\nProfile may override this — set Strategy Profile to Custom to use this raw value.')
+usePullbackSetup = input.bool(true, 'Enable Pullback Continuation Setup', group=g_setup,
+     tooltip='Adds a second setup family: trend impulse + controlled pullback + WT re-entry. This is separate from range-edge reversal and should increase useful 4H trade count.')
+requirePullbackHTF = input.bool(false, '  Require HTF for Pullback', group=g_setup,
+     tooltip='When off, pullback continuation uses chart structure as the hard requirement and leaves HTF as score/log context. This prevents MTF from silently starving pullback trades.')
+pullbackEmaLen = input.int(34, '  Pullback EMA Length', minval=5, maxval=200, group=g_setup)
+pullbackProximityATR = input.float(1.75, '  Pullback Proximity (ATR×)', minval=0.25, maxval=5.0, step=0.25, group=g_setup,
+     tooltip='Pullback setup requires price near the EMA or a confirmed swing support/resistance by this ATR distance.')
+minImpulseATR = input.float(2.0, '  Min Prior Impulse (ATR×)', minval=1.0, maxval=15.0, step=0.25, group=g_setup,
+     tooltip='Minimum distance between the latest confirmed swing low/high. Avoids continuation entries when no meaningful prior move exists.')
+minTargetRoomATR = input.float(2.0, 'Min Room to Target (ATR×)', minval=0.5, maxval=10.0, step=0.25, group=g_setup,
+     tooltip='Minimum distance from entry to the next structure/range target. Blocks trades with no realistic payoff room.')
+stopBufferATR = input.float(0.5, 'Structure Stop Buffer (ATR×)', minval=0.0, maxval=5.0, step=0.1, group=g_setup,
+     tooltip='Buffer beyond the latest swing low/high used for the initial stop.')
+fallbackStopATR = input.float(2.5, 'Fallback Stop (ATR×)', minval=0.5, maxval=10.0, step=0.25, group=g_setup,
+     tooltip='Fallback stop distance when no usable swing exists.')
+shortRRRequireConfirm = input.bool(true, 'SHORT Range-Reversal: Require Pullback Confirm', group=g_setup,
+     tooltip='Restricts SHORT range-reversal entries to those that also have pullback location (near EMA/swing resistance) or bear structure trend. NatGas tests showed unconfirmed SHORT reversals bleed PF (0.68 vs LONG 1.37 across 193 trades).')
+longPBRequireConfirm = input.bool(true, 'LONG Pullback-Continuation: Require Range-Edge or Volume Confirm', group=g_setup,
+     tooltip='Restricts LONG pullback-continuation entries to those that also have range-edge location OR a bullish volume spike with structure. Diagnostic showed LONG-PB without this gate runs at PF 0.53.')
+pullbackTriggerZone = input.float(35.0, 'Pullback WT Trigger Zone (±)', minval=10.0, maxval=50.0, step=2.5, group=g_setup,
+     tooltip='Pullback continuation uses its own WT trigger: a cross while the oscillator is in the neutral band ±this value. Range-reversal still requires the OB/OS-based trigger.')
+volatilityRegimeMode = input.string('Hard Gate', 'Volatility Regime Mode',
+     options=['Off', 'Score Only', 'Hard Gate'], group=g_setup,
+     tooltip='How the volatility regime check (atrNorm = ATR(14) / SMA(ATR(14), 100)) acts:\n• Off — ignored\n• Score Only — adds +0.5 context score when atrNorm is in band (advisory, never blocks)\n• Hard Gate — blocks all signals outside the band (default — preserves multi-instrument validation behavior)')
+volatilityRegimeMin = input.float(0.7, 'Volatility Regime Min (atrNorm)', minval=0.0, maxval=2.0, step=0.05, group=g_setup,
+     tooltip='Lower bound for the regime band. Below this, market is too quiet — no edge. Compression breakouts will be missed in Hard Gate mode.')
+volatilityRegimeMax = input.float(1.5, 'Volatility Regime Max (atrNorm)', minval=0.5, maxval=5.0, step=0.1, group=g_setup,
+     tooltip='Upper bound for the regime band. Above this, market is too chaotic — outside the strategy working range.')
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6 — Composite Signal
+// ═══════════════════════════════════════════════════════════════════════════
+
+g_sig = '6. Composite Signal'
+
+// ─── Trigger + Context model ─────────────────────────────────────────────────
+// Trigger is a binary requirement (WT Cross after a fresh OB/OS visit). Context
+// is a score across independent components. This separation prevents the
+// double-counting bug where Cross-in-Zone added 2 score points for one event.
+
+minContextScore = input.float(3.0, 'Min Context Score', minval=0, maxval=7, step=0.5, group=g_sig,
+     tooltip='Trigger (WT Cross after a fresh OB/OS visit) is binary required. Then context score must reach this threshold:\n\n• +1 Structure (HL/no-LL for long, LH/no-HH for short — reversal-friendly)\n• +1 POC reclaim/reject (event-based, not just above/below)\n• +1 Directional volume spike (volume + bullish/bearish bar shape)\n• +htfWeight setup HTF WT direction agrees, only when not already gated\n• +anchorWeight according to Anchor Score Mode\n\nDefault needs setup HTF alignment, two local confirmations, and/or contrarian anchor context.')
+
+pocRecentBars = input.int(5, '  POC Reclaim/Reject Window', minval=1, maxval=20, group=g_sig,
+     tooltip='POC reclaim/reject is counted as context if it occurred within this many bars of the trigger.')
+
+showSignals = input.bool(true, 'Show Composite Signals', group=g_sig)
+debugMode   = input.bool(false, 'Debug Mode (verbose log)', group=g_sig)
+
+// ATR length used by setup-gate room/proximity calcs and the volatility regime gate
+atrLen  = input.int(14,  'ATR Length',     minval=1, group=g_sig, display=display.none)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7 — Profile & Per-Family Gating
+// ═══════════════════════════════════════════════════════════════════════════
+// Profile mode is a configuration layer over the raw inputs. When set to a
+// named profile, it overrides minContextScore, volumeGateMode, mtfGateMode,
+// mtfGateApplyTo, anchorScoreApplyTo, shortRRRequireConfirm,
+// pullbackTriggerZone, usePullbackSetup. Set to "Custom" to use raw inputs.
+// Per-family gates (mtfGateApplyTo, anchorScoreApplyTo) decide whether the
+// MTF / anchor scoring/gating applies to range-reversal, pullback, both, none.
+
+g_profile = '7. Profile & Per-Family Gates'
+
+profileMode = input.string('Balanced', 'Strategy Profile',
+     options=['Strict', 'Balanced', 'Aggressive', 'Reversal', 'Pullback', 'Diagnostic', 'Custom'], group=g_profile,
+     tooltip='Preset configurations:\n• Strict — high score bar, all gates on\n• Balanced — current best defaults (PB-only MTF, SHORT-RR confirm)\n• Aggressive — minimal gating, more trades\n• Reversal — only range-reversal family, contrarian anchor\n• Pullback — only pullback-flavored gating, looser score\n• Diagnostic — accept everything, log everything\n• Custom — use the raw inputs as-is')
+
+mtfGateApplyTo = input.string('Pullback Only', 'Apply MTF Gate To',
+     options=['All', 'Reversal Only', 'Pullback Only', 'None'], group=g_profile,
+     tooltip='Which setup family is hard-gated by MTF (when mtfGateMode != None). Range-reversal often happens before HTF turns, so Pullback Only is a sensible default.')
+
+anchorScoreApplyTo = input.string('All', 'Apply Anchor Score To',
+     options=['All', 'Reversal Only', 'Pullback Only', 'None'], group=g_profile,
+     tooltip='Which setup family the anchor score component contributes to.')
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8 — Exit Logic
+// ═══════════════════════════════════════════════════════════════════════════
+// Active exit signals fired by the indicator (in addition to fixed SL/TP). Each
+// can be toggled. They are visualized on chart so you can see WHY a trade exited.
+
+g_exit = '8. Exit Logic'
+
+useExitOpposite = input.bool(true, 'Exit on Opposite Signal', group=g_exit,
+     tooltip='Close LONG when SHORT signal fires (and vice versa). Universal — fires regardless of family.')
+oppositeExitMinScore = input.float(3.0, '  Opposite Exit Min Score (conviction gate)', minval=0.0, maxval=7.0, step=0.5, group=g_exit,
+     tooltip='Require the opposite signal to have at least this context score before closing. Filters out weak counter-signals that would needlessly cut good trades. Default 3.0 = requires same conviction as Balanced minScore.')
+useExitFamilyWT = input.bool(true, 'Exit on Family-WT Cross', group=g_exit,
+     tooltip='Close LONG-RR on WT cross-down in OB area; close LONG-PB on WT cross-down (any). Mirror for SHORT. Cuts trades when the trigger that opened them reverses.')
+useExitTimeFail = input.bool(true, 'Exit on Time Failure (no progress)', group=g_exit,
+     tooltip='Close trade when N bars passed AND running R-multiple is below threshold. Prevents stagnant trades from running to SL.')
+maxBarsInTrade  = input.int(30,  '  Max Bars in Trade (4H baseline)', minval=5, maxval=200, group=g_exit,
+     tooltip='Bar window after which Time-Failure exit applies. Auto-scaled to chart TF.')
+minProfitR      = input.float(0.0, '  Min R-Multiple to Continue', minval=-2.0, maxval=3.0, step=0.1, group=g_exit,
+     tooltip='If running profit (in R-multiples) is below this after maxBarsInTrade, the trade is closed. Default 0.0 = only close losing stagnant trades; breakeven stays open. Set to e.g. 0.5 if you want to also cut weak winners.')
+useExitFollowThr = input.bool(false, 'Exit on Follow-Through Failure (opt-in)', group=g_exit,
+     tooltip='After N bars from entry, require highest high (long) / lowest low (short) to be at least followThroughATR × ATR beyond entry. Aggressive — kills slow-but-eventual-winners.')
+followThroughBars = input.int(3, '  Follow-Through Bars (4H baseline)', minval=2, maxval=20, group=g_exit)
+followThroughATR  = input.float(0.3, '  Follow-Through ATR×', minval=0.0, maxval=3.0, step=0.05, group=g_exit)
+
+showExitMarkers = input.bool(true, 'Show Exit Markers', group=g_exit,
+     tooltip='Draw a label on chart at each indicator-driven exit, color-coded by reason.')
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+f_jma(src, length, phase, power) =>
+    var float jma = na
+    var float e0 = na
+    var float e1 = na
+    var float e2 = na
+    _phaseRatio = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    _beta  = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    _alpha = math.pow(_beta, power)
+    e0 := (1 - _alpha) * src + _alpha * nz(e0[1], src)
+    e1 := (src - e0) * (1 - _beta) + _beta * nz(e1[1], 0)
+    e2 := (e0 + _phaseRatio * e1 - nz(jma[1], src)) * math.pow(1 - _alpha, 2) + math.pow(_alpha, 2) * nz(e2[1], 0)
+    jma := nz(jma[1], src) + e2
+    jma
+
+f_smooth(src, length, mode) =>
+    switch mode
+        'SMA' => ta.sma(src, length)
+        'RMA' => ta.rma(src, length)
+        'HMA' => ta.hma(src, length)
+        'WMA' => ta.wma(src, length)
+        'JMA' => f_jma(src, length, jmaPhase, jmaPower)
+        =>      ta.ema(src, length)
+
+_chartSec = timeframe.in_seconds()
+tfScale = useAutoTF ? 14400.0 / math.max(float(_chartSec), 60.0) : 1.0
+
+f_scaleBars(base, floor, cap) =>
+    int(math.min(math.max(math.round(base * tfScale), floor), cap))
+
+f_getWT(src, n1, n2) =>
+    _normMode = wtEnginePreset == 'Classic Stable' ? 'Mean Abs Dev' : normMode
+    _smoothType = wtEnginePreset == 'Classic Stable' ? 'EMA' : smoothType
+    _esa = ta.ema(src, n1)
+    _d   = _normMode == 'ATR' ? ta.atr(n1) : ta.ema(math.abs(src - _esa), n1)
+    _den = ciConst * _d
+    _ci  = _den != 0 ? (src - _esa) / _den : 0
+    f_smooth(_ci, n2, _smoothType)
+
+f_autoTF(seconds) =>
+    string _tf = "W"
+    if seconds <= 3600
+        _tf := "60"
+    else if seconds <= 14400
+        _tf := "240"
+    else if seconds <= 86400
+        _tf := "D"
+    _tf
+
+// HTF wtOsc — for use in the alignment score
+_setupSec  = _chartSec * 4
+_anchorSec = _chartSec * 24
+zoneExitWindowA = f_scaleBars(zoneExitWindow, 1, 40)
+structLookbackA = f_scaleBars(structLookback, 20, 500)
+setupRangeLenA = f_scaleBars(setupRangeLen, 30, 500)
+// pocLookbackA / pocMacroLookbackA are recomputed below after profile resolution
+pocRecentBarsA = f_scaleBars(pocRecentBars, 1, 30)
+volMALenA = f_scaleBars(volMALen, 10, 300)
+pullbackEmaLenA = f_scaleBars(pullbackEmaLen, 5, 300)
+_autoSetupHTF = f_autoTF(_setupSec)
+_autoAnchorHTF = f_autoTF(_anchorSec)
+_htfTF     = htfTimeframe == "" ? _autoSetupHTF : htfTimeframe
+_anchorTF  = anchorTimeframe == "" ? _autoAnchorHTF : anchorTimeframe
+_anchorActive = _anchorTF != _htfTF
+
+htfWtOsc = request.security(syminfo.tickerid, _htfTF,
+     f_getWT(hlc3, chLength, avgLength),
+     lookahead = barmerge.lookahead_off)
+
+anchorWtOsc = request.security(syminfo.tickerid, _anchorTF,
+     f_getWT(hlc3, chLength, avgLength),
+     lookahead = barmerge.lookahead_off)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROFILE RESOLUTION — turns named profileMode into effective config
+// ═══════════════════════════════════════════════════════════════════════════
+// When profileMode != 'Custom' the profile overrides selected raw inputs.
+// Inputs that the profile does NOT touch (HTF tfs, weights, edges, etc.)
+// always come straight from the user.
+
+_isCustomProfile = profileMode == 'Custom'
+float _effMinScore = minContextScore
+string _effVolMode = volumeGateMode
+string _effMtfGateMode = mtfGateMode
+string _effMtfApplyTo = mtfGateApplyTo
+string _effAnchorApplyTo = anchorScoreApplyTo
+bool _effShortRRConfirm = shortRRRequireConfirm
+bool _effLongPBConfirm = longPBRequireConfirm
+float _effPbZone = pullbackTriggerZone
+bool _effUsePullback = usePullbackSetup
+int _effUpperBand = upperBand
+int _effLowerBand = lowerBand
+int _effPocLocalLookback = pocLookback
+int _effPocMacroLookback = pocMacroLookback
+float _effSetupEdgePct = setupEdgePct
+float _effSwingProximityATR = swingProximityATR
+float _effVolRegimeMin = volatilityRegimeMin
+float _effVolRegimeMax = volatilityRegimeMax
+string _effRegimeMode = volatilityRegimeMode
+
+if not _isCustomProfile
+    if profileMode == 'Strict'
+        _effMinScore := 4.0
+        _effSetupEdgePct := 0.30
+        _effSwingProximityATR := 1.25
+        _effVolMode := 'All TF'
+        _effMtfGateMode := 'Setup Only'
+        _effMtfApplyTo := 'All'
+        _effAnchorApplyTo := 'All'
+        _effShortRRConfirm := true
+        _effLongPBConfirm := true
+        _effPbZone := 25.0
+        _effUpperBand := 60
+        _effLowerBand := -60
+        _effPocLocalLookback := 120
+        _effPocMacroLookback := 400
+        _effVolRegimeMin := 0.8
+        _effVolRegimeMax := 1.3
+        _effRegimeMode := 'Hard Gate'
+    else if profileMode == 'Balanced'
+        // Aligned to Aggressive's loose setup gates so all edge candidates
+        // are reachable, but keeps minScore=3.0 to filter the noise tier
+        // (Score 2.5 trades had PF 1.01 in test31 Aggressive — those drop out).
+        _effMinScore := 3.0
+        _effSetupEdgePct := 0.45
+        _effSwingProximityATR := 2.5
+        _effVolMode := 'Lower TF Only'
+        _effMtfGateMode := 'None'
+        _effMtfApplyTo := 'None'
+        _effAnchorApplyTo := 'All'
+        _effShortRRConfirm := true
+        _effLongPBConfirm := true
+        _effPbZone := 50.0
+        _effUpperBand := 45
+        _effLowerBand := -45
+        _effPocLocalLookback := 80
+        _effPocMacroLookback := 300
+        _effVolRegimeMin := 0.6
+        _effVolRegimeMax := 1.6
+        _effRegimeMode := 'Score Only'
+    else if profileMode == 'Aggressive'
+        _effMinScore := 2.0
+        _effSetupEdgePct := 0.45
+        _effSwingProximityATR := 2.5
+        _effVolMode := 'Off'
+        _effMtfGateMode := 'None'
+        _effMtfApplyTo := 'None'
+        _effShortRRConfirm := true
+        _effLongPBConfirm := true
+        _effPbZone := 50.0
+        _effUpperBand := 45
+        _effLowerBand := -45
+        _effPocLocalLookback := 80
+        _effPocMacroLookback := 200
+        _effVolRegimeMin := 0.5
+        _effVolRegimeMax := 2.0
+        _effRegimeMode := 'Score Only'
+    else if profileMode == 'Reversal'
+        _effMinScore := 3.0
+        _effSetupEdgePct := 0.40
+        _effSwingProximityATR := 2.0
+        _effVolMode := 'Reversal Only'
+        _effMtfApplyTo := 'None'
+        _effAnchorApplyTo := 'Reversal Only'
+        _effShortRRConfirm := true
+        _effUsePullback := false
+        _effUpperBand := 45
+        _effLowerBand := -45
+        _effPocLocalLookback := 120
+        _effPocMacroLookback := 400
+        _effVolRegimeMin := 0.6
+        _effVolRegimeMax := 1.4
+        _effRegimeMode := 'Hard Gate'
+    else if profileMode == 'Pullback'
+        _effMinScore := 2.5
+        _effSetupEdgePct := 0.35
+        _effSwingProximityATR := 1.5
+        _effVolMode := 'Pullback Only'
+        _effMtfGateMode := 'Setup Only'
+        _effMtfApplyTo := 'Pullback Only'
+        _effAnchorApplyTo := 'Pullback Only'
+        _effLongPBConfirm := true
+        _effPbZone := 35.0
+        _effUpperBand := 56
+        _effLowerBand := -56
+        _effPocLocalLookback := 100
+        _effPocMacroLookback := 300
+        _effVolRegimeMin := 0.7
+        _effVolRegimeMax := 1.3
+        _effRegimeMode := 'Hard Gate'
+    else if profileMode == 'Diagnostic'
+        _effMinScore := 0.0
+        _effSetupEdgePct := 0.50
+        _effSwingProximityATR := 5.0
+        _effVolMode := 'Off'
+        _effMtfApplyTo := 'None'
+        _effAnchorApplyTo := 'None'
+        _effShortRRConfirm := false
+        _effLongPBConfirm := false
+        _effPbZone := 50.0
+        _effUpperBand := 20
+        _effLowerBand := -20
+        _effPocLocalLookback := 100
+        _effPocMacroLookback := 300
+        _effVolRegimeMin := 0.0
+        _effVolRegimeMax := 99.0
+        _effRegimeMode := 'Off'
+
+// Per-family gate booleans (derived once, used downstream)
+_mtfHardRR = _effMtfGateMode != 'None' and (_effMtfApplyTo == 'All' or _effMtfApplyTo == 'Reversal Only')
+_mtfHardPB = _effMtfGateMode != 'None' and (_effMtfApplyTo == 'All' or _effMtfApplyTo == 'Pullback Only')
+_anchorReqRR = _effAnchorApplyTo == 'All' or _effAnchorApplyTo == 'Reversal Only'
+_anchorReqPB = _effAnchorApplyTo == 'All' or _effAnchorApplyTo == 'Pullback Only'
+_volReqRR = _effVolMode == 'All TF' or _effVolMode == 'Reversal Only' or (_effVolMode == 'Lower TF Only' and _chartSec <= 3600)
+_volReqPB = _effVolMode == 'All TF' or _effVolMode == 'Pullback Only' or (_effVolMode == 'Lower TF Only' and _chartSec <= 3600)
+
+// POC lookbacks (dual horizon) use effective profile values, auto-scaled
+pocLookbackA      = f_scaleBars(_effPocLocalLookback, 30, 500)
+pocMacroLookbackA = f_scaleBars(_effPocMacroLookback, 50, 1000)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// SECTION 1 — WaveTrend
+wtOsc = f_getWT(hlc3, chLength, avgLength)
+wtSig = ta.sma(wtOsc, sigLength)
+activeNormMode = wtEnginePreset == 'Classic Stable' ? 'Mean Abs Dev' : normMode
+activeSmoothType = wtEnginePreset == 'Classic Stable' ? 'EMA' : smoothType
+
+// Fresh-zone reversal trigger. Reversal crosses often print after WT has
+// already left OB/OS; same-bar zone membership was too late/strict.
+// Bands resolve via profile (_effUpperBand/_effLowerBand) so Aggressive can
+// use ±30 for more triggers, Strict ±60 for fewer/cleaner.
+inOSZone = wtOsc < _effLowerBand
+inOBZone = wtOsc > _effUpperBand
+barsSinceOS = nz(ta.barssince(inOSZone), 999)
+barsSinceOB = nz(ta.barssince(inOBZone), 999)
+osRecent = barsSinceOS <= zoneExitWindowA
+obRecent = barsSinceOB <= zoneExitWindowA
+
+crossUp   = ta.crossover(wtOsc, wtSig)  and osRecent and wtOsc < 0
+crossDown = ta.crossunder(wtOsc, wtSig) and obRecent and wtOsc > 0
+
+// SECTION 2 — Structure detection
+_phFound = not na(ta.pivothigh(high, structPivLen, structPivLen))
+_plFound = not na(ta.pivotlow(low, structPivLen, structPivLen))
+
+var float lastSwingHigh1 = na
+var float lastSwingHigh2 = na
+var float lastSwingLow1  = na
+var float lastSwingLow2  = na
+
+if _phFound
+    lastSwingHigh2 := lastSwingHigh1
+    lastSwingHigh1 := high[structPivLen]
+
+if _plFound
+    lastSwingLow2 := lastSwingLow1
+    lastSwingLow1 := low[structPivLen]
+
+// Structure state — reversal-friendly (Fix #2):
+// Long-OK requires either HL (constructive low) or absence of fresh LL.
+// Short-OK requires either LH (constructive high) or absence of fresh HH.
+// HH+HL is too late for reversal-trading (move already underway).
+hhDetected = not na(lastSwingHigh1) and not na(lastSwingHigh2) and lastSwingHigh1 > lastSwingHigh2
+hlDetected = not na(lastSwingLow1)  and not na(lastSwingLow2)  and lastSwingLow1  > lastSwingLow2
+lhDetected = not na(lastSwingHigh1) and not na(lastSwingHigh2) and lastSwingHigh1 < lastSwingHigh2
+llDetected = not na(lastSwingLow1)  and not na(lastSwingLow2)  and lastSwingLow1  < lastSwingLow2
+
+// Structure freshness (Fix #6 — was structLookback unused)
+var int lastStructBar = na
+if _phFound or _plFound
+    lastStructBar := bar_index
+structureFresh = not na(lastStructBar) and (bar_index - lastStructBar) <= structLookbackA
+
+// Require real swing history before granting structure points (no
+// false-positives during warm-up where `not llDetected` is trivially true
+// because no swings exist yet).
+hasLowStructure  = not na(lastSwingLow1)  and not na(lastSwingLow2)
+hasHighStructure = not na(lastSwingHigh1) and not na(lastSwingHigh2)
+
+// Long conflict: HL with a still-active LH means compression under a lower high.
+// Test11/Test12 showed these longs were consistently poor; wait for HH or a
+// deeper reversal setup instead of treating HL alone as constructive.
+structureLongConflict = hlDetected and lhDetected and not hhDetected
+structureLongOk  = structureFresh and hasLowStructure  and not structureLongConflict and (hlDetected or not llDetected)
+// Short conflict: LL with a still-active LH often means the move is already
+// mature. 4H NatGas tests showed these shorts were the main drag; prefer lower
+// high rollover before a fresh lower low, or stronger non-structure context.
+structureShortConflict = llDetected and lhDetected and not hhDetected
+structureShortOk = structureFresh and hasHighStructure and not structureShortConflict and (lhDetected or not hhDetected)
+
+// Kept for dashboard / log display only (not used in score)
+structureBull = hhDetected and hlDetected
+structureBear = llDetected and lhDetected
+
+// SECTION 3 — Volume context
+volMA = ta.sma(volume, volMALenA)
+volSpike = volume > volMA * volSpikeMult
+
+// Directional volume spike (Fix #4) — Spike + bar-shape confirms direction.
+// Avoids rewarding panic-selloff bars as bullish or vice versa.
+_barRange = high - low
+_closePos = _barRange > 0 ? (close - low) / _barRange : 0.5
+bullVolSpike = volSpike and _closePos > 0.65
+bearVolSpike = volSpike and _closePos < 0.35
+
+// Simple POC computation: most-traded price level over pocLookback
+f_computePOC(lookback, bins) =>
+    _hi = ta.highest(high, lookback)
+    _lo = ta.lowest(low, lookback)
+    _binSize = (_hi - _lo) / bins
+    var float[] _binVols = array.new<float>(bins, 0.0)
+    if barstate.isconfirmed and _binSize > 0
+        for i = 0 to bins - 1
+            array.set(_binVols, i, 0.0)
+        for j = 0 to lookback - 1
+            _midPx = (high[j] + low[j]) / 2
+            _binIdx = math.floor((_midPx - _lo) / _binSize)
+            _binIdx := math.max(0, math.min(bins - 1, _binIdx))
+            array.set(_binVols, _binIdx, array.get(_binVols, _binIdx) + nz(volume[j], 0))
+    var float pocPx = na
+    if barstate.isconfirmed and _binSize > 0
+        _maxIdx = 0
+        _maxVol = 0.0
+        for i = 0 to bins - 1
+            _v = array.get(_binVols, i)
+            if _v > _maxVol
+                _maxVol := _v
+                _maxIdx := i
+        pocPx := _lo + (_maxIdx + 0.5) * _binSize
+    pocPx
+
+// Local POC (short horizon) drives entry-context score (reclaim/reject).
+// Macro POC (long horizon) is bias / informational only.
+pocPrice      = useVolPOC ? f_computePOC(pocLookbackA, pocBins) : na
+pocMacroPrice = useVolPOC ? f_computePOC(pocMacroLookbackA, pocBins) : na
+
+// Above/Below for dashboard display (local POC, not used in score directly)
+priceAbovePOC = useVolPOC and not na(pocPrice) and close > pocPrice
+priceBelowPOC = useVolPOC and not na(pocPrice) and close < pocPrice
+priceAboveMacroPOC = useVolPOC and not na(pocMacroPrice) and close > pocMacroPrice
+priceBelowMacroPOC = useVolPOC and not na(pocMacroPrice) and close < pocMacroPrice
+
+// POC reclaim/reject — event-based context (Fix #3).
+// Long-meaningful: price was below POC and just closed back above.
+// Short-meaningful: price was above POC and just closed back below.
+// Explicit bar-over-bar comparison (both close[t] vs pocPrice[t] and
+// close[t-1] vs pocPrice[t-1]) is robust against wandering POC.
+pocReclaim = useVolPOC and not na(pocPrice) and not na(pocPrice[1]) and close > pocPrice and close[1] <= pocPrice[1]
+pocReject  = useVolPOC and not na(pocPrice) and not na(pocPrice[1]) and close < pocPrice and close[1] >= pocPrice[1]
+_barsSincePocReclaim = nz(ta.barssince(pocReclaim), 999)
+_barsSincePocReject  = nz(ta.barssince(pocReject), 999)
+pocReclaimRecent = _barsSincePocReclaim <= pocRecentBarsA
+pocRejectRecent  = _barsSincePocReject  <= pocRecentBarsA
+
+// SECTION 4 — Multi-Timeframe Trend (per-family gating)
+// MTF / anchor are now applied per setup family. _mtfHardRR / _mtfHardPB
+// (computed in profile resolution) decide whether the family is hard-gated.
+htfBull = not na(htfWtOsc) and htfWtOsc > 0
+htfBear = not na(htfWtOsc) and htfWtOsc < 0
+anchorBull = not na(anchorWtOsc) and anchorWtOsc > 0
+anchorBear = not na(anchorWtOsc) and anchorWtOsc < 0
+
+_setupGateActive = _effMtfGateMode == 'Setup Only' or _effMtfGateMode == 'Setup + Anchor'
+_anchorGateActive = _effMtfGateMode == 'Setup + Anchor'
+
+// Underlying alignment booleans, independent of whether the gate is hard for a family
+_setupLongAlign = htfWeight == 0 or htfBull
+_setupShortAlign = htfWeight == 0 or htfBear
+_anchorLongAlign = not _anchorActive or anchorWeight == 0 or anchorBull
+_anchorShortAlign = not _anchorActive or anchorWeight == 0 or anchorBear
+_mtfLongAlign  = (not _setupGateActive or _setupLongAlign)  and (not _anchorGateActive or _anchorLongAlign)
+_mtfShortAlign = (not _setupGateActive or _setupShortAlign) and (not _anchorGateActive or _anchorShortAlign)
+
+// Per-family gate verdict (true = pass)
+mtfLongOkRR  = not _mtfHardRR or _mtfLongAlign
+mtfLongOkPB  = not _mtfHardPB or _mtfLongAlign
+mtfShortOkRR = not _mtfHardRR or _mtfShortAlign
+mtfShortOkPB = not _mtfHardPB or _mtfShortAlign
+
+// HTF score component per family (0 when MTF is hard-gated for that family — no double-count)
+longHtfScoreRR  = (not _mtfHardRR) and htfBull ? htfWeight : 0.0
+longHtfScorePB  = (not _mtfHardPB) and htfBull ? htfWeight : 0.0
+shortHtfScoreRR = (not _mtfHardRR) and htfBear ? htfWeight : 0.0
+shortHtfScorePB = (not _mtfHardPB) and htfBear ? htfWeight : 0.0
+
+// Anchor score raw (before per-family apply)
+float _anchorLongRaw = 0.0
+float _anchorShortRaw = 0.0
+if _anchorActive and anchorScoreMode != 'Ignore'
+    if anchorScoreMode == 'Alignment'
+        _anchorLongRaw := anchorBull ? anchorWeight : 0
+        _anchorShortRaw := anchorBear ? anchorWeight : 0
+    else if anchorScoreMode == 'Contrarian'
+        _anchorLongRaw := not anchorBull ? anchorWeight : 0
+        _anchorShortRaw := not anchorBear ? anchorWeight : 0
+
+longAnchorScoreRR  = _anchorReqRR ? _anchorLongRaw  : 0.0
+longAnchorScorePB  = _anchorReqPB ? _anchorLongRaw  : 0.0
+shortAnchorScoreRR = _anchorReqRR ? _anchorShortRaw : 0.0
+shortAnchorScorePB = _anchorReqPB ? _anchorShortRaw : 0.0
+
+// SECTION 5 — Setup-first location and payoff room
+atrVal = ta.atr(atrLen)
+
+// Volatility regime — three modes (per profile / Custom):
+// • Off        — never blocks, no score bonus
+// • Score Only — never blocks; +0.5 to context score when atrNorm is in band
+// • Hard Gate  — blocks all signals when atrNorm out of band (default)
+atrNorm = atrVal / ta.sma(atrVal, 100)
+_inRegimeBand = not na(atrNorm) and atrNorm >= _effVolRegimeMin and atrNorm <= _effVolRegimeMax
+volRegimeOk = _effRegimeMode != 'Hard Gate' or _inRegimeBand
+volRegimeBonus = _effRegimeMode == 'Score Only' and _inRegimeBand ? 0.5 : 0.0
+setupRangeHigh = ta.highest(high, setupRangeLenA)
+setupRangeLow = ta.lowest(low, setupRangeLenA)
+setupRange = setupRangeHigh - setupRangeLow
+setupRangePos = setupRange > 0 ? (close - setupRangeLow) / setupRange : 0.5
+
+nearSwingSupport = atrVal > 0 and not na(lastSwingLow1) and lastSwingLow1 < close and (close - lastSwingLow1) / atrVal <= _effSwingProximityATR
+nearSwingResistance = atrVal > 0 and not na(lastSwingHigh1) and lastSwingHigh1 > close and (lastSwingHigh1 - close) / atrVal <= _effSwingProximityATR
+longRangeLocationOk = setupRangePos <= _effSetupEdgePct
+shortRangeLocationOk = setupRangePos >= 1.0 - _effSetupEdgePct
+longSwingLocationOk = nearSwingSupport and structureLongOk
+shortSwingLocationOk = nearSwingResistance and structureShortOk
+longLocationOk = longRangeLocationOk or longSwingLocationOk
+shortLocationOk = shortRangeLocationOk or shortSwingLocationOk
+
+longStructureTarget = not na(lastSwingHigh1) and lastSwingHigh1 > close ? lastSwingHigh1 : setupRangeHigh
+shortStructureTarget = not na(lastSwingLow1) and lastSwingLow1 < close ? lastSwingLow1 : setupRangeLow
+longTargetRoomATR = atrVal > 0 ? (longStructureTarget - close) / atrVal : 0
+shortTargetRoomATR = atrVal > 0 ? (close - shortStructureTarget) / atrVal : 0
+longRoomOk = longTargetRoomATR >= minTargetRoomATR
+shortRoomOk = shortTargetRoomATR >= minTargetRoomATR
+
+// Per-family volume gate (volume requirement may apply only to one family)
+longSetupVolumeOkRR  = not _volReqRR or bullVolSpike
+longSetupVolumeOkPB  = not _volReqPB or bullVolSpike
+shortSetupVolumeOkRR = not _volReqRR or bearVolSpike
+shortSetupVolumeOkPB = not _volReqPB or bearVolSpike
+
+pullbackEma = ta.ema(close, pullbackEmaLenA)
+nearPullbackEma = atrVal > 0 and math.abs(close - pullbackEma) / atrVal <= pullbackProximityATR
+longImpulseATR = atrVal > 0 and hasLowStructure and hasHighStructure ? math.abs(lastSwingHigh1 - lastSwingLow1) / atrVal : 0
+shortImpulseATR = atrVal > 0 and hasLowStructure and hasHighStructure ? math.abs(lastSwingHigh1 - lastSwingLow1) / atrVal : 0
+// Pullback trend uses the permissive structureLongOk/structureShortOk (HL/no-LL,
+// LH/no-HH) instead of strict HH+HL. Strict definition starved the pullback path
+// to ~0.5% of accepted trades on NatGas; the permissive form is consistent with
+// the range-reversal location check and unblocks meaningful continuation entries.
+longPullbackTrendOk = structureLongOk and (not requirePullbackHTF or htfBull)
+shortPullbackTrendOk = structureShortOk and (not requirePullbackHTF or htfBear)
+longPullbackLocationOk = nearPullbackEma or nearSwingSupport
+shortPullbackLocationOk = nearPullbackEma or nearSwingResistance
+// LONG-PB confirm: pullback continuation must also have a range-edge location
+// OR a strong bullish-context combo (volume spike + structure). Diagnostic
+// showed unconfirmed LONG-PB runs at PF 0.53 over 27 trades.
+longPBConfirmOk = not _effLongPBConfirm or longRangeLocationOk or (bullVolSpike and structureLongOk)
+longPullbackSetupOk = _effUsePullback and longPullbackTrendOk and longPullbackLocationOk and longImpulseATR >= minImpulseATR and longRoomOk and longSetupVolumeOkPB and longPBConfirmOk
+shortPullbackSetupOk = _effUsePullback and shortPullbackTrendOk and shortPullbackLocationOk and shortImpulseATR >= minImpulseATR and shortRoomOk and shortSetupVolumeOkPB
+
+shortRRConfirmOk = not _effShortRRConfirm or shortPullbackLocationOk or shortPullbackTrendOk
+longRangeReversalSetupOk = longLocationOk and longRoomOk and longSetupVolumeOkRR
+shortRangeReversalSetupOk = shortLocationOk and shortRoomOk and shortSetupVolumeOkRR and shortRRConfirmOk
+// Family-typed setup label — used in tooltips/log "type=" field; useSetupGate
+// is now applied in the per-family pass logic (longRRSetupPass etc.) below.
+longSetupType = longPullbackSetupOk and not longRangeReversalSetupOk ? 'pullback_continuation' : longRangeReversalSetupOk ? 'range_reversal' : 'none'
+shortSetupType = shortPullbackSetupOk and not shortRangeReversalSetupOk ? 'pullback_continuation' : shortRangeReversalSetupOk ? 'range_reversal' : 'none'
+
+longStopStruct = not na(lastSwingLow1) and lastSwingLow1 < close ? lastSwingLow1 - stopBufferATR * atrVal : close - fallbackStopATR * atrVal
+shortStopStruct = not na(lastSwingHigh1) and lastSwingHigh1 > close ? lastSwingHigh1 + stopBufferATR * atrVal : close + fallbackStopATR * atrVal
+longStop = math.min(longStopStruct, close - syminfo.mintick)
+shortStop = math.max(shortStopStruct, close + syminfo.mintick)
+longRisk = math.max(close - longStop, syminfo.mintick)
+shortRisk = math.max(shortStop - close, syminfo.mintick)
+longTakeProfit = longStructureTarget > close ? longStructureTarget : close + longRisk * minTargetRoomATR
+shortTakeProfit = shortStructureTarget < close ? shortStructureTarget : close - shortRisk * minTargetRoomATR
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL — Per-family Trigger + Context model
+// ═══════════════════════════════════════════════════════════════════════════
+// Each setup family (range-reversal, pullback continuation) has its own WT
+// trigger and its own context score. The combined long/short signal fires
+// when either family fires.
+
+// Triggers per family
+rrTriggerLong  = crossUp                                                                                  // OB/OS-based
+rrTriggerShort = crossDown
+pbTriggerLong  = ta.crossover(wtOsc, wtSig)  and wtOsc <  _effPbZone and wtOsc > -_effPbZone              // neutral-zone cross
+pbTriggerShort = ta.crossunder(wtOsc, wtSig) and wtOsc <  _effPbZone and wtOsc > -_effPbZone
+
+// Per-family context score (HTF / anchor components depend on family)
+// volRegimeBonus is +0.5 when regime mode = "Score Only" AND atrNorm in band; else 0.
+longContextScoreRR  = (structureLongOk  ? 1 : 0) + (pocReclaimRecent ? 1 : 0) + (bullVolSpike ? 1 : 0) + longHtfScoreRR  + longAnchorScoreRR  + volRegimeBonus
+longContextScorePB  = (structureLongOk  ? 1 : 0) + (pocReclaimRecent ? 1 : 0) + (bullVolSpike ? 1 : 0) + longHtfScorePB  + longAnchorScorePB  + volRegimeBonus
+shortContextScoreRR = (structureShortOk ? 1 : 0) + (pocRejectRecent  ? 1 : 0) + (bearVolSpike ? 1 : 0) + shortHtfScoreRR + shortAnchorScoreRR + volRegimeBonus
+shortContextScorePB = (structureShortOk ? 1 : 0) + (pocRejectRecent  ? 1 : 0) + (bearVolSpike ? 1 : 0) + shortHtfScorePB + shortAnchorScorePB + volRegimeBonus
+
+// Per-family setup pass — useSetupGate=false bypasses the family setup OK
+longRRSetupPass  = not useSetupGate or longRangeReversalSetupOk
+longPBSetupPass  = not useSetupGate or longPullbackSetupOk
+shortRRSetupPass = not useSetupGate or shortRangeReversalSetupOk
+shortPBSetupPass = not useSetupGate or shortPullbackSetupOk
+
+// Per-family signals (volRegimeOk applies universally — outside the regime, no entries)
+longRRSignal  = rrTriggerLong  and longRRSetupPass  and mtfLongOkRR  and longContextScoreRR  >= _effMinScore and volRegimeOk
+longPBSignal  = pbTriggerLong  and longPBSetupPass  and mtfLongOkPB  and longContextScorePB  >= _effMinScore and volRegimeOk
+shortRRSignal = rrTriggerShort and shortRRSetupPass and mtfShortOkRR and shortContextScoreRR >= _effMinScore and volRegimeOk
+shortPBSignal = pbTriggerShort and shortPBSetupPass and mtfShortOkPB and shortContextScorePB >= _effMinScore and volRegimeOk
+
+longSignal  = longRRSignal  or longPBSignal
+shortSignal = shortRRSignal or shortPBSignal
+
+// Display aggregates (max of the two family scores per direction)
+longContextScore  = math.max(longContextScoreRR,  longContextScorePB)
+shortContextScore = math.max(shortContextScoreRR, shortContextScorePB)
+maxContextScoreRR = 3 + (_mtfHardRR ? 0 : htfWeight) + (_anchorActive and anchorScoreMode != 'Ignore' and _anchorReqRR ? anchorWeight : 0)
+maxContextScorePB = 3 + (_mtfHardPB ? 0 : htfWeight) + (_anchorActive and anchorScoreMode != 'Ignore' and _anchorReqPB ? anchorWeight : 0)
+maxContextScore = math.max(maxContextScoreRR, maxContextScorePB)
+
+// Family of the active signal (for log/tooltip display)
+longSignalFamily  = longRRSignal  ? 'range_reversal' : longPBSignal  ? 'pullback_continuation' : 'none'
+shortSignalFamily = shortRRSignal ? 'range_reversal' : shortPBSignal ? 'pullback_continuation' : 'none'
+
+// ATR-based stops for strategy generation
+// longStop/shortStop and longTakeProfit/shortTakeProfit are computed in the
+// setup-first block above.
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXIT LOGIC — virtual position tracking + 4 exit families
+// ═══════════════════════════════════════════════════════════════════════════
+// The indicator tracks an approximate position state for visualization. The
+// strategy template uses real strategy.position_size for execution. Both share
+// the same longExitSignal / shortExitSignal expressions.
+
+// Auto-scale time-based exit windows from 4H baseline (consistent with other A-vars)
+maxBarsInTradeA   = f_scaleBars(maxBarsInTrade, 5, 400)
+followThroughBarsA = f_scaleBars(followThroughBars, 2, 40)
+
+// --- Virtual position state ---
+var int    _vPos        = 0     // 1 = long, -1 = short, 0 = flat
+var int    _vEntryBar   = na
+var float  _vEntryPx    = na
+var float  _vRisk       = na    // entry-to-stop distance, used for R-multiple
+var string _vFamily     = na    // 'rr' or 'pb'
+var float  _vHigh       = na    // running high since entry (for follow-through / MFE)
+var float  _vLow        = na    // running low since entry / MFE
+var float  _vEntryScore = na    // context-score at entry (quality reference)
+
+// --- Per-trade quality journal (arrays grow with backtest) ---
+var array<string> _trDir         = array.new<string>()
+var array<string> _trFamily      = array.new<string>()
+var array<string> _trReason      = array.new<string>()
+var array<float>  _trEntryScore  = array.new<float>()
+var array<float>  _trExitR       = array.new<float>()    // R-multiple at exit
+var array<float>  _trMFE         = array.new<float>()    // peak R during trade
+var array<int>    _trBarsHeld    = array.new<int>()
+
+// Update running high/low while in position
+if _vPos == 1
+    _vHigh := math.max(nz(_vHigh, high), high)
+if _vPos == -1
+    _vLow := math.min(nz(_vLow, low), low)
+
+// --- Exit-condition components (only meaningful while in matching position) ---
+
+// 1) Opposite signal — only with conviction (max active opposite-family score >= gate)
+_oppShortScore = math.max(shortContextScoreRR, shortContextScorePB)
+_oppLongScore  = math.max(longContextScoreRR,  longContextScorePB)
+longExitOpposite  = _vPos == 1  and (shortRRSignal or shortPBSignal) and _oppShortScore >= oppositeExitMinScore
+shortExitOpposite = _vPos == -1 and (longRRSignal  or longPBSignal)  and _oppLongScore  >= oppositeExitMinScore
+
+// Track running R-multiple early — used by family-WT (RR profit guard) and time-failure
+_barsInTrade = _vPos != 0 and not na(_vEntryBar) ? bar_index - _vEntryBar : 0
+_currentRLong  = _vPos == 1  and not na(_vRisk) and _vRisk > 0 ? (close - _vEntryPx) / _vRisk : 0.0
+_currentRShort = _vPos == -1 and not na(_vRisk) and _vRisk > 0 ? (_vEntryPx - close) / _vRisk : 0.0
+
+// 2) Family-WT cross
+//    RR exits on opposite-side cross — but only if already at R≥1 profit
+//      (else WT-cross at the TARGET zone exits us before price reaches the actual price target)
+//    PB exits on opposite-side cross past the mid-line (trend break, no profit gate)
+_wtCrossDown = ta.crossunder(wtOsc, wtSig)
+_wtCrossUp   = ta.crossover(wtOsc, wtSig)
+longExitFamilyWT  = _vPos == 1  and ((_vFamily == 'rr' and _wtCrossDown and wtOsc > 0 and _currentRLong  >= 1.0) or (_vFamily == 'pb' and _wtCrossDown and wtOsc < 0))
+shortExitFamilyWT = _vPos == -1 and ((_vFamily == 'rr' and _wtCrossUp   and wtOsc < 0 and _currentRShort >= 1.0) or (_vFamily == 'pb' and _wtCrossUp   and wtOsc > 0))
+
+// 3) Time-failure — exit only LOSING stagnant trades (R < 0 after maxBarsInTrade).
+//    Stagnant breakeven trades stay open (might still resolve into TP).
+longExitTimeFail  = _vPos == 1  and _barsInTrade >= maxBarsInTradeA and _currentRLong  < minProfitR
+shortExitTimeFail = _vPos == -1 and _barsInTrade >= maxBarsInTradeA and _currentRShort < minProfitR
+
+// 4) Follow-through — at exactly N bars after entry, require directional progress
+_atTriggerBar = _vPos != 0 and _barsInTrade == followThroughBarsA
+longExitFollowThr  = _vPos == 1  and _atTriggerBar and not na(_vHigh) and _vHigh < _vEntryPx + followThroughATR * atrVal
+shortExitFollowThr = _vPos == -1 and _atTriggerBar and not na(_vLow)  and _vLow  > _vEntryPx - followThroughATR * atrVal
+
+// Aggregated exit signals (gated by toggles)
+longExitSignal  = (useExitOpposite  and longExitOpposite)  or (useExitFamilyWT and longExitFamilyWT)  or (useExitTimeFail and longExitTimeFail)  or (useExitFollowThr and longExitFollowThr)
+shortExitSignal = (useExitOpposite  and shortExitOpposite) or (useExitFamilyWT and shortExitFamilyWT) or (useExitTimeFail and shortExitTimeFail) or (useExitFollowThr and shortExitFollowThr)
+
+// Determine reason text (priority order: opposite > family > time > follow-through)
+_longExitReason  = longExitOpposite  and useExitOpposite  ? 'Opp'
+                 : longExitFamilyWT  and useExitFamilyWT  ? 'WT'
+                 : longExitTimeFail  and useExitTimeFail  ? 'Time'
+                 : longExitFollowThr and useExitFollowThr ? 'FTh' : ''
+_shortExitReason = shortExitOpposite  and useExitOpposite  ? 'Opp'
+                 : shortExitFamilyWT  and useExitFamilyWT  ? 'WT'
+                 : shortExitTimeFail  and useExitTimeFail  ? 'Time'
+                 : shortExitFollowThr and useExitFollowThr ? 'FTh' : ''
+
+// --- State transitions ---
+// Entry (only when flat or opposite is exiting). Opposite-signal exits handle the flip implicitly.
+_enteringLong  = longSignal  and _vPos != 1
+_enteringShort = shortSignal and _vPos != -1
+
+// Exit applies first (close current position + record trade), then entry can flip
+if _vPos == 1 and longExitSignal
+    _exitR  = (close - _vEntryPx) / _vRisk
+    _mfeR   = not na(_vHigh) ? (_vHigh - _vEntryPx) / _vRisk : _exitR
+    _captureL = _mfeR > 0 ? _exitR / _mfeR * 100 : 0.0
+    array.push(_trDir,        'LONG')
+    array.push(_trFamily,     _vFamily)
+    array.push(_trReason,     _longExitReason)
+    array.push(_trEntryScore, _vEntryScore)
+    array.push(_trExitR,      _exitR)
+    array.push(_trMFE,        _mfeR)
+    array.push(_trBarsHeld,   _barsInTrade)
+    if debugMode
+        log.info(str.format('WT3 LONG EXIT | family={0} | reason={1} | bar={2} | entryScore={3} | R={4} | MFE={5} | capturePct={6} | barsHeld={7} | win={8} | profile={9}',
+             str.tostring(_vFamily), _longExitReason, str.tostring(bar_index), str.tostring(_vEntryScore, '#.#'),
+             str.tostring(_exitR, '#.##'), str.tostring(_mfeR, '#.##'), str.tostring(_captureL, '#.#'),
+             str.tostring(_barsInTrade), str.tostring(_exitR > 0), profileMode))
+    _vPos := 0
+    _vEntryBar := na
+    _vEntryPx := na
+    _vRisk := na
+    _vFamily := na
+    _vHigh := na
+    _vEntryScore := na
+if _vPos == -1 and shortExitSignal
+    _exitR  = (_vEntryPx - close) / _vRisk
+    _mfeR   = not na(_vLow) ? (_vEntryPx - _vLow) / _vRisk : _exitR
+    _captureS = _mfeR > 0 ? _exitR / _mfeR * 100 : 0.0
+    array.push(_trDir,        'SHORT')
+    array.push(_trFamily,     _vFamily)
+    array.push(_trReason,     _shortExitReason)
+    array.push(_trEntryScore, _vEntryScore)
+    array.push(_trExitR,      _exitR)
+    array.push(_trMFE,        _mfeR)
+    array.push(_trBarsHeld,   _barsInTrade)
+    if debugMode
+        log.info(str.format('WT3 SHORT EXIT | family={0} | reason={1} | bar={2} | entryScore={3} | R={4} | MFE={5} | capturePct={6} | barsHeld={7} | win={8} | profile={9}',
+             str.tostring(_vFamily), _shortExitReason, str.tostring(bar_index), str.tostring(_vEntryScore, '#.#'),
+             str.tostring(_exitR, '#.##'), str.tostring(_mfeR, '#.##'), str.tostring(_captureS, '#.#'),
+             str.tostring(_barsInTrade), str.tostring(_exitR > 0), profileMode))
+    _vPos := 0
+    _vEntryBar := na
+    _vEntryPx := na
+    _vRisk := na
+    _vFamily := na
+    _vLow := na
+    _vEntryScore := na
+
+if _enteringLong
+    if _vPos == -1
+        _vPos := 0
+    _vPos := 1
+    _vEntryBar := bar_index
+    _vEntryPx := close
+    _vRisk := math.max(close - longStop, syminfo.mintick)
+    _vFamily := longRRSignal ? 'rr' : 'pb'
+    _vHigh := high
+    _vLow := na
+    _vEntryScore := longRRSignal ? longContextScoreRR : longContextScorePB
+if _enteringShort
+    if _vPos == 1
+        _vPos := 0
+    _vPos := -1
+    _vEntryBar := bar_index
+    _vEntryPx := close
+    _vRisk := math.max(shortStop - close, syminfo.mintick)
+    _vFamily := shortRRSignal ? 'rr' : 'pb'
+    _vLow := low
+    _vHigh := na
+    _vEntryScore := shortRRSignal ? shortContextScoreRR : shortContextScorePB
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTTING (Pane)
+// ═══════════════════════════════════════════════════════════════════════════
+
+colorBull = #16a34a
+colorBear = #dc2626
+colorOsc  = #0ea5e9
+colorSig  = #f97316
+
+// Bands plotted via plot() (not hline) so they reflect the active profile's
+// effective OB/OS levels rather than the raw inputs.
+plot(_effUpperBand, 'OB', color.new(colorBear, 50), linewidth=1)
+plot(0,             'Mid', color.new(color.gray, 40), linewidth=1)
+plot(_effLowerBand, 'OS', color.new(colorBull, 50), linewidth=1)
+
+p_osc = plot(wtOsc, 'WT', color.from_gradient(wtOsc, _effLowerBand, _effUpperBand, colorBull, colorBear), linewidth=2)
+p_sig = plot(wtSig, 'Sig', color.new(colorSig, 20), linewidth=1)
+p_mid = plot(0, display=display.none)
+plot(htfWtOsc, 'HTF WT', color.new(color.purple, 40), linewidth=1)
+plot(anchorWtOsc, 'Anchor HTF WT', color.new(color.blue, 55), linewidth=1)
+fill(p_osc, p_mid, _effUpperBand, 0,             color.new(colorBear, 90), color.new(colorBear, 100))
+fill(p_osc, p_mid, 0,             _effLowerBand, color.new(colorBull, 100), color.new(colorBull, 90))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRICE-CHART OVERLAYS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// POC line overlay
+plot(useVolPOC ? pocPrice      : na, 'POC (local)', color.new(color.yellow, 30), linewidth=2, force_overlay=true)
+plot(useVolPOC ? pocMacroPrice : na, 'POC (macro)', color.new(color.orange, 50), linewidth=1, style=plot.style_circles, force_overlay=true)
+
+// Structure markers
+if showStructure and _phFound and lhDetected
+    label.new(bar_index - structPivLen, high[structPivLen], 'LH',
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down, color=color.new(colorBear, 30), textcolor=color.white,
+         size=size.tiny, force_overlay=true)
+if showStructure and _phFound and hhDetected
+    label.new(bar_index - structPivLen, high[structPivLen], 'HH',
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down, color=color.new(colorBull, 30), textcolor=color.white,
+         size=size.tiny, force_overlay=true)
+if showStructure and _plFound and hlDetected
+    label.new(bar_index - structPivLen, low[structPivLen], 'HL',
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_up, color=color.new(colorBull, 30), textcolor=color.white,
+         size=size.tiny, force_overlay=true)
+if showStructure and _plFound and llDetected
+    label.new(bar_index - structPivLen, low[structPivLen], 'LL',
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_up, color=color.new(colorBear, 30), textcolor=color.white,
+         size=size.tiny, force_overlay=true)
+
+// Composite signal markers — show family, active context score, family-specific gates
+_longActiveScore = longRRSignal ? longContextScoreRR : longContextScorePB
+_longActiveMax   = longRRSignal ? maxContextScoreRR  : maxContextScorePB
+_longActiveVolOk = longRRSignal ? longSetupVolumeOkRR : longSetupVolumeOkPB
+_longActiveMtf   = longRRSignal ? mtfLongOkRR : mtfLongOkPB
+_longActiveHtfSc = longRRSignal ? longHtfScoreRR : longHtfScorePB
+_longActiveAncSc = longRRSignal ? longAnchorScoreRR : longAnchorScorePB
+_longActiveTrig  = longRRSignal ? 'WT Cross Up after OS visit (≤' + str.tostring(zoneExitWindowA) + ' bars)' : 'WT Cross Up in neutral zone (±' + str.tostring(_effPbZone, '#.#') + ')'
+_shortActiveScore = shortRRSignal ? shortContextScoreRR : shortContextScorePB
+_shortActiveMax   = shortRRSignal ? maxContextScoreRR  : maxContextScorePB
+_shortActiveVolOk = shortRRSignal ? shortSetupVolumeOkRR : shortSetupVolumeOkPB
+_shortActiveMtf   = shortRRSignal ? mtfShortOkRR : mtfShortOkPB
+_shortActiveHtfSc = shortRRSignal ? shortHtfScoreRR : shortHtfScorePB
+_shortActiveAncSc = shortRRSignal ? shortAnchorScoreRR : shortAnchorScorePB
+_shortActiveTrig  = shortRRSignal ? 'WT Cross Down after OB visit (≤' + str.tostring(zoneExitWindowA) + ' bars)' : 'WT Cross Down in neutral zone (±' + str.tostring(_effPbZone, '#.#') + ')'
+
+if showSignals and longSignal
+    label.new(bar_index, low, '▲ ' + str.tostring(_longActiveScore, '#.#'),
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_up, color=colorBull, textcolor=color.white,
+         size=size.normal, force_overlay=true,
+         tooltip='WT3 Composite Long [' + longSignalFamily + ']  ·  ' + str.tostring(_longActiveScore, '#.#') + '/' + str.tostring(_longActiveMax, '#.#')
+              + '  ·  profile=' + profileMode
+              + '\n────────────'
+              + '\nTRIGGER:  ' + _longActiveTrig
+              + '\nSETUP:'
+              + '\n  ' + (longLocationOk ? '✓' : '✗') + '  Location lower range/swing (pos=' + str.tostring(setupRangePos, '#.##') + ')'
+              + '\n  ' + (longRoomOk ? '✓' : '✗') + '  Room ' + str.tostring(longTargetRoomATR, '#.#') + ' ATR'
+              + '\n  ' + (_longActiveVolOk ? '✓' : '✗') + '  Volume Gate'
+              + '\n  ' + (_longActiveMtf ? '✓' : '✗') + '  MTF Gate (apply=' + _effMtfApplyTo + ')'
+              + '\n  Target: ' + str.tostring(longTakeProfit, format.mintick) + '  Stop: ' + str.tostring(longStop, format.mintick)
+              + '\nCONTEXT:'
+              + '\n  ' + (structureLongOk  ? '✓' : '✗') + '  Structure'
+              + '\n  ' + (pocReclaimRecent ? '✓' : '✗') + '  POC Reclaim'
+              + '\n  ' + (bullVolSpike     ? '✓' : '✗') + '  Bull Volume Spike'
+              + '\n  ' + (_longActiveHtfSc > 0 ? '✓' : '✗') + '  HTF score ×' + str.tostring(_longActiveHtfSc, '#.#')
+              + '\n  ' + (_longActiveAncSc > 0 ? '✓' : '✗') + '  Anchor score ×' + str.tostring(_longActiveAncSc, '#.#')
+              + '\n────────────'
+              + '\nWT: ' + str.tostring(wtOsc, '#.##') + '  HTF: ' + str.tostring(htfWtOsc, '#.##') + '  Anchor: ' + str.tostring(anchorWtOsc, '#.##'))
+
+if showSignals and shortSignal
+    label.new(bar_index, high, '▼ ' + str.tostring(_shortActiveScore, '#.#'),
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down, color=colorBear, textcolor=color.white,
+         size=size.normal, force_overlay=true,
+         tooltip='WT3 Composite Short [' + shortSignalFamily + ']  ·  ' + str.tostring(_shortActiveScore, '#.#') + '/' + str.tostring(_shortActiveMax, '#.#')
+              + '  ·  profile=' + profileMode
+              + '\n────────────'
+              + '\nTRIGGER:  ' + _shortActiveTrig
+              + '\nSETUP:'
+              + '\n  ' + (shortLocationOk ? '✓' : '✗') + '  Location upper range/swing (pos=' + str.tostring(setupRangePos, '#.##') + ')'
+              + '\n  ' + (shortRoomOk ? '✓' : '✗') + '  Room ' + str.tostring(shortTargetRoomATR, '#.#') + ' ATR'
+              + '\n  ' + (_shortActiveVolOk ? '✓' : '✗') + '  Volume Gate'
+              + '\n  ' + (_shortActiveMtf ? '✓' : '✗') + '  MTF Gate (apply=' + _effMtfApplyTo + ')'
+              + '\n  Target: ' + str.tostring(shortTakeProfit, format.mintick) + '  Stop: ' + str.tostring(shortStop, format.mintick)
+              + '\nCONTEXT:'
+              + '\n  ' + (structureShortOk ? '✓' : '✗') + '  Structure'
+              + '\n  ' + (pocRejectRecent  ? '✓' : '✗') + '  POC Reject'
+              + '\n  ' + (bearVolSpike     ? '✓' : '✗') + '  Bear Volume Spike'
+              + '\n  ' + (_shortActiveHtfSc > 0 ? '✓' : '✗') + '  HTF score ×' + str.tostring(_shortActiveHtfSc, '#.#')
+              + '\n  ' + (_shortActiveAncSc > 0 ? '✓' : '✗') + '  Anchor score ×' + str.tostring(_shortActiveAncSc, '#.#')
+              + '\n────────────'
+              + '\nWT: ' + str.tostring(wtOsc, '#.##') + '  HTF: ' + str.tostring(htfWtOsc, '#.##') + '  Anchor: ' + str.tostring(anchorWtOsc, '#.##'))
+
+// ─── Exit markers ────────────────────────────────────────────────────────────
+// Color-coded by reason. Long exits below high (close-long arrow), short exits
+// above low (close-short arrow).
+_exitColorOpp  = #6b7280   // gray
+_exitColorWT   = #f59e0b   // amber
+_exitColorTime = #3b82f6   // blue
+_exitColorFTh  = #eab308   // yellow
+
+f_exitColor(reason) =>
+    switch reason
+        'Opp'  => _exitColorOpp
+        'WT'   => _exitColorWT
+        'Time' => _exitColorTime
+        'FTh'  => _exitColorFTh
+        =>        color.gray
+
+// Helpers for exit-label tooltip — these read the LATEST recorded trade
+_lastIdx       = array.size(_trExitR) - 1
+_lastExitR     = _lastIdx >= 0 ? array.get(_trExitR, _lastIdx)      : 0.0
+_lastMFE       = _lastIdx >= 0 ? array.get(_trMFE, _lastIdx)        : 0.0
+_lastEntrySc   = _lastIdx >= 0 ? array.get(_trEntryScore, _lastIdx) : 0.0
+_lastBarsHeld  = _lastIdx >= 0 ? array.get(_trBarsHeld, _lastIdx)   : 0
+_lastCapturePc = _lastMFE > 0 ? _lastExitR / _lastMFE * 100 : 0.0
+_lastExitWin   = _lastExitR > 0
+
+if showExitMarkers and longExitSignal
+    label.new(bar_index, high, '✕ ' + _longExitReason + ' · ' + str.tostring(_lastExitR, '#.##') + 'R',
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down, color=f_exitColor(_longExitReason), textcolor=color.white,
+         size=size.small, force_overlay=true,
+         tooltip='LONG EXIT  ·  reason=' + _longExitReason + '  ·  ' + (_lastExitWin ? 'WIN' : 'LOSS')
+              + '\n────────────'
+              + '\nEntry score: ' + str.tostring(_lastEntrySc, '#.#')
+              + '\nFamily: ' + str.tostring(array.get(_trFamily, _lastIdx))
+              + '\nBars held: ' + str.tostring(_lastBarsHeld)
+              + '\nR at exit: ' + str.tostring(_lastExitR, '#.##')
+              + '\nMFE (peak R): ' + str.tostring(_lastMFE, '#.##')
+              + '\nCapture: ' + str.tostring(_lastCapturePc, '#.#') + '%')
+
+if showExitMarkers and shortExitSignal
+    label.new(bar_index, low, '✕ ' + _shortExitReason + ' · ' + str.tostring(_lastExitR, '#.##') + 'R',
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_up, color=f_exitColor(_shortExitReason), textcolor=color.white,
+         size=size.small, force_overlay=true,
+         tooltip='SHORT EXIT  ·  reason=' + _shortExitReason + '  ·  ' + (_lastExitWin ? 'WIN' : 'LOSS')
+              + '\n────────────'
+              + '\nEntry score: ' + str.tostring(_lastEntrySc, '#.#')
+              + '\nFamily: ' + str.tostring(array.get(_trFamily, _lastIdx))
+              + '\nBars held: ' + str.tostring(_lastBarsHeld)
+              + '\nR at exit: ' + str.tostring(_lastExitR, '#.##')
+              + '\nMFE (peak R): ' + str.tostring(_lastMFE, '#.##')
+              + '\nCapture: ' + str.tostring(_lastCapturePc, '#.#') + '%')
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MINI DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table dash = table.new(position.top_right, 2, 10,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1)
+
+// Separate Trade-Quality table (small, sits at bottom-right; only meaningful
+// once there are completed virtual trades).
+var table qdash = table.new(position.bottom_right, 3, 6,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1)
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+if barstate.islast
+    table.cell(dash, 0, 0, 'WT v3 Composite', text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, '', bgcolor=hd, text_size=size.small)
+
+    table.cell(dash, 0, 1, '1 WT', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    _wtState = inOSZone ? 'OS' : inOBZone ? 'OB' : (wtOsc > 0 ? 'Bull' : 'Bear')
+    table.cell(dash, 1, 1, _wtState + ' (' + str.tostring(wtOsc, '#.#') + ')', text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 2, '2 Structure', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    _structState = structureBull ? 'Bull HH/HL' : structureBear ? 'Bear LL/LH' : 'Mixed'
+    _structColor = structureBull ? colorBull : structureBear ? colorBear : color.gray
+    table.cell(dash, 1, 2, _structState, text_color=_structColor, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 3, '3 Volume', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    _volRatio = na(volMA) or volMA == 0 ? 1.0 : volume / volMA
+    table.cell(dash, 1, 3, str.tostring(_volRatio, '#.#') + '× MA' + (volSpike ? ' ⚡' : ''),
+         text_color=volSpike ? colorBull : tc, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 4, '   POC loc/macro', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    _pocLocSym = priceAbovePOC ? '↑' : priceBelowPOC ? '↓' : '·'
+    _pocMacSym = priceAboveMacroPOC ? '↑' : priceBelowMacroPOC ? '↓' : '·'
+    table.cell(dash, 1, 4, _pocLocSym + ' / ' + _pocMacSym, text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 5, '4 Setup HTF (' + _htfTF + ')', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    _htfState = htfBull ? 'Bull' : htfBear ? 'Bear' : 'Flat'
+    _htfColor = htfBull ? colorBull : htfBear ? colorBear : color.gray
+    table.cell(dash, 1, 5, _htfState + ' (' + str.tostring(htfWtOsc, '#.#') + ')', text_color=_htfColor, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 6, '   Anchor (' + _anchorTF + ')', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    _anchorState = not _anchorActive ? 'Same as setup' : anchorBull ? 'Bull' : anchorBear ? 'Bear' : 'Flat'
+    _anchorColor = not _anchorActive ? color.gray : anchorBull ? colorBull : anchorBear ? colorBear : color.gray
+    table.cell(dash, 1, 6, _anchorState + ' (' + str.tostring(anchorWtOsc, '#.#') + ')', text_color=_anchorColor, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 7, '', bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(dash, 1, 7, '', bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+
+    table.cell(dash, 0, 8, 'Long Ctx (' + profileMode + ')', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 8, str.tostring(longContextScore, '#.#') + ' / ' + str.tostring(maxContextScore, '#.#'),
+         text_color=longContextScore >= _effMinScore ? colorBull : tc, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 9, 'Short Ctx (' + profileMode + ')', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 9, str.tostring(shortContextScore, '#.#') + ' / ' + str.tostring(maxContextScore, '#.#'),
+         text_color=shortContextScore >= _effMinScore ? colorBear : tc, text_size=size.small, text_halign=text.align_right)
+
+    // ─── Trade-Quality table (separate, bottom_right) ────────────────────────
+    int   _nL = 0
+    int   _nS = 0
+    int   _wL = 0
+    int   _wS = 0
+    float _sumRL = 0.0
+    float _sumRS = 0.0
+    float _sumMFEL = 0.0
+    float _sumMFES = 0.0
+    int _trN = array.size(_trExitR)
+    if _trN > 0
+        for i = 0 to _trN - 1
+            _r = array.get(_trExitR, i)
+            _m = array.get(_trMFE, i)
+            if array.get(_trDir, i) == 'LONG'
+                _nL := _nL + 1
+                _sumRL := _sumRL + _r
+                _sumMFEL := _sumMFEL + _m
+                if _r > 0
+                    _wL := _wL + 1
+            else
+                _nS := _nS + 1
+                _sumRS := _sumRS + _r
+                _sumMFES := _sumMFES + _m
+                if _r > 0
+                    _wS := _wS + 1
+    _avgRL    = _nL > 0 ? _sumRL / _nL : 0.0
+    _avgRS    = _nS > 0 ? _sumRS / _nS : 0.0
+    _avgMFEL  = _nL > 0 ? _sumMFEL / _nL : 0.0
+    _avgMFES  = _nS > 0 ? _sumMFES / _nS : 0.0
+    _wrL      = _nL > 0 ? _wL * 100.0 / _nL : 0.0
+    _wrS      = _nS > 0 ? _wS * 100.0 / _nS : 0.0
+    _capL     = _avgMFEL > 0 ? _avgRL / _avgMFEL * 100 : 0.0
+    _capS     = _avgMFES > 0 ? _avgRS / _avgMFES * 100 : 0.0
+
+    table.cell(qdash, 0, 0, 'Quality',  text_color=tc, bgcolor=hd, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(qdash, 1, 0, 'L',        text_color=tc, bgcolor=hd, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(qdash, 2, 0, 'S',        text_color=tc, bgcolor=hd, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(qdash, 0, 1, 'Trades',   text_color=tc, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(qdash, 1, 1, str.tostring(_nL), text_color=tc, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(qdash, 2, 1, str.tostring(_nS), text_color=tc, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(qdash, 0, 2, 'WR %',     text_color=tc, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(qdash, 1, 2, str.tostring(_wrL, '#.#'), text_color=tc, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(qdash, 2, 2, str.tostring(_wrS, '#.#'), text_color=tc, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(qdash, 0, 3, 'Avg R',    text_color=tc, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(qdash, 1, 3, str.tostring(_avgRL, '#.##'), text_color=_avgRL > 0 ? colorBull : colorBear, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(qdash, 2, 3, str.tostring(_avgRS, '#.##'), text_color=_avgRS > 0 ? colorBull : colorBear, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(qdash, 0, 4, 'Avg MFE',  text_color=tc, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(qdash, 1, 4, str.tostring(_avgMFEL, '#.##'), text_color=tc, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(qdash, 2, 4, str.tostring(_avgMFES, '#.##'), text_color=tc, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(qdash, 0, 5, 'Capt %',   text_color=tc, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(qdash, 1, 5, str.tostring(_capL, '#.#'), text_color=tc, text_size=size.tiny, text_halign=text.align_right)
+    table.cell(qdash, 2, 5, str.tostring(_capS, '#.#'), text_color=tc, text_size=size.tiny, text_halign=text.align_right)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DEBUG LOG
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Family-aware DECISION + BLOCKED logs.
+// One DECISION per direction per bar (RR takes precedence over PB if both fire).
+// One BLOCKED row per family-trigger that didn't pass.
+
+_volRatio = na(volMA) or volMA == 0 ? 1.0 : volume / volMA
+_regimeStr = ' | REGIME: mode=' + _effRegimeMode + ' regimeOk=' + str.tostring(volRegimeOk) + ' inBand=' + str.tostring(_inRegimeBand) + ' atrNorm=' + str.tostring(atrNorm, '#.##') + ' min=' + str.tostring(_effVolRegimeMin, '#.#') + ' max=' + str.tostring(_effVolRegimeMax, '#.#') + ' bonus=' + str.tostring(volRegimeBonus, '#.#')
+
+// LONG DECISION (range-reversal preferred when both families fire same bar)
+if debugMode and longRRSignal
+    log.info(str.format('WT3 LONG DECISION | family=range_reversal | type=range_reversal | bar={0} | ctxScore={1}/{2} | profile={3}'
+         + ' | WT: osc={4} sig={5} osRecent={6} barsSinceOS={7}'
+         + ' | STRUCT: hl={8} ll={9} hh={10} lh={11} fresh={12} STRUCT={13}'
+         + ' | VOLUME: ratio={14} bullSpike={15} VOL={16}'
+         + ' | POC: px={17} reclaim={18} POC={19}'
+         + ' | HTF: tf={20} bull={21} mtfOk={22} htf={23} anchor={24}'
+         + ' | SETUP: ok={25} loc={26} rangeLoc={27} swingLoc={28} roomOk={29} volOk={30}'
+         + ' | PB: pbOk={31} pbTrend={32} pbLoc={33} impulseATR={34}'
+         + ' | TARGET: tp={35} sl={36}',
+         str.tostring(bar_index), str.tostring(longContextScoreRR, '#.#'), str.tostring(maxContextScoreRR, '#.#'), profileMode,
+         str.tostring(wtOsc, '#.##'), str.tostring(wtSig, '#.##'), str.tostring(osRecent), str.tostring(barsSinceOS),
+         str.tostring(hlDetected), str.tostring(llDetected), str.tostring(hhDetected), str.tostring(lhDetected), str.tostring(structureFresh), str.tostring(structureLongOk),
+         str.tostring(_volRatio, '#.##'), str.tostring(bullVolSpike), str.tostring(bullVolSpike),
+         str.tostring(pocPrice, format.mintick), str.tostring(pocReclaimRecent), str.tostring(pocReclaimRecent),
+         _htfTF, str.tostring(htfBull), str.tostring(mtfLongOkRR), str.tostring(longHtfScoreRR, '#.#'), str.tostring(longAnchorScoreRR, '#.#'),
+         str.tostring(longRangeReversalSetupOk), str.tostring(longLocationOk), str.tostring(longRangeLocationOk), str.tostring(longSwingLocationOk), str.tostring(longRoomOk), str.tostring(longSetupVolumeOkRR),
+         str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk), str.tostring(longImpulseATR, '#.#'),
+         str.tostring(longTakeProfit, format.mintick), str.tostring(longStop, format.mintick)) + _regimeStr)
+
+if debugMode and longPBSignal and not longRRSignal
+    log.info(str.format('WT3 LONG DECISION | family=pullback_continuation | type=pullback_continuation | bar={0} | ctxScore={1}/{2} | profile={3}'
+         + ' | WT: osc={4} sig={5}'
+         + ' | STRUCT: hl={6} ll={7} hh={8} lh={9} fresh={10} STRUCT={11}'
+         + ' | VOLUME: ratio={12} bullSpike={13} VOL={14}'
+         + ' | POC: px={15} reclaim={16} POC={17}'
+         + ' | HTF: tf={18} bull={19} mtfOk={20} htf={21} anchor={22}'
+         + ' | SETUP: ok={23} loc={24} rangeLoc={25} swingLoc={26} roomOk={27} volOk={28}'
+         + ' | PB: pbOk={29} pbTrend={30} pbLoc={31} impulseATR={32}'
+         + ' | TARGET: tp={33} sl={34}',
+         str.tostring(bar_index), str.tostring(longContextScorePB, '#.#'), str.tostring(maxContextScorePB, '#.#'), profileMode,
+         str.tostring(wtOsc, '#.##'), str.tostring(wtSig, '#.##'),
+         str.tostring(hlDetected), str.tostring(llDetected), str.tostring(hhDetected), str.tostring(lhDetected), str.tostring(structureFresh), str.tostring(structureLongOk),
+         str.tostring(_volRatio, '#.##'), str.tostring(bullVolSpike), str.tostring(bullVolSpike),
+         str.tostring(pocPrice, format.mintick), str.tostring(pocReclaimRecent), str.tostring(pocReclaimRecent),
+         _htfTF, str.tostring(htfBull), str.tostring(mtfLongOkPB), str.tostring(longHtfScorePB, '#.#'), str.tostring(longAnchorScorePB, '#.#'),
+         str.tostring(longPullbackSetupOk), str.tostring(longLocationOk), str.tostring(longRangeLocationOk), str.tostring(longSwingLocationOk), str.tostring(longRoomOk), str.tostring(longSetupVolumeOkPB),
+         str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk), str.tostring(longImpulseATR, '#.#'),
+         str.tostring(longTakeProfit, format.mintick), str.tostring(longStop, format.mintick)) + _regimeStr)
+
+// LONG BLOCKED — one row per family trigger that didn't pass
+if debugMode and rrTriggerLong and not longRRSignal
+    log.info(str.format('WT3 LONG BLOCKED | family=range_reversal | type=range_reversal | bar={0} | ctxScore={1}/{2} min={3} | profile={4}'
+         + ' | mtfOk={5} STRUCT={6} POC={7} VOL={8}'
+         + ' | SETUP: ok={9} loc={10} rangeLoc={11} swingLoc={12} roomOk={13} volOk={14}'
+         + ' | PB: pbOk={15} pbTrend={16} pbLoc={17}',
+         str.tostring(bar_index), str.tostring(longContextScoreRR, '#.#'), str.tostring(maxContextScoreRR, '#.#'), str.tostring(_effMinScore, '#.#'), profileMode,
+         str.tostring(mtfLongOkRR), str.tostring(structureLongOk), str.tostring(pocReclaimRecent), str.tostring(bullVolSpike),
+         str.tostring(longRangeReversalSetupOk), str.tostring(longLocationOk), str.tostring(longRangeLocationOk), str.tostring(longSwingLocationOk), str.tostring(longRoomOk), str.tostring(longSetupVolumeOkRR),
+         str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk)) + _regimeStr)
+
+if debugMode and pbTriggerLong and not longPBSignal
+    log.info(str.format('WT3 LONG BLOCKED | family=pullback_continuation | type=pullback_continuation | bar={0} | ctxScore={1}/{2} min={3} | profile={4}'
+         + ' | mtfOk={5} STRUCT={6} POC={7} VOL={8}'
+         + ' | SETUP: ok={9} loc={10} rangeLoc={11} swingLoc={12} roomOk={13} volOk={14}'
+         + ' | PB: pbOk={15} pbTrend={16} pbLoc={17} impulseATR={18}',
+         str.tostring(bar_index), str.tostring(longContextScorePB, '#.#'), str.tostring(maxContextScorePB, '#.#'), str.tostring(_effMinScore, '#.#'), profileMode,
+         str.tostring(mtfLongOkPB), str.tostring(structureLongOk), str.tostring(pocReclaimRecent), str.tostring(bullVolSpike),
+         str.tostring(longPullbackSetupOk), str.tostring(longLocationOk), str.tostring(longRangeLocationOk), str.tostring(longSwingLocationOk), str.tostring(longRoomOk), str.tostring(longSetupVolumeOkPB),
+         str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk), str.tostring(longImpulseATR, '#.#')) + _regimeStr)
+
+// SHORT DECISION
+if debugMode and shortRRSignal
+    log.info(str.format('WT3 SHORT DECISION | family=range_reversal | type=range_reversal | bar={0} | ctxScore={1}/{2} | profile={3}'
+         + ' | WT: osc={4} sig={5} obRecent={6} barsSinceOB={7}'
+         + ' | STRUCT: lh={8} hh={9} ll={10} hl={11} fresh={12} STRUCT={13}'
+         + ' | VOLUME: ratio={14} bearSpike={15} VOL={16}'
+         + ' | POC: px={17} reject={18} POC={19}'
+         + ' | HTF: tf={20} bear={21} mtfOk={22} htf={23} anchor={24}'
+         + ' | SETUP: ok={25} loc={26} rangeLoc={27} swingLoc={28} roomOk={29} volOk={30}'
+         + ' | PB: pbOk={31} pbTrend={32} pbLoc={33} impulseATR={34}'
+         + ' | TARGET: tp={35} sl={36}',
+         str.tostring(bar_index), str.tostring(shortContextScoreRR, '#.#'), str.tostring(maxContextScoreRR, '#.#'), profileMode,
+         str.tostring(wtOsc, '#.##'), str.tostring(wtSig, '#.##'), str.tostring(obRecent), str.tostring(barsSinceOB),
+         str.tostring(lhDetected), str.tostring(hhDetected), str.tostring(llDetected), str.tostring(hlDetected), str.tostring(structureFresh), str.tostring(structureShortOk),
+         str.tostring(_volRatio, '#.##'), str.tostring(bearVolSpike), str.tostring(bearVolSpike),
+         str.tostring(pocPrice, format.mintick), str.tostring(pocRejectRecent), str.tostring(pocRejectRecent),
+         _htfTF, str.tostring(htfBear), str.tostring(mtfShortOkRR), str.tostring(shortHtfScoreRR, '#.#'), str.tostring(shortAnchorScoreRR, '#.#'),
+         str.tostring(shortRangeReversalSetupOk), str.tostring(shortLocationOk), str.tostring(shortRangeLocationOk), str.tostring(shortSwingLocationOk), str.tostring(shortRoomOk), str.tostring(shortSetupVolumeOkRR),
+         str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk), str.tostring(shortImpulseATR, '#.#'),
+         str.tostring(shortTakeProfit, format.mintick), str.tostring(shortStop, format.mintick)) + _regimeStr)
+
+if debugMode and shortPBSignal and not shortRRSignal
+    log.info(str.format('WT3 SHORT DECISION | family=pullback_continuation | type=pullback_continuation | bar={0} | ctxScore={1}/{2} | profile={3}'
+         + ' | WT: osc={4} sig={5}'
+         + ' | STRUCT: lh={6} hh={7} ll={8} hl={9} fresh={10} STRUCT={11}'
+         + ' | VOLUME: ratio={12} bearSpike={13} VOL={14}'
+         + ' | POC: px={15} reject={16} POC={17}'
+         + ' | HTF: tf={18} bear={19} mtfOk={20} htf={21} anchor={22}'
+         + ' | SETUP: ok={23} loc={24} rangeLoc={25} swingLoc={26} roomOk={27} volOk={28}'
+         + ' | PB: pbOk={29} pbTrend={30} pbLoc={31} impulseATR={32}'
+         + ' | TARGET: tp={33} sl={34}',
+         str.tostring(bar_index), str.tostring(shortContextScorePB, '#.#'), str.tostring(maxContextScorePB, '#.#'), profileMode,
+         str.tostring(wtOsc, '#.##'), str.tostring(wtSig, '#.##'),
+         str.tostring(lhDetected), str.tostring(hhDetected), str.tostring(llDetected), str.tostring(hlDetected), str.tostring(structureFresh), str.tostring(structureShortOk),
+         str.tostring(_volRatio, '#.##'), str.tostring(bearVolSpike), str.tostring(bearVolSpike),
+         str.tostring(pocPrice, format.mintick), str.tostring(pocRejectRecent), str.tostring(pocRejectRecent),
+         _htfTF, str.tostring(htfBear), str.tostring(mtfShortOkPB), str.tostring(shortHtfScorePB, '#.#'), str.tostring(shortAnchorScorePB, '#.#'),
+         str.tostring(shortPullbackSetupOk), str.tostring(shortLocationOk), str.tostring(shortRangeLocationOk), str.tostring(shortSwingLocationOk), str.tostring(shortRoomOk), str.tostring(shortSetupVolumeOkPB),
+         str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk), str.tostring(shortImpulseATR, '#.#'),
+         str.tostring(shortTakeProfit, format.mintick), str.tostring(shortStop, format.mintick)) + _regimeStr)
+
+// SHORT BLOCKED
+if debugMode and rrTriggerShort and not shortRRSignal
+    log.info(str.format('WT3 SHORT BLOCKED | family=range_reversal | type=range_reversal | bar={0} | ctxScore={1}/{2} min={3} | profile={4}'
+         + ' | mtfOk={5} STRUCT={6} POC={7} VOL={8}'
+         + ' | SETUP: ok={9} loc={10} rangeLoc={11} swingLoc={12} roomOk={13} volOk={14}'
+         + ' | PB: pbOk={15} pbTrend={16} pbLoc={17}',
+         str.tostring(bar_index), str.tostring(shortContextScoreRR, '#.#'), str.tostring(maxContextScoreRR, '#.#'), str.tostring(_effMinScore, '#.#'), profileMode,
+         str.tostring(mtfShortOkRR), str.tostring(structureShortOk), str.tostring(pocRejectRecent), str.tostring(bearVolSpike),
+         str.tostring(shortRangeReversalSetupOk), str.tostring(shortLocationOk), str.tostring(shortRangeLocationOk), str.tostring(shortSwingLocationOk), str.tostring(shortRoomOk), str.tostring(shortSetupVolumeOkRR),
+         str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk)) + _regimeStr)
+
+if debugMode and pbTriggerShort and not shortPBSignal
+    log.info(str.format('WT3 SHORT BLOCKED | family=pullback_continuation | type=pullback_continuation | bar={0} | ctxScore={1}/{2} min={3} | profile={4}'
+         + ' | mtfOk={5} STRUCT={6} POC={7} VOL={8}'
+         + ' | SETUP: ok={9} loc={10} rangeLoc={11} swingLoc={12} roomOk={13} volOk={14}'
+         + ' | PB: pbOk={15} pbTrend={16} pbLoc={17} impulseATR={18}',
+         str.tostring(bar_index), str.tostring(shortContextScorePB, '#.#'), str.tostring(maxContextScorePB, '#.#'), str.tostring(_effMinScore, '#.#'), profileMode,
+         str.tostring(mtfShortOkPB), str.tostring(structureShortOk), str.tostring(pocRejectRecent), str.tostring(bearVolSpike),
+         str.tostring(shortPullbackSetupOk), str.tostring(shortLocationOk), str.tostring(shortRangeLocationOk), str.tostring(shortSwingLocationOk), str.tostring(shortRoomOk), str.tostring(shortSetupVolumeOkPB),
+         str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk), str.tostring(shortImpulseATR, '#.#')) + _regimeStr)
+
+alertcondition(longSignal,  'WT3 Composite Long',  'WT3 Long signal — {{ticker}} @ {{close}}')
+alertcondition(shortSignal, 'WT3 Composite Short', 'WT3 Short signal — {{ticker}} @ {{close}}')
+
+// @strategy-config
+// long:       longSignal
+// short:      shortSignal
+// sl_type:    directional_fixed_tp
+// sl_long:    longStop
+// sl_short:   shortStop
+// tp_long:    longTakeProfit
+// tp_short:   shortTakeProfit
+// long_exit:  longExitSignal
+// short_exit: shortExitSignal
+// @end-strategy-config

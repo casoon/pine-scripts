@@ -121,7 +121,7 @@ python3 scripts/build_strategies.py indicators/chandelier_flip_radar/
 | [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising (PF 1.22, NatGas 4H) |
 | [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising (PF 1.14, NatGas 4H) |
 | [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (PF 1.13, NatGas 4H) |
-| [`wavetrend_strategy.pine`](strategies/wavetrend_strategy.pine) | WaveTrend | Trailing | Promising (PF 2.42, +52.6%, NatGas 1D — best in repo) |
+| [`wavetrend_strategy.pine`](strategies/wavetrend_strategy.pine) | WaveTrend | Trailing | Promising (PF 3.07, +69.7%, NatGas 1D — best in repo) |
 
 Full backtest results and parameter notes: `strategies/*_assessment.md`. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
 

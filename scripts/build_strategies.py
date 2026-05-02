@@ -59,10 +59,19 @@ tpRRInput  = input.float(2.0, "TP R:R Ratio",      minval=0.5, step=0.5, group=g
      tooltip="Take profit at this R:R multiple of the SL distance from entry.")
 """
 
+# Inputs added only for trailing strategies — volatility exit (ATR spike).
+_TRAILING_EXTRA_INPUTS = """\
+g_exits       = "Strategy — Advanced Exits"
+enableVolExit = input.bool(true,  "Volatility Exit (ATR spike)", group=g_exits,
+     tooltip="Close the position when current ATR jumps above its baseline by the configured ratio — captures climax / exhaustion bars where the rest of the move is unlikely to continue.")
+volExitRatio  = input.float(1.6, "  Volatility Spike Ratio",   minval=1.2, maxval=5.0, step=0.1, group=g_exits,
+     tooltip="Exit when ta.atr(atrLen) >= ratio × ema(ta.atr(atrLen), 50). Default 1.6 = current ATR is 60% above its 50-bar average.")
+"""
+
 # sl_type: trailing — per-bar ATR volatility envelope + integrated break-even
-# Ratcheting was tested but on NatGas it tightened too aggressively and cut
-# winning trades short during normal retracements (1D PF 2.42 → 1.35).
-# The "loose" envelope works better empirically for this kind of indicator.
+# + optional ATR-spike volatility exit. Ratcheting was tested but on NatGas it
+# tightened too aggressively (1D PF 2.42 → 1.35); the per-bar envelope works
+# better empirically for this kind of indicator.
 _EXEC_TRAILING = """\
 
 // ─── Strategy execution (generated) ──────────────────────────────────────────
@@ -74,6 +83,16 @@ if ({long}) and _canLong and _canEntry
 if ({short}) and _canShort and _canEntry
     strategy.entry("Short", strategy.short)
 
+// Volatility exit — close on ATR spike (climax / exhaustion bars)
+if enableVolExit and strategy.position_size != 0
+    _atrCur  = ta.atr(atrLen)
+    _atrBase = ta.ema(_atrCur, 50)
+    _spike   = not na(_atrBase) and _atrCur >= _atrBase * volExitRatio
+    if _spike and strategy.position_size > 0
+        strategy.close("Long",  comment="Vol Exit (ATR×" + str.tostring(volExitRatio, '#.#') + ")")
+    if _spike and strategy.position_size < 0
+        strategy.close("Short", comment="Vol Exit (ATR×" + str.tostring(volExitRatio, '#.#') + ")")
+
 // Break-even integrated into the same exit (single stop level — no exit races)
 _beAtr   = ta.atr(14) * beATRInput
 _beLong  = enableBE and strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
@@ -81,6 +100,61 @@ _beShort = enableBE and strategy.position_size < 0 and close <= strategy.positio
 
 _finalLongStop  = _beLong  ? math.max({sl_long},  strategy.position_avg_price) : {sl_long}
 _finalShortStop = _beShort ? math.min({sl_short}, strategy.position_avg_price) : {sl_short}
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=_finalLongStop)
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=_finalShortStop)
+"""
+
+# sl_type: trailing_ratchet — like trailing but stop only ever tightens.
+# Reviewer's preferred behavior. NOTE: empirically hurt v1 on NatGas (PF 2.42 → 1.35)
+# because NatGas retracements often tag tightened stops. Use selectively.
+_EXEC_TRAILING_RATCHET = """\
+
+// ─── Strategy execution (generated, ratcheting trailing stop) ────────────────
+_canLong  = tradeDirInput != "Short Only"
+_canShort = tradeDirInput != "Long Only"
+
+if ({long}) and _canLong and _canEntry
+    strategy.entry("Long", strategy.long)
+if ({short}) and _canShort and _canEntry
+    strategy.entry("Short", strategy.short)
+
+// Ratcheted stops — tighten only, never loosen, reset on flat
+var float _trailLong  = na
+var float _trailShort = na
+
+if strategy.position_size > 0
+    _trailLong := na(_trailLong[1]) ? {sl_long} : math.max(_trailLong[1], {sl_long})
+else
+    _trailLong := na
+
+if strategy.position_size < 0
+    _trailShort := na(_trailShort[1]) ? {sl_short} : math.min(_trailShort[1], {sl_short})
+else
+    _trailShort := na
+
+// Volatility exit — directional: only close on a counter-direction climax bar
+// (avoids exiting good trends on with-trend exhaustion candles).
+if enableVolExit and strategy.position_size != 0
+    _atrCur   = ta.atr(atrLen)
+    _atrBase  = ta.ema(_atrCur, 50)
+    _spike    = not na(_atrBase) and _atrCur >= _atrBase * volExitRatio
+    _vRange   = high - low
+    _vClosePos = _vRange > 0 ? (close - low) / _vRange : 0.5
+    if _spike and strategy.position_size > 0 and _vClosePos < 0.35
+        strategy.close("Long",  comment="Vol Exit (ATR×" + str.tostring(volExitRatio, '#.#') + ", bear close)")
+    if _spike and strategy.position_size < 0 and _vClosePos > 0.65
+        strategy.close("Short", comment="Vol Exit (ATR×" + str.tostring(volExitRatio, '#.#') + ", bull close)")
+
+// Break-even integrated
+_beAtr   = ta.atr(14) * beATRInput
+_beLong  = enableBE and strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
+_beShort = enableBE and strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
+
+_finalLongStop  = _beLong  ? math.max(_trailLong,  strategy.position_avg_price) : _trailLong
+_finalShortStop = _beShort ? math.min(_trailShort, strategy.position_avg_price) : _trailShort
 
 if strategy.position_size > 0
     strategy.exit("Long Exit", "Long", stop=_finalLongStop)
@@ -134,6 +208,45 @@ if strategy.position_size > 0
     strategy.exit("Long Exit", "Long", stop={sl}, limit=_exitTP)
 if strategy.position_size < 0
     strategy.exit("Short Exit", "Short", stop={sl}, limit=_exitTP)
+"""
+
+# sl_type: directional_fixed_tp — direction-specific precomputed SL/TP.
+_EXEC_DIRECTIONAL_FIXED_TP = """\
+
+// ─── Strategy execution (generated, directional fixed SL/TP) ─────────────────
+_canLong  = tradeDirInput != "Short Only"
+_canShort = tradeDirInput != "Long Only"
+
+var float _longSL = na
+var float _longTP = na
+var float _shortSL = na
+var float _shortTP = na
+
+if ({long}) and _canLong and _canEntry
+    _longSL := {sl_long}
+    _longTP := {tp_long}
+    strategy.entry("Long", strategy.long)
+
+if ({short}) and _canShort and _canEntry
+    _shortSL := {sl_short}
+    _shortTP := {tp_short}
+    strategy.entry("Short", strategy.short)
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=_longSL, limit=_longTP)
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=_shortSL, limit=_shortTP)
+"""
+
+# Optional indicator-driven close-on-signal block. Appended when @strategy-config
+# defines long_exit / short_exit expressions.
+_EXEC_CLOSE_ON_SIGNAL = """\
+
+// ─── Indicator-driven exits (close on long_exit / short_exit signal) ─────────
+if strategy.position_size > 0 and ({long_exit})
+    strategy.close("Long",  comment="Indicator Exit")
+if strategy.position_size < 0 and ({short_exit})
+    strategy.close("Short", comment="Indicator Exit")
 """
 
 # sl_type: pivot_atr — SL computed from divergence pivot + ATR buffer
@@ -337,7 +450,17 @@ def generate(pine_path: Path) -> tuple[str, str] | None:
     if sl_type == "trailing":
         sl_long  = cfg.get("sl_long",  "longStop")
         sl_short = cfg.get("sl_short", "shortStop")
+        extra_inputs = _TRAILING_EXTRA_INPUTS
         exec_block = _EXEC_TRAILING.format(
+            long=long_expr, short=short_expr,
+            sl_long=sl_long, sl_short=sl_short,
+        )
+
+    elif sl_type == "trailing_ratchet":
+        sl_long  = cfg.get("sl_long",  "longStop")
+        sl_short = cfg.get("sl_short", "shortStop")
+        extra_inputs = _TRAILING_EXTRA_INPUTS
+        exec_block = _EXEC_TRAILING_RATCHET.format(
             long=long_expr, short=short_expr,
             sl_long=sl_long, sl_short=sl_short,
         )
@@ -360,6 +483,22 @@ def generate(pine_path: Path) -> tuple[str, str] | None:
                 long=long_expr, short=short_expr, sl=sl_var,
             )
 
+    elif sl_type == "directional_fixed_tp":
+        exec_block = _EXEC_DIRECTIONAL_FIXED_TP.format(
+            long=long_expr, short=short_expr,
+            sl_long=cfg.get("sl_long", "longStop"),
+            sl_short=cfg.get("sl_short", "shortStop"),
+            tp_long=cfg.get("tp_long", "longTakeProfit"),
+            tp_short=cfg.get("tp_short", "shortTakeProfit"),
+        )
+        long_exit  = cfg.get("long_exit")
+        short_exit = cfg.get("short_exit")
+        if long_exit or short_exit:
+            exec_block += _EXEC_CLOSE_ON_SIGNAL.format(
+                long_exit=long_exit or "false",
+                short_exit=short_exit or "false",
+            )
+
     elif sl_type == "pivot_atr":
         pivot_low  = cfg.get("pivot_low",  "low[pivRight]")
         pivot_high = cfg.get("pivot_high", "high[pivRight]")
@@ -379,7 +518,7 @@ def generate(pine_path: Path) -> tuple[str, str] | None:
     out += exec_block
     # Trailing template integrates BE into the main exit; only fixed/pivot need
     # the separate BE management block.
-    if sl_type != "trailing":
+    if sl_type not in ("trailing", "trailing_ratchet"):
         out += _EXEC_RISK_MANAGEMENT
 
     out_name = pine_path.stem + "_strategy.pine"

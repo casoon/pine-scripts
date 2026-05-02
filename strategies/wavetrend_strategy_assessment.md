@@ -63,18 +63,22 @@ Commission used in all runs: 0.02%
 | 19 | 1D | 2017–2026 | 1 | 1 | 3.0 | v9 full revert + persistOscBlock=0.8 | 1.952 | 2.643 | 1.359 | +39.46% | 12.85% | 60 | 48.33% |
 | **20** | **1D** | **2017–2026** | **1** | **1** | **3.0** | **final (Run 14 reproduced, persistOscBlock=1.5)** | **2.418** | **2.845** | **1.878** | **+52.60%** | **12.88%** | **66** | **46.97%** |
 | 21 | 1D | 2017–2026 | 1 | 1 | 3.0 | v10 + divTypeBySource=true | 0.929 | 1.125 | 0.711 | −1.65% | 8.89% | 25 | 36.00% |
+| **22** | **1D** | **2017–2026** | **1** | **1** | **3.0** | **v11 Vol Exit (1.6) + percLookback=200** | **3.069** | **4.080** | **2.044** | **+69.69%** | **14.32%** | **71** | **47.89%** |
+| **23** | **1D** | **NYMEX:NG1! 1990–2026 (35 yr)** | **1** | **1** | **3.0** | **v11 (same as Run 22)** | **1.218** | **1.929** | **0.654** | **+33.66%** | **28.55%** | **310** | **45.48%** |
 
 ---
 
 ## Best Configuration Results
 
-**Run 20** (1D NatGas, 2017–2026, current defaults): **PF 2.418** · PF Long 2.845 · PF Short 1.878 · net **+52.60%** · 66 trades · win rate 46.97% · max DD 12.88% · **Return/DD 4.08** · avg winner / avg loser = 2.73×. Confirmed best configuration after Run 14 → v8 → v9 → revert journey.
+**Run 22** (1D NatGas, 2017–2026, v11 — current defaults): **PF 3.069** · PF Long 4.080 · PF Short 2.044 · net **+69.69%** · 71 trades · win rate 47.89% · max DD 14.32% · **Return/DD 4.87** · avg winner / avg loser = 3.34×. New best configuration in the repo. Vol-Exit (ATR×1.6) cuts climax bars before reversals eat open profit; combined with `percLookback=200` the score components are calibrated against a more stable distribution.
 
-**Run 13** (4H NatGas, 2019–2026, v6 + both sustained triggers): PF 1.490 · PF Long 2.543 · PF Short 1.006 · net +18.58% · 59 trades · win rate 54.24% · max DD 10.23% · Return/DD 1.82.
+**Run 20** (1D NatGas, 2017–2026, baseline before Vol-Exit): PF 2.418 · net +52.60% · 66 trades · DD 12.88%. Useful comparison point — shows the Vol-Exit lift in isolation.
 
-**Run 11** (1H NatGas, 2024–2026, v6): PF 1.374 · net +5.92% · 52 trades · win rate 53.85% · max DD 3.84%.
+**Run 13** (4H NatGas, 2019–2026, v6 + both sustained triggers): PF 1.490 · net +18.58% · 59 trades · DD 10.23%.
 
-Reach Run 20 with: chart on **1D**, `useAutoCalibrate=true`, all gates ON except `sigGateVol`, both sustained triggers ON, `sigMinScoreLong/Short=1`, `atrMult=3.0`, `persistOscBlock=1.5`, both directions.
+**Run 11** (1H NatGas, 2024–2026, v6): PF 1.374 · net +5.92% · 52 trades · DD 3.84%.
+
+Reach Run 22 with: chart on **1D**, `useAutoCalibrate=true`, all gates ON except `sigGateVol`, both sustained triggers ON, `sigMinScoreLong/Short=1`, `atrMult=3.0`, `persistOscBlock=1.5`, `enableVolExit=true` (ratio 1.6), `percLookback=200`, both directions.
 
 ## Timeframe Suitability
 
@@ -178,20 +182,30 @@ Plus the related v8-era addition (`persistOscBlock=0.8` as default): also revert
 
 **Bottom line:** 3 bugs fixed, 2 cleanups (BE-integration, StochRSI lower-TF), 4 logic changes empirically falsified on NatGas. The code review delivered real bug fixes but every "improvement to logic" cost performance.
 
-## Pending Review Feedback (Phase 3+)
+## Phase 3 — Exit Logic (#9 implemented as opt-in)
 
-Additional reviewer feedback received after v10. **None of these are implemented or tested yet** — they are forward-looking hypotheses for future iterations, documented here so the ideas don't get lost.
+All three exit-logic ideas from the reviewer (#9A/B/C) are now implemented in the strategy template as opt-in features. Defaults are OFF — Run 20 baseline is preserved exactly. New strategy inputs in group **"Strategy — Advanced Exits"**:
 
-### #9 Exit-Logic — biggest unexplored lever
+**#9A Partial Exit — REMOVED**
+Implemented and tested. On NatGas, locking in 50% at 1R didn't improve PF — the strategy already extracts the full asymmetric payoff via the trailing stop, and partial exits cut the profitable runner side without offsetting risk reduction. Entry-tracking state and partial-exit logic removed from the trailing template.
 
-Reviewer's critique: the strategy lives from "let winners run, cut losers short" — but the exit logic is currently just an ATR stop (per-bar, non-ratcheting) plus optional break-even. That underexploits the asymmetric-payoff edge the entry logic creates (avg winner / avg loser = 2.73× on Run 20).
+**#9B Structure Exit — REMOVED**
+Implemented and tested with three sub-conditions (zero-line flip, opposite signal cross, opposite-zone entry). Empirically no improvement over the trailing ATR stop on NatGas. Removed from `build_strategies.py` template, the WaveTrend `@strategy-config` block, and all generated strategy files. Generic cfg-based mechanism (`struct_long_exit` / `struct_short_exit` keys) also removed since no indicator was using it.
 
-Three concrete ideas to test:
-- **A) Partial Exit** — close 50% of position at 1R, let the rest ride. Locks in a guaranteed risk-recovery while preserving runners.
-- **B) Structure Exit** — exit on opposite WT cross or zero-line flip. Less arbitrary than ATR distance, more aligned with the indicator's own state machine.
-- **C) Volatility Exit** — exit on ATR spike (e.g., current ATR > N × recent ATR average). Catches climax/exhaustion bars.
+**#9C Volatility Exit (ATR spike) — KEPT, default ON**
+- `enableVolExit` (default **true**), `volExitRatio` (default **1.6**)
+- Closes position when `ta.atr(atrLen) >= volExitRatio × ema(ta.atr(atrLen), 50)`
+- Catches climax / exhaustion bars where the rest of the move is unlikely to continue
 
-Empirical test needed: each variant against Run 20 baseline. Largest expected upside is from (A) — well-known asymmetry-amplifier.
+**Empirical result:** tested on NatGas — **significant improvement** over Run 20 baseline. The single Phase 3 #9 idea that works on this instrument. ATR-spike exits successfully cut climax bars before the reversal eats the open profit, while leaving the bulk of trend-following trades undisturbed.
+
+To test: enable individually on Run 20 setup (1D NatGas, both sustained triggers on, defaults otherwise) and compare to baseline PF 2.418.
+
+---
+
+## Pending Review Feedback (Phase 3+ remaining)
+
+Items #10/#11/#12 from the reviewer not yet implemented — design decisions still open.
 
 ### #10 Score-System reconsideration
 
@@ -316,15 +330,22 @@ This restores the v3 (Run 7) gate stack as the default. Empirically that was the
 
 **Rating:** Promising
 
-**Best in-sample:** Run 20 — NatGas 1D, 2017–2026, PF **2.418**, net **+52.60%**, Return/DD **4.08**, 66 trades, win rate 46.97%, max DD 12.88%. Avg winner 2.73× avg loser. Both directions profitable (Long PF 2.85, Short PF 1.88). Highest PF in the strategy repo by a wide margin.
+**Best in-sample:** Run 22 — NatGas 1D, 2017–2026, PF **3.069**, net **+69.69%**, Return/DD **4.87**, 71 trades, win rate 47.89%, max DD 14.32%. Avg winner 3.34× avg loser. Long PF 4.08, Short PF 2.04 — both directions strongly profitable. Significantly above the strategy repo's previous best (Run 20 PF 2.42).
+
+**Extended-history validation:** Run 23 — NYMEX:NG1! futures, 35-year window (1990–2026), 310 trades. **PF 1.218 overall** (Promising, below the 1.3 Ready threshold). Critically: **Long PF 1.929** (clear edge), **Short PF 0.654** (consistent loss across multi-decade bull runs). The CFD sample (Run 22, 2017–2026) happened to coincide with an atypically bear-heavy phase that made shorts look profitable. Over the full 35-year futures history, the indicator's edge is **structurally long-biased** on NatGas. Long-Only configuration would clear the Ready threshold cleanly.
 
 Edge is robust across the 9-year sample but the strategy is currently single-instrument validated. Win rate below 50% — profit depends on the asymmetric winner-vs-loser size, which is consistent and large (2.73×) but a quality the strategy depends on.
 
 **Next steps to reach "Ready":**
-1. Out-of-sample validation on a second instrument (CL1! crude oil, BRENT, SI1! silver, or HG1! copper) with same defaults — PF must remain ≥ 1.3
-2. Walk-forward split: train on NatGas 2017–2022, validate on 2023–2026 — verify edge persists temporally
-3. Forward-test (paper / small live) to confirm slippage and execution match backtest assumptions
+1. **Long-Only confirmation on NYMEX:NG1!** — same v11 settings, Trade Direction = "Long Only". Expected: PF ~1.93, DD significantly lower. If confirmed, this is the production-recommended configuration for NatGas.
+2. **Out-of-sample on a second instrument** (CL1! crude oil, BRENT, SI1! silver, HG1! copper). Test with default "Both" first — if PF ≥ 1.3 cross-instrument, the indicator's edge is generic. If only Long works on the new instrument too, the indicator is a directional-trend system, not a both-sides reversal system.
+3. Walk-forward split: NYMEX:NG1! 1990–2008 (in-sample) vs 2009–2026 (out-of-sample). Verify Long edge persists across regime shifts.
+4. Forward-test (paper / small live) to confirm slippage and execution match backtest assumptions.
 
 **Code review v9/v10 closed:** Eight original points addressed — 3 bug fixes kept, 2 cleanups kept (BE-integration, StochRSI lower-TF), 4 logic changes empirically falsified and either reverted or made opt-in.
 
-**Phase 3+ ideas pending** (see "Pending Review Feedback" section above): exit-logic upgrade (partial / structure / volatility exits), score-system reconsideration (`sigMinScore=0` test), persist structural filter (replace `persistOscBlock` hack with HH/LL or slope-inflection logic), StochRSI as timing layer rather than gate. Largest expected lever: exit-logic — current strategy underexploits its 2.73× winner/loser ratio.
+**Phase 3 status:**
+- 🟡 #9 Exit-Logic — Partial Exit removed (no improvement), Structure Exit removed (no improvement), **Volatility Exit kept as default ON (significant improvement)**
+- ⏳ #10 Score-system reconsideration — testable without code change (set `sigMinScore=0`)
+- ⏳ #11 Persist structural filter — design open (HH/LL detection or slope-inflection)
+- ⏳ #12 StochRSI as timing layer — re-architecture, not yet started

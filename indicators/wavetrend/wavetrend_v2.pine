@@ -1,0 +1,207 @@
+//@version=6
+// ============================================================================
+// WaveTrend v2 [Experimental]
+// Version: 2.0-experimental
+// Build: 2026-05-02
+// ============================================================================
+// Formel-fokussierter Refactor des klassischen WaveTrend:
+//
+//   ✓ Schwäche 1: 0.015-Konstante als Input exposed
+//   ✓ Schwäche 2: Normalisierung wahlweise Mean-Abs-Dev (klassisch) oder ATR
+//   ✓ Schwäche 4: Glättungs-Typ wählbar (EMA / HMA / WMA / JMA-Approx)
+//   ✗ Schwäche 6: Adaptive Glättung — nicht in Pine v6 möglich (ta.* require simple int)
+//
+// Signal-Logik bewusst minimal gehalten (nur Cross), damit man die
+// Formel-Verbesserung sauber gegen die klassische Variante A/B-testen kann.
+// ============================================================================
+
+indicator('WaveTrend v2 [Experimental]', 'WT2',
+     max_labels_count=500, max_lines_count=500, max_bars_back=500)
+
+// ─── Engine Inputs ───────────────────────────────────────────────────────────
+
+g_eng = 'Engine'
+
+chLength  = input.int(10, 'Channel Length',  minval=2, group=g_eng,
+     tooltip='Smoothing period of price input. Higher = smoother oscillator, more lag.')
+avgLength = input.int(21, 'Average Length',  minval=2, group=g_eng,
+     tooltip='Second smoothing period applied to the channel index.')
+sigLength = input.int(4,  'Signal Length',   minval=1, group=g_eng,
+     tooltip='SMA period for the signal line. wtSig = SMA(wt, sigLength).')
+
+priceSrc  = input.source(hlc3, 'Price Source', group=g_eng,
+     tooltip='Input price series. Default hlc3. Try ohlc4 for more weight on open, or vwap for volume-weighted.')
+
+// ─── Schwäche 1: Normalisierungs-Konstante ────────────────────────────────────
+
+g_norm = 'Normalization'
+
+ciConst = input.float(0.015, 'Channel Index Constant', minval=0.001, maxval=0.5, step=0.001, group=g_norm,
+     tooltip='Normalization constant in the channel index calculation.\n\nClassic WaveTrend uses 0.015 (from Lambert\'s CCI, originally tuned for US stocks). Higher = wt values stay smaller (rarely reach OB/OS bands). Lower = wt values get larger.\n\nFor instruments with higher inherent volatility (NatGas, Crypto), values around 0.020-0.025 may produce more useful range. Test per instrument.')
+
+normMode = input.string('Mean Abs Dev (classic)', 'Volatility Norm', options=['Mean Abs Dev (classic)', 'ATR'], group=g_norm,
+     tooltip='How the channel index normalizes deviations:\n\n• Mean Abs Dev: classic — averages absolute close-to-EMA distances. Gap-blind.\n• ATR: uses Average True Range (Wilder) — gap-aware, includes high/low ranges. Recommended for futures with overnight/roll gaps and crypto with liquidity gaps.')
+
+// ─── Schwäche 4: Glättungs-Typ ────────────────────────────────────────────────
+
+g_smooth = 'Smoothing'
+
+smoothType = input.string('EMA (classic)', 'Smoothing Type', options=['EMA (classic)', 'HMA (Hull)', 'WMA (linear weighted)', 'JMA-approx'], group=g_smooth,
+     tooltip='Type of smoothing applied to channel index → wt:\n\n• EMA: classic, well-known lag (~length/2 bars)\n• HMA: Hull MA, ~50% less lag than EMA, can ring on noisy data\n• WMA: linear-weighted, simple middle ground\n• JMA-approx: Jurik-like adaptive smoothing (open-source approximation, proprietary original is patented). Tunable phase parameter, less ringing than HMA.')
+
+jmaPhase = input.int(50, '  JMA Phase', minval=-100, maxval=100, group=g_smooth,
+     tooltip='Only used when JMA-approx is selected. Phase parameter controls reactivity vs smoothness:\n\n• -100: maximum smoothing, more lag\n• 0: balanced\n• +100: maximum reactivity, less lag, more overshoot\n\nDefault 50 = mild bias toward reactivity.')
+
+// NOTE: Adaptive smoothing (Schwäche 6, Variante C — KAMA / Efficiency Ratio)
+// not implemented here because Pine v6's ta.ema/hma/wma require `simple int`
+// length, but adaptive length is `series int`. Would require manual EMA/HMA
+// implementation. Kept as a future enhancement.
+
+// ─── Bands ───────────────────────────────────────────────────────────────────
+
+g_bands = 'Bands'
+
+upperBand1 = input.int( 60, 'Upper Band 1', group=g_bands)
+upperBand2 = input.int( 53, 'Upper Band 2', group=g_bands)
+lowerBand2 = input.int(-53, 'Lower Band 2', group=g_bands)
+lowerBand1 = input.int(-60, 'Lower Band 1', group=g_bands)
+
+// ─── Signal Logic (minimal, nur Cross) ───────────────────────────────────────
+
+g_sig = 'Signal'
+
+showCross = input.bool(true, 'Show Cross Markers', group=g_sig)
+strongOnly = input.bool(true, 'Strong crosses only (in OB/OS zones)', group=g_sig,
+     tooltip='When ON, only flag crosses where the oscillator is currently inside the OB or OS band. When OFF, flag every wt-vs-wtSig cross.')
+
+// ─── Functions ───────────────────────────────────────────────────────────────
+
+// JMA-like adaptive smoothing (open-source approximation; not Mark Jurik's
+// proprietary algorithm). Output is similar in character to commercial JMA.
+f_jma(src, length, phase) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+
+    _phaseRatio = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    _beta       = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    _alpha      = math.pow(_beta, length)
+
+    e0 := (1 - _alpha) * src + _alpha * nz(e0[1], src)
+    e1 := (src - e0) * (1 - _beta) + _beta * nz(e1[1])
+    e2 := (e0 + _phaseRatio * e1 - nz(jma[1], src)) * math.pow(1 - _alpha, 2) + math.pow(_alpha, 2) * nz(e2[1])
+    jma := nz(jma[1], src) + e2
+    jma
+
+// Dispatched smoothing — selects EMA/HMA/WMA/JMA based on user input
+f_smooth(src, length, mode) =>
+    switch mode
+        'HMA (Hull)'           => ta.hma(src, length)
+        'WMA (linear weighted)'=> ta.wma(src, length)
+        'JMA-approx'           => f_jma(src, length, jmaPhase)
+        =>                        ta.ema(src, length)
+
+// Improved WaveTrend formula:
+//   • CI normalization constant exposed (Schwäche 1)
+//   • Volatility norm switchable Mean-Abs-Dev / ATR (Schwäche 2)
+//   • Smoothing type selectable (Schwäche 4)
+f_getWT_v2(src, n1, n2, normMode, smoothMode) =>
+    _esa = ta.ema(src, n1)
+    _d   = normMode == 'ATR' ? ta.atr(n1) : ta.ema(math.abs(src - _esa), n1)
+    _ci  = (src - _esa) / (ciConst * _d)
+    f_smooth(_ci, n2, smoothMode)
+
+// ─── Core Calculation ────────────────────────────────────────────────────────
+
+wtOsc = f_getWT_v2(priceSrc, chLength, avgLength, normMode, smoothType)
+wtSig = ta.sma(wtOsc, sigLength)
+
+lowerThreshold = math.avg(lowerBand1, lowerBand2)
+upperThreshold = math.avg(upperBand1, upperBand2)
+
+// ─── Cross Detection ─────────────────────────────────────────────────────────
+
+crossUp   = ta.crossover(wtOsc, wtSig)
+crossDown = ta.crossunder(wtOsc, wtSig)
+
+strongUp   = crossUp   and (not strongOnly or wtOsc < lowerThreshold)
+strongDown = crossDown and (not strongOnly or wtOsc > upperThreshold)
+
+// ─── Plotting (Pane) ─────────────────────────────────────────────────────────
+
+colorBull    = #16a34a
+colorBear    = #dc2626
+colorOsc     = #0ea5e9
+colorSig     = #f97316
+
+hline(upperBand1, 'OB1', color.new(colorBear, 50))
+hline(upperBand2, 'OB2', color.new(colorBear, 75), linestyle=hline.style_dotted)
+hline(0,          'Mid', color.new(color.gray, 40))
+hline(lowerBand2, 'OS2', color.new(colorBull, 75), linestyle=hline.style_dotted)
+hline(lowerBand1, 'OS1', color.new(colorBull, 50))
+
+p_osc = plot(wtOsc, 'Oscillator',
+     color.from_gradient(wtOsc, lowerBand1, upperBand1, colorBull, colorBear), linewidth=2)
+p_sig = plot(wtSig, 'Signal', color.new(colorSig, 20), linewidth=1)
+p_mid = plot(0, display=display.none)
+plot(wtOsc - wtSig, 'Histogram', color.new(colorOsc, 50), style=plot.style_histogram, linewidth=1)
+fill(p_osc, p_mid, upperBand1, 0,          color.new(colorBear, 88), color.new(colorBear, 100))
+fill(p_osc, p_mid, 0,          lowerBand1, color.new(colorBull, 100), color.new(colorBull, 88))
+
+// ─── Markers ─────────────────────────────────────────────────────────────────
+
+if showCross and strongUp
+    label.new(bar_index, low, '▲',
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_up, color=colorBull, textcolor=color.white,
+         size=size.small, force_overlay=true,
+         tooltip='WT2 Strong Bullish Cross\nOsc: ' + str.tostring(wtOsc, '#.##')
+              + '\nSig: ' + str.tostring(wtSig, '#.##')
+              + '\nNorm: ' + normMode + '\nSmoothing: ' + smoothType
+              )
+
+if showCross and strongDown
+    label.new(bar_index, high, '▼',
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=label.style_label_down, color=colorBear, textcolor=color.white,
+         size=size.small, force_overlay=true,
+         tooltip='WT2 Strong Bearish Cross\nOsc: ' + str.tostring(wtOsc, '#.##')
+              + '\nSig: ' + str.tostring(wtSig, '#.##')
+              + '\nNorm: ' + normMode + '\nSmoothing: ' + smoothType
+              )
+
+// ─── Mini Dashboard ──────────────────────────────────────────────────────────
+
+var table dash = table.new(position.top_right, 2, 6,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1)
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+if barstate.islast
+    table.cell(dash, 0, 0, 'WT v2', text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, '',                                  bgcolor=hd, text_size=size.small)
+
+    table.cell(dash, 0, 1, 'Osc',     text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 1, str.tostring(wtOsc, '#.##'), text_color=colorOsc, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 2, 'Sig',     text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 2, str.tostring(wtSig, '#.##'), text_color=colorSig, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 3, 'Norm',    text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 3, normMode == 'ATR' ? 'ATR' : 'MAD', text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 4, 'Smooth',  text_color=tc, text_size=size.small, text_halign=text.align_left)
+    _smoothShort = smoothType == 'HMA (Hull)' ? 'HMA' : smoothType == 'WMA (linear weighted)' ? 'WMA' : smoothType == 'JMA-approx' ? 'JMA' : 'EMA'
+    table.cell(dash, 1, 4, _smoothShort, text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+    table.cell(dash, 0, 5, 'Const', text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 5, str.tostring(ciConst, '#.###'), text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+// ─── Alerts ──────────────────────────────────────────────────────────────────
+
+alertcondition(strongUp,   'WT2 Strong Bull Cross', 'WT v2 strong bullish cross — {{ticker}} @ {{close}}')
+alertcondition(strongDown, 'WT2 Strong Bear Cross', 'WT v2 strong bearish cross — {{ticker}} @ {{close}}')
