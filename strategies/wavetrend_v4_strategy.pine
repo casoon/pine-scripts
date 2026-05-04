@@ -1,0 +1,513 @@
+//@version=6
+// ============================================================================
+// WaveTrend v4 [WavesUnchained]
+// Version: 4.30
+// Author: WavesUnchained
+// Build: 2026-05-04
+// ============================================================================
+// WT oscillator cross at OS/OB extremes — entry, ATR stop/target, break-even.
+// Optional gates: StochRSI, ATR rank, BB expansion, chop, pivot proximity, sweep.
+//
+// Features:
+//   ✓ WT cross below OS level → long; above OB level → short
+//   ✓ ATR frozen at signal bar; SL/TP set from fill price + frozen ATR
+//   ✓ Break-even confirmed on close from next bar only (calc_on_order_fills)
+//   ✓ Exit reason logged from exit_comment (tp / sl / be / struct)
+//   ✓ Session filter, date range, max drawdown, max intraday loss, losing streak limit
+//   ✓ Diagnostic logs: WT4 PIVOT, WT4 BLOCKED, WT4 ENTRY, WT4 REAL EXIT
+//
+// ============================================================================
+
+strategy("WaveTrend v4 [WavesUnchained] — Strategy",
+     overlay             = false,
+     calc_on_order_fills = true,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 100,
+     initial_capital     = 10000,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.02,
+     slippage            = 1)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+g_wt      = "WaveTrend"
+g_srsi    = "Stochastic RSI"
+g_risk    = "Risk"
+g_be      = "Break-Even"
+g_strat   = "Strategy"
+g_pivot   = "Pivots"
+g_filters = "Filters"
+
+chLen   = input.int(10,    "Channel Length",         minval=1,              group=g_wt)
+avgLen  = input.int(21,    "Average Length",         minval=1,              group=g_wt)
+sigLen  = input.int(4,     "Signal Smoothing",       minval=1,              group=g_wt)
+osLevel      = input.float(-45, "OS Level (long entry)",  step=1,                group=g_wt)
+obLevel      = input.float(45,  "OB Level (short entry)", step=1,                group=g_wt)
+smooth1H     = input.string("JMA", "Smoothing 1H",
+     options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"],                         group=g_wt)
+smooth4H     = input.string("JMA", "Smoothing 4H",
+     options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"],                         group=g_wt)
+smooth1D     = input.string("EMA", "Smoothing 1D",
+     options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"],                         group=g_wt)
+jmaPhase     = input.int(50,   "  JMA Phase", minval=-100, maxval=100,            group=g_wt)
+jmaPower     = input.float(2.0,"  JMA Power", minval=1.0,  maxval=4.0, step=0.25, group=g_wt)
+
+srsiRsiLen   = input.int(14,   "RSI Length",        minval=1,               group=g_srsi)
+srsiStochLen = input.int(14,   "Stoch Length",      minval=1,               group=g_srsi)
+srsiKSmooth  = input.int(3,    "K Smooth",          minval=1,               group=g_srsi)
+srsiDSmooth  = input.int(3,    "D Smooth",          minval=1,               group=g_srsi)
+srsiOsLevel  = input.float(20, "OS Level",           step=1,                 group=g_srsi)
+srsiObLevel  = input.float(80, "OB Level",           step=1,                 group=g_srsi)
+srsiPersist  = input.int(5,    "Trend Block (Bars stuck at OS/OB)", minval=1, group=g_srsi,
+     tooltip="Block entry if K has been at OS/OB for this many consecutive bars — signals a trend, not a reversal.")
+useSrsiGate  = input.bool(false, "Use StochRSI Gate",                          group=g_srsi)
+
+atrLen  = input.int(14,    "ATR Length",  minval=1,                         group=g_risk)
+slMult  = input.float(1.5, "SL (ATR×)",  minval=0.1, step=0.1,             group=g_risk)
+tpMult  = input.float(3.0, "TP (ATR×)",  minval=0.1, step=0.1,             group=g_risk)
+
+enableBE = input.bool(true,  "Enable Break-Even Stop",                      group=g_be)
+beTrigR  = input.float(1.0,  "Trigger (R×)", minval=0.1, step=0.1,         group=g_be)
+
+dirMode       = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"],                            group=g_strat)
+cooldown      = input.int(0, "Cooldown Bars After Exit", minval=0,           group=g_strat)
+useStructExit   = input.bool(false, "Structural Exit (unconfirmed pivot)",     group=g_strat,
+     tooltip="Close trade when price forms a potential swing against the position (high[1] > high[0] and high[2]) before ATR target is reached.")
+structMinR1H  = input.float(1.5,  "  Struct Exit Min Profit 1H (R×)", minval=0.0, step=0.1, group=g_strat)
+structMinR4H  = input.float(2.0,  "  Struct Exit Min Profit 4H (R×)", minval=0.0, step=0.1, group=g_strat)
+structMinR1D  = input.float(0.5,  "  Struct Exit Min Profit 1D (R×)", minval=0.0, step=0.1, group=g_strat)
+
+pivLen = input.int(5, "Pivot Length", minval=2, maxval=20,                   group=g_pivot,
+     tooltip="Bars on each side to confirm a swing high/low.")
+
+useSession    = input.bool(false,  "Session Filter",                         group=g_filters)
+sessionInput  = input.session("0000-2345", "Session",                        group=g_filters)
+useDateRange  = input.bool(false,  "Date Range",                             group=g_filters)
+dateFrom      = input.time(timestamp("01 Jan 2020 00:00 +0000"), "From",     group=g_filters)
+dateTo        = input.time(timestamp("31 Dec 2030 23:59 +0000"), "To",       group=g_filters)
+useMaxDD      = input.bool(false,  "Max Drawdown",                           group=g_filters)
+maxDD         = input.float(20.0,  "Max Drawdown (%)", minval=1, step=1,     group=g_filters)
+useMaxIntraDD = input.bool(false,  "Max Intraday Loss",                      group=g_filters)
+maxIntraDD    = input.float(5.0,   "Max Intraday Loss (%)", minval=1, step=1, group=g_filters)
+useLossStreak = input.bool(false,  "Losing Streak Limit",                    group=g_filters)
+maxLossStreak = input.int(5,       "Max Consecutive Losses", minval=1,       group=g_filters)
+useAtrRankGate = input.bool(false, "Use ATR Rank Gate",                        group=g_filters)
+atrPctLen     = input.int(100,     "  ATR Percentile Length",    minval=10,  group=g_filters)
+minAtrRank1H  = input.float(35,   "  Min ATR Rank 1H",           step=1,     group=g_filters)
+maxAtrRank1H  = input.float(85,   "  Max ATR Rank 1H",           step=1,     group=g_filters)
+minAtrRank4H  = input.float(30,   "  Min ATR Rank 4H",           step=1,     group=g_filters)
+maxAtrRank4H  = input.float(90,   "  Max ATR Rank 4H",           step=1,     group=g_filters)
+minAtrRank1D  = input.float(20,   "  Min ATR Rank 1D",           step=1,     group=g_filters)
+maxAtrRank1D  = input.float(95,   "  Max ATR Rank 1D",           step=1,     group=g_filters)
+useBBExpGate  = input.bool(false, "Use BB Expansion Gate",                    group=g_filters)
+bbLen         = input.int(20,     "  BB Width Length",           minval=1,   group=g_filters)
+bbMult        = input.float(2.0,  "  BB Mult",                   step=0.1,   group=g_filters)
+useChopGate   = input.bool(false, "Use Chop Gate",                            group=g_filters)
+chopLen       = input.int(14,     "  Chop Length",               minval=1,   group=g_filters)
+maxChop       = input.float(58,   "  Max Chop",                  step=0.5,   group=g_filters)
+usePivotProx  = input.bool(false, "Use Pivot Proximity",                     group=g_filters)
+maxPivBars1H  = input.int(12,     "  Max Bars From Pivot 1H",   minval=1,   group=g_filters)
+maxPivBars4H  = input.int(9,      "  Max Bars From Pivot 4H",   minval=1,   group=g_filters)
+maxPivBars1D  = input.int(5,      "  Max Bars From Pivot 1D",   minval=1,   group=g_filters)
+maxDistAtr    = input.float(1.2,  "Max Distance From Pivot (ATR×)", step=0.1, group=g_filters)
+useSweepGate          = input.bool(false, "Use Liquidity Sweep Gate",          group=g_filters)
+sweepLookback1H       = input.int(8,   "  Sweep Lookback 1H",  minval=1,      group=g_filters)
+sweepLookback4H       = input.int(6,   "  Sweep Lookback 4H",  minval=1,      group=g_filters)
+sweepLookback1D       = input.int(4,   "  Sweep Lookback 1D",  minval=1,      group=g_filters)
+sweepValidBars1H      = input.int(5,   "  Sweep Valid Bars 1H", minval=1,     group=g_filters)
+sweepValidBars4H      = input.int(8,   "  Sweep Valid Bars 4H", minval=1,     group=g_filters)
+sweepValidBars1D      = input.int(12,  "  Sweep Valid Bars 1D", minval=1,     group=g_filters)
+useSweepAsHardGate1D  = input.bool(false, "  Daily Sweep as Hard Gate",       group=g_filters)
+
+// ─── Risk limits (fire-and-forget, built-in strategy.risk) ───────────────────
+strategy.risk.max_drawdown(useMaxDD      ? maxDD      : 100, strategy.percent_of_equity)
+strategy.risk.max_intraday_loss(useMaxIntraDD ? maxIntraDD : 100, strategy.percent_of_equity)
+
+// ─── WaveTrend ───────────────────────────────────────────────────────────────
+f_jma(src, length, phase, power) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+    _pr    = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    _beta  = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    _alpha = math.pow(_beta, power)
+    e0    := (1 - _alpha) * src + _alpha * nz(e0[1], src)
+    e1    := (src - e0) * (1 - _beta) + _beta * nz(e1[1], 0)
+    e2    := (e0 + _pr * e1 - nz(jma[1], src)) * math.pow(1 - _alpha, 2) + math.pow(_alpha, 2) * nz(e2[1], 0)
+    jma   := nz(jma[1], src) + e2
+    jma
+
+f_smooth(src, length, mode) =>
+    switch mode
+        'SMA' => ta.sma(src, length)
+        'RMA' => ta.rma(src, length)
+        'HMA' => ta.hma(src, length)
+        'WMA' => ta.wma(src, length)
+        'JMA' => f_jma(src, length, jmaPhase, jmaPower)
+        =>       ta.ema(src, length)
+
+_smoothMode = timeframe.in_seconds() == 3600 ? smooth1H : timeframe.in_seconds() == 14400 ? smooth4H : timeframe.in_seconds() == 86400 ? smooth1D : 'EMA'
+_esa        = ta.ema(hlc3, chLen)
+_d          = ta.ema(math.abs(hlc3 - _esa), chLen)
+_ci         = _d != 0 ? (hlc3 - _esa) / (0.015 * _d) : 0.0
+wt1         = f_smooth(_ci, avgLen, _smoothMode)
+wt2         = ta.sma(wt1, sigLen)
+
+// ─── Stochastic RSI ──────────────────────────────────────────────────────────
+_rsi      = ta.rsi(close, srsiRsiLen)
+_stoch    = ta.stoch(_rsi, _rsi, _rsi, srsiStochLen)
+srsiK     = ta.sma(_stoch, srsiKSmooth)
+srsiD     = ta.sma(srsiK,  srsiDSmooth)
+
+var int _srsiOsBars = 0
+var int _srsiObBars = 0
+_srsiOsBars := srsiK <= srsiOsLevel ? _srsiOsBars + 1 : 0
+_srsiObBars := srsiK >= srsiObLevel ? _srsiObBars + 1 : 0
+
+srsiLongOk  = not useSrsiGate or (srsiK > srsiD and _srsiOsBars <= srsiPersist)
+srsiShortOk = not useSrsiGate or (srsiK < srsiD and _srsiObBars <= srsiPersist)
+
+// ─── Pivots ───────────────────────────────────────────────────────────────────
+_phVal   = ta.pivothigh(high, pivLen, pivLen)
+_plVal   = ta.pivotlow(low,  pivLen, pivLen)
+_phFound = not na(_phVal)
+_plFound = not na(_plVal)
+
+var int _lastHighBar = na
+var int _lastLowBar  = na
+if _phFound
+    _lastHighBar := bar_index - pivLen
+if _plFound
+    _lastLowBar  := bar_index - pivLen
+
+lastPivHigh = ta.valuewhen(_phFound, high[pivLen], 0)
+lastPivLow  = ta.valuewhen(_plFound, low[pivLen],  0)
+
+barsSinceHighPiv = not na(_lastHighBar) ? bar_index - _lastHighBar : na
+barsSinceLowPiv  = not na(_lastLowBar)  ? bar_index - _lastLowBar  : na
+
+// ─── ATR ─────────────────────────────────────────────────────────────────────
+atrVal  = ta.atr(atrLen)
+atrRank = ta.percentrank(atrVal, atrPctLen)
+
+// ─── Choppiness Index ────────────────────────────────────────────────────────
+_trSum     = math.sum(ta.tr(true), chopLen)
+_chopRange = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
+chop       = _chopRange > 0 ? 100 * math.log10(_trSum / _chopRange) / math.log10(chopLen) : 100.0
+chopGate   = not useChopGate or chop < maxChop
+
+// ─── Bollinger Band width expansion ──────────────────────────────────────────
+bbBasis             = ta.sma(close, bbLen)
+bbDev               = bbMult * ta.stdev(close, bbLen)
+bbWidth             = math.abs(bbBasis) > syminfo.mintick ? (2.0 * bbDev) / math.abs(bbBasis) : na
+bbWidthRank         = ta.percentrank(bbWidth, 100)
+compressionRecently = ta.lowest(bbWidthRank, 20) < 20
+expandingNow        = bbWidthRank > bbWidthRank[1] and bbWidthRank > 30
+volExpansionGate    = not useBBExpGate or (compressionRecently and expandingNow)
+
+// ─── Filters ─────────────────────────────────────────────────────────────────
+_inSession   = not useSession  or not na(time(timeframe.period, sessionInput))
+_inDateRange = not useDateRange or (time >= dateFrom and time <= dateTo)
+
+var int  _lossStreak    = 0
+var bool _streakBlocked = false
+_newLoss = strategy.losstrades > strategy.losstrades[1]
+_newWin  = strategy.wintrades  > strategy.wintrades[1]
+if _newLoss
+    _lossStreak := _lossStreak + 1
+if _newWin
+    _lossStreak := 0
+_streakBlocked := useLossStreak and _lossStreak >= maxLossStreak
+
+_tfSec       = timeframe.in_seconds()
+_tfOk        = _tfSec == 3600 or _tfSec == 14400 or _tfSec == 86400
+_minAtrRank  = _tfSec == 3600 ? minAtrRank1H : _tfSec == 14400 ? minAtrRank4H : minAtrRank1D
+_maxAtrRank  = _tfSec == 3600 ? maxAtrRank1H : _tfSec == 14400 ? maxAtrRank4H : maxAtrRank1D
+_volOk       = not useAtrRankGate or (atrRank >= _minAtrRank and atrRank <= _maxAtrRank)
+
+_canTrade = _inSession and _inDateRange and not _streakBlocked and _tfOk and _volOk and volExpansionGate and chopGate
+
+_maxPivBars    = _tfSec == 3600 ? maxPivBars1H : _tfSec == 14400 ? maxPivBars4H : maxPivBars1D
+pivotLongGate  = not usePivotProx or (not na(barsSinceLowPiv)  and barsSinceLowPiv  <= _maxPivBars)
+pivotShortGate = not usePivotProx or (not na(barsSinceHighPiv) and barsSinceHighPiv <= _maxPivBars)
+
+distFromLowAtr     = not na(lastPivLow)  ? math.abs(close - lastPivLow)  / atrVal : na
+distFromHighAtr    = not na(lastPivHigh) ? math.abs(close - lastPivHigh) / atrVal : na
+pivotDistLongGate  = not usePivotProx or (not na(distFromLowAtr)  and distFromLowAtr  <= maxDistAtr)
+pivotDistShortGate = not usePivotProx or (not na(distFromHighAtr) and distFromHighAtr <= maxDistAtr)
+
+// ─── Liquidity Sweep Gate ────────────────────────────────────────────────────
+_sweepLookback  = _tfSec == 3600 ? sweepLookback1H : _tfSec == 14400 ? sweepLookback4H : sweepLookback1D
+_sweepValidBars = _tfSec == 3600 ? sweepValidBars1H : _tfSec == 14400 ? sweepValidBars4H : sweepValidBars1D
+
+rawSweptLow  = not na(lastPivLow)  and ta.lowest(low,  _sweepLookback) < lastPivLow  and close > lastPivLow
+rawSweptHigh = not na(lastPivHigh) and ta.highest(high, _sweepLookback) > lastPivHigh and close < lastPivHigh
+
+sweepLongContext  = not na(ta.barssince(rawSweptLow))  and ta.barssince(rawSweptLow)  <= _sweepValidBars
+sweepShortContext = not na(ta.barssince(rawSweptHigh)) and ta.barssince(rawSweptHigh) <= _sweepValidBars
+
+_dailyBypass = _tfSec == 86400 and not useSweepAsHardGate1D
+sweepLongGate  = not useSweepGate or _dailyBypass or sweepLongContext
+sweepShortGate = not useSweepGate or _dailyBypass or sweepShortContext
+
+// ─── Signals ─────────────────────────────────────────────────────────────────
+_wtLongRaw  = ta.crossover(wt1, wt2)  and wt1 <= osLevel
+_wtShortRaw = ta.crossunder(wt1, wt2) and wt1 >= obLevel
+longSignal  = _wtLongRaw  and srsiLongOk
+shortSignal = _wtShortRaw and srsiShortOk
+
+canLong  = dirMode != "Short Only"
+canShort = dirMode != "Long Only"
+
+// ─── Trade state ─────────────────────────────────────────────────────────────
+var float _longSL   = na
+var float _longTP   = na
+var float _longRisk = na
+var bool  _longBE   = false
+
+var float _shortSL   = na
+var float _shortTP   = na
+var float _shortRisk = na
+var bool  _shortBE   = false
+
+var int _lastExitBar = na
+
+// Frozen at signal bar — used for SL/TP and exit log
+var float _pendingLongAtr    = na
+var float _pendingShortAtr   = na
+var int   _pendingLowPivBars  = na
+var int   _pendingHighPivBars = na
+
+// Entry metadata kept for exit log
+var float  _execRisk         = na
+var string _execDir          = ""
+var int    _execLowPivBars   = na
+var int    _execHighPivBars  = na
+
+_isNewLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+_isNewShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+_isFlat     = strategy.position_size == 0
+
+if _isNewLong
+    _atrUsed   = na(_pendingLongAtr) ? atrVal : _pendingLongAtr
+    _entry     = strategy.position_avg_price
+    _longSL   := _entry - slMult * _atrUsed
+    _longTP   := _entry + tpMult * _atrUsed
+    _longRisk := math.max(_entry - _longSL, syminfo.mintick)
+    _longBE   := false
+    _execRisk        := _longRisk
+    _execDir         := "long"
+    _execLowPivBars  := na(_pendingLowPivBars)  ? barsSinceLowPiv  : _pendingLowPivBars
+    _execHighPivBars := na(_pendingHighPivBars) ? barsSinceHighPiv : _pendingHighPivBars
+    _pendingLongAtr     := na
+    _pendingShortAtr    := na
+    _pendingLowPivBars  := na
+    _pendingHighPivBars := na
+
+if _isNewShort
+    _atrUsed    = na(_pendingShortAtr) ? atrVal : _pendingShortAtr
+    _entry      = strategy.position_avg_price
+    _shortSL   := _entry + slMult * _atrUsed
+    _shortTP   := _entry - tpMult * _atrUsed
+    _shortRisk := math.max(_shortSL - _entry, syminfo.mintick)
+    _shortBE   := false
+    _execRisk        := _shortRisk
+    _execDir         := "short"
+    _execLowPivBars  := na(_pendingLowPivBars)  ? barsSinceLowPiv  : _pendingLowPivBars
+    _execHighPivBars := na(_pendingHighPivBars) ? barsSinceHighPiv : _pendingHighPivBars
+    _pendingLongAtr     := na
+    _pendingShortAtr    := na
+    _pendingLowPivBars  := na
+    _pendingHighPivBars := na
+
+_isNewFlat = strategy.position_size == 0 and strategy.position_size[1] != 0
+if _isNewFlat
+    _lastExitBar := bar_index
+if _isFlat
+    _longBE    := false
+    _shortBE   := false
+    _longSL    := na
+    _longTP    := na
+    _longRisk  := na
+    _shortSL   := na
+    _shortTP   := na
+    _shortRisk := na
+
+// ─── Bracket exit + break-even ───────────────────────────────────────────────
+if strategy.position_size > 0 and not na(_longRisk)
+    _nextBar = bar_index > strategy.opentrades.entry_bar_index(0)
+    if enableBE and _nextBar and close >= strategy.position_avg_price + beTrigR * _longRisk
+        _longBE := true
+    _longStop = _longBE ? strategy.position_avg_price : _longSL
+    strategy.exit("Long Exit", "Long", stop=_longStop, limit=_longTP,
+         comment_profit="tp", comment_loss=_longBE ? "be" : "sl")
+
+if strategy.position_size < 0 and not na(_shortRisk)
+    _nextBar = bar_index > strategy.opentrades.entry_bar_index(0)
+    if enableBE and _nextBar and close <= strategy.position_avg_price - beTrigR * _shortRisk
+        _shortBE := true
+    _shortStop = _shortBE ? strategy.position_avg_price : _shortSL
+    strategy.exit("Short Exit", "Short", stop=_shortStop, limit=_shortTP,
+         comment_profit="tp", comment_loss=_shortBE ? "be" : "sl")
+
+// ─── Structural exit (unconfirmed pivot) ─────────────────────────────────────
+_structMinR = _tfSec == 3600 ? structMinR1H : _tfSec == 14400 ? structMinR4H : structMinR1D
+
+if useStructExit
+    _potentialHigh = high[1] > high[0] and high[1] > high[2]
+    _potentialLow  = low[1]  < low[0]  and low[1]  < low[2]
+    _longProfitR   = not na(_execRisk) and _execRisk > 0 ? (close - strategy.position_avg_price) / _execRisk : 0.0
+    _shortProfitR  = not na(_execRisk) and _execRisk > 0 ? (strategy.position_avg_price - close) / _execRisk : 0.0
+    if strategy.position_size > 0 and _potentialHigh and _longProfitR >= _structMinR
+        strategy.close("Long", comment="struct")
+    if strategy.position_size < 0 and _potentialLow and _shortProfitR >= _structMinR
+        strategy.close("Short", comment="struct")
+
+// ─── Pivot event log (validator reference) ───────────────────────────────────
+// Logs confirmed pivots as reference points. WT signals use barsSinceLowPiv /
+// barsSinceHighPiv to measure proximity — pivot validates signal quality.
+if _plFound
+    log.info(str.format('WT4 PIVOT | dir=long | pivBar={0} | pivLow={1} | pivAtr={2} | wt1={3} | tf={4}',
+         bar_index - pivLen,
+         str.tostring(low[pivLen],  format.mintick),
+         str.tostring(atrVal[pivLen], format.mintick),
+         str.tostring(wt1[pivLen], '#.##'),
+         timeframe.period))
+
+if _phFound
+    log.info(str.format('WT4 PIVOT | dir=short | pivBar={0} | pivHigh={1} | pivAtr={2} | wt1={3} | tf={4}',
+         bar_index - pivLen,
+         str.tostring(high[pivLen], format.mintick),
+         str.tostring(atrVal[pivLen], format.mintick),
+         str.tostring(wt1[pivLen], '#.##'),
+         timeframe.period))
+
+// ─── Entries + Block diagnostics ─────────────────────────────────────────────
+_cooldownOk = cooldown == 0 or na(_lastExitBar) or (bar_index - _lastExitBar) > cooldown
+
+f_blockReason(wtRaw, srsiOk, cooldownOk, inSession, inDateRange, tfOk, volOk, bbExpOk, chopOk, pivBarsOk, pivDistOk, sweepOk) =>
+    string _r = ""
+    if wtRaw
+        if not srsiOk
+            _r := "srsi"
+        else if not cooldownOk
+            _r := "cooldown"
+        else if not inSession
+            _r := "session"
+        else if not inDateRange
+            _r := "dateRange"
+        else if not tfOk
+            _r := "tf"
+        else if not volOk
+            _r := "atrRank"
+        else if not bbExpOk
+            _r := "bbExpansion"
+        else if not chopOk
+            _r := "chop"
+        else if not pivBarsOk
+            _r := "pivotBars"
+        else if not pivDistOk
+            _r := "pivotDist"
+        else if not sweepOk
+            _r := "sweep"
+    _r
+
+_blockLong  = f_blockReason(_wtLongRaw,  srsiLongOk,  _cooldownOk, _inSession, _inDateRange, _tfOk, _volOk, volExpansionGate, chopGate, pivotLongGate,  pivotDistLongGate,  sweepLongGate)
+_blockShort = f_blockReason(_wtShortRaw, srsiShortOk, _cooldownOk, _inSession, _inDateRange, _tfOk, _volOk, volExpansionGate, chopGate, pivotShortGate, pivotDistShortGate, sweepShortGate)
+
+if canLong and strategy.position_size == 0 and _blockLong != ""
+    log.info(str.format('WT4 BLOCKED | dir=long | reason={0} | bar={1} | wt1={2} | srsiK={3} | srsiD={4} | srsiOsBars={5} | atrRank={6} | chop={7} | bbWidthRank={8} | sweepCtx={9} | lowPivBars={10} | distLowAtr={11} | tf={12}',
+         _blockLong, bar_index,
+         str.tostring(wt1, '#.##'),
+         str.tostring(srsiK, '#.##'), str.tostring(srsiD, '#.##'), _srsiOsBars,
+         str.tostring(atrRank, '#.#'), str.tostring(chop, '#.#'), str.tostring(bbWidthRank, '#.#'),
+         sweepLongContext,
+         str.tostring(barsSinceLowPiv),
+         str.tostring(distFromLowAtr, '#.##'),
+         timeframe.period))
+
+if canShort and strategy.position_size == 0 and _blockShort != ""
+    log.info(str.format('WT4 BLOCKED | dir=short | reason={0} | bar={1} | wt1={2} | srsiK={3} | srsiD={4} | srsiObBars={5} | atrRank={6} | chop={7} | bbWidthRank={8} | sweepCtx={9} | highPivBars={10} | distHighAtr={11} | tf={12}',
+         _blockShort, bar_index,
+         str.tostring(wt1, '#.##'),
+         str.tostring(srsiK, '#.##'), str.tostring(srsiD, '#.##'), _srsiObBars,
+         str.tostring(atrRank, '#.#'), str.tostring(chop, '#.#'), str.tostring(bbWidthRank, '#.#'),
+         sweepShortContext,
+         str.tostring(barsSinceHighPiv),
+         str.tostring(distFromHighAtr, '#.##'),
+         timeframe.period))
+
+if longSignal and canLong and strategy.position_size == 0 and _cooldownOk and _canTrade and pivotLongGate and pivotDistLongGate and sweepLongGate
+    _pendingLongAtr    := atrVal
+    _pendingLowPivBars  := barsSinceLowPiv
+    _pendingHighPivBars := barsSinceHighPiv
+    log.info(str.format('WT4 ENTRY | dir=long | bar={0} | wt1={1} | wt2={2} | osLevel={3} | srsiK={4} | srsiD={5} | srsiOsBars={6} | lowPivBars={7} | highPivBars={8} | atr={9} | signalSL={10} | signalTP={11} | atrRank={12} | chop={13} | bbWidthRank={14} | sweepCtx={15} | tf={16}',
+         bar_index, str.tostring(wt1, '#.##'), str.tostring(wt2, '#.##'), osLevel,
+         str.tostring(srsiK, '#.##'), str.tostring(srsiD, '#.##'), _srsiOsBars,
+         str.tostring(barsSinceLowPiv), str.tostring(barsSinceHighPiv),
+         str.tostring(atrVal, format.mintick),
+         str.tostring(close - slMult * atrVal, format.mintick),
+         str.tostring(close + tpMult * atrVal, format.mintick),
+         str.tostring(atrRank, '#.#'), str.tostring(chop, '#.#'), str.tostring(bbWidthRank, '#.#'),
+         sweepLongContext,
+         timeframe.period))
+    strategy.entry("Long", strategy.long)
+
+if shortSignal and canShort and strategy.position_size == 0 and _cooldownOk and _canTrade and pivotShortGate and pivotDistShortGate and sweepShortGate
+    _pendingShortAtr    := atrVal
+    _pendingLowPivBars  := barsSinceLowPiv
+    _pendingHighPivBars := barsSinceHighPiv
+    log.info(str.format('WT4 ENTRY | dir=short | bar={0} | wt1={1} | wt2={2} | obLevel={3} | srsiK={4} | srsiD={5} | srsiObBars={6} | lowPivBars={7} | highPivBars={8} | atr={9} | signalSL={10} | signalTP={11} | atrRank={12} | chop={13} | bbWidthRank={14} | sweepCtx={15} | tf={16}',
+         bar_index, str.tostring(wt1, '#.##'), str.tostring(wt2, '#.##'), obLevel,
+         str.tostring(srsiK, '#.##'), str.tostring(srsiD, '#.##'), _srsiObBars,
+         str.tostring(barsSinceLowPiv), str.tostring(barsSinceHighPiv),
+         str.tostring(atrVal, format.mintick),
+         str.tostring(close + slMult * atrVal, format.mintick),
+         str.tostring(close - tpMult * atrVal, format.mintick),
+         str.tostring(atrRank, '#.#'), str.tostring(chop, '#.#'), str.tostring(bbWidthRank, '#.#'),
+         sweepShortContext,
+         timeframe.period))
+    strategy.entry("Short", strategy.short)
+
+// ─── Exit log ────────────────────────────────────────────────────────────────
+var int _lastLoggedTrade = 0
+if strategy.closedtrades > _lastLoggedTrade
+    for _idx = _lastLoggedTrade to strategy.closedtrades - 1
+        _ep    = strategy.closedtrades.entry_price(_idx)
+        _xp    = strategy.closedtrades.exit_price(_idx)
+        _pnl   = strategy.closedtrades.profit(_idx)
+        _barsH = strategy.closedtrades.exit_bar_index(_idx) - strategy.closedtrades.entry_bar_index(_idx)
+        _mfe   = strategy.closedtrades.max_runup(_idx)
+        _mae   = strategy.closedtrades.max_drawdown(_idx)
+        _R     = not na(_execRisk) and _execRisk > 0
+                     ? (_execDir == "long" ? (_xp - _ep) : (_ep - _xp)) / _execRisk
+                     : na
+        _exitComment = strategy.closedtrades.exit_comment(_idx)
+        _exitReason  = na(_exitComment) or _exitComment == "" ? "unknown" : _exitComment
+        log.info(str.format('WT4 REAL EXIT | dir={0} | entryBar={1} | exitBar={2} | entry={3} | exitPx={4} | pnl={5} | R={6} | barsHeld={7} | MFE={8} | MAE={9} | lowPivBars={10} | highPivBars={11} | exitReason={12} | tf={13}',
+             _execDir,
+             strategy.closedtrades.entry_bar_index(_idx),
+             strategy.closedtrades.exit_bar_index(_idx),
+             str.tostring(_ep, format.mintick),
+             str.tostring(_xp, format.mintick),
+             str.tostring(_pnl, '#.##'),
+             str.tostring(_R, '#.##'),
+             _barsH,
+             str.tostring(_mfe, '#.##'),
+             str.tostring(_mae, '#.##'),
+             str.tostring(_execLowPivBars),
+             str.tostring(_execHighPivBars),
+             _exitReason,
+             timeframe.period))
+    _lastLoggedTrade := strategy.closedtrades
+
+// ─── Plots ───────────────────────────────────────────────────────────────────
+plot(wt1,     "WT",     color=color.new(color.teal,  0), linewidth=2)
+plot(wt2,     "Signal", color=color.new(color.orange, 0), linewidth=1)
+plot(osLevel, "OS",     color=color.new(#00c853, 50), linewidth=1)
+plot(obLevel, "OB",     color=color.new(#d50000, 50), linewidth=1)
+hline(0, "Zero", color=color.new(color.gray, 60))
+
+plotshape(longSignal  and canLong,  style=shape.triangleup,   location=location.bottom, color=color.new(#00c853, 0), size=size.small, title="Long Signal")
+plotshape(shortSignal and canShort, style=shape.triangledown, location=location.top,    color=color.new(#d50000, 0), size=size.small, title="Short Signal")
