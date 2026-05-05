@@ -60,6 +60,8 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`tweezer_kangaroo_zones.pine`](indicators/structure/tweezer_kangaroo_zones.pine) | Tweezer tops/bottoms and kangaroo tails mapped to supply/demand zones |
 | [`jma_struct.pine`](indicators/structure/jma_struct.pine) | JMA entry clusters with Wyckoff and SMC structure context |
 | [`time_to_react_volatility_time.pine`](indicators/structure/time_to_react_volatility_time.pine) | BOS and sweep timing with volatility-adjusted candle coloring |
+| [`coilforge_zones_v1.pine`](indicators/coilforge_zones/coilforge_zones_v1.pine) | Compression zone detection with multi-module scoring and post-zone breakout watch |
+| [`reversal_engine_score_v1.pine`](indicators/reversal_engine_score/reversal_engine_score_v1.pine) | Score-based liquidity sweep reversal signals with HTF trend filter and configurable evidence threshold |
 
 ### Trend & Regime
 

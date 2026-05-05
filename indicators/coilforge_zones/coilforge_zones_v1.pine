@@ -1,0 +1,389 @@
+//@version=6
+// ============================================================================
+// CoilForge Zones v1.1 [WavesUnchained]
+// Version: 1.1
+// Author: WavesUnchained
+// Build: 2026-05-05 00:00:00
+// ============================================================================
+// Detects price compression zones using ATR, ADX, volume, impulse, and
+// historical S/R context, then tracks confirmed breakouts for a configurable
+// window after the zone ends.
+//
+// Features:
+//   ✓ Multi-module compression scoring (ATR, ADX, volume, impulse, historical S/R)
+//   ✓ Sensitivity presets (Strict / Balanced / Aggressive / Custom)
+//   ✓ Dynamic bias detection via touch pressure and DI comparison
+//   ✓ Zone boxes with quality-based color and directional border
+//   ✓ Post-zone breakout detection with configurable watch window
+//   ✓ Historical pivot level reuse detection
+//   ✓ Alert conditions for breakout up / down
+//
+// ============================================================================
+
+indicator("CoilForge Zones v1.1 [WavesUnchained]",
+         shorttitle    = "CFZ v1",
+         overlay       = true,
+         max_boxes_count  = 100,
+         max_labels_count = 100)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Inputs
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+groupCore = "Core"
+sensitivity        = input.string("Balanced", "Sensitivity", options = ["Strict", "Balanced", "Aggressive", "Custom"], group = groupCore)
+lookback           = input.int(24,  "Zone Lookback",        minval = 8,  maxval = 100,  group = groupCore)
+minZoneBars        = input.int(8,   "Minimum Zone Bars",    minval = 3,  maxval = 50,   group = groupCore)
+customRangeAtrMult = input.float(2.2, "Custom: Max Range / ATR",  step = 0.1,  group = groupCore)
+customAdxMax       = input.float(22.0, "Custom: Max ADX",         step = 0.5,  group = groupCore)
+customMinScore     = input.int(45,  "Custom: Minimum Score", minval = 0,  maxval = 100,  group = groupCore)
+
+groupModules = "Modules"
+useAtrCompression = input.bool(true, "Use ATR Compression",     group = groupModules)
+useAdxFilter      = input.bool(true, "Use ADX Chop Filter",     group = groupModules)
+useTouches        = input.bool(true, "Use Touch Structure",      group = groupModules)
+useVolume         = input.bool(true, "Use Volume Dry-Up",        group = groupModules)
+useImpulse        = input.bool(true, "Use Impulse-In Context",   group = groupModules)
+useHistorical     = input.bool(true, "Use Historical S/R Reuse", group = groupModules)
+
+groupCalc = "Calculation"
+atrLen          = input.int(14,   "ATR Length",                      minval = 2,            group = groupCalc)
+adxLen          = input.int(14,   "DI Length",                       minval = 2,            group = groupCalc)
+adxSmooth       = input.int(14,   "ADX Smoothing",                   minval = 2,            group = groupCalc)
+touchTolAtr     = input.float(0.25, "Touch Tolerance / ATR",         step = 0.05,           group = groupCalc)
+volLen          = input.int(20,   "Volume MA Length",                 minval = 2,            group = groupCalc)
+impulseLookback = input.int(12,   "Impulse Lookback",                 minval = 3, maxval = 100, group = groupCalc)
+impulseAtrMult  = input.float(1.8, "Impulse Strength / ATR",         step = 0.1,            group = groupCalc)
+histLookback    = input.int(250,  "Historical Pivot Lookback",        minval = 50, maxval = 2000, group = groupCalc)
+histTolAtr      = input.float(0.5, "Historical Level Tolerance / ATR", step = 0.1,          group = groupCalc)
+pivotLen        = input.int(5,    "Pivot Length",                     minval = 2, maxval = 20,  group = groupCalc)
+
+groupVisual = "Visuals"
+showOldZones = input.bool(true,  "Show Old Zones",         group = groupVisual)
+oldZoneLife  = input.int(180,    "Old Zone Lifetime Bars", minval = 10, maxval = 2000, group = groupVisual)
+maxOldZones  = input.int(8,      "Max Old Zones",          minval = 0,  maxval = 50,   group = groupVisual)
+showLabels   = input.bool(true,  "Show Zone Label",        group = groupVisual)
+showTable    = input.bool(true,  "Show Info Table",        group = groupVisual)
+
+groupBreakout = "Breakout"
+breakoutWatchBars = input.int(20, "Breakout Watch Bars After Zone", minval = 1, maxval = 200, group = groupBreakout)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Sensitivity mapping
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+rangeAtrMult =
+     sensitivity == "Strict"     ? 1.6 :
+     sensitivity == "Balanced"   ? 2.2 :
+     sensitivity == "Aggressive" ? 3.0 :
+     customRangeAtrMult
+
+adxMax =
+     sensitivity == "Strict"     ? 18.0 :
+     sensitivity == "Balanced"   ? 22.0 :
+     sensitivity == "Aggressive" ? 28.0 :
+     customAdxMax
+
+minScore =
+     sensitivity == "Strict"     ? 60 :
+     sensitivity == "Balanced"   ? 45 :
+     sensitivity == "Aggressive" ? 30 :
+     customMinScore
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Base calculations
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+atr               = ta.atr(atrLen)
+[plusDI, minusDI, adx] = ta.dmi(adxLen, adxSmooth)
+rangeHigh         = ta.highest(high, lookback)
+rangeLow          = ta.lowest(low,   lookback)
+rangeSize         = rangeHigh - rangeLow
+rangeAtrRatio     = atr > 0 ? rangeSize / atr : na
+volMa             = ta.sma(volume, volLen)
+volDrying         = volume < volMa and ta.sma(volume, math.max(3, math.floor(volLen / 2))) < volMa
+priorMove         = close - close[impulseLookback]
+impulseBull       = priorMove >  atr * impulseAtrMult
+impulseBear       = priorMove < -atr * impulseAtrMult
+impulseDir        = impulseBull ? 1 : impulseBear ? -1 : 0
+atrMa             = ta.sma(atr, lookback)
+rangeOk           = rangeAtrRatio <= rangeAtrMult
+adxOk             = adx <= adxMax
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Historical levels
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var float[] histLevels = array.new_float()
+var int[]   histBars   = array.new_int()
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low,  pivotLen, pivotLen)
+
+if useHistorical and not na(ph)
+    array.push(histLevels, ph)
+    array.push(histBars, bar_index - pivotLen)
+if useHistorical and not na(pl)
+    array.push(histLevels, pl)
+    array.push(histBars, bar_index - pivotLen)
+
+while array.size(histLevels) > 0 and bar_index - array.get(histBars, 0) > histLookback
+    array.shift(histLevels)
+    array.shift(histBars)
+
+histNearTop    = false
+histNearBottom = false
+histTol        = atr * histTolAtr
+
+if useHistorical and array.size(histLevels) > 0
+    for i = 0 to array.size(histLevels) - 1
+        lvl = array.get(histLevels, i)
+        if math.abs(lvl - rangeHigh) <= histTol
+            histNearTop := true
+        if math.abs(lvl - rangeLow) <= histTol
+            histNearBottom := true
+
+histReuse = histNearTop or histNearBottom
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Score
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+score = 0.0
+
+if useAtrCompression
+    atrScore = rangeAtrRatio <= rangeAtrMult ? 25.0 * (1.0 - math.min(rangeAtrRatio / rangeAtrMult, 1.0)) : 0.0
+    score += atrScore
+else
+    score += 25.0
+
+if useAdxFilter
+    adxScore = adx <= adxMax ? 15.0 * (1.0 - math.min(adx / adxMax, 1.0)) : 0.0
+    score += adxScore
+else
+    score += 15.0
+
+if useVolume
+    score += volDrying ? 15.0 : 0.0
+else
+    score += 15.0
+
+if useImpulse
+    score += impulseDir != 0 ? 15.0 : 0.0
+else
+    score += 15.0
+
+if useHistorical
+    score += histReuse ? 10.0 : 0.0
+else
+    score += 10.0
+
+baseCandidate =
+     (not useAtrCompression or rangeOk) and
+     (not useAdxFilter      or adxOk)
+
+candidate = baseCandidate and score >= minScore
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Active zone state
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var bool  inZone       = false
+var int   zoneStart    = na
+var float zoneHigh     = na
+var float zoneLow      = na
+var int   upperTouches = 0
+var int   lowerTouches = 0
+var box   activeBox    = na
+var label activeLabel  = na
+var box[] oldBoxes     = array.new_box()
+var int[] oldBoxEndBars = array.new_int()
+
+var bool  armedZone  = false
+var int   armedUntil = na
+var float armedHigh  = na
+var float armedLow   = na
+
+zoneAge      = inZone ? bar_index - zoneStart + 1 : 0
+startZone    = candidate and not inZone
+continueZone = candidate and inZone
+endZone      = not candidate and inZone
+
+if startZone
+    inZone       := true
+    zoneStart    := bar_index - lookback + 1
+    zoneHigh     := rangeHigh
+    zoneLow      := rangeLow
+    upperTouches := 0
+    lowerTouches := 0
+    activeBox    := box.new(
+         left         = zoneStart,
+         top          = zoneHigh,
+         right        = bar_index,
+         bottom       = zoneLow,
+         bgcolor      = color.new(color.gray, 88),
+         border_color = color.new(color.gray, 35),
+         border_width = 1)
+
+if continueZone
+    zoneHigh := math.max(zoneHigh, rangeHigh)
+    zoneLow  := math.min(zoneLow,  rangeLow)
+
+touchTol = atr * touchTolAtr
+
+if inZone
+    if high >= zoneHigh - touchTol
+        upperTouches += 1
+    if low <= zoneLow + touchTol
+        lowerTouches += 1
+
+    pressureRaw = upperTouches - lowerTouches
+    bias =
+         pressureRaw >= 3  and plusDI > minusDI  ? "Up" :
+         pressureRaw <= -3 and minusDI > plusDI   ? "Down" :
+         impulseDir ==  1  and plusDI >= minusDI  ? "Up / Continuation" :
+         impulseDir == -1  and minusDI >= plusDI  ? "Down / Continuation" :
+         "Neutral"
+
+    boxColor =
+         score >= 70 ? color.new(color.blue, 82) :
+         score >= 45 ? color.new(color.gray, 88) :
+         color.new(color.gray, 94)
+
+    borderColor =
+         bias == "Up"   or bias == "Up / Continuation"   ? color.new(color.lime, 20) :
+         bias == "Down" or bias == "Down / Continuation" ? color.new(color.red,  20) :
+         color.new(color.gray, 30)
+
+    if not na(activeBox)
+        box.set_right(activeBox, bar_index)
+        box.set_top(activeBox, zoneHigh)
+        box.set_bottom(activeBox, zoneLow)
+        box.set_bgcolor(activeBox, boxColor)
+        box.set_border_color(activeBox, borderColor)
+        box.set_border_width(activeBox, score >= 70 ? 2 : 1)
+
+    if showLabels
+        labelText =
+             "CoilForge Zone\n" +
+             "Score: "       + str.tostring(math.round(score)) + "\n" +
+             "Bias: "        + bias + "\n" +
+             "Upper Tests: " + str.tostring(upperTouches) + "\n" +
+             "Lower Tests: " + str.tostring(lowerTouches) + "\n" +
+             "Hist: "        + (histNearTop ? "R " : "") + (histNearBottom ? "S" : "")
+        if na(activeLabel)
+            activeLabel := label.new(bar_index, zoneHigh, labelText,
+                 style     = label.style_label_down,
+                 textcolor = color.white,
+                 color     = color.new(color.black, 20))
+        else
+            label.set_x(activeLabel, bar_index)
+            label.set_y(activeLabel, zoneHigh)
+            label.set_text(activeLabel, labelText)
+            label.set_color(activeLabel, color.new(color.black, 20))
+
+if endZone
+    if zoneAge >= minZoneBars
+        armedZone  := true
+        armedUntil := bar_index + breakoutWatchBars
+        armedHigh  := zoneHigh
+        armedLow   := zoneLow
+
+        if showOldZones and not na(activeBox)
+            array.push(oldBoxes, activeBox)
+            array.push(oldBoxEndBars, bar_index)
+            array.push(histLevels, zoneHigh)
+            array.push(histBars, bar_index)
+            array.push(histLevels, zoneLow)
+            array.push(histBars, bar_index)
+        else
+            if not na(activeBox)
+                box.delete(activeBox)
+    else
+        if not na(activeBox)
+            box.delete(activeBox)
+
+    if not na(activeLabel)
+        label.delete(activeLabel)
+
+    activeBox    := na
+    activeLabel  := na
+    inZone       := false
+    zoneStart    := na
+    zoneHigh     := na
+    zoneLow      := na
+    upperTouches := 0
+    lowerTouches := 0
+
+while array.size(oldBoxes) > maxOldZones
+    old = array.shift(oldBoxes)
+    array.shift(oldBoxEndBars)
+    box.delete(old)
+
+if showOldZones and array.size(oldBoxes) > 0
+    for i = array.size(oldBoxes) - 1 to 0
+        oldEnd = array.get(oldBoxEndBars, i)
+        if bar_index - oldEnd > oldZoneLife
+            oldBox = array.get(oldBoxes, i)
+            box.delete(oldBox)
+            array.remove(oldBoxes, i)
+            array.remove(oldBoxEndBars, i)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Breakout detection (armed zone)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if armedZone and bar_index > armedUntil
+    armedZone  := false
+    armedUntil := na
+    armedHigh  := na
+    armedLow   := na
+
+breakoutUp   = armedZone and close > armedHigh and volume > volMa and adx > adx[1]
+breakoutDown = armedZone and close < armedLow  and volume > volMa and adx > adx[1]
+
+if breakoutUp or breakoutDown
+    armedZone  := false
+    armedUntil := na
+    armedHigh  := na
+    armedLow   := na
+
+plotshape(breakoutUp,   title = "Breakout Up",   style = shape.triangleup,   location = location.belowbar, size = size.small, color = color.lime, text = "BO↑")
+plotshape(breakoutDown, title = "Breakout Down",  style = shape.triangledown, location = location.abovebar, size = size.small, color = color.red,  text = "BO↓")
+
+alertcondition(breakoutUp,   "CoilForge Breakout Up",   "CoilForge: bullish breakout after compression zone.")
+alertcondition(breakoutDown, "CoilForge Breakout Down",  "CoilForge: bearish breakout after compression zone.")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Info table
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table info = table.new(position.top_right, 2, 9,
+     bgcolor      = color.new(color.white, 5),
+     border_color = color.new(color.gray, 60),
+     border_width = 1,
+     frame_color  = color.new(color.gray, 40),
+     frame_width  = 1)
+
+if showTable and barstate.islast
+    currentBias =
+         not inZone                           ? "No active zone" :
+         upperTouches - lowerTouches >= 3     ? "Up Pressure" :
+         lowerTouches - upperTouches >= 3     ? "Down Pressure" :
+         "Neutral"
+
+    armedStr = not armedZone ? "–" : "Armed (" + str.tostring(armedUntil - bar_index) + " bars)"
+
+    table.cell(info, 0, 0, "CoilForge Zones", text_color = tc, bgcolor = hd, text_size = size.small)
+    table.cell(info, 1, 0, "v1.1",            text_color = tc, bgcolor = hd, text_size = size.small)
+    table.cell(info, 0, 1, "Zone",      text_color = tc, text_size = size.small)
+    table.cell(info, 1, 1, inZone ? "Active" : "None", text_color = tc, text_size = size.small)
+    table.cell(info, 0, 2, "Score",     text_color = tc, text_size = size.small)
+    table.cell(info, 1, 2, str.tostring(math.round(score)), text_color = tc, text_size = size.small)
+    table.cell(info, 0, 3, "Bias",      text_color = tc, text_size = size.small)
+    table.cell(info, 1, 3, currentBias, text_color = tc, text_size = size.small)
+    table.cell(info, 0, 4, "Range/ATR", text_color = tc, text_size = size.small)
+    table.cell(info, 1, 4, str.tostring(rangeAtrRatio, "#.##"), text_color = tc, text_size = size.small)
+    table.cell(info, 0, 5, "ADX",       text_color = tc, text_size = size.small)
+    table.cell(info, 1, 5, str.tostring(adx, "#.##"), text_color = tc, text_size = size.small)
+    table.cell(info, 0, 6, "Volume",    text_color = tc, text_size = size.small)
+    table.cell(info, 1, 6, volDrying ? "Drying" : "Normal/High", text_color = tc, text_size = size.small)
+    table.cell(info, 0, 7, "Historical", text_color = tc, text_size = size.small)
+    table.cell(info, 1, 7, histReuse ? "Reused Level" : "No", text_color = tc, text_size = size.small)
+    table.cell(info, 0, 8, "BO Watch",  text_color = tc, text_size = size.small)
+    table.cell(info, 1, 8, armedStr,    text_color = tc, text_size = size.small)

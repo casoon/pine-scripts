@@ -1,0 +1,336 @@
+//@version=6
+// ============================================================================
+// Reversal Engine Score v1 [WavesUnchained]
+// Version: 1.1
+// Author: WavesUnchained
+// Build: 2026-05-05 00:00:00
+// ============================================================================
+// Score-based liquidity sweep reversal detector with HTF trend confluence.
+//
+// Features:
+//   ✓ Score gate (0–12 pts, configurable minimum) — signal requires enough evidence
+//   ✓ Liquidity sweep detection (swing violation + recovery close)
+//   ✓ HTF trend filter via dual EMA on configurable timeframe
+//   ✓ ATR volatility and candle body size filters
+//   ✓ EMA slope, RSI momentum, close position, and candle direction scoring
+//   ✓ Cooldown gate to suppress chasing
+//   ✓ ATR-based SL/TP levels
+//   ✓ Price structure labels (HH / HL / LH / LL) at confirmed pivots
+//   ✓ Signal label turns blue when pivot structure contradicts the trade direction
+//   ✓ Alert conditions for BUY / SELL / either
+//
+// ============================================================================
+
+indicator("Reversal Engine Score v1 [WavesUnchained]",
+         shorttitle       = "RES v1",
+         overlay          = true,
+         max_labels_count = 500,
+         max_lines_count  = 500)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Inputs
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+only15m             = input.bool(true,   "Nur auf 15M aktiv")
+showLevels          = input.bool(true,   "SL/TP-Level anzeigen")
+showTrendBackground = input.bool(false,  "Trend-Hintergrund anzeigen")
+showScoreLabel      = input.bool(true,   "Score am Signal anzeigen")
+minScore            = input.int(7,       "Mindestscore für Signal", minval = 1, maxval = 10)
+htf                 = input.timeframe("60", "HTF Trendfilter")
+htfFastLen          = input.int(50,      "HTF EMA schnell",   minval = 1)
+htfSlowLen          = input.int(200,     "HTF EMA langsam",   minval = 1)
+emaLen              = input.int(21,      "15M Reclaim EMA",   minval = 1)
+rsiLen              = input.int(14,      "RSI Länge",         minval = 1)
+swingLen            = input.int(10,      "Sweep Lookback",    minval = 2)
+atrLen              = input.int(14,      "ATR Länge",         minval = 1)
+atrBaseLen          = input.int(50,      "ATR Basislänge",    minval = 5)
+minAtrFactor        = input.float(0.80,  "Min. ATR Faktor",   step = 0.05)
+minBodyAtr          = input.float(0.25,  "Min. Body / ATR",   step = 0.05)
+slAtrMult           = input.float(1.20,  "SL ATR Multiplikator", step = 0.1)
+tpAtrMult           = input.float(2.00,  "TP ATR Multiplikator", step = 0.1)
+sigCooldown         = input.int(5,       "Cooldown nach Signal",  minval = 0)
+
+gStruct = "Marktstruktur"
+pivLen      = input.int(5,    "Pivot Length",          minval = 2, maxval = 20, group = gStruct)
+showPivots  = input.bool(false, "Struktur-Labels (HH/HL/LH/LL) anzeigen", group = gStruct)
+
+gOutcome = "Outcome"
+outcomeWindow = input.int(20, "Outcome-Fenster (Bars)", minval = 5, maxval = 500, group = gOutcome,
+     tooltip = "Nach dieser Anzahl Bars ohne neues Hoch (Long) / neues Tief (Short) wird das Signal-Label blau.")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 15M Check
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+is15m    = timeframe.period == "15"
+isActive = only15m ? is15m : true
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Core
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+emaReclaim = ta.ema(close, emaLen)
+rsiValue   = ta.rsi(close, rsiLen)
+atrValue   = ta.atr(atrLen)
+atrBase    = ta.sma(atrValue, atrBaseLen)
+htfEmaFast = request.security(syminfo.tickerid, htf, ta.ema(close, htfFastLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfEmaSlow = request.security(syminfo.tickerid, htf, ta.ema(close, htfSlowLen), barmerge.gaps_off, barmerge.lookahead_off)
+bullTrend = htfEmaFast > htfEmaSlow
+bearTrend = htfEmaFast < htfEmaSlow
+
+prevSwingLow  = ta.lowest(low[1],  swingLen)
+prevSwingHigh = ta.highest(high[1], swingLen)
+
+rangeValue = high - low
+bodyValue  = math.abs(close - open)
+
+closeInUpperThird = rangeValue > 0 and close > low  + rangeValue * 0.65
+closeInLowerThird = rangeValue > 0 and close < high - rangeValue * 0.65
+
+liquiditySweepLong  = low  < prevSwingLow  and close > prevSwingLow
+liquiditySweepShort = high > prevSwingHigh and close < prevSwingHigh
+
+momentumLong  = close > emaReclaim and rsiValue > 50
+momentumShort = close < emaReclaim and rsiValue < 50
+
+volatilityOk = atrValue > atrBase * minAtrFactor
+bodyOk       = bodyValue > atrValue * minBodyAtr
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Price structure (HH / HL / LH / LL)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_phFound = not na(ta.pivothigh(high, pivLen, pivLen))
+_plFound = not na(ta.pivotlow(low,   pivLen, pivLen))
+
+var float _lastSwingHigh1 = na
+var float _lastSwingHigh2 = na
+var float _lastSwingLow1  = na
+var float _lastSwingLow2  = na
+
+if _phFound
+    _lastSwingHigh2 := _lastSwingHigh1
+    _lastSwingHigh1 := high[pivLen]
+if _plFound
+    _lastSwingLow2 := _lastSwingLow1
+    _lastSwingLow1 := low[pivLen]
+
+hasHighStructure = not na(_lastSwingHigh1) and not na(_lastSwingHigh2)
+hasLowStructure  = not na(_lastSwingLow1)  and not na(_lastSwingLow2)
+
+hhDetected = hasHighStructure and _lastSwingHigh1 > _lastSwingHigh2
+lhDetected = hasHighStructure and _lastSwingHigh1 < _lastSwingHigh2
+hlDetected = hasLowStructure  and _lastSwingLow1  > _lastSwingLow2
+llDetected = hasLowStructure  and _lastSwingLow1  < _lastSwingLow2
+
+// Signal turns blue when structure contradicts the trade direction
+longPivotFail  = hasLowStructure  and llDetected
+shortPivotFail = hasHighStructure and hhDetected
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Score components
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+emaSlopeUp   = emaReclaim > emaReclaim[1]
+emaSlopeDown = emaReclaim < emaReclaim[1]
+rsiRising    = rsiValue > rsiValue[1]
+rsiFalling   = rsiValue < rsiValue[1]
+breakPrevHigh = close > high[1]
+breakPrevLow  = close < low[1]
+bullCandle   = close > open
+bearCandle   = close < open
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Score Long / Short  (max 12 pts)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+longScore  = 0
+longScore  += bullTrend          ? 2 : 0
+longScore  += liquiditySweepLong ? 2 : 0
+longScore  += momentumLong       ? 1 : 0
+longScore  += closeInUpperThird  ? 1 : 0
+longScore  += volatilityOk       ? 1 : 0
+longScore  += bodyOk             ? 1 : 0
+longScore  += emaSlopeUp         ? 1 : 0
+longScore  += rsiRising          ? 1 : 0
+longScore  += breakPrevHigh      ? 1 : 0
+longScore  += bullCandle         ? 1 : 0
+
+shortScore  = 0
+shortScore  += bearTrend           ? 2 : 0
+shortScore  += liquiditySweepShort ? 2 : 0
+shortScore  += momentumShort       ? 1 : 0
+shortScore  += closeInLowerThird   ? 1 : 0
+shortScore  += volatilityOk        ? 1 : 0
+shortScore  += bodyOk              ? 1 : 0
+shortScore  += emaSlopeDown        ? 1 : 0
+shortScore  += rsiFalling          ? 1 : 0
+shortScore  += breakPrevLow        ? 1 : 0
+shortScore  += bearCandle          ? 1 : 0
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Cooldown
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var int lastSignalBar = na
+cooldownOk = na(lastSignalBar) or bar_index - lastSignalBar > sigCooldown
+
+rawLongSignal  = isActive and longScore  >= minScore and liquiditySweepLong  and bullTrend
+rawShortSignal = isActive and shortScore >= minScore and liquiditySweepShort and bearTrend
+longSignal  = rawLongSignal  and cooldownOk and barstate.isconfirmed
+shortSignal = rawShortSignal and cooldownOk and barstate.isconfirmed
+
+if longSignal or shortSignal
+    lastSignalBar := bar_index
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Strategy-ready values
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+entryLong  = longSignal  ? close : na
+entryShort = shortSignal ? close : na
+longStop   = longSignal  ? close - atrValue * slAtrMult : na
+longTake   = longSignal  ? close + atrValue * tpAtrMult : na
+shortStop  = shortSignal ? close + atrValue * slAtrMult : na
+shortTake  = shortSignal ? close - atrValue * tpAtrMult : na
+
+signalDirection = longSignal ? 1 : shortSignal ? -1 : 0
+signalScore     = longSignal ? longScore : shortSignal ? shortScore : na
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Plots
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+plot(emaReclaim, "15M Reclaim EMA", color = color.new(color.blue, 0), linewidth = 1)
+
+plotshape(longSignal,  title = "BUY Signal",  style = shape.triangleup,   location = location.belowbar, size = size.small, color = color.lime, text = "BUY")
+plotshape(shortSignal, title = "SELL Signal", style = shape.triangledown, location = location.abovebar, size = size.small, color = color.red,  text = "SELL")
+
+plot(showLevels ? longStop  : na, "Long SL",  color = color.new(color.red,   0), style = plot.style_linebr)
+plot(showLevels ? longTake  : na, "Long TP",  color = color.new(color.green, 0), style = plot.style_linebr)
+plot(showLevels ? shortStop : na, "Short SL", color = color.new(color.red,   0), style = plot.style_linebr)
+plot(showLevels ? shortTake : na, "Short TP", color = color.new(color.green, 0), style = plot.style_linebr)
+
+plot(signalDirection, "Signal Direction", display = display.none)
+plot(signalScore,     "Signal Score",     display = display.none)
+plot(entryLong,       "Entry Long",       display = display.none)
+plot(entryShort,      "Entry Short",      display = display.none)
+plot(longStop,        "Long Stop",        display = display.none)
+plot(longTake,        "Long Take",        display = display.none)
+plot(shortStop,       "Short Stop",       display = display.none)
+plot(shortTake,       "Short Take",       display = display.none)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Structure labels (HH / HL / LH / LL)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+colorBull = #16a34a
+colorBear = #dc2626
+colorWarn = #1565c0
+
+if showPivots and _phFound and lhDetected
+    label.new(bar_index - pivLen, high[pivLen], "LH",
+         style = label.style_label_down, color = color.new(colorBear, 30),
+         textcolor = color.white, size = size.tiny, force_overlay = true)
+if showPivots and _phFound and hhDetected
+    label.new(bar_index - pivLen, high[pivLen], "HH",
+         style = label.style_label_down, color = color.new(colorBull, 30),
+         textcolor = color.white, size = size.tiny, force_overlay = true)
+if showPivots and _plFound and hlDetected
+    label.new(bar_index - pivLen, low[pivLen], "HL",
+         style = label.style_label_up, color = color.new(colorBull, 30),
+         textcolor = color.white, size = size.tiny, force_overlay = true)
+if showPivots and _plFound and llDetected
+    label.new(bar_index - pivLen, low[pivLen], "LL",
+         style = label.style_label_up, color = color.new(colorBear, 30),
+         textcolor = color.white, size = size.tiny, force_overlay = true)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Signal labels + Outcome tracking
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var label[] _pendingLbl  = array.new_label()
+var int[]   _pendingBar  = array.new_int()
+var float[] _pendingRef  = array.new_float()
+var bool[]  _pendingLong = array.new_bool()
+
+if showScoreLabel and longSignal
+    string structCtx = longPivotFail ? "⚠ Struktur: LL (gegenläufig)" : "✓ Struktur ok"
+    string tip = "Score: " + str.tostring(longScore) + "/12\n"
+    tip += bullTrend          ? "✓ HTF Trend (+2)\n"         : "✗ HTF Trend\n"
+    tip += liquiditySweepLong ? "✓ Liquidity Sweep (+2)\n"   : "✗ Liquidity Sweep\n"
+    tip += momentumLong       ? "✓ EMA+RSI Momentum (+1)\n"  : "✗ EMA+RSI Momentum\n"
+    tip += closeInUpperThird  ? "✓ Close upper third (+1)\n"  : "✗ Close upper third\n"
+    tip += volatilityOk       ? "✓ ATR Volatility (+1)\n"    : "✗ ATR Volatility\n"
+    tip += bodyOk             ? "✓ Body size (+1)\n"          : "✗ Body size\n"
+    tip += emaSlopeUp         ? "✓ EMA Slope up (+1)\n"      : "✗ EMA Slope up\n"
+    tip += rsiRising          ? "✓ RSI rising (+1)\n"        : "✗ RSI rising\n"
+    tip += breakPrevHigh      ? "✓ Breaks prior high (+1)\n"  : "✗ Breaks prior high\n"
+    tip += bullCandle         ? "✓ Bull candle (+1)\n"        : "✗ Bull candle\n"
+    tip += structCtx
+    lbl = label.new(bar_index, low,
+         "BUY\nScore: " + str.tostring(longScore),
+         style     = label.style_label_up,
+         textcolor = color.white,
+         color     = colorBull,
+         tooltip   = tip)
+    array.push(_pendingLbl,  lbl)
+    array.push(_pendingBar,  bar_index)
+    array.push(_pendingRef,  high)
+    array.push(_pendingLong, true)
+
+if showScoreLabel and shortSignal
+    string structCtx = shortPivotFail ? "⚠ Struktur: HH (gegenläufig)" : "✓ Struktur ok"
+    string tip = "Score: " + str.tostring(shortScore) + "/12\n"
+    tip += bearTrend           ? "✓ HTF Trend (+2)\n"         : "✗ HTF Trend\n"
+    tip += liquiditySweepShort ? "✓ Liquidity Sweep (+2)\n"   : "✗ Liquidity Sweep\n"
+    tip += momentumShort       ? "✓ EMA+RSI Momentum (+1)\n"  : "✗ EMA+RSI Momentum\n"
+    tip += closeInLowerThird   ? "✓ Close lower third (+1)\n"  : "✗ Close lower third\n"
+    tip += volatilityOk        ? "✓ ATR Volatility (+1)\n"    : "✗ ATR Volatility\n"
+    tip += bodyOk              ? "✓ Body size (+1)\n"          : "✗ Body size\n"
+    tip += emaSlopeDown        ? "✓ EMA Slope down (+1)\n"    : "✗ EMA Slope down\n"
+    tip += rsiFalling          ? "✓ RSI falling (+1)\n"       : "✗ RSI falling\n"
+    tip += breakPrevLow        ? "✓ Breaks prior low (+1)\n"   : "✗ Breaks prior low\n"
+    tip += bearCandle          ? "✓ Bear candle (+1)\n"        : "✗ Bear candle\n"
+    tip += structCtx
+    lbl = label.new(bar_index, high,
+         "SELL\nScore: " + str.tostring(shortScore),
+         style     = label.style_label_down,
+         textcolor = color.white,
+         color     = colorBear,
+         tooltip   = tip)
+    array.push(_pendingLbl,  lbl)
+    array.push(_pendingBar,  bar_index)
+    array.push(_pendingRef,  low)
+    array.push(_pendingLong, false)
+
+// Check pending labels each bar: new high (long) or new low (short) = win, else blue after window
+if array.size(_pendingLbl) > 0
+    for i = array.size(_pendingLbl) - 1 to 0
+        _lbl    = array.get(_pendingLbl,  i)
+        _sigBar = array.get(_pendingBar,  i)
+        _ref    = array.get(_pendingRef,  i)
+        _isLong = array.get(_pendingLong, i)
+        if bar_index > _sigBar
+            _win     = _isLong ? high > _ref : low < _ref
+            _expired = bar_index - _sigBar >= outcomeWindow
+            if _win or _expired
+                if not _win
+                    label.set_color(_lbl, colorWarn)
+                array.remove(_pendingLbl,  i)
+                array.remove(_pendingBar,  i)
+                array.remove(_pendingRef,  i)
+                array.remove(_pendingLong, i)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Backgrounds
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+bgcolor(showTrendBackground and bullTrend        ? color.new(color.green,  92) : na)
+bgcolor(showTrendBackground and bearTrend        ? color.new(color.red,    92) : na)
+bgcolor(only15m             and not is15m        ? color.new(color.orange, 85) : na)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Alerts
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+alertcondition(longSignal,               title = "BUY Signal",        message = "RES BUY auf {{ticker}} bei {{close}}")
+alertcondition(shortSignal,              title = "SELL Signal",        message = "RES SELL auf {{ticker}} bei {{close}}")
+alertcondition(longSignal or shortSignal, title = "BUY or SELL Signal", message = "RES Signal auf {{ticker}} bei {{close}}")
+
+// @strategy-config
+// long:      longSignal
+// short:     shortSignal
+// sl_type:   directional_fixed_tp
+// sl_long:   longStop
+// sl_short:  shortStop
+// tp_long:   longTake
+// tp_short:  shortTake
+// @end-strategy-config

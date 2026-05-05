@@ -99,7 +99,14 @@ color hd = color.new(color.gray, 90)   // header row background (very light gray
 
 ## Strategy infrastructure
 
-Generated strategy files live in `strategies/`. Never edit them by hand — they are always regenerated from the indicator source.
+Strategy files live in `strategies/`. They fall into two categories:
+
+- **Generated** — produced by `build_strategies.py` from an indicator with a `@strategy-config` block. Regenerating overwrites any manual changes.
+- **Standalone** — manually written and maintained (e.g. `wavetrend_v4_strategy.pine`, `reversal_engine_score_v1_strategy.pine`). These must **never** be regenerated or overwritten without explicit confirmation from the user.
+
+**Rule: before running `build_strategies.py` in any form (including `# rebuild all`), identify which output files would be overwritten and ask for confirmation for any standalone strategy.**
+
+To check whether a strategy is standalone: if the corresponding indicator has no `@strategy-config` block, the strategy is standalone.
 
 ### Generator
 
