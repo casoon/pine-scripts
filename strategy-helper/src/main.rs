@@ -6,6 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const REAL_EXIT_MARKER: &str = "WT3 REAL EXIT";
+const RAW_WT_MARKER: &str = "RAW_WT:";
 const REQUIRED_FIELDS: &[(&str, FieldKind)] = &[
     ("dir", FieldKind::Enum(&["LONG", "SHORT"])),
     ("family", FieldKind::Enum(&["rr", "pb", "er"])),
@@ -92,7 +93,27 @@ struct Trade {
     ll: Option<bool>,
     long_struct: Option<bool>,
     short_struct: Option<bool>,
+    structure_phase: String,
+    playbook: String,
+    wt_bull_div: Option<bool>,
+    wt_bear_div: Option<bool>,
+    high_confirm_bars: Option<f64>,
+    low_confirm_bars: Option<f64>,
+    high_actual_bars: Option<f64>,
+    low_actual_bars: Option<f64>,
     range_pos: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct RawWtEvent {
+    source: String,
+    dir: String,
+    profile: String,
+    playbook_active: String,
+    structure_phase: String,
+    pivot_confirm_bars: Option<f64>,
+    pivot_actual_bars: Option<f64>,
+    piv_len: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -256,8 +277,9 @@ fn analyze_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("no {REAL_EXIT_MARKER} rows found under {}", input.display()).into());
     }
     let strategy_runs = load_strategy_runs(&input)?;
+    let raw_wt_events = load_raw_wt_events(&input)?;
 
-    let report = render_markdown_report(&input, &trades, &strategy_runs);
+    let report = render_markdown_report(&input, &trades, &strategy_runs, &raw_wt_events);
     if let Some(path) = out_md {
         write_parented(&path, report.as_bytes())?;
     } else {
@@ -318,6 +340,35 @@ fn load_trades(input: &Path) -> io::Result<Vec<Trade>> {
         }
     }
     Ok(trades)
+}
+
+fn load_raw_wt_events(input: &Path) -> io::Result<Vec<RawWtEvent>> {
+    let files = collect_files(input)?;
+    let mut dedup = BTreeMap::new();
+    for file in files {
+        let content = fs::read_to_string(&file)?;
+        for line in content.lines() {
+            if !line.contains(RAW_WT_MARKER) {
+                continue;
+            }
+            let message = csv_last_field(line);
+            for event in parse_raw_wt_events(&message, &file) {
+                let key = format!(
+                    "{}|{}|{}|{}|{}",
+                    event.source,
+                    parse_pipe_fields(&message)
+                        .get("bar")
+                        .cloned()
+                        .unwrap_or_default(),
+                    event.profile,
+                    event.dir,
+                    event.playbook_active
+                );
+                dedup.entry(key).or_insert(event);
+            }
+        }
+    }
+    Ok(dedup.into_values().collect())
 }
 
 fn load_strategy_runs(input: &Path) -> Result<Vec<StrategyRun>, Box<dyn std::error::Error>> {
@@ -701,14 +752,78 @@ fn parse_trade(message: &str, source: &Path) -> Option<Trade> {
         ll: parse_bool(entry_struct.get("ll")),
         long_struct: parse_bool(entry_struct.get("longStruct")),
         short_struct: parse_bool(entry_struct.get("shortStruct")),
+        structure_phase: text_default(&entry_struct, "structurePhase", "unknown"),
+        playbook: text_default(&entry_struct, "playbook", "unknown"),
+        wt_bull_div: parse_bool(entry_struct.get("wtBullDiv")),
+        wt_bear_div: parse_bool(entry_struct.get("wtBearDiv")),
+        high_confirm_bars: parse_f64(entry_struct.get("highConfirmBars")),
+        low_confirm_bars: parse_f64(entry_struct.get("lowConfirmBars")),
+        high_actual_bars: parse_f64(entry_struct.get("highActualBars")),
+        low_actual_bars: parse_f64(entry_struct.get("lowActualBars")),
         range_pos: parse_f64(entry_struct.get("rangePos")),
     })
+}
+
+fn parse_raw_wt_events(message: &str, source: &Path) -> Vec<RawWtEvent> {
+    if !message.contains(RAW_WT_MARKER) {
+        return Vec::new();
+    }
+
+    let fields = parse_pipe_fields(message);
+    let raw = parse_named_segment(message, RAW_WT_MARKER);
+    let playbook = parse_named_segment(message, "PLAYBOOK:");
+    let strong_bull = parse_bool(raw.get("strongBull")).unwrap_or(false);
+    let strong_bear = parse_bool(raw.get("strongBear")).unwrap_or(false);
+    let profile = text_default(&fields, "profile", "unknown");
+    let playbook_active = text_default(&playbook, "active", "unknown");
+    let structure_phase = text_default(&playbook, "structure", "unknown");
+
+    let mut events = Vec::new();
+    if strong_bull {
+        events.push(RawWtEvent {
+            source: source.display().to_string(),
+            dir: "BULL".to_string(),
+            profile: profile.clone(),
+            playbook_active: playbook_active.clone(),
+            structure_phase: structure_phase.clone(),
+            pivot_confirm_bars: parse_f64(raw.get("lowConfirmBars")),
+            pivot_actual_bars: parse_f64(raw.get("lowActualBars")),
+            piv_len: parse_f64(raw.get("pivLen")),
+        });
+    }
+    if strong_bear {
+        events.push(RawWtEvent {
+            source: source.display().to_string(),
+            dir: "BEAR".to_string(),
+            profile,
+            playbook_active,
+            structure_phase,
+            pivot_confirm_bars: parse_f64(raw.get("highConfirmBars")),
+            pivot_actual_bars: parse_f64(raw.get("highActualBars")),
+            piv_len: parse_f64(raw.get("pivLen")),
+        });
+    }
+    events
 }
 
 fn parse_pipe_fields(message: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for part in message.split('|').skip(1) {
         if let Some((key, value)) = part.trim().split_once('=') {
+            out.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    out
+}
+
+fn parse_named_segment(message: &str, marker: &str) -> BTreeMap<String, String> {
+    let Some((_, tail)) = message.split_once(marker) else {
+        return BTreeMap::new();
+    };
+    let segment = tail.split('|').next().unwrap_or_default();
+    let mut out = BTreeMap::new();
+    for part in segment.split_whitespace() {
+        if let Some((key, value)) = part.split_once('=') {
             out.insert(key.trim().to_string(), value.trim().to_string());
         }
     }
@@ -725,7 +840,12 @@ fn parse_entry_struct(value: &str) -> BTreeMap<String, String> {
     out
 }
 
-fn render_markdown_report(input: &Path, trades: &[Trade], strategy_runs: &[StrategyRun]) -> String {
+fn render_markdown_report(
+    input: &Path,
+    trades: &[Trade],
+    strategy_runs: &[StrategyRun],
+    raw_wt_events: &[RawWtEvent],
+) -> String {
     let mut out = String::new();
     out.push_str("# Strategy Helper Report\n\n");
     out.push_str(&format!("- Input: `{}`\n", input.display()));
@@ -773,6 +893,28 @@ fn render_markdown_report(input: &Path, trades: &[Trade], strategy_runs: &[Strat
     out.push_str(&render_grouped_table(trades, |t| {
         format!("{} / {} / {}", t.tf, t.family, structure_label(t))
     }));
+
+    if trades.iter().any(|t| t.playbook != "unknown") {
+        out.push_str("\n## By Timeframe / Playbook / Family\n\n");
+        out.push_str(&render_grouped_table(trades, |t| {
+            format!("{} / {} / {}", t.tf, t.playbook, t.family)
+        }));
+    }
+
+    if trades
+        .iter()
+        .any(|t| t.wt_bull_div.is_some() || t.wt_bear_div.is_some())
+    {
+        out.push_str("\n## By Timeframe / Playbook / WT Divergence\n\n");
+        out.push_str(&render_grouped_table(trades, |t| {
+            format!("{} / {} / {}", t.tf, t.playbook, wt_divergence_label(t))
+        }));
+    }
+
+    if !raw_wt_events.is_empty() {
+        out.push_str("\n## Raw Strong WT Cross / Pivot Timing\n\n");
+        out.push_str(&render_raw_wt_table(raw_wt_events));
+    }
 
     out.push_str("\n## Error Classes\n\n");
     out.push_str(&render_grouped_table(trades, |t| {
@@ -830,6 +972,77 @@ fn render_strategy_exits_table(runs: &[StrategyRun]) -> String {
     out
 }
 
+fn render_raw_wt_table(events: &[RawWtEvent]) -> String {
+    let mut groups: BTreeMap<String, Vec<&RawWtEvent>> = BTreeMap::new();
+    for event in events {
+        let key = format!(
+            "{} / {} / active={} / {}",
+            event.profile, event.dir, event.playbook_active, event.structure_phase
+        );
+        groups.entry(key).or_default().push(event);
+    }
+
+    let mut rows: Vec<_> = groups.into_iter().collect();
+    rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+
+    let has_pivot_timing = events
+        .iter()
+        .any(|event| event.pivot_confirm_bars.is_some() || event.pivot_actual_bars.is_some());
+
+    let mut out = String::new();
+    if !has_pivot_timing {
+        out.push_str("Current logs contain raw strong WT crosses, but not pivot-distance fields yet. Re-export after the Pine update to get coincidence rates.\n\n");
+    }
+
+    out.push_str("| Group | Crosses | Confirm <=0 | Confirm <=2 | Actual <=PivLen+2 | Avg Confirm Bars | Avg Actual Bars |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
+    for (key, group) in rows {
+        let n = group.len();
+        let confirm_now = group
+            .iter()
+            .filter(|event| event.pivot_confirm_bars.is_some_and(|bars| bars <= 0.0))
+            .count();
+        let confirm_near = group
+            .iter()
+            .filter(|event| event.pivot_confirm_bars.is_some_and(|bars| bars <= 2.0))
+            .count();
+        let actual_near = group
+            .iter()
+            .filter(|event| {
+                event
+                    .pivot_actual_bars
+                    .zip(event.piv_len)
+                    .is_some_and(|(bars, piv_len)| bars <= piv_len + 2.0)
+            })
+            .count();
+        let avg_confirm = avg_events(&group, |event| event.pivot_confirm_bars);
+        let avg_actual = avg_events(&group, |event| event.pivot_actual_bars);
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            escape_md(&key),
+            n,
+            if has_pivot_timing {
+                pct_s(pct(confirm_now, n))
+            } else {
+                "na".to_string()
+            },
+            if has_pivot_timing {
+                pct_s(pct(confirm_near, n))
+            } else {
+                "na".to_string()
+            },
+            if has_pivot_timing {
+                pct_s(pct(actual_near, n))
+            } else {
+                "na".to_string()
+            },
+            opt(avg_confirm),
+            opt(avg_actual),
+        ));
+    }
+    out
+}
+
 fn render_grouped_table<F>(trades: &[Trade], key_fn: F) -> String
 where
     F: Fn(&Trade) -> String,
@@ -868,42 +1081,53 @@ fn render_table(rows: Vec<(String, Stats)>) -> String {
 
 fn render_trades_csv(trades: &[Trade]) -> String {
     let mut out = String::new();
-    out.push_str("source,tf,chart_sec,profile,execution_mode,dir,family,exit,pnl,R,MFE,MAE,capture_pct,target_room_r,target_room_atr,target_hit,bars_held,bars_to_target,fav_pivot_r,bars_to_fav_pivot,adv_pivot_r,bars_to_adv_pivot,entry_score,structure,hh,hl,lh,ll,long_struct,short_struct,range_pos\n");
+    out.push_str("source,tf,chart_sec,profile,execution_mode,dir,family,exit,pnl,R,MFE,MAE,capture_pct,target_room_r,target_room_atr,target_hit,bars_held,bars_to_target,fav_pivot_r,bars_to_fav_pivot,adv_pivot_r,bars_to_adv_pivot,entry_score,structure,structure_phase,playbook,wt_bull_div,wt_bear_div,high_confirm_bars,low_confirm_bars,high_actual_bars,low_actual_bars,hh,hl,lh,ll,long_struct,short_struct,range_pos\n");
     for t in trades {
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-            csv(&t.source),
-            csv(&t.tf),
-            opt_i(t.chart_sec),
-            csv(&t.profile),
-            csv(&t.execution_mode),
-            csv(&t.dir),
-            csv(&t.family),
-            csv(&t.exit),
-            opt(t.pnl),
-            opt(t.r),
-            opt(t.mfe),
-            opt(t.mae),
-            opt(t.capture_pct),
-            opt(t.target_room_r),
-            opt(t.target_room_atr),
-            t.target_hit,
-            opt(t.bars_held),
-            opt(t.bars_to_target),
-            opt(t.fav_pivot_r),
-            opt(t.bars_to_fav_pivot),
-            opt(t.adv_pivot_r),
-            opt(t.bars_to_adv_pivot),
-            opt(t.entry_score),
-            csv(&structure_label(t)),
-            opt_b(t.hh),
-            opt_b(t.hl),
-            opt_b(t.lh),
-            opt_b(t.ll),
-            opt_b(t.long_struct),
-            opt_b(t.short_struct),
-            opt(t.range_pos),
-        ));
+        out.push_str(
+            &[
+                csv(&t.source),
+                csv(&t.tf),
+                opt_i(t.chart_sec),
+                csv(&t.profile),
+                csv(&t.execution_mode),
+                csv(&t.dir),
+                csv(&t.family),
+                csv(&t.exit),
+                opt(t.pnl),
+                opt(t.r),
+                opt(t.mfe),
+                opt(t.mae),
+                opt(t.capture_pct),
+                opt(t.target_room_r),
+                opt(t.target_room_atr),
+                t.target_hit.to_string(),
+                opt(t.bars_held),
+                opt(t.bars_to_target),
+                opt(t.fav_pivot_r),
+                opt(t.bars_to_fav_pivot),
+                opt(t.adv_pivot_r),
+                opt(t.bars_to_adv_pivot),
+                opt(t.entry_score),
+                csv(&structure_label(t)),
+                csv(&t.structure_phase),
+                csv(&t.playbook),
+                opt_b(t.wt_bull_div),
+                opt_b(t.wt_bear_div),
+                opt(t.high_confirm_bars),
+                opt(t.low_confirm_bars),
+                opt(t.high_actual_bars),
+                opt(t.low_actual_bars),
+                opt_b(t.hh),
+                opt_b(t.hl),
+                opt_b(t.lh),
+                opt_b(t.ll),
+                opt_b(t.long_struct),
+                opt_b(t.short_struct),
+                opt(t.range_pos),
+            ]
+            .join(","),
+        );
+        out.push('\n');
     }
     out
 }
@@ -935,6 +1159,23 @@ fn render_schema_markdown() -> String {
         out.push_str(&format!("| `{key}` | {} |\n", kind_name(*kind)));
     }
 
+    out.push_str("\n## Optional `entryStruct` Fields\n\n");
+    out.push_str("| Field | Type | Purpose |\n|---|---|---|\n");
+    out.push_str(
+        "| `structurePhase` | text | Named HH/HL/LL/LH phase used by playbook routing. |\n",
+    );
+    out.push_str("| `playbook` | text | Active entry-side playbook for the trade direction. |\n");
+    out.push_str(
+        "| `wtBullDiv` | bool | Confirmed WT bullish divergence at the latest low-pivot pair. |\n",
+    );
+    out.push_str(
+        "| `wtBearDiv` | bool | Confirmed WT bearish divergence at the latest high-pivot pair. |\n",
+    );
+    out.push_str("| `highConfirmBars` | optional number | Bars since the latest swing-high pivot was confirmed. |\n");
+    out.push_str("| `lowConfirmBars` | optional number | Bars since the latest swing-low pivot was confirmed. |\n");
+    out.push_str("| `highActualBars` | optional number | Bars since the actual latest swing-high pivot bar. |\n");
+    out.push_str("| `lowActualBars` | optional number | Bars since the actual latest swing-low pivot bar. |\n");
+
     out
 }
 
@@ -956,6 +1197,18 @@ fn structure_label(t: &Trade) -> String {
         (_, Some(true), Some(true), _) => "HL/LH".to_string(),
         (Some(true), _, _, Some(true)) => "HH/LL".to_string(),
         _ => "other".to_string(),
+    }
+}
+
+fn wt_divergence_label(t: &Trade) -> &'static str {
+    match (t.wt_bull_div, t.wt_bear_div) {
+        (Some(true), Some(true)) => "bull+bear div",
+        (Some(true), _) => "bull div",
+        (_, Some(true)) => "bear div",
+        (Some(false), Some(false)) => "no div",
+        (Some(false), None) => "no bull div",
+        (None, Some(false)) => "no bear div",
+        _ => "unknown",
     }
 }
 
@@ -997,6 +1250,20 @@ fn add_opt(value: Option<f64>, sum: &mut f64, n: &mut usize) {
             *n += 1;
         }
     }
+}
+
+fn avg_events<T>(items: &[&T], value: impl Fn(&T) -> Option<f64>) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut n = 0;
+    for item in items {
+        if let Some(v) = value(*item) {
+            if v.is_finite() {
+                sum += v;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 { None } else { Some(sum / n as f64) }
 }
 
 fn parse_f64(value: Option<&String>) -> Option<f64> {
@@ -1187,7 +1454,7 @@ mod tests {
 
     #[test]
     fn parses_real_exit_trade() {
-        let msg = "WT3 REAL EXIT | dir=SHORT | family=pb | exit=Short Exit | profile=Balanced | tf=60 | chartSec=3600 | executionMode=Bracket SL/TP | pnl=-12.5 | R=-1 | MFE=0.4 | MAE=1.1 | capturePct=-250 | targetHit=false | entryStruct=hh=false,hl=true,lh=true,ll=false,longStruct=false,shortStruct=true,rangePos=0.57";
+        let msg = "WT3 REAL EXIT | dir=SHORT | family=pb | exit=Short Exit | profile=Balanced | tf=60 | chartSec=3600 | executionMode=Bracket SL/TP | pnl=-12.5 | R=-1 | MFE=0.4 | MAE=1.1 | capturePct=-250 | targetHit=false | entryStruct=hh=false,hl=true,lh=true,ll=false,longStruct=false,shortStruct=true,structurePhase=compression,playbook=pullback_short,wtBullDiv=false,wtBearDiv=true,rangePos=0.57";
         let trade = parse_trade(msg, Path::new("pine-logs.csv")).expect("trade");
 
         assert_eq!(trade.dir, "SHORT");
@@ -1197,6 +1464,10 @@ mod tests {
         assert_eq!(trade.r, Some(-1.0));
         assert_eq!(trade.hl, Some(true));
         assert_eq!(trade.lh, Some(true));
+        assert_eq!(trade.structure_phase, "compression");
+        assert_eq!(trade.playbook, "pullback_short");
+        assert_eq!(trade.wt_bull_div, Some(false));
+        assert_eq!(trade.wt_bear_div, Some(true));
         assert_eq!(structure_label(&trade), "HL/LH");
         assert_eq!(error_class(&trade), "bad idea / no follow-through");
     }

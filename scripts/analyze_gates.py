@@ -24,11 +24,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 GATES = ["srsi", "cooldown", "session", "dateRange", "tf", "atrRank",
-         "bbExpansion", "chop", "pivotBars", "pivotDist", "sweep"]
+         "bbExpansion", "chop", "pivotBars", "pivotDist", "sweep",
+         "gateA", "gateB", "gateB2", "gateC", "gateD", "gateG", "gateH", "gateI"]
 
 NEAR_PIV_THRESHOLD = 10  # bars — signals within this distance count as "near pivot"
 PIV_LEN = 5              # default pivot confirmation lookback (bars)
-TF_SECONDS = {"60": 3600, "240": 14400, "1D": 86400}
+TF_SECONDS = {"15": 900, "60": 3600, "240": 14400, "1D": 86400}
 SL_MULT = 1.5            # must match strategy SL multiplier
 
 
@@ -48,7 +49,8 @@ def load_logs(testdir: str) -> dict:
             for row in csv.DictReader(f):
                 msg = row.get("Nachricht", "")
                 ts = row.get("Datum", "")
-                for marker in ("WT4 PIVOT", "WT4 BLOCKED", "WT4 ENTRY", "WT4 REAL EXIT"):
+                # "WT4 ENTRY FILL" must be checked before "WT4 ENTRY" (substring match)
+                for marker in ("WT4 PIVOT", "WT4 BLOCKED", "WT4 ENTRY FILL", "WT4 ENTRY", "WT4 REAL EXIT", "WT4 STRUCT_WT"):
                     if marker in msg:
                         kv = parse_kv(msg)
                         kv["_ts"] = ts
@@ -181,17 +183,18 @@ def pivot_to_pivot_baseline(pivots: list, entries: list, exits: list, tfs: list)
 
 def analyze(testdir: str) -> str:
     events = load_logs(testdir)
-    pivots  = events["WT4 PIVOT"]
-    blocked = events["WT4 BLOCKED"]
-    entries = events["WT4 ENTRY"]
-    exits   = events["WT4 REAL EXIT"]
+    pivots      = events["WT4 PIVOT"]
+    blocked     = events["WT4 BLOCKED"]
+    entries     = events["WT4 ENTRY"]
+    entry_fills = events["WT4 ENTRY FILL"]
+    exits       = events["WT4 REAL EXIT"]
 
     all_events = pivots + blocked + entries + exits
     tfs = sorted({e.get("tf", "?") for e in all_events if e.get("tf")})
     out = []
 
     out.append(f"# Gate Analysis — {Path(testdir).name}\n")
-    out.append(f"Events: {len(pivots)} pivot_ref | {len(blocked)} blocked | {len(entries)} entries | {len(exits)} exits\n")
+    out.append(f"Events: {len(pivots)} pivot_ref | {len(blocked)} blocked | {len(entries)} entry_signals | {len(entry_fills)} entry_fills | {len(exits)} exits\n")
 
     out.extend(pivot_to_pivot_baseline(pivots, entries, exits, tfs))
 
@@ -309,7 +312,21 @@ def analyze(testdir: str) -> str:
     out.append(f"- Pivot reference events logged: {len(pivots)}")
     out.append(f"- Total WT crosses (blocked + entries): {total_fired}")
     out.append(f"- Signals that passed all gates: {pct(passed, total_fired)} ({passed}/{total_fired})")
-    out.append(f"- Actual entries: {len(entries)}")
+    out.append(f"- Entry signals (order submission): {len(entries)}")
+    fills_long  = sum(1 for f in entry_fills if f.get("dir") == "long")
+    fills_short = sum(1 for f in entry_fills if f.get("dir") == "short")
+    delta = len(entry_fills) - len(exits)
+    out.append(f"- Entry fills:   {len(entry_fills)} (long={fills_long} short={fills_short})")
+    out.append(f"- Real exits:    {len(exits)}")
+    out.append(f"- Fill/Exit delta: {delta:+d}  {'✓ 1:1' if abs(delta) <= 3 else '⚠ mismatch — open trades or double fills'}")
+    fill_ids  = {int(float(f["tradeId"])) for f in entry_fills if "tradeId" in f}
+    exit_ids  = {int(float(e["tradeId"])) for e in exits       if "tradeId" in e}
+    fills_only = sorted(fill_ids - exit_ids)
+    exits_only = sorted(exit_ids - fill_ids)
+    if fills_only:
+        out.append(f"- Fills with no exit:  {len(fills_only)} — first 10: {fills_only[:10]}")
+    if exits_only:
+        out.append(f"- Exits with no fill:  {len(exits_only)} — first 10: {exits_only[:10]}")
     all_rs = [r for rs in exit_rs.values() for r in rs]
     out.append(f"- Entry quality (all TF): {fmt_r(all_rs)}")
     out.append("")
@@ -317,6 +334,40 @@ def analyze(testdir: str) -> str:
     gate_rank = sorted(block_events_by_gate.items(), key=lambda x: -len(x[1]))
     for gate, bs in gate_rank:
         out.append(f"  {gate:<14} blocks {len(bs):>4} signals ({pct(len(bs), total_fired)})")
+
+    # ── 7. WT-cross exit probe ────────────────────────────────────────────────
+    struct_wt = events.get("WT4 STRUCT_WT", [])
+    if struct_wt:
+        out.append("\n## 7. WT-Cross Exit Probe (diagnostic)\n")
+        out.append("Signal: wt1 crosses wt2 in OB/OS zone (candidate for WT-based struct exit).")
+        out.append("'Aligned' = signal direction matches open trade direction.\n")
+        out.append(f"{'TF':<6} {'Dir':<12} {'Total':>7} {'InTrade':>8} {'Aligned':>8}  R distribution (aligned)")
+        out.append("-" * 78)
+        buckets = [(-999, 0, "<0R"), (0, 1, "0–1R"), (1, 2, "1–2R"), (2, 3, "2–3R"), (3, 999, "3R+")]
+        for tf in ["15", "60", "240", "1D"]:
+            for d in ["long_exit", "short_exit"]:
+                evs = [e for e in struct_wt if e.get("tf") == tf and e.get("dir") == d]
+                if not evs:
+                    continue
+                in_trade = [e for e in evs if e.get("inTrade") == "1"]
+                trade_dir = "long" if d == "long_exit" else "short"
+                aligned   = [e for e in in_trade if e.get("tradeDir") == trade_dir]
+                rs = []
+                for e in aligned:
+                    try:
+                        rs.append(float(e["currentR"]))
+                    except (KeyError, ValueError):
+                        pass
+                dist = ""
+                if rs:
+                    parts = []
+                    for lo, hi, label in buckets:
+                        n = sum(1 for r in rs if lo <= r < hi)
+                        if n:
+                            parts.append(f"{label}:{n}")
+                    dist = "  " + " | ".join(parts)
+                out.append(f"{tf:<6} {d:<12} {len(evs):>7} {len(in_trade):>8} {len(aligned):>8}{dist}")
+        out.append("")
 
     return "\n".join(out)
 

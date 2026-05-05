@@ -2,7 +2,7 @@
 // ============================================================================
 // WaveTrend v3 [Experimental — Composite]
 // Version: 3.2-experimental
-// Build: 2026-05-02
+// Build: 2026-05-04 (v3.10: BE merged into bracket exit; bar/local/score gates allow WT-extreme entries)
 // ============================================================================
 // Composite-Indikator. Nicht mehr "WaveTrend optimiert" sondern ein eigenes
 // Konzept das mehrere Bausteine kombiniert:
@@ -36,19 +36,26 @@ avgLength = input.int(21, 'Average Length',  minval=2, group=g_wt)
 sigLength = input.int(4,  'Signal Length',   minval=1, group=g_wt)
 ciConst   = input.float(0.015, 'CI Constant', minval=0.001, maxval=0.5, step=0.001, group=g_wt,
      tooltip='Channel Index normalization constant. Default 0.015 (Lambert/CCI). Higher for high-vol instruments.')
-wtEnginePreset = input.string('Classic Stable', 'WT Engine Preset', options=['Classic Stable', 'Custom'], group=g_wt,
-     tooltip='Classic Stable forces classic WT normalization and EMA smoothing, regardless of older saved chart inputs. Use Custom to test ATR/HMA/JMA variants.')
+wtEnginePreset = input.string('Custom', 'WT Engine Preset', options=['Classic Stable', 'Custom'], group=g_wt,
+     tooltip='Custom activates the smoothing type and norm mode below. Classic Stable forces EMA + Mean Abs Dev regardless of saved inputs.')
 normMode  = input.string('Mean Abs Dev', 'Custom Volatility Norm', options=['Mean Abs Dev', 'ATR'], group=g_wt,
      tooltip='Mean Abs Dev is the classic WaveTrend normalization. ATR is gap-aware but can compress oscillator extremes after wide candles.')
 smoothType= input.string('EMA', 'Custom Smoothing', options=['EMA', 'RMA', 'SMA', 'WMA', 'HMA', 'JMA'], group=g_wt,
-     tooltip='EMA is the classic WaveTrend smoother and the default baseline. HMA is faster but can overshoot/ring on oscillators.')
+     tooltip='EMA is the classic WaveTrend baseline. HMA halves lag at the same period but can overshoot on the oscillator.')
 jmaPhase  = input.int(50, '  JMA Phase', minval=-100, maxval=100, group=g_wt)
 jmaPower  = input.float(2.0, '  JMA Power', minval=1.0, maxval=4.0, step=0.25, group=g_wt)
 
 upperBand = input.int(56, 'OB Threshold', group=g_wt)
 lowerBand = input.int(-56, 'OS Threshold', group=g_wt)
+showRawStrongWTCross = input.bool(true, 'Show Raw Strong WT Cross Diagnostics', group=g_wt,
+     tooltip='Shows LazyBear-style raw strong WT crosses before strategy gates. These are diagnostics only: entries still require playbook/setup/score confirmation.')
 zoneExitWindow = input.int(4, 'Zone Exit Trigger Window', minval=0, maxval=20, group=g_wt,
      tooltip='How many bars after an OB/OS visit a WT cross may still count as a valid reversal trigger. 0 = cross must happen inside the zone.')
+useWVF     = input.bool(true, 'Williams Vix Fix Gate', group=g_wt,
+     tooltip='Treat a WVF spike as equivalent to an OS/OB WT zone. Fires at price extremes before the WT oscillator catches up, effectively extending the reversal zone from the price side.')
+wvfLen     = input.int(22, '  WVF Period', minval=5, maxval=100, group=g_wt)
+wvfBBLen   = input.int(20, '  WVF BB Length', minval=5, maxval=100, group=g_wt)
+wvfBBMult  = input.float(2.0, '  WVF BB Multiplier', minval=0.5, maxval=5.0, step=0.25, group=g_wt)
 useAutoTF = input.bool(true, 'Auto-Calibrate Time Windows', group=g_wt,
      tooltip='Scales time-based bar windows from a 4H baseline. WT engine lengths are not scaled because they control oscillator shape.')
 
@@ -134,6 +141,8 @@ enableLongRangeReversal = input.bool(true, 'Enable LONG Range-Reversal Setup', g
      tooltip='Emergency direction switch for LONG range-reversal entries. The symmetric RR quality filter below should be the primary control.')
 enableShortRangeReversal = input.bool(true, 'Enable SHORT Range-Reversal Setup', group=g_setup,
      tooltip='Emergency direction switch for SHORT range-reversal entries. The symmetric RR quality filter below should be the primary control.')
+rrMinTFSec = input.int(3600, 'RR Minimum Timeframe (seconds)', minval=0, group=g_setup,
+     tooltip='Range-Reversal is disabled on timeframes shorter than this. Default 3600 = 1H minimum. Test68-71 showed 15m RR consistently negative (WR 29-33%) while 15m ER is positive — the lag-entry problem is structural on fast TFs. Set to 0 to allow all TFs.')
 rangeReversalQualityMode = input.string('Score 3.5 or POC+Volume', 'Range-Reversal Quality Filter',
      options=['Off', 'Score 3.5 or POC+Volume', 'POC+Volume'], group=g_setup,
      tooltip='Symmetric filter for LONG/SHORT range-reversal entries.\n• Off: no extra RR quality filter\n• Score 3.5 or POC+Volume: allow stronger context-score RR, or require local POC event plus directional volume\n• POC+Volume: strict mirrored confirmation only')
@@ -550,7 +559,7 @@ _mtfHardPB = _effMtfGateMode != 'None' and (_effMtfApplyTo == 'All' or _effMtfAp
 _anchorReqRR = _effAnchorApplyTo == 'All' or _effAnchorApplyTo == 'Reversal Only'
 _anchorReqPB = _effAnchorApplyTo == 'All' or _effAnchorApplyTo == 'Pullback Only'
 _volReqRR = _effVolMode == 'All TF' or _effVolMode == 'Reversal Only' or (_effVolMode == 'Lower TF Only' and _chartSec <= 3600)
-_volReqPB = _effVolMode == 'All TF' or _effVolMode == 'Pullback Only' or (_effVolMode == 'Lower TF Only' and _chartSec <= 3600)
+_volReqPB = _effVolMode == 'Pullback Only'  // 'All TF' intentionally excluded: pullbacks have declining vol by design; vol is already score component
 
 // POC lookbacks (dual horizon) use effective profile values, auto-scaled
 pocLookbackA      = f_scaleBars(_effPocLocalLookback, 30, 500)
@@ -563,22 +572,52 @@ pocMacroLookbackA = f_scaleBars(_effPocMacroLookback, 50, 1000)
 // SECTION 1 — WaveTrend
 wtOsc = f_getWT(hlc3, chLength, avgLength)
 wtSig = ta.sma(wtOsc, sigLength)
-activeNormMode = wtEnginePreset == 'Classic Stable' ? 'Mean Abs Dev' : normMode
+activeNormMode   = wtEnginePreset == 'Classic Stable' ? 'Mean Abs Dev' : normMode
 activeSmoothType = wtEnginePreset == 'Classic Stable' ? 'EMA' : smoothType
+hmaMode = activeSmoothType == 'HMA'
 
-// Fresh-zone reversal trigger. Reversal crosses often print after WT has
-// already left OB/OS; same-bar zone membership was too late/strict.
-// Bands resolve via profile (_effUpperBand/_effLowerBand) so Aggressive can
-// use ±30 for more triggers, Strict ±60 for fewer/cleaner.
+// Fast PB oscillator: HMA pass over wtOsc with a short window.
+// RR/ER use wtOsc (base smoothing). PB uses wtOscFast (HMA re-smoothed) for
+// earlier momentum turns in the neutral zone without affecting RR timing.
+wtOscFast = f_smooth(wtOsc, math.max(2, sigLength), 'HMA')
+wtSigFast = ta.sma(wtOscFast, sigLength)
+
+// Williams Vix Fix — fires at price extremes, before WT oscillator catches up
+wvf        = (ta.highest(close, wvfLen) - low)  / ta.highest(close, wvfLen) * 100
+wvfInv     = (high - ta.lowest(close, wvfLen))  / ta.lowest(close, wvfLen)  * 100
+wvfMean    = ta.sma(wvf,    wvfBBLen)
+wvfInvMean = ta.sma(wvfInv, wvfBBLen)
+wvfBBHigh    = wvfMean    + wvfBBMult * ta.stdev(wvf,    wvfBBLen)
+wvfInvBBHigh = wvfInvMean + wvfBBMult * ta.stdev(wvfInv, wvfBBLen)
+wvfSpike    = useWVF and wvf    >= wvfBBHigh
+wvfInvSpike = useWVF and wvfInv >= wvfInvBBHigh
+barsSinceWvfSpike    = nz(ta.barssince(wvfSpike),    999)
+barsSinceWvfInvSpike = nz(ta.barssince(wvfInvSpike), 999)
+wvfRecentBull = barsSinceWvfSpike    <= zoneExitWindowA
+wvfRecentBear = barsSinceWvfInvSpike <= zoneExitWindowA
+
+// Oscillator momentum — fires at the oscillator peak/trough, not the crossover.
+// This is ~sigLen/2 bars earlier than ta.crossover(wtOsc,wtSig) and much closer
+// to the actual price pivot.
+wtMomUp   = ta.crossover(wtOsc - wtOsc[1], 0)
+wtMomDown = ta.crossunder(wtOsc - wtOsc[1], 0)
+
+// Reversal zone: WT oscillator recently in OS/OB, OR WVF spike recently fired.
+// WVF extends the zone definition to the price side without adding a hard gate.
 inOSZone = wtOsc < _effLowerBand
 inOBZone = wtOsc > _effUpperBand
 barsSinceOS = nz(ta.barssince(inOSZone), 999)
 barsSinceOB = nz(ta.barssince(inOBZone), 999)
-osRecent = barsSinceOS <= zoneExitWindowA
-obRecent = barsSinceOB <= zoneExitWindowA
+osRecent = barsSinceOS <= zoneExitWindowA or wvfRecentBull
+obRecent = barsSinceOB <= zoneExitWindowA or wvfRecentBear
 
-crossUp   = ta.crossover(wtOsc, wtSig)  and osRecent and wtOsc < 0
-crossDown = ta.crossunder(wtOsc, wtSig) and obRecent and wtOsc > 0
+rawStrongBullCross = wtMomUp   and wtOsc < _effLowerBand
+rawStrongBearCross = wtMomDown and wtOsc > _effUpperBand
+
+// HMA mode fires earlier — add price-direction confirmation to avoid
+// entries where the oscillator turns before price confirms.
+crossUp   = wtMomUp   and osRecent and wtOsc < 0 and (not hmaMode or close > close[1])
+crossDown = wtMomDown and obRecent and wtOsc > 0 and (not hmaMode or close < close[1])
 
 // SECTION 2 — Structure detection
 _phFound = not na(ta.pivothigh(high, structPivLen, structPivLen))
@@ -588,14 +627,30 @@ var float lastSwingHigh1 = na
 var float lastSwingHigh2 = na
 var float lastSwingLow1  = na
 var float lastSwingLow2  = na
+var float lastSwingHighWt1 = na
+var float lastSwingHighWt2 = na
+var float lastSwingLowWt1  = na
+var float lastSwingLowWt2  = na
+var int lastSwingHighBar1 = na
+var int lastSwingHighBar2 = na
+var int lastSwingLowBar1  = na
+var int lastSwingLowBar2  = na
 
 if _phFound
     lastSwingHigh2 := lastSwingHigh1
+    lastSwingHighWt2 := lastSwingHighWt1
+    lastSwingHighBar2 := lastSwingHighBar1
     lastSwingHigh1 := high[structPivLen]
+    lastSwingHighWt1 := wtOsc[structPivLen]
+    lastSwingHighBar1 := bar_index - structPivLen
 
 if _plFound
     lastSwingLow2 := lastSwingLow1
+    lastSwingLowWt2 := lastSwingLowWt1
+    lastSwingLowBar2 := lastSwingLowBar1
     lastSwingLow1 := low[structPivLen]
+    lastSwingLowWt1 := wtOsc[structPivLen]
+    lastSwingLowBar1 := bar_index - structPivLen
 
 // Structure state — reversal-friendly (Fix #2):
 // Long-OK requires either HL (constructive low) or absence of fresh LL.
@@ -605,6 +660,8 @@ hhDetected = not na(lastSwingHigh1) and not na(lastSwingHigh2) and lastSwingHigh
 hlDetected = not na(lastSwingLow1)  and not na(lastSwingLow2)  and lastSwingLow1  > lastSwingLow2
 lhDetected = not na(lastSwingHigh1) and not na(lastSwingHigh2) and lastSwingHigh1 < lastSwingHigh2
 llDetected = not na(lastSwingLow1)  and not na(lastSwingLow2)  and lastSwingLow1  < lastSwingLow2
+wtBullDiv = not na(lastSwingLow1) and not na(lastSwingLow2) and not na(lastSwingLowWt1) and not na(lastSwingLowWt2) and lastSwingLow1 < lastSwingLow2 and lastSwingLowWt1 > lastSwingLowWt2
+wtBearDiv = not na(lastSwingHigh1) and not na(lastSwingHigh2) and not na(lastSwingHighWt1) and not na(lastSwingHighWt2) and lastSwingHigh1 > lastSwingHigh2 and lastSwingHighWt1 < lastSwingHighWt2
 
 // Structure freshness (Fix #6 — was structLookback unused)
 var int lastStructBar = na
@@ -620,6 +677,10 @@ structureFresh = not na(lastStructBar) and (bar_index - lastStructBar) <= struct
 highStructureFresh = not na(lastHighStructBar) and (bar_index - lastHighStructBar) <= structLookbackA
 lowStructureFresh = not na(lastLowStructBar) and (bar_index - lastLowStructBar) <= structLookbackA
 lastPivotWasLow = not na(lastLowStructBar) and (na(lastHighStructBar) or lastLowStructBar > lastHighStructBar)
+barsSinceHighPivotConfirm = not na(lastHighStructBar) ? bar_index - lastHighStructBar : na
+barsSinceLowPivotConfirm = not na(lastLowStructBar) ? bar_index - lastLowStructBar : na
+barsSinceHighPivotActual = not na(lastSwingHighBar1) ? bar_index - lastSwingHighBar1 : na
+barsSinceLowPivotActual = not na(lastSwingLowBar1) ? bar_index - lastSwingLowBar1 : na
 
 // Require real swing history before granting structure points (no
 // false-positives during warm-up where `not llDetected` is trivially true
@@ -737,8 +798,8 @@ longRRBiasOk = not autoTFBiasAppliesRR or autoTFBiasLongOk
 shortRRBiasOk = not autoTFBiasAppliesRR or autoTFBiasShortOk
 longPBBiasOk = not autoTFBiasAppliesPB or autoTFBiasLongOk
 shortPBBiasOk = not autoTFBiasAppliesPB or autoTFBiasShortOk
-longERBiasOk = not autoTFBiasAppliesER or autoTFBiasLongOk
-shortERBiasOk = not autoTFBiasAppliesER or autoTFBiasShortOk
+longERBiasOk  = not autoTFBiasAppliesER or autoTFBiasLongOk or (autoTFBiasActive and htfWtOsc <= _effLowerBand)
+shortERBiasOk = not autoTFBiasAppliesER or autoTFBiasShortOk or (autoTFBiasActive and htfWtOsc >= _effUpperBand)
 
 _setupGateActive = _effMtfGateMode == 'Setup Only' or _effMtfGateMode == 'Setup + Anchor'
 _anchorGateActive = _effMtfGateMode == 'Setup + Anchor'
@@ -870,10 +931,10 @@ shortTakeProfit = shortStructureTarget < close ? shortStructureTarget : close - 
 // It looks for an actual rejection at a useful area and requires local flow
 // confirmation. This is intended for 1H where confirmed pivots often arrive
 // after the move has already started.
-earlyLongRejectArea = atrVal > 0 and (longRangeLocationOk or nearPullbackEma or (not na(lastSwingLow1) and math.abs(low - lastSwingLow1) / atrVal <= earlyRejectProximityATR))
-earlyShortRejectArea = atrVal > 0 and (shortRangeLocationOk or nearPullbackEma or (not na(lastSwingHigh1) and math.abs(high - lastSwingHigh1) / atrVal <= earlyRejectProximityATR))
-earlyLongRejectBar = _closePos >= earlyRejectWickMin and close > open
-earlyShortRejectBar = _closePos <= 1.0 - earlyRejectWickMin and close < open
+earlyLongRejectArea = atrVal > 0 and (longRangeLocationOk or nearPullbackEma or (not na(lastSwingLow1) and low >= lastSwingLow1 and (low - lastSwingLow1) / atrVal <= earlyRejectProximityATR))
+earlyShortRejectArea = atrVal > 0 and (shortRangeLocationOk or nearPullbackEma or (not na(lastSwingHigh1) and high <= lastSwingHigh1 and (lastSwingHigh1 - high) / atrVal <= earlyRejectProximityATR))
+earlyLongRejectBar  = (_closePos >= earlyRejectWickMin and close > open) or wtOsc <= _effLowerBand
+earlyShortRejectBar = (_closePos <= 1.0 - earlyRejectWickMin and close < open) or wtOsc >= _effUpperBand
 _isOneHourChart = _chartSec == 3600
 earlyLocalLongConfirm = useOneHourERQuality and _isOneHourChart ? bullVolSpike : (pocReclaimRecent or bullVolSpike)
 earlyLocalShortConfirm = useOneHourERQuality and _isOneHourChart ? pocRejectRecent : (pocRejectRecent or bearVolSpike)
@@ -893,10 +954,11 @@ earlyShortContextScore = (earlyLocalShortConfirm ? 1 : 0) + (earlyMomentumBear ?
 _profileChartTfOk = (profileMode != 'Balanced' and profileMode != 'Aggressive') or (_chartSec >= 900 and _chartSec <= 14400)
 
 // Triggers per family
-rrTriggerLong  = crossUp                                                                                  // OB/OS-based
-rrTriggerShort = crossDown
-pbTriggerLong  = ta.crossover(wtOsc, wtSig)  and wtOsc <  _effPbZone and wtOsc > -_effPbZone              // neutral-zone cross
-pbTriggerShort = ta.crossunder(wtOsc, wtSig) and wtOsc <  _effPbZone and wtOsc > -_effPbZone
+_rrTfOk = _chartSec >= rrMinTFSec
+rrTriggerLong  = crossUp   and _rrTfOk                                                      // OB/OS-based, momentum turn
+rrTriggerShort = crossDown and _rrTfOk
+pbTriggerLong  = ta.crossover(wtOscFast, wtSigFast)  and wtOscFast < _effPbZone and wtOscFast > -_effPbZone   // HMA fast cross, neutral zone
+pbTriggerShort = ta.crossunder(wtOscFast, wtSigFast) and wtOscFast < _effPbZone and wtOscFast > -_effPbZone
 erTriggerLong  = ta.crossover(wtOsc, wtSig)  and wtOsc <= 0
 erTriggerShort = ta.crossunder(wtOsc, wtSig) and wtOsc >= 0
 
@@ -922,16 +984,20 @@ longRRSetupPass  = enableLongRangeReversal and longRRBiasOk and (not useSetupGat
 longPBSetupPass  = _effUsePullback and (not useSetupGate or longPullbackSetupOk) and longPBMidlineOk and longPBBiasOk
 shortRRSetupPass = enableShortRangeReversal and shortRRBiasOk and (not useSetupGate or shortRangeReversalSetupOk)
 shortPBSetupPass = _effUsePullback and (not useSetupGate or shortPullbackSetupOk) and shortPBMidlineOk and shortPBBiasOk
-longERSetupPass = useEarlyRejectionSetup and earlyRejectTFMode != 'Off' and earlyLongTFOk and longERBiasOk and earlyLongRejectArea and earlyLongRejectBar and earlyLocalLongConfirm and earlyMomentumBull and earlyLongRoomOk
-shortERSetupPass = useEarlyRejectionSetup and earlyRejectTFMode != 'Off' and earlyShortTFOk and shortERBiasOk and earlyShortRejectArea and earlyShortRejectBar and earlyLocalShortConfirm and earlyMomentumBear and earlyShortRoomOk
+// earlyLocalLongConfirm kept as hard gate on 1H (was protecting quality there).
+// Removed from gate on ≤15m where it blocked 73% of signals with no benefit.
+// Score component (+1 pt) still applies on all TFs.
+_erLocalRequired = _isOneHourChart
+longERSetupPass = useEarlyRejectionSetup and earlyRejectTFMode != 'Off' and earlyLongTFOk and longERBiasOk and earlyLongRejectArea and earlyLongRejectBar and (not _erLocalRequired or earlyLocalLongConfirm or wtOsc <= _effLowerBand) and earlyMomentumBull and earlyLongRoomOk
+shortERSetupPass = useEarlyRejectionSetup and earlyRejectTFMode != 'Off' and earlyShortTFOk and shortERBiasOk and earlyShortRejectArea and earlyShortRejectBar and (not _erLocalRequired or earlyLocalShortConfirm or wtOsc >= _effUpperBand) and earlyMomentumBear and earlyShortRoomOk
 erExpansion = hhDetected and llDetected and not hlDetected and not lhDetected
-longERStructureOk = not erBlockCounterExpansion or not (erExpansion and htfBear)
-shortERStructureOk = not erBlockCounterExpansion or not (erExpansion and htfBull)
+longERStructureOk  = not erBlockCounterExpansion or not (erExpansion and htfBear) or wtOsc <= _effLowerBand
+shortERStructureOk = not erBlockCounterExpansion or not (erExpansion and htfBull) or wtOsc >= _effUpperBand
 _oneHourERConfirmActive = useOneHourERFollowThrough and _isOneHourChart
 _oneHourERDmiLongOk = not useOneHourERDmiConfirm or (_erPlusDI > _erMinusDI and _erAdx >= oneHourERMinAdx)
 _oneHourERDmiShortOk = not useOneHourERDmiConfirm or (_erMinusDI > _erPlusDI and _erAdx >= oneHourERMinAdx)
-_longERRawSignal = _profileChartTfOk and erTriggerLong and longERSetupPass and longERStructureOk and mtfLongOkPB and earlyLongContextScore >= earlyRejectMinScore and volRegimeOk
-_shortERRawSignal = _profileChartTfOk and erTriggerShort and shortERSetupPass and shortERStructureOk and mtfShortOkPB and earlyShortContextScore >= earlyRejectMinScore and volRegimeOk
+_longERRawSignal = _profileChartTfOk and erTriggerLong and longERSetupPass and longERStructureOk and mtfLongOkPB and (earlyLongContextScore >= earlyRejectMinScore or wtOsc <= _effLowerBand) and volRegimeOk
+_shortERRawSignal = _profileChartTfOk and erTriggerShort and shortERSetupPass and shortERStructureOk and mtfShortOkPB and (earlyShortContextScore >= earlyRejectMinScore or wtOsc >= _effUpperBand) and volRegimeOk
 
 var int _pendingLongERBar = na
 var int _pendingShortERBar = na
@@ -960,12 +1026,37 @@ _structurePlaybookActive = structurePlaybookMode == 'All TF' or (structurePlaybo
 // setup family was allowed in a structure phase where that family had stable
 // negative expectancy. Keep this as an entry gate, not as trade management.
 _oneHourPlaybook = _structurePlaybookActive and _chartSec == 3600
-longPBPlaybookOk = not _oneHourPlaybook or not (hhDetected and hlDetected)
-shortPBPlaybookOk = not _oneHourPlaybook or (hlDetected and lhDetected and not llDetected)
-longRRPlaybookOk = not _oneHourPlaybook or not (hhDetected and hlDetected)
-shortRRPlaybookOk = not _oneHourPlaybook or not (hhDetected and llDetected)
-longERPlaybookOk = true
-shortERPlaybookOk = not _oneHourPlaybook or not (llDetected and lhDetected)
+_playbookStructure = hhDetected and hlDetected ? 'trend_up'
+     : llDetected and lhDetected ? 'trend_down'
+     : hhDetected and llDetected ? 'expansion'
+     : hlDetected and lhDetected ? 'compression'
+     : hhDetected ? 'high_break'
+     : llDetected ? 'low_break'
+     : hlDetected ? 'higher_low'
+     : lhDetected ? 'lower_high'
+     : 'unclassified'
+_longPlaybook = not _oneHourPlaybook ? 'composite'
+     : llDetected and lhDetected ? 'mature_reversal_long'
+     : hhDetected and hlDetected ? 'trend_up_blocked_long'
+     : 'selective_long'
+_shortPlaybook = not _oneHourPlaybook ? 'composite'
+     : hlDetected and lhDetected and not llDetected ? 'pullback_short'
+     : hhDetected and llDetected ? 'expansion_rejection_short'
+     : llDetected and lhDetected ? 'trend_down_reversal_short'
+     : 'selective_short'
+_longPBRouteOk = not _oneHourPlaybook or _longPlaybook == 'selective_long'
+_shortPBRouteOk = not _oneHourPlaybook or _shortPlaybook == 'pullback_short'
+_longRRRouteOk = not _oneHourPlaybook or _longPlaybook == 'mature_reversal_long' or _longPlaybook == 'selective_long'
+_shortRRRouteOk = not _oneHourPlaybook or _shortPlaybook == 'trend_down_reversal_short'
+_longERRouteOk = true
+_shortERRouteOk = not _oneHourPlaybook or _shortPlaybook == 'expansion_rejection_short'
+_playbookStr = ' | PLAYBOOK: mode=' + structurePlaybookMode + ' active=' + str.tostring(_structurePlaybookActive) + ' structure=' + _playbookStructure + ' long=' + _longPlaybook + ' short=' + _shortPlaybook
+longPBPlaybookOk = _longPBRouteOk
+shortPBPlaybookOk = _shortPBRouteOk
+longRRPlaybookOk = _longRRRouteOk
+shortRRPlaybookOk = _shortRRRouteOk
+longERPlaybookOk = _longERRouteOk
+shortERPlaybookOk = _shortERRouteOk
 
 // Per-family signals (volRegimeOk applies universally — outside the regime, no entries)
 longRRSignal  = _profileChartTfOk and rrTriggerLong  and longRRSetupPass  and longRRPlaybookOk  and rrLongQualityOk  and mtfLongOkRR  and longContextScoreRR  >= _effMinScore and volRegimeOk
@@ -1135,7 +1226,8 @@ _shortExitReason = shortExitOpposite  and useExitOpposite  ? 'Opp'
                  : shortExitOneHourPBFail               ? 'PBF'
                  : shortExitTimeFail  and useExitTimeFail  ? 'Time'
                  : shortExitFollowThr and useExitFollowThr ? 'FTh' : ''
-_structureSnapshot = ' | STRUCT: hh=' + str.tostring(hhDetected) + ' hl=' + str.tostring(hlDetected) + ' lh=' + str.tostring(lhDetected) + ' ll=' + str.tostring(llDetected) + ' longStruct=' + str.tostring(structureLongOk) + ' shortStruct=' + str.tostring(structureShortOk)
+_pivotTimingStr = ' highConfirmBars=' + str.tostring(barsSinceHighPivotConfirm) + ' lowConfirmBars=' + str.tostring(barsSinceLowPivotConfirm) + ' highActualBars=' + str.tostring(barsSinceHighPivotActual) + ' lowActualBars=' + str.tostring(barsSinceLowPivotActual) + ' phNow=' + str.tostring(_phFound) + ' plNow=' + str.tostring(_plFound) + ' pivLen=' + str.tostring(structPivLen)
+_structureSnapshot = ' | STRUCT: hh=' + str.tostring(hhDetected) + ' hl=' + str.tostring(hlDetected) + ' lh=' + str.tostring(lhDetected) + ' ll=' + str.tostring(llDetected) + ' longStruct=' + str.tostring(structureLongOk) + ' shortStruct=' + str.tostring(structureShortOk) + ' wtBullDiv=' + str.tostring(wtBullDiv) + ' wtBearDiv=' + str.tostring(wtBearDiv) + _pivotTimingStr
 
 // --- State transitions ---
 // Entry (only when flat or opposite is exiting). Opposite-signal exits handle the flip implicitly.
@@ -1247,6 +1339,10 @@ plot(htfWtOsc, 'HTF WT', color.new(color.purple, 40), linewidth=1)
 plot(anchorWtOsc, 'Anchor HTF WT', color.new(color.blue, 55), linewidth=1)
 fill(p_osc, p_mid, _effUpperBand, 0,             color.new(colorBear, 90), color.new(colorBear, 100))
 fill(p_osc, p_mid, 0,             _effLowerBand, color.new(colorBull, 100), color.new(colorBull, 90))
+plotshape(showRawStrongWTCross and rawStrongBullCross, title='Raw Strong WT Bull Cross', style=shape.triangleup,
+     location=location.bottom, color=color.new(colorBull, 0), size=size.tiny, text='WT+')
+plotshape(showRawStrongWTCross and rawStrongBearCross, title='Raw Strong WT Bear Cross', style=shape.triangledown,
+     location=location.top, color=color.new(colorBear, 0), size=size.tiny, text='WT-')
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PRICE-CHART OVERLAYS
@@ -1579,6 +1675,7 @@ if barstate.islast
 // One BLOCKED row per family-trigger that didn't pass.
 
 _volRatio = na(volMA) or volMA == 0 ? 1.0 : volume / volMA
+_rawWtCrossStr = ' | RAW_WT: strongBull=' + str.tostring(rawStrongBullCross) + ' strongBear=' + str.tostring(rawStrongBearCross) + ' osc=' + str.tostring(wtOsc, '#.##') + ' sig=' + str.tostring(wtSig, '#.##') + ' ob=' + str.tostring(_effUpperBand) + ' os=' + str.tostring(_effLowerBand) + _pivotTimingStr
 _regimeStr = ' | REGIME: mode=' + _effRegimeMode + ' regimeOk=' + str.tostring(volRegimeOk) + ' inBand=' + str.tostring(_inRegimeBand) + ' atrNorm=' + str.tostring(atrNorm, '#.##') + ' min=' + str.tostring(_effVolRegimeMin, '#.#') + ' max=' + str.tostring(_effVolRegimeMax, '#.#') + ' bonus=' + str.tostring(volRegimeBonus, '#.#')
 _tfBiasStr = ' | TFB: active=' + str.tostring(autoTFBiasActive) + ' htf=' + str.tostring(htfWtOsc, '#.#') + ' longOk=' + str.tostring(autoTFBiasLongOk) + ' shortOk=' + str.tostring(autoTFBiasShortOk)
 
@@ -1601,7 +1698,7 @@ if debugMode and longEntrySignal and longRRSignal
          _htfTF, str.tostring(htfBull), str.tostring(mtfLongOkRR), str.tostring(longHtfScoreRR, '#.#'), str.tostring(longAnchorScoreRR, '#.#'),
          str.tostring(longRangeReversalSetupOk), str.tostring(longLocationOk), str.tostring(longRangeLocationOk), str.tostring(longSwingLocationOk), str.tostring(longRoomOk), str.tostring(longSetupVolumeOkRR),
          str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk), str.tostring(longImpulseATR, '#.#'),
-         str.tostring(longEntryTakeProfit, format.mintick), str.tostring(longStop, format.mintick)) + _structureSnapshot + _regimeStr + _tfBiasStr)
+         str.tostring(longEntryTakeProfit, format.mintick), str.tostring(longStop, format.mintick)) + _structureSnapshot + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 if debugMode and longEntrySignal and longPBSignal and not longRRSignal
     log.info(str.format('WT3 LONG DECISION | family=pullback_continuation | type=pullback_continuation | bar={0} | ctxScore={1}/{2} | profile={3}'
@@ -1621,7 +1718,7 @@ if debugMode and longEntrySignal and longPBSignal and not longRRSignal
          _htfTF, str.tostring(htfBull), str.tostring(mtfLongOkPB), str.tostring(longHtfScorePB, '#.#'), str.tostring(longAnchorScorePB, '#.#'),
          str.tostring(longPullbackSetupOk), str.tostring(longLocationOk), str.tostring(longRangeLocationOk), str.tostring(longSwingLocationOk), str.tostring(longRoomOk), str.tostring(longPBRoomOk), str.tostring(longPBMidlineOk), str.tostring(longSetupVolumeOkPB),
          str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk), str.tostring(longImpulseATR, '#.#'),
-         str.tostring(longEntryTakeProfit, format.mintick), str.tostring(longStop, format.mintick)) + _structureSnapshot + _regimeStr + _tfBiasStr)
+         str.tostring(longEntryTakeProfit, format.mintick), str.tostring(longStop, format.mintick)) + _structureSnapshot + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 if debugMode and longEntrySignal and longERSignal and not longRRSignal and not longPBSignal
     log.info(str.format('WT3 LONG DECISION | family=early_rejection | type=early_rejection | bar={0} | ctxScore={1}/{2} | profile={3}'
@@ -1639,7 +1736,7 @@ if debugMode and longEntrySignal and longERSignal and not longRRSignal and not l
          str.tostring(pocPrice, format.mintick), str.tostring(pocReclaimRecent),
          _htfTF, str.tostring(htfBull), str.tostring(mtfLongOkPB), str.tostring(longHtfScorePB, '#.#'), str.tostring(longAnchorScorePB, '#.#'),
          str.tostring(earlyLongRoomOk), str.tostring(longPBRoomOk), str.tostring(longRangeLocationOk), str.tostring(nearPullbackEma),
-         str.tostring(longEntryTakeProfit, format.mintick), str.tostring(longStop, format.mintick)) + ' | ERSTRUCT: longOk=' + str.tostring(longERStructureOk) + _structureSnapshot + _regimeStr + _tfBiasStr)
+         str.tostring(longEntryTakeProfit, format.mintick), str.tostring(longStop, format.mintick)) + ' | ERSTRUCT: longOk=' + str.tostring(longERStructureOk) + _structureSnapshot + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 // LONG BLOCKED — one row per family trigger that didn't pass
 if debugMode and rrTriggerLong and not longRRSignal
@@ -1650,7 +1747,7 @@ if debugMode and rrTriggerLong and not longRRSignal
          str.tostring(bar_index), str.tostring(longContextScoreRR, '#.#'), str.tostring(maxContextScoreRR, '#.#'), str.tostring(_effMinScore, '#.#'), profileMode,
          str.tostring(mtfLongOkRR), str.tostring(rrLongQualityOk), str.tostring(structureLongOk), str.tostring(pocReclaimRecent), str.tostring(bullVolSpike),
          str.tostring(longRangeReversalSetupOk), str.tostring(longLocationOk), str.tostring(longRangeLocationOk), str.tostring(longSwingLocationOk), str.tostring(longRoomOk), str.tostring(longSetupVolumeOkRR),
-         str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk)) + _regimeStr + _tfBiasStr)
+         str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk)) + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 if debugMode and pbTriggerLong and not longPBSignal
     log.info(str.format('WT3 LONG BLOCKED | family=pullback_continuation | type=pullback_continuation | bar={0} | ctxScore={1}/{2} min={3} | profile={4}'
@@ -1660,9 +1757,30 @@ if debugMode and pbTriggerLong and not longPBSignal
          str.tostring(bar_index), str.tostring(longContextScorePB, '#.#'), str.tostring(maxContextScorePB, '#.#'), str.tostring(_effMinScore, '#.#'), profileMode,
          str.tostring(mtfLongOkPB), str.tostring(structureLongOk), str.tostring(pocReclaimRecent), str.tostring(bullVolSpike),
          str.tostring(longPullbackSetupOk), str.tostring(longLocationOk), str.tostring(longRangeLocationOk), str.tostring(longSwingLocationOk), str.tostring(longRoomOk), str.tostring(longPBMidlineOk), str.tostring(longSetupVolumeOkPB),
-         str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk), str.tostring(longImpulseATR, '#.#')) + _regimeStr + _tfBiasStr)
+         str.tostring(longPullbackSetupOk), str.tostring(longPullbackTrendOk), str.tostring(longPullbackLocationOk), str.tostring(longImpulseATR, '#.#')) + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 if debugMode and erTriggerLong and not longERSignal
+    _erLongReason = 'other'
+    if not earlyLongTFOk
+        _erLongReason := 'tf'
+    else if not earlyLongRejectArea
+        _erLongReason := 'area'
+    else if not earlyLongRejectBar
+        _erLongReason := 'bar'
+    else if _erLocalRequired and not earlyLocalLongConfirm
+        _erLongReason := 'local_gate'
+    else if not earlyMomentumBull
+        _erLongReason := 'momentum'
+    else if not earlyLongRoomOk
+        _erLongReason := 'room'
+    else if not longERBiasOk
+        _erLongReason := 'bias'
+    else if not longERStructureOk
+        _erLongReason := 'struct'
+    else if not mtfLongOkPB
+        _erLongReason := 'mtf'
+    else if earlyLongContextScore < earlyRejectMinScore
+        _erLongReason := 'score'
     log.info(str.format('WT3 LONG BLOCKED | family=early_rejection | type=early_rejection | bar={0} | ctxScore={1}/{2} min={3} | profile={4}'
          + ' | mtfOk={5} tfOk={6} erOk={7} area={8} barOk={9} local={10} momentum={11}'
          + ' | FLOW: mfi={12} mfiBull={13} stochK={14} stochD={15} stochBull={16}'
@@ -1670,7 +1788,7 @@ if debugMode and erTriggerLong and not longERSignal
          str.tostring(bar_index), str.tostring(earlyLongContextScore, '#.#'), str.tostring(maxContextScoreER, '#.#'), str.tostring(earlyRejectMinScore, '#.#'), profileMode,
          str.tostring(mtfLongOkPB), str.tostring(earlyLongTFOk), str.tostring(longERSetupPass), str.tostring(earlyLongRejectArea), str.tostring(earlyLongRejectBar), str.tostring(earlyLocalLongConfirm), str.tostring(earlyMomentumBull),
          str.tostring(mfiVal, '#.#'), str.tostring(mfiBullConfirm), str.tostring(stochRsiK, '#.#'), str.tostring(stochRsiD, '#.#'), str.tostring(stochRsiBullConfirm),
-         str.tostring(earlyLongRoomOk), str.tostring(longPBRoomOk), str.tostring(longRangeLocationOk), str.tostring(nearPullbackEma), str.tostring(longSetupVolumeOkPB)) + ' | ERSTRUCT: longOk=' + str.tostring(longERStructureOk) + _regimeStr + _tfBiasStr)
+         str.tostring(earlyLongRoomOk), str.tostring(longPBRoomOk), str.tostring(longRangeLocationOk), str.tostring(nearPullbackEma), str.tostring(longSetupVolumeOkPB)) + ' | reason=' + _erLongReason + ' | ERSTRUCT: longOk=' + str.tostring(longERStructureOk) + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 // SHORT DECISION
 if debugMode and shortEntrySignal and shortRRSignal
@@ -1691,7 +1809,7 @@ if debugMode and shortEntrySignal and shortRRSignal
          _htfTF, str.tostring(htfBear), str.tostring(mtfShortOkRR), str.tostring(shortHtfScoreRR, '#.#'), str.tostring(shortAnchorScoreRR, '#.#'),
          str.tostring(shortRangeReversalSetupOk), str.tostring(shortLocationOk), str.tostring(shortRangeLocationOk), str.tostring(shortSwingLocationOk), str.tostring(shortRoomOk), str.tostring(shortSetupVolumeOkRR),
          str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk), str.tostring(shortImpulseATR, '#.#'),
-         str.tostring(shortEntryTakeProfit, format.mintick), str.tostring(shortStop, format.mintick)) + _structureSnapshot + _regimeStr + _tfBiasStr)
+         str.tostring(shortEntryTakeProfit, format.mintick), str.tostring(shortStop, format.mintick)) + _structureSnapshot + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 if debugMode and shortEntrySignal and shortPBSignal and not shortRRSignal
     log.info(str.format('WT3 SHORT DECISION | family=pullback_continuation | type=pullback_continuation | bar={0} | ctxScore={1}/{2} | profile={3}'
@@ -1711,7 +1829,7 @@ if debugMode and shortEntrySignal and shortPBSignal and not shortRRSignal
          _htfTF, str.tostring(htfBear), str.tostring(mtfShortOkPB), str.tostring(shortHtfScorePB, '#.#'), str.tostring(shortAnchorScorePB, '#.#'),
          str.tostring(shortPullbackSetupOk), str.tostring(shortLocationOk), str.tostring(shortRangeLocationOk), str.tostring(shortSwingLocationOk), str.tostring(shortRoomOk), str.tostring(shortPBRoomOk), str.tostring(shortPBMidlineOk), str.tostring(shortSetupVolumeOkPB),
          str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk), str.tostring(shortImpulseATR, '#.#'),
-         str.tostring(shortEntryTakeProfit, format.mintick), str.tostring(shortStop, format.mintick)) + _structureSnapshot + _regimeStr + _tfBiasStr)
+         str.tostring(shortEntryTakeProfit, format.mintick), str.tostring(shortStop, format.mintick)) + _structureSnapshot + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 if debugMode and shortEntrySignal and shortERSignal and not shortRRSignal and not shortPBSignal
     log.info(str.format('WT3 SHORT DECISION | family=early_rejection | type=early_rejection | bar={0} | ctxScore={1}/{2} | profile={3}'
@@ -1729,7 +1847,7 @@ if debugMode and shortEntrySignal and shortERSignal and not shortRRSignal and no
          str.tostring(pocPrice, format.mintick), str.tostring(pocRejectRecent),
          _htfTF, str.tostring(htfBear), str.tostring(mtfShortOkPB), str.tostring(shortHtfScorePB, '#.#'), str.tostring(shortAnchorScorePB, '#.#'),
          str.tostring(earlyShortRoomOk), str.tostring(shortPBRoomOk), str.tostring(shortRangeLocationOk), str.tostring(nearPullbackEma),
-         str.tostring(shortEntryTakeProfit, format.mintick), str.tostring(shortStop, format.mintick)) + _structureSnapshot + _regimeStr + _tfBiasStr)
+         str.tostring(shortEntryTakeProfit, format.mintick), str.tostring(shortStop, format.mintick)) + _structureSnapshot + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 // SHORT BLOCKED
 if debugMode and rrTriggerShort and not shortRRSignal
@@ -1740,7 +1858,7 @@ if debugMode and rrTriggerShort and not shortRRSignal
          str.tostring(bar_index), str.tostring(shortContextScoreRR, '#.#'), str.tostring(maxContextScoreRR, '#.#'), str.tostring(_effMinScore, '#.#'), profileMode,
          str.tostring(mtfShortOkRR), str.tostring(rrShortQualityOk), str.tostring(structureShortOk), str.tostring(pocRejectRecent), str.tostring(bearVolSpike),
          str.tostring(shortRangeReversalSetupOk), str.tostring(shortLocationOk), str.tostring(shortRangeLocationOk), str.tostring(shortSwingLocationOk), str.tostring(shortRoomOk), str.tostring(shortSetupVolumeOkRR),
-         str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk)) + _regimeStr + _tfBiasStr)
+         str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk)) + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 if debugMode and pbTriggerShort and not shortPBSignal
     log.info(str.format('WT3 SHORT BLOCKED | family=pullback_continuation | type=pullback_continuation | bar={0} | ctxScore={1}/{2} min={3} | profile={4}'
@@ -1750,9 +1868,30 @@ if debugMode and pbTriggerShort and not shortPBSignal
          str.tostring(bar_index), str.tostring(shortContextScorePB, '#.#'), str.tostring(maxContextScorePB, '#.#'), str.tostring(_effMinScore, '#.#'), profileMode,
          str.tostring(mtfShortOkPB), str.tostring(structureShortOk), str.tostring(pocRejectRecent), str.tostring(bearVolSpike),
          str.tostring(shortPullbackSetupOk), str.tostring(shortLocationOk), str.tostring(shortRangeLocationOk), str.tostring(shortSwingLocationOk), str.tostring(shortRoomOk), str.tostring(shortPBMidlineOk), str.tostring(shortSetupVolumeOkPB),
-         str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk), str.tostring(shortImpulseATR, '#.#')) + _regimeStr + _tfBiasStr)
+         str.tostring(shortPullbackSetupOk), str.tostring(shortPullbackTrendOk), str.tostring(shortPullbackLocationOk), str.tostring(shortImpulseATR, '#.#')) + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 
 if debugMode and erTriggerShort and not shortERSignal
+    _erShortReason = 'other'
+    if not earlyShortTFOk
+        _erShortReason := 'tf'
+    else if not earlyShortRejectArea
+        _erShortReason := 'area'
+    else if not earlyShortRejectBar
+        _erShortReason := 'bar'
+    else if _erLocalRequired and not earlyLocalShortConfirm
+        _erShortReason := 'local_gate'
+    else if not earlyMomentumBear
+        _erShortReason := 'momentum'
+    else if not earlyShortRoomOk
+        _erShortReason := 'room'
+    else if not shortERBiasOk
+        _erShortReason := 'bias'
+    else if not shortERStructureOk
+        _erShortReason := 'struct'
+    else if not mtfShortOkPB
+        _erShortReason := 'mtf'
+    else if earlyShortContextScore < earlyRejectMinScore
+        _erShortReason := 'score'
     log.info(str.format('WT3 SHORT BLOCKED | family=early_rejection | type=early_rejection | bar={0} | ctxScore={1}/{2} min={3} | profile={4}'
          + ' | mtfOk={5} tfOk={6} erOk={7} area={8} barOk={9} local={10} momentum={11}'
          + ' | FLOW: mfi={12} mfiBear={13} stochK={14} stochD={15} stochBear={16}'
@@ -1760,7 +1899,7 @@ if debugMode and erTriggerShort and not shortERSignal
          str.tostring(bar_index), str.tostring(earlyShortContextScore, '#.#'), str.tostring(maxContextScoreER, '#.#'), str.tostring(earlyRejectMinScore, '#.#'), profileMode,
          str.tostring(mtfShortOkPB), str.tostring(earlyShortTFOk), str.tostring(shortERSetupPass), str.tostring(earlyShortRejectArea), str.tostring(earlyShortRejectBar), str.tostring(earlyLocalShortConfirm), str.tostring(earlyMomentumBear),
          str.tostring(mfiVal, '#.#'), str.tostring(mfiBearConfirm), str.tostring(stochRsiK, '#.#'), str.tostring(stochRsiD, '#.#'), str.tostring(stochRsiBearConfirm),
-         str.tostring(earlyShortRoomOk), str.tostring(shortPBRoomOk), str.tostring(shortRangeLocationOk), str.tostring(nearPullbackEma), str.tostring(shortSetupVolumeOkPB)) + ' | ERSTRUCT: shortOk=' + str.tostring(shortERStructureOk) + _regimeStr + _tfBiasStr)
+         str.tostring(earlyShortRoomOk), str.tostring(shortPBRoomOk), str.tostring(shortRangeLocationOk), str.tostring(nearPullbackEma), str.tostring(shortSetupVolumeOkPB)) + ' | reason=' + _erShortReason + ' | ERSTRUCT: shortOk=' + str.tostring(shortERStructureOk) + _rawWtCrossStr + _playbookStr + _regimeStr + _tfBiasStr)
 // ─── Strategy inputs (generated) ─────────────────────────────────────────────
 g_strat       = "Strategy"
 tradeDirInput = input.string("Both", "Trade Direction",
@@ -1780,10 +1919,10 @@ indicatorExitNeedsTargetOrStructure = input.bool(false, "Indicator Exits Need Ta
 oneHourExecutionMode = input.string("Bracket SL/TP", "1H Execution Mode",
      options=["Bracket SL/TP", "Stop + Signal Exit"], group=g_strat,
      tooltip="Concept test from test57/test58. Stop + Signal Exit keeps the protective stop but removes the fixed TP limit on 1H. test58 rejected it as a default because full-stop losses grew faster than signal-exit winners. 15m and 4H always keep bracket SL/TP.")
-enableBE      = input.bool(false, "Break-Even Stop", group=g_strat,
-     tooltip="Move SL to entry price once the trade is N×ATR in profit.")
-beATRInput    = input.float(1.0,  "Break-Even Trigger (ATR×)", minval=0.1, step=0.1, group=g_strat,
-     tooltip="ATR distance from entry that triggers the break-even move.")
+enableBE      = input.bool(true, "Break-Even Stop", group=g_strat,
+     tooltip="Move SL to entry price once the trade is N×R in profit.")
+beATRInput    = input.float(1.0,  "Break-Even Trigger (R×)", minval=0.1, step=0.1, group=g_strat,
+     tooltip="R-multiple of the initial stop distance that triggers the break-even move. 1.0 = move SL to entry once 1R in profit.")
 
 var int _lastExitBar = na
 _justClosed = strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
@@ -1828,6 +1967,8 @@ var int _longAdvPivotBarExec = na
 var int _shortAdvPivotBarExec = na
 var bool _longTargetHitExec = false
 var bool _shortTargetHitExec = false
+var bool _longBETriggered = false
+var bool _shortBETriggered = false
 var string _longFamilyExec = ''
 var string _shortFamilyExec = ''
 var string _longEntryStructExec = ''
@@ -1975,6 +2116,8 @@ if _flatExec
     _shortAdvPivotBarExec := na
     _longTargetHitExec := false
     _shortTargetHitExec := false
+    _longBETriggered := false
+    _shortBETriggered := false
     _longFamilyExec := ''
     _shortFamilyExec := ''
     _longEntryStructExec := ''
@@ -2035,8 +2178,11 @@ if strategy.position_size > 0
     if not _longTargetHitExec and not na(_longTargetExec) and high >= _longTargetExec
         _longTargetHitExec := true
         _longTargetBarExec := bar_index
+    if enableBE and not na(_longRiskExec) and high >= strategy.position_avg_price + beATRInput * _longRiskExec
+        _longBETriggered := true
+    _longBEStop = _longBETriggered ? strategy.position_avg_price : _longSL
     _longGivebackStop = useExitGiveback and useStrategyGivebackStop and _longMfeExecR >= _longExecProtectR ? strategy.position_avg_price + _longExecGivebackR * _longRiskExec : _longSL
-    strategy.exit("Long Exit", "Long", stop=math.max(_longSL, _longGivebackStop), limit=_longExecLimit)
+    strategy.exit("Long Exit", "Long", stop=math.max(_longBEStop, _longGivebackStop), limit=_longExecLimit)
 if strategy.position_size < 0
     _shortLowExec := _shortLowNowExec
     _shortHighExec := _shortHighNowExec
@@ -2049,8 +2195,11 @@ if strategy.position_size < 0
     if not _shortTargetHitExec and not na(_shortTargetExec) and low <= _shortTargetExec
         _shortTargetHitExec := true
         _shortTargetBarExec := bar_index
+    if enableBE and not na(_shortRiskExec) and low <= strategy.position_avg_price - beATRInput * _shortRiskExec
+        _shortBETriggered := true
+    _shortBEStop = _shortBETriggered ? strategy.position_avg_price : _shortSL
     _shortGivebackStop = useExitGiveback and useStrategyGivebackStop and _shortMfeExecR >= _shortExecProtectR ? strategy.position_avg_price - _shortExecGivebackR * _shortRiskExec : _shortSL
-    strategy.exit("Short Exit", "Short", stop=math.min(_shortSL, _shortGivebackStop), limit=_shortExecLimit)
+    strategy.exit("Short Exit", "Short", stop=math.min(_shortBEStop, _shortGivebackStop), limit=_shortExecLimit)
 
 // ─── Strategy-managed exits (real position state, same exit families) ─────────
 _execIndicatorExit = indicatorExitExecMode == "All TF" or (indicatorExitExecMode == "1H Only" and _chartSec == 3600)
@@ -2071,7 +2220,7 @@ if longEntrySignal and _canLong and _canEntry and _canOpenLongNow
     _longSL := longStop
     _longTP := longEntryTakeProfit
     _pendingLongFamilyExec := longRRSignal ? 'rr' : longPBSignal ? 'pb' : 'er'
-    _pendingLongStructExec := 'hh=' + str.tostring(hhDetected) + ',hl=' + str.tostring(hlDetected) + ',lh=' + str.tostring(lhDetected) + ',ll=' + str.tostring(llDetected) + ',longStruct=' + str.tostring(structureLongOk) + ',shortStruct=' + str.tostring(structureShortOk) + ',rangePos=' + str.tostring(setupRangePos, '#.##') + ',target=' + str.tostring(longEntryTakeProfit, format.mintick) + ',stop=' + str.tostring(longStop, format.mintick)
+    _pendingLongStructExec := 'hh=' + str.tostring(hhDetected) + ',hl=' + str.tostring(hlDetected) + ',lh=' + str.tostring(lhDetected) + ',ll=' + str.tostring(llDetected) + ',longStruct=' + str.tostring(structureLongOk) + ',shortStruct=' + str.tostring(structureShortOk) + ',structurePhase=' + _playbookStructure + ',playbook=' + _longPlaybook + ',wtBullDiv=' + str.tostring(wtBullDiv) + ',wtBearDiv=' + str.tostring(wtBearDiv) + ',highConfirmBars=' + str.tostring(barsSinceHighPivotConfirm) + ',lowConfirmBars=' + str.tostring(barsSinceLowPivotConfirm) + ',highActualBars=' + str.tostring(barsSinceHighPivotActual) + ',lowActualBars=' + str.tostring(barsSinceLowPivotActual) + ',rangePos=' + str.tostring(setupRangePos, '#.##') + ',target=' + str.tostring(longEntryTakeProfit, format.mintick) + ',stop=' + str.tostring(longStop, format.mintick)
     _pendingLongScoreExec := longRRSignal ? longContextScoreRR : longPBSignal ? longContextScorePB : earlyLongContextScore
     _pendingLongTargetRoomRExec := longTargetRoomR
     _pendingLongTargetRoomATRExec := longTargetRoomATR
@@ -2081,16 +2230,8 @@ if shortEntrySignal and _canShort and _canEntry and _canOpenShortNow
     _shortSL := shortStop
     _shortTP := shortEntryTakeProfit
     _pendingShortFamilyExec := shortRRSignal ? 'rr' : shortPBSignal ? 'pb' : 'er'
-    _pendingShortStructExec := 'hh=' + str.tostring(hhDetected) + ',hl=' + str.tostring(hlDetected) + ',lh=' + str.tostring(lhDetected) + ',ll=' + str.tostring(llDetected) + ',longStruct=' + str.tostring(structureLongOk) + ',shortStruct=' + str.tostring(structureShortOk) + ',rangePos=' + str.tostring(setupRangePos, '#.##') + ',target=' + str.tostring(shortEntryTakeProfit, format.mintick) + ',stop=' + str.tostring(shortStop, format.mintick)
+    _pendingShortStructExec := 'hh=' + str.tostring(hhDetected) + ',hl=' + str.tostring(hlDetected) + ',lh=' + str.tostring(lhDetected) + ',ll=' + str.tostring(llDetected) + ',longStruct=' + str.tostring(structureLongOk) + ',shortStruct=' + str.tostring(structureShortOk) + ',structurePhase=' + _playbookStructure + ',playbook=' + _shortPlaybook + ',wtBullDiv=' + str.tostring(wtBullDiv) + ',wtBearDiv=' + str.tostring(wtBearDiv) + ',highConfirmBars=' + str.tostring(barsSinceHighPivotConfirm) + ',lowConfirmBars=' + str.tostring(barsSinceLowPivotConfirm) + ',highActualBars=' + str.tostring(barsSinceHighPivotActual) + ',lowActualBars=' + str.tostring(barsSinceLowPivotActual) + ',rangePos=' + str.tostring(setupRangePos, '#.##') + ',target=' + str.tostring(shortEntryTakeProfit, format.mintick) + ',stop=' + str.tostring(shortStop, format.mintick)
     _pendingShortScoreExec := shortRRSignal ? shortContextScoreRR : shortPBSignal ? shortContextScorePB : earlyShortContextScore
     _pendingShortTargetRoomRExec := shortTargetRoomR
     _pendingShortTargetRoomATRExec := shortTargetRoomATR
     strategy.entry("Short", strategy.short)
-
-// ─── Break-even management (generated) ────────────────────────────────────────
-if enableBE
-    _beAtr = ta.atr(14) * beATRInput
-    if strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
-        strategy.exit("Long BE", "Long", stop=strategy.position_avg_price)
-    if strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
-        strategy.exit("Short BE", "Short", stop=strategy.position_avg_price)
