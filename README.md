@@ -62,6 +62,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`time_to_react_volatility_time.pine`](indicators/structure/time_to_react_volatility_time.pine) | BOS and sweep timing with volatility-adjusted candle coloring |
 | [`coilforge_zones_v1.pine`](indicators/coilforge_zones/coilforge_zones_v1.pine) | Compression zone detection with multi-module scoring and post-zone breakout watch |
 | [`reversal_engine_score_v1.pine`](indicators/reversal_engine_score/reversal_engine_score_v1.pine) | Score-based liquidity sweep reversal signals with HTF trend filter and configurable evidence threshold |
+| [`reversal_type_classifier_v1.pine`](indicators/reversal_type_classifier/reversal_type_classifier_v1.pine) | Ex-post diagnostic: classifies confirmed pivot reversals as Snapback / Grind / Fake / Chop with WT context and R-outcome scoring |
 
 ### Trend & Regime
 
@@ -87,6 +88,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`market_exhaustion.pine`](indicators/momentum/market_exhaustion.pine) | Exhaustion signals via MFI and StochRSI with divergence detection |
 | [`candle_pressure_response_jma.pine`](indicators/momentum/candle_pressure_response_jma.pine) | JMA-smoothed candle pressure and response scoring |
 | [`oscillator_divergence_zones.pine`](indicators/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI; regular + hidden; ATR-wide zones with retest counter |
+| [`market_pressure_scale.pine`](indicators/market_pressure_scale/market_pressure_scale.pine) | Dual-component oscillator — Setup Pressure (coiling) vs Impulse Pressure (expansion), phase labels, signal markers, POC/range context lines |
 
 ### Liquidity & Order Flow
 

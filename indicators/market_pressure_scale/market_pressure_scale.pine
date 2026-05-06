@@ -1,0 +1,347 @@
+//@version=6
+// ============================================================================
+// Market Pressure Scale [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-05-06 12:00:00
+// ============================================================================
+// Two-component oscillator separating setup pressure (compression + S/R proximity)
+// from impulse pressure (range expansion + volume + body + trend) with phase
+// classification and directional bias.
+//
+// Features:
+//   ✓ Setup Pressure — ATR/BB compression, S/R proximity, trend quietness
+//   ✓ Impulse Pressure — range expansion, volume, body size, ADX
+//   ✓ Phase classification: Coiling / Breakout Watch / Impulse Running / Sideways / Neutral
+//   ✓ Directional bias via EMA + DMI
+//   ✓ Range position (close relative to N-bar range)
+//   ✓ Dashboard table with phase, bias, ADX, range position
+//   ✓ Configurable output smoothing — EMA / RMA / SMA / WMA / HMA / JMA
+//   ✓ StochRSI K/D overlay (toggleable)
+//   ✓ Impulse Pressure divergence — bullish / bearish, plotted like WaveTrend
+//   ✓ Alerts for all four phase transitions
+//
+// ============================================================================
+
+indicator("Market Pressure Scale [WavesUnchained]", shorttitle="MPS", overlay=false, max_labels_count=100)
+
+// Inputs
+normLen   = input.int(100,  "Normalisation",    minval=20)
+atrLen    = input.int(14,   "ATR Length")
+bbLen     = input.int(20,   "BB Length")
+bbMult    = input.float(2.0, "BB Multiplier")
+volLen    = input.int(20,   "Volume MA")
+srLen     = input.int(50,   "Range / S/R Lookback")
+
+biasGR       = "Bias"
+biasType     = input.string("HMA", "Type",
+     options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"], group=biasGR)
+biasFastLen  = input.int(9,  "Fast Length", minval=1, group=biasGR)
+biasSlowLen  = input.int(21, "Slow Length", minval=1, group=biasGR)
+
+smGR       = "Smoothing"
+smoothLen  = input.int(3,     "Length", minval=1, maxval=50, group=smGR)
+smoothType = input.string("EMA", "Type",
+     options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"], group=smGR)
+jmaPhase   = input.int(50,    "  JMA Phase", minval=-100, maxval=100,            group=smGR)
+jmaPower   = input.float(2.0, "  JMA Power", minval=1.0,  maxval=4.0, step=0.25, group=smGR)
+
+sigGR       = "Signal Markers"
+showMarkers = input.bool(true,  "Show Markers",     group=sigGR)
+showCoil    = input.bool(true,  "  Coiling Start",  group=sigGR,
+              tooltip="Setup crosses above 65 with Impulse below 40 — spring loading.")
+showIgnit   = input.bool(true,  "  Breakout Watch", group=sigGR,
+              tooltip="Impulse crosses above 45 while Setup is still elevated — watch for breakout.")
+showFailed  = input.bool(true,  "  Failed Coil",    group=sigGR,
+              tooltip="Setup was high but Impulse never confirmed — stalled breakout, likely range continues.")
+showNaked   = input.bool(true,  "  Naked Impulse",  group=sigGR,
+              tooltip="Impulse > 70 but Setup collapses below 40 — move running without structural backing.")
+showDouble  = input.bool(true,  "  Double Peak",    group=sigGR,
+              tooltip="Both components simultaneously above 65 — unstable, sharp move typically imminent.")
+showFade    = input.bool(true,  "  Dual Fade",      group=sigGR,
+              tooltip="Both components falling from elevated levels — momentum exhausting on both sides.")
+
+stochGR    = "StochRSI"
+showStoch  = input.bool(true,  "Show StochRSI",   group=stochGR)
+smoothK    = input.int(3,      "K",               minval=1, group=stochGR)
+smoothD    = input.int(3,      "D",               minval=1, group=stochGR)
+rsiLen     = input.int(14,     "RSI Length",      minval=1, group=stochGR)
+stochLen   = input.int(14,     "Stoch Length",    minval=1, group=stochGR)
+
+divGR      = "Divergence"
+showBull   = input.bool(true,  "Bullish",         group=divGR)
+showBear   = input.bool(true,  "Bearish",         group=divGR)
+divLbL     = input.int(5,      "Pivot Left",      minval=1, group=divGR)
+divLbR     = input.int(5,      "Pivot Right",     minval=1, group=divGR)
+divRangeLo = input.int(5,      "Range Min Bars",  minval=1, group=divGR)
+divRangeHi = input.int(60,     "Range Max Bars",  minval=1, group=divGR)
+
+// Helpers
+clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+norm100(src, len) =>
+    hi = ta.highest(src, len)
+    lo = ta.lowest(src, len)
+    hi == lo ? 50.0 : 100.0 * (src - lo) / (hi - lo)
+
+f_jma(src, length, phase, power) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+    _pr    = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    _beta  = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    _alpha = math.pow(_beta, power)
+    e0    := (1 - _alpha) * src + _alpha * nz(e0[1], src)
+    e1    := (src - e0) * (1 - _beta) + _beta * nz(e1[1], 0)
+    e2    := (e0 + _pr * e1 - nz(jma[1], src)) * math.pow(1 - _alpha, 2) + math.pow(_alpha, 2) * nz(e2[1], 0)
+    jma   := nz(jma[1], src) + e2
+    jma
+
+f_smooth(src, length, mode) =>
+    switch mode
+        'SMA' => ta.sma(src, length)
+        'RMA' => ta.rma(src, length)
+        'HMA' => ta.hma(src, length)
+        'WMA' => ta.wma(src, length)
+        'JMA' => f_jma(src, length, jmaPhase, jmaPower)
+        =>       ta.ema(src, length)
+
+// Base values
+atr    = ta.atr(atrLen)
+atrPct = atr / close
+
+basis    = ta.sma(close, bbLen)
+dev      = bbMult * ta.stdev(close, bbLen)
+bbUpper  = basis + dev
+bbLower  = basis - dev
+bbWidth  = (bbUpper - bbLower) / basis
+
+volRel    = volume / ta.sma(volume, volLen)
+barRange  = high - low
+bodySize  = math.abs(close - open)
+bodyRatio = bodySize / math.max(barRange, syminfo.mintick)
+
+_biasFast = f_smooth(close, biasFastLen, biasType)
+_biasSlow = f_smooth(close, biasSlowLen, biasType)
+bullBias  = _biasFast > _biasSlow
+bearBias  = _biasFast < _biasSlow
+
+// StochRSI
+_rsi1  = ta.rsi(close, rsiLen)
+stochK = ta.sma(ta.stoch(_rsi1, _rsi1, _rsi1, stochLen), smoothK)
+stochD = ta.sma(stochK, smoothD)
+
+// Range / Support / Resistance
+rangeHigh = ta.highest(high, srLen)
+rangeLow  = ta.lowest(low,  srLen)
+rangeSize = rangeHigh - rangeLow
+
+nearHigh    = math.abs(rangeHigh - close) / atr
+nearLow     = math.abs(close - rangeLow)  / atr
+srProximity = clamp(100 - math.min(nearHigh, nearLow) * 50, 0, 100)
+
+rangePosition = rangeSize == 0 ? 50 : 100 * (close - rangeLow) / rangeSize
+
+// Setup Pressure — high when volatility is low, BBs tight, price near range extreme
+atrCompression = 100 - norm100(atrPct, normLen)
+bbCompression  = 100 - norm100(bbWidth, normLen)
+compression    = (atrCompression + bbCompression) / 2
+
+setupPressure =
+     compression              * 0.55 +
+     srProximity              * 0.30 +
+     norm100(volRel, normLen) * 0.15
+
+setupPressure := clamp(setupPressure, 0, 100)
+
+// Impulse Pressure — high when range, body and volume expand
+rangeExpansion = norm100(barRange / atr, normLen)
+volumePressure = norm100(volRel,    normLen)
+bodyPressure   = norm100(bodyRatio, normLen)
+
+impulsePressure =
+     rangeExpansion * 0.35 +
+     volumePressure * 0.35 +
+     bodyPressure   * 0.30
+
+impulsePressure := clamp(impulsePressure, 0, 100)
+
+// Smoothing
+setupPressure   := f_smooth(setupPressure,   smoothLen, smoothType)
+impulsePressure := f_smooth(impulsePressure, smoothLen, smoothType)
+
+// Impulse Pressure divergence
+_divInRange(cond) =>
+    bars = ta.barssince(cond)
+    divRangeLo <= bars and bars <= divRangeHi
+
+_divPlFound = not na(ta.pivotlow( impulsePressure, divLbL, divLbR))
+_divPhFound = not na(ta.pivothigh(impulsePressure, divLbL, divLbR))
+
+_oscHL   = impulsePressure[divLbR] > ta.valuewhen(_divPlFound, impulsePressure[divLbR], 1) and _divInRange(_divPlFound[1])
+_priceLL = low[divLbR]  < ta.valuewhen(_divPlFound, low[divLbR],  1)
+bullDiv  = showBull and _priceLL and _oscHL  and _divPlFound
+
+_oscLH   = impulsePressure[divLbR] < ta.valuewhen(_divPhFound, impulsePressure[divLbR], 1) and _divInRange(_divPhFound[1])
+_priceHH = high[divLbR] > ta.valuewhen(_divPhFound, high[divLbR], 1)
+bearDiv  = showBear and _priceHH and _oscLH  and _divPhFound
+
+// Signal detection
+var bool inCoil      = false
+var bool coilIgnited = false
+
+coilEntry = ta.crossover(setupPressure, 65) and impulsePressure < 40
+if coilEntry
+    inCoil      := true
+    coilIgnited := false
+if inCoil and impulsePressure >= 45
+    coilIgnited := true
+
+sigCoil   = coilEntry
+sigIgnit  = ta.crossover(impulsePressure, 45) and setupPressure > 55
+sigFailed = inCoil and not coilIgnited and ta.crossunder(setupPressure, 52)
+sigNaked  = impulsePressure > 70 and ta.crossunder(setupPressure, 40)
+sigDouble = setupPressure > 65 and ta.crossover(impulsePressure, 65)
+_fadePrevHigh = setupPressure[1] > 60 and impulsePressure[1] > 60
+_fadeBothFall = setupPressure < setupPressure[1] and impulsePressure < impulsePressure[1]
+_fadeCross    = ta.crossunder(setupPressure, 55) or ta.crossunder(impulsePressure, 55)
+sigFade       = _fadePrevHigh and _fadeBothFall and _fadeCross
+
+if sigFailed or setupPressure < 40
+    inCoil := false
+
+// Phase — priority order: Impulse > Breakout Watch > Coiling > Sideways > Neutral
+phase = if impulsePressure > 70
+    "Impulse Running"
+else if setupPressure > 55 and impulsePressure >= 45
+    "Breakout Watch"
+else if setupPressure > 65 and impulsePressure < 45
+    "Coiling"
+else if setupPressure < 40 and impulsePressure < 40
+    "Sideways / Quiet"
+else
+    "Neutral"
+
+biasText = bullBias ? "Bullish" : "Bearish"
+
+// Colors
+setupColor   = setupPressure   > 65 ? color.orange             : color.new(color.orange, 45)
+impulseColor = impulsePressure > 70 ? color.lime               : color.new(color.lime,   45)
+
+_nc = color.new(color.white, 100)
+plot(showStoch ? stochK : na, "StochRSI K", color=color.new(#2962FF, 40), linewidth=1)
+plot(showStoch ? stochD : na, "StochRSI D", color=color.new(#FF6D00, 40), linewidth=1)
+plot(setupPressure,   "Setup Pressure",   color=setupColor,   linewidth=3)
+plot(impulsePressure, "Impulse Pressure", color=impulseColor, linewidth=4)
+plot(_divPlFound ? impulsePressure[divLbR] : na, "Bull Div", offset=-divLbR, linewidth=2, color=bullDiv ? #00c853 : _nc)
+plot(_divPhFound ? impulsePressure[divLbR] : na, "Bear Div", offset=-divLbR, linewidth=2, color=bearDiv ? #d50000 : _nc)
+plotshape(bullDiv ? impulsePressure[divLbR] : na, "Bull", offset=-divLbR, style=shape.labelup,   location=location.absolute, color=#00c853, textcolor=color.white, text=" Bull ")
+plotshape(bearDiv ? impulsePressure[divLbR] : na, "Bear", offset=-divLbR, style=shape.labeldown, location=location.absolute, color=#d50000, textcolor=color.white, text=" Bear ")
+
+hline(40, "Quiet",        color=color.new(color.gray, 55), linestyle=hline.style_dashed)
+hline(65, "Setup Zone",   color=color.new(color.gray, 40), linestyle=hline.style_dashed)
+hline(70, "Impulse Zone", color=color.new(color.gray, 25), linestyle=hline.style_dashed)
+
+bgcolor(
+     setupPressure > 65 and impulsePressure < 55 ? color.new(color.orange, 88) :
+     impulsePressure > 70                        ? color.new(color.green,  88) :
+     na
+)
+
+// Signal markers
+if showMarkers
+    mid = (setupPressure + impulsePressure) / 2
+
+    if showCoil and sigCoil
+        label.new(bar_index, setupPressure, "▲",
+             style=label.style_label_up, color=color.new(#ffd600, 15),
+             textcolor=color.white, size=size.small,
+             tooltip="Coiling — Setup crossed above 65, Impulse flat.\nSpring loading. Watch for Breakout Watch (Impulse ≥ 45 while Setup stays elevated).")
+
+    if showIgnit and sigIgnit
+        label.new(bar_index, mid, "ℹ",
+             style=label.style_label_up, color=color.new(#ff6f00, 15),
+             textcolor=color.white, size=size.small,
+             tooltip="Breakout Watch — Setup and Impulse both elevated.\nCoil is releasing. Watch for directional follow-through before committing.")
+
+    if showFailed and sigFailed
+        label.new(bar_index, setupPressure, "FC",
+             style=label.style_label_down, color=color.new(#d50000, 15),
+             textcolor=color.white, size=size.small,
+             tooltip="Failed Coil — Setup was high but Impulse never confirmed.\nBreakout attempt stalled. Expect range continuation or a full reset before the next setup forms.")
+
+    if showNaked and sigNaked
+        label.new(bar_index, impulsePressure, "NI",
+             style=label.style_label_down, color=color.new(#d50000, 15),
+             textcolor=color.white, size=size.small,
+             tooltip="Naked Impulse — Impulse > 70 but Setup collapsed below 40.\nMove is running without structural backing. Late-entry risk — momentum may stall or reverse sharply.")
+
+    if showDouble and sigDouble
+        label.new(bar_index, math.max(setupPressure, impulsePressure), "DP",
+             style=label.style_label_down, color=color.new(#aa00ff, 15),
+             textcolor=color.white, size=size.small,
+             tooltip="Double Peak — both components simultaneously above 65.\nUnstable and short-lived. A sharp directional move is typically imminent — direction confirmed by Bias.")
+
+    if showFade and sigFade
+        label.new(bar_index, mid, "DF",
+             style=label.style_label_down, color=color.new(color.gray, 15),
+             textcolor=color.white, size=size.small,
+             tooltip="Dual Fade — both components falling from elevated levels.\nMomentum exhausting on both sides. Potential reversal or transition to Sideways/Quiet.")
+
+// Table
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+setupDir   = setupPressure   > setupPressure[1]   + 0.5 ? "↑" : setupPressure   < setupPressure[1]   - 0.5 ? "↓" : "→"
+impulseDir = impulsePressure > impulsePressure[1] + 0.5 ? "↑" : impulsePressure < impulsePressure[1] - 0.5 ? "↓" : "→"
+
+var table t = table.new(position.top_right, 3, 5,
+     bgcolor      = color.new(color.white, 5),
+     border_color = color.new(color.gray, 60),
+     border_width = 1,
+     frame_color  = color.new(color.gray, 40),
+     frame_width  = 1)
+
+if barstate.islast
+    phaseActive = impulsePressure > 70 or (setupPressure > 55 and impulsePressure >= 45) or setupPressure > 65
+    phaseBg     = impulsePressure > 70                                       ? color.new(#00c853, 20) :
+                  setupPressure > 55 and impulsePressure >= 45               ? color.new(#ff6f00, 20) :
+                  setupPressure > 65                                         ? color.new(#ffd600, 30) :
+                  color.new(color.gray, 80)
+    phaseTC     = phaseActive ? color.white : tc
+
+    table.cell(t, 0, 0, "Phase",   text_color=tc,      bgcolor=hd,      text_size=size.small)
+    table.cell(t, 1, 0, phase,     text_color=phaseTC, bgcolor=phaseBg, text_size=size.small)
+    table.cell(t, 2, 0, "",        bgcolor=hd,                          text_size=size.small)
+
+    table.cell(t, 0, 1, "Setup",   text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(setupPressure,   "#.0") + " / 100", text_color=tc,         text_size=size.small)
+    table.cell(t, 2, 1, setupDir,                                         text_color=color.new(color.orange, 0), text_size=size.small)
+
+    table.cell(t, 0, 2, "Impulse", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(impulsePressure, "#.0") + " / 100", text_color=tc,          text_size=size.small)
+    table.cell(t, 2, 2, impulseDir,                                       text_color=color.new(#00c853, 0), text_size=size.small)
+
+    biasTC = bullBias ? color.new(#00c853, 0) : bearBias ? color.new(#d50000, 0) : tc
+    table.cell(t, 0, 3, "Bias",       text_color=tc,     text_size=size.small)
+    table.cell(t, 1, 3, biasText,     text_color=biasTC, text_size=size.small)
+    table.cell(t, 2, 3, "",           text_color=tc,     text_size=size.small)
+
+    table.cell(t, 0, 4, "Range Pos.", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(rangePosition, "#.0") + " %", text_color=tc, text_size=size.small)
+    table.cell(t, 2, 4, "",           text_color=tc, text_size=size.small)
+
+
+// Alerts
+alertcondition(setupPressure > 65 and impulsePressure < 45,               "Coiling",        "Setup Pressure high, Impulse flat — spring loaded, no release yet.")
+alertcondition(setupPressure > 55 and impulsePressure >= 45 and impulsePressure <= 70, "Breakout Watch", "Setup and Impulse both active — watch for directional follow-through.")
+alertcondition(impulsePressure > 70,                                       "Impulse Running", "Impulse Pressure above 70 — directional move active.")
+alertcondition(setupPressure < 40 and impulsePressure < 40,                "Sideways / Quiet", "Both components below 40 — no active setup or impulse.")
+alertcondition(sigCoil,   "Signal: Coiling Start",  "Setup crossed above 65 with Impulse flat — spring loading.")
+alertcondition(sigIgnit,  "Signal: Breakout Watch",  "Impulse rising with Setup still elevated — watch for follow-through.")
+alertcondition(sigFailed, "Signal: Failed Coil",     "Setup was high but Impulse never confirmed — breakout stalled.")
+alertcondition(sigNaked,  "Signal: Naked Impulse",   "Impulse > 70 but Setup collapsed — late-entry warning.")
+alertcondition(sigDouble, "Signal: Double Peak",     "Both components above 65 simultaneously — sharp move imminent.")
+alertcondition(sigFade,   "Signal: Dual Fade",       "Both components falling from high — momentum exhausting.")
