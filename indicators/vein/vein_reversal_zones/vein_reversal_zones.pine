@@ -1,0 +1,561 @@
+//@version=6
+// ============================================================================
+// Vein: Reversal Zones [WavesUnchained]
+// Version: 2.0
+// Author: WavesUnchained
+// Build: 2026-05-06
+// ============================================================================
+// S/R zones from forward-validated reversal bars + live signal engine.
+// Zones show only the nearest N supports/resistances within ATR range.
+// Nearby zones merge; touch counter tracks revisits.
+//
+// Features:
+//   ✓ Support zones [low→close] and resistance zones [close→high] of reversal bars
+//   ✓ Visibility filter: ATR range + max nearest N per direction
+//   ✓ Merge nearby zones (same direction, within ATR threshold)
+//   ✓ Touch counter per zone
+//   ✓ Optional deletion when price closes fully through zone
+//   ✓ 5 selectable signal triggers: WaveTrend, RSI Reclaim, Supertrend, Candle Sweep, EMA/MACD
+//   ✓ Signal modes: Known Zones only / Candidates / Both
+//   ✓ Cooldown per direction
+//
+// ============================================================================
+
+indicator("Vein: Reversal Zones [WavesUnchained]", "Vein RZones", overlay=true,
+     max_boxes_count=50, max_labels_count=200)
+
+// ─── Groups ──────────────────────────────────────────────────────────────────
+g_label   = "Labeling Parameters"
+g_quality = "Quality Criteria"
+g_cluster = "Cluster Filter"
+g_zones   = "Zones"
+g_signals = "Signals"
+g_wt      = "  Trigger: WaveTrend"
+g_rsi     = "  Trigger: RSI Reclaim"
+g_st      = "  Trigger: Supertrend"
+g_sweep   = "  Trigger: Candle Sweep"
+g_ema     = "  Trigger: MA / Momentum"
+g_display = "Display"
+
+// ─── Labeling Parameters ─────────────────────────────────────────────────────
+int   lblAtrLen     = input.int(14,   "ATR Length",                        minval=1,             group=g_label)
+int   forwardBars   = input.int(8,    "Forward Bars (min target)",          minval=1, maxval=50,  group=g_label)
+int   extendedBars  = input.int(16,   "Extended Bars (strong target)",      minval=2, maxval=80,  group=g_label)
+float targetATR     = input.float(1.5,"Weak Target (ATR×)",                 minval=0.1, step=0.1, group=g_label)
+float strongATR_lbl = input.float(2.5,"Strong Target (ATR×)",               minval=0.5, step=0.1, group=g_label)
+float maxAdverseATR = input.float(0.6,"Max Adverse Move (ATR×)",            minval=0.1, step=0.1, group=g_label)
+bool  useClose      = input.bool(false,"Use Close instead of High/Low",                           group=g_label)
+
+// ─── Quality Criteria ────────────────────────────────────────────────────────
+int   fastBarsThresh  = input.int(4,   "Fast Reversal: bars to target ≤",  minval=1, maxval=20,  group=g_quality)
+float maeStrongThresh = input.float(0.3,"Strong: Max Adverse ≤ ATR×",       minval=0.0, step=0.1, group=g_quality)
+
+// ─── Cluster Filter ──────────────────────────────────────────────────────────
+int minGapBars = input.int(3, "Min Bars Between Labels (same direction)", minval=0, maxval=20, group=g_cluster)
+
+// ─── Zone Settings ───────────────────────────────────────────────────────────
+bool  showStrongSupport = input.bool(true,  "Strong Support (label +2)",     group=g_zones)
+bool  showWeakSupport   = input.bool(true,  "Weak Support   (label +1)",     group=g_zones)
+bool  showStrongResist  = input.bool(true,  "Strong Resistance (label −2)",  group=g_zones)
+bool  showWeakResist    = input.bool(true,  "Weak Resistance   (label −1)",  group=g_zones)
+int   maxStoredZones    = input.int(40,  "Max Stored Zones",           minval=4, maxval=100,group=g_zones)
+int   maxNearSupport    = input.int(2,   "Max Visible Supports (nearest)",   minval=1, maxval=8,  group=g_zones)
+int   maxNearResist     = input.int(2,   "Max Visible Resistances (nearest)",minval=1, maxval=8,  group=g_zones)
+float visibleAtrRange   = input.float(8.0,"Visible Zone Range (ATR×)",       minval=1.0, step=0.5, group=g_zones)
+float mergeDistATR      = input.float(0.5,"Merge Nearby Zones (ATR×, 0=off)",minval=0.0, step=0.1, group=g_zones)
+bool  deleteBroken      = input.bool(true, "Delete When Price Closes Through",group=g_zones)
+int   extendBars        = input.int(100,  "Extend Right (bars)",             minval=10, maxval=500, group=g_zones)
+
+// ─── Signal Settings ─────────────────────────────────────────────────────────
+string signalMode      = input.string("Known Zones", "Signal Mode",
+     options=["Known Zones", "Candidates", "Both"], group=g_signals,
+     tooltip="Known Zones: fires only when near an existing zone.\nCandidates: fires on trigger regardless of zone.\nBoth: fires always; solid arrow = zone-confluent, outline = candidate only.")
+string sigRequirement  = input.string("Any", "Trigger Requirement",
+     options=["Any", "2+"], group=g_signals,
+     tooltip="Any: one enabled trigger suffices.\n2+: at least two must fire simultaneously.")
+float zoneProxATR      = input.float(0.5, "Zone Proximity (ATR×)", minval=0.1, step=0.1, group=g_signals,
+     tooltip="Max distance from zone mid to count as 'in zone' for signal gate and arrow style.")
+int   cooldownBars     = input.int(8, "Cooldown After Signal (bars)", minval=0, group=g_signals)
+
+// ─── WaveTrend ───────────────────────────────────────────────────────────────
+bool  useWT     = input.bool(true,   "Use WaveTrend Cross",                group=g_wt)
+int   wtChLen   = input.int(10,      "  Channel Length", minval=1,         group=g_wt)
+int   wtAvgLen  = input.int(21,      "  Average Length", minval=1,         group=g_wt)
+float wtOsLevel = input.float(-53.0, "  OS Level (long)",  step=1.0,       group=g_wt)
+float wtObLevel = input.float(53.0,  "  OB Level (short)", step=1.0,       group=g_wt)
+
+// ─── RSI Reclaim ─────────────────────────────────────────────────────────────
+bool  useRSI      = input.bool(false, "Use RSI Reclaim",                   group=g_rsi)
+int   rsiLen      = input.int(14,    "  RSI Length",   minval=1,           group=g_rsi)
+float rsiOsLevel  = input.float(35.0,"  OS Level (long)",  step=1.0,       group=g_rsi)
+float rsiObLevel  = input.float(65.0,"  OB Level (short)", step=1.0,       group=g_rsi)
+
+// ─── Supertrend ──────────────────────────────────────────────────────────────
+bool  useST     = input.bool(true,  "Use Supertrend Flip",                 group=g_st)
+int   stAtrLen  = input.int(10,     "  ATR Length",  minval=1,             group=g_st)
+float stFactor  = input.float(3.0,  "  Factor",      minval=0.5, step=0.5, group=g_st)
+
+// ─── Candle Sweep ────────────────────────────────────────────────────────────
+bool  useSweep  = input.bool(true,  "Use Candle Sweep (liquidity)",        group=g_sweep)
+int   sweepLen  = input.int(10,     "  Swing Lookback (bars)", minval=3,   group=g_sweep)
+
+// ─── MA / Momentum ───────────────────────────────────────────────────────────
+bool   useEMA    = input.bool(true,   "Use MA Reclaim + MACD",              group=g_ema)
+int    emaLen    = input.int(20,      "  MA Length",    minval=1,           group=g_ema)
+string emaType   = input.string("RMA","  MA Type", options=["EMA","RMA","SMA","WMA","HMA","JMA"], group=g_ema)
+int    jmaPhase  = input.int(50,      "  JMA Phase",   minval=-100, maxval=100, group=g_ema,
+     tooltip="Only relevant when MA Type = JMA.")
+float  jmaPower  = input.float(2.0,   "  JMA Power",   minval=1.0, maxval=4.0, step=0.25, group=g_ema,
+     tooltip="Only relevant when MA Type = JMA.")
+int   macdFast  = input.int(12,      "  MACD Fast",    minval=1,           group=g_ema)
+int   macdSlow  = input.int(26,      "  MACD Slow",    minval=1,           group=g_ema)
+int   macdSig   = input.int(9,       "  MACD Signal",  minval=1,           group=g_ema)
+
+// ─── Display ─────────────────────────────────────────────────────────────────
+color strongSuppColor = input.color(color.new(#00c853, 0), "Strong Support Color",    group=g_display)
+color weakSuppColor   = input.color(color.new(#00c853, 0), "Weak Support Color",      group=g_display)
+color strongResColor  = input.color(color.new(#d50000, 0), "Strong Resistance Color", group=g_display)
+color weakResColor    = input.color(color.new(#d50000, 0), "Weak Resistance Color",   group=g_display)
+bool  showTouches     = input.bool(true, "Show Touch Count on Zone",       group=g_display)
+bool  showGrade       = input.bool(true, "Show Grade Label (★★ / ★)",      group=g_display)
+
+// ─── Labeler Core ────────────────────────────────────────────────────────────
+atrVal = ta.atr(lblAtrLen)
+
+int bufSize    = math.max(forwardBars, extendedBars) + 1
+int evalOffset = bufSize - 1
+
+var array<float> _bufClose = array.new_float(bufSize, na)
+var array<float> _bufHigh  = array.new_float(bufSize, na)
+var array<float> _bufLow   = array.new_float(bufSize, na)
+var array<float> _bufATR   = array.new_float(bufSize, na)
+
+array.shift(_bufClose)
+array.push(_bufClose, close)
+array.shift(_bufHigh)
+array.push(_bufHigh, high)
+array.shift(_bufLow)
+array.push(_bufLow, low)
+array.shift(_bufATR)
+array.push(_bufATR, atrVal)
+
+float _startClose = array.get(_bufClose, 0)
+float _startATR   = array.get(_bufATR,   0)
+bool  _canEval    = not na(_startClose) and not na(_startATR) and _startATR > 0 and bar_index >= evalOffset
+
+f_evalBull(array<float> hi, array<float> lo, array<float> cl, int bars, float refC, float atr, float tgt, float maxAdv, bool clOnly) =>
+    float mae   = 0.0
+    int   barsT = bars
+    bool  hit   = false
+    bool  stop  = false
+    for i = 1 to bars
+        float bHi = clOnly ? array.get(cl, i) : array.get(hi, i)
+        float bLo = clOnly ? array.get(cl, i) : array.get(lo, i)
+        mae := math.max(mae, refC - bLo)
+        if not stop and (refC - bLo) > maxAdv * atr
+            stop := true
+        if not hit and not stop and (bHi - refC) >= tgt * atr
+            hit   := true
+            barsT := i
+    [hit and not stop, mae, barsT]
+
+f_evalBear(array<float> hi, array<float> lo, array<float> cl, int bars, float refC, float atr, float tgt, float maxAdv, bool clOnly) =>
+    float mae   = 0.0
+    int   barsT = bars
+    bool  hit   = false
+    bool  stop  = false
+    for i = 1 to bars
+        float bHi = clOnly ? array.get(cl, i) : array.get(hi, i)
+        float bLo = clOnly ? array.get(cl, i) : array.get(lo, i)
+        mae := math.max(mae, bHi - refC)
+        if not stop and (bHi - refC) > maxAdv * atr
+            stop := true
+        if not hit and not stop and (refC - bLo) >= tgt * atr
+            hit   := true
+            barsT := i
+    [hit and not stop, mae, barsT]
+
+var bool  _bullWeak      = false
+var float _bullMAE       = 0.0
+var int   _bullBarsToTgt = 0
+var bool  _bearWeak      = false
+var float _bearMAE       = 0.0
+var int   _bearBarsToTgt = 0
+
+if _canEval
+    [h1, a1, b1] = f_evalBull(_bufHigh, _bufLow, _bufClose, forwardBars, _startClose, _startATR, targetATR, maxAdverseATR, useClose)
+    _bullWeak      := h1
+    _bullMAE       := a1
+    _bullBarsToTgt := b1
+    [h2, a2, b2] = f_evalBear(_bufHigh, _bufLow, _bufClose, forwardBars, _startClose, _startATR, targetATR, maxAdverseATR, useClose)
+    _bearWeak      := h2
+    _bearMAE       := a2
+    _bearBarsToTgt := b2
+else
+    _bullWeak      := false
+    _bullMAE       := 0.0
+    _bullBarsToTgt := forwardBars
+    _bearWeak      := false
+    _bearMAE       := 0.0
+    _bearBarsToTgt := forwardBars
+
+var bool _bullStrong = false
+var bool _bearStrong = false
+
+if _canEval
+    [h3, a3, b3] = f_evalBull(_bufHigh, _bufLow, _bufClose, extendedBars, _startClose, _startATR, strongATR_lbl, maxAdverseATR, useClose)
+    _bullStrong := h3
+    [h4, a4, b4] = f_evalBear(_bufHigh, _bufLow, _bufClose, extendedBars, _startClose, _startATR, strongATR_lbl, maxAdverseATR, useClose)
+    _bearStrong := h4
+else
+    _bullStrong := false
+    _bearStrong := false
+
+bool _bullIsStrong = _bullStrong or (_bullWeak and _bullBarsToTgt <= fastBarsThresh and _startATR > 0 and _bullMAE <= maeStrongThresh * _startATR)
+bool _bullIsWeak   = _bullWeak and not _bullIsStrong
+bool _bearIsStrong = _bearStrong or (_bearWeak and _bearBarsToTgt <= fastBarsThresh and _startATR > 0 and _bearMAE <= maeStrongThresh * _startATR)
+bool _bearIsWeak   = _bearWeak and not _bearIsStrong
+
+int _rawLabel = _bullIsStrong ? 2 : _bullIsWeak ? 1 : _bearIsStrong ? -2 : _bearIsWeak ? -1 : 0
+if (_bullIsStrong or _bullIsWeak) and (_bearIsStrong or _bearIsWeak)
+    _rawLabel := 0
+
+var int _barsSinceLastBull = 999
+var int _barsSinceLastBear = 999
+_barsSinceLastBull += 1
+_barsSinceLastBear += 1
+
+int reversalLabel = _rawLabel
+if minGapBars > 0
+    if _rawLabel > 0 and _barsSinceLastBull < minGapBars
+        reversalLabel := 0
+    if _rawLabel < 0 and _barsSinceLastBear < minGapBars
+        reversalLabel := 0
+
+if reversalLabel > 0
+    _barsSinceLastBull := 0
+if reversalLabel < 0
+    _barsSinceLastBear := 0
+
+// ─── MA Helper ───────────────────────────────────────────────────────────────
+f_jma(src, length, phase, power) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+    _pr    = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    _beta  = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    _alpha = math.pow(_beta, power)
+    e0    := (1 - _alpha) * src + _alpha * nz(e0[1], src)
+    e1    := (src - e0) * (1 - _beta) + _beta * nz(e1[1], 0)
+    e2    := (e0 + _pr * e1 - nz(jma[1], src)) * math.pow(1 - _alpha, 2) + math.pow(_alpha, 2) * nz(e2[1], 0)
+    jma   := nz(jma[1], src) + e2
+    jma
+
+f_smooth(src, length, mode) =>
+    switch mode
+        'SMA' => ta.sma(src, length)
+        'RMA' => ta.rma(src, length)
+        'HMA' => ta.hma(src, length)
+        'WMA' => ta.wma(src, length)
+        'JMA' => f_jma(src, length, jmaPhase, jmaPower)
+        =>       ta.ema(src, length)
+
+// ─── Signal Triggers ─────────────────────────────────────────────────────────
+
+// WaveTrend
+_wtSrc = hlc3
+_wtEsa = ta.ema(_wtSrc, wtChLen)
+_wtD   = ta.ema(math.abs(_wtSrc - _wtEsa), wtChLen)
+_wtCi  = _wtD != 0 ? (_wtSrc - _wtEsa) / (0.015 * _wtD) : 0.0
+_wt1   = ta.ema(_wtCi, wtAvgLen)
+_wt2   = ta.sma(_wt1, 4)
+wtLong  = useWT and ta.crossover(_wt1, _wt2)  and _wt1 <= wtOsLevel
+wtShort = useWT and ta.crossunder(_wt1, _wt2) and _wt1 >= wtObLevel
+
+// RSI Reclaim
+_rsi     = ta.rsi(close, rsiLen)
+rsiLong  = useRSI and ta.crossover(_rsi, rsiOsLevel)
+rsiShort = useRSI and ta.crossunder(_rsi, rsiObLevel)
+
+// Supertrend Flip
+[_stLine, _stDir] = ta.supertrend(stFactor, stAtrLen)
+stLong   = useST and _stDir < 0 and nz(_stDir[1], _stDir) > 0
+stShort  = useST and _stDir > 0 and nz(_stDir[1], _stDir) < 0
+
+// Candle Sweep (liquidity grab + close recovery)
+_swingLo  = ta.lowest(low,  sweepLen)[1]
+_swingHi  = ta.highest(high, sweepLen)[1]
+sweepLong  = useSweep and low  < _swingLo and close > _swingLo
+sweepShort = useSweep and high > _swingHi and close < _swingHi
+
+// MA Reclaim + MACD momentum
+_maReclaim = f_smooth(close, emaLen, emaType)
+_macdLine  = ta.ema(close, macdFast) - ta.ema(close, macdSlow)
+_macdHist  = _macdLine - ta.ema(_macdLine, macdSig)
+emaLong    = useEMA and ta.crossover(close, _maReclaim)  and _macdHist > _macdHist[1]
+emaShort   = useEMA and ta.crossunder(close, _maReclaim) and _macdHist < _macdHist[1]
+
+// Aggregate
+int trigLong  = (wtLong  ? 1 : 0) + (rsiLong  ? 1 : 0) + (stLong   ? 1 : 0) + (sweepLong  ? 1 : 0) + (emaLong  ? 1 : 0)
+int trigShort = (wtShort ? 1 : 0) + (rsiShort ? 1 : 0) + (stShort  ? 1 : 0) + (sweepShort ? 1 : 0) + (emaShort ? 1 : 0)
+bool anyLong  = sigRequirement == "Any" ? trigLong  >= 1 : trigLong  >= 2
+bool anyShort = sigRequirement == "Any" ? trigShort >= 1 : trigShort >= 2
+
+// ─── Zone Data Arrays ────────────────────────────────────────────────────────
+var array<int>   _zDir      = array.new<int>()
+var array<int>   _zGrade    = array.new<int>()
+var array<float> _zUpper    = array.new<float>()
+var array<float> _zLower    = array.new<float>()
+var array<int>   _zTouches  = array.new<int>()
+var array<bool>  _zInZone   = array.new<bool>()
+var array<int>   _zBar      = array.new<int>()
+
+// Render handles rebuilt on barstate.islast
+var array<box>   _rBox = array.new<box>()
+var array<label> _rLbl = array.new<label>()
+
+// ─── Add Zone When Label Fires ────────────────────────────────────────────────
+if reversalLabel != 0
+    int   zDir   = reversalLabel > 0 ? 1 : -1
+    int   zGrade = math.abs(reversalLabel)
+    bool  doAdd  = (zDir ==  1 and zGrade == 2 and showStrongSupport) or
+                   (zDir ==  1 and zGrade == 1 and showWeakSupport)   or
+                   (zDir == -1 and zGrade == 2 and showStrongResist)  or
+                   (zDir == -1 and zGrade == 1 and showWeakResist)
+
+    if doAdd
+        float zU    = zDir == 1 ? _startClose : array.get(_bufHigh, 0)
+        float zL    = zDir == 1 ? array.get(_bufLow, 0) : _startClose
+        float minH  = 0.2 * _startATR
+        if zU - zL < minH
+            if zDir == 1
+                zL := zU - minH
+            else
+                zU := zL + minH
+
+        // Merge with overlapping zone of same direction
+        bool merged = false
+        if mergeDistATR > 0.0 and array.size(_zDir) > 0
+            float mergeThresh = mergeDistATR * _startATR
+            for i = 0 to array.size(_zDir) - 1
+                if not merged and array.get(_zDir, i) == zDir
+                    float zu = array.get(_zUpper, i)
+                    float zl = array.get(_zLower, i)
+                    if zL <= zu + mergeThresh and zU >= zl - mergeThresh
+                        array.set(_zUpper,  i, math.max(zu, zU))
+                        array.set(_zLower,  i, math.min(zl, zL))
+                        array.set(_zGrade,  i, math.max(array.get(_zGrade, i), zGrade))
+                        merged := true
+
+        if not merged
+            if array.size(_zDir) >= maxStoredZones
+                array.shift(_zDir)
+                array.shift(_zGrade)
+                array.shift(_zUpper)
+                array.shift(_zLower)
+                array.shift(_zTouches)
+                array.shift(_zInZone)
+                array.shift(_zBar)
+            array.push(_zDir,     zDir)
+            array.push(_zGrade,   zGrade)
+            array.push(_zUpper,   zU)
+            array.push(_zLower,   zL)
+            array.push(_zTouches, 0)
+            array.push(_zInZone,  false)
+            array.push(_zBar,     bar_index - evalOffset)
+
+// ─── Zone Update: Touches + Break Deletion ────────────────────────────────────
+int _n = array.size(_zDir)
+if _n > 0
+    for i = _n - 1 to 0
+        float zu  = array.get(_zUpper, i)
+        float zl  = array.get(_zLower, i)
+        int   zd  = array.get(_zDir,   i)
+        bool  inZ = close >= zl and close <= zu
+        if inZ and not array.get(_zInZone, i)
+            array.set(_zTouches, i, array.get(_zTouches, i) + 1)
+        array.set(_zInZone, i, inZ)
+        if deleteBroken and ((zd == 1 and close < zl) or (zd == -1 and close > zu))
+            array.remove(_zDir,     i)
+            array.remove(_zGrade,   i)
+            array.remove(_zUpper,   i)
+            array.remove(_zLower,   i)
+            array.remove(_zTouches, i)
+            array.remove(_zInZone,  i)
+            array.remove(_zBar,     i)
+
+// ─── Signal Gate + Cooldown ──────────────────────────────────────────────────
+bool _nearSupport = false
+bool _nearResist  = false
+float _proxThresh = zoneProxATR * atrVal
+
+int _nz = array.size(_zDir)
+if _nz > 0
+    for i = 0 to _nz - 1
+        float zMid = (array.get(_zUpper, i) + array.get(_zLower, i)) / 2.0
+        int   zd   = array.get(_zDir, i)
+        float dist = math.abs(close - zMid)
+        if dist <= _proxThresh
+            if zd == 1
+                _nearSupport := true
+            else
+                _nearResist := true
+
+bool _gateL = signalMode != "Known Zones" or _nearSupport
+bool _gateS = signalMode != "Known Zones" or _nearResist
+
+var int _lastLongBar  = na
+var int _lastShortBar = na
+bool _cdL = na(_lastLongBar)  or (bar_index - _lastLongBar)  > cooldownBars
+bool _cdS = na(_lastShortBar) or (bar_index - _lastShortBar) > cooldownBars
+
+bool goLong  = anyLong  and _gateL and _cdL
+bool goShort = anyShort and _gateS and _cdS
+
+if goLong
+    _lastLongBar  := bar_index
+if goShort
+    _lastShortBar := bar_index
+
+// ─── Signal Labels ────────────────────────────────────────────────────────────
+// Solid arrow = zone-confluent; outline = candidate only
+color _cBull = #00c853
+color _cBear = #d50000
+
+if goLong
+    bool zoneConfl = _nearSupport
+    string _ttTriggers = (wtLong    ? "✓ WaveTrend Cross\n" : "") +
+                         (rsiLong   ? "✓ RSI Reclaim\n"     : "") +
+                         (stLong    ? "✓ Supertrend Flip\n" : "") +
+                         (sweepLong ? "✓ Candle Sweep\n"    : "") +
+                         (emaLong   ? "✓ EMA Reclaim\n"     : "")
+    string _ttZone  = zoneConfl ? "Zone: Support confluence\n" : "Zone: No zone nearby (candidate)\n"
+    string _ttScore = "Triggers: " + str.tostring(trigLong) + " / 5\n"
+    string _ttAtr   = "ATR: " + str.tostring(atrVal, format.mintick)
+    label.new(bar_index, close,
+         zoneConfl ? "▲" : "△",
+         style     = label.style_label_up,
+         color     = color.new(_cBull, zoneConfl ? 10 : 60),
+         textcolor = color.white,
+         size      = size.small,
+         tooltip   = "LONG SIGNAL\n" + _ttZone + _ttScore + _ttTriggers + _ttAtr)
+
+if goShort
+    bool zoneConfl = _nearResist
+    string _ttTriggers = (wtShort    ? "✓ WaveTrend Cross\n" : "") +
+                         (rsiShort   ? "✓ RSI Reclaim\n"     : "") +
+                         (stShort    ? "✓ Supertrend Flip\n" : "") +
+                         (sweepShort ? "✓ Candle Sweep\n"    : "") +
+                         (emaShort   ? "✓ EMA Reclaim\n"     : "")
+    string _ttZone  = zoneConfl ? "Zone: Resistance confluence\n" : "Zone: No zone nearby (candidate)\n"
+    string _ttScore = "Triggers: " + str.tostring(trigShort) + " / 5\n"
+    string _ttAtr   = "ATR: " + str.tostring(atrVal, format.mintick)
+    label.new(bar_index, close,
+         zoneConfl ? "▼" : "▽",
+         style     = label.style_label_down,
+         color     = color.new(_cBear, zoneConfl ? 10 : 60),
+         textcolor = color.white,
+         size      = size.small,
+         tooltip   = "SHORT SIGNAL\n" + _ttZone + _ttScore + _ttTriggers + _ttAtr)
+
+// ─── Zone Rendering (barstate.islast) ─────────────────────────────────────────
+if barstate.islast
+    // Clear previous render
+    int rn = array.size(_rBox)
+    if rn > 0
+        for i = 0 to rn - 1
+            box.delete(array.get(_rBox, i))
+            label.delete(array.get(_rLbl, i))
+    array.clear(_rBox)
+    array.clear(_rLbl)
+
+    int nz = array.size(_zDir)
+    if nz > 0
+        float visRange = visibleAtrRange * atrVal
+
+        // Select nearest N supports + N resistances using picked-index tracking
+        var array<int> _allPicked = array.new<int>()
+        array.clear(_allPicked)
+
+        // Supports
+        for _ = 0 to maxNearSupport - 1
+            float bestDist = 1.0e10
+            int   bestIdx  = -1
+            for i = 0 to nz - 1
+                if array.get(_zDir, i) == 1
+                    float zMid = (array.get(_zUpper, i) + array.get(_zLower, i)) / 2.0
+                    float dist = math.abs(close - zMid)
+                    if dist <= visRange and dist < bestDist
+                        bool already = false
+                        int np = array.size(_allPicked)
+                        if np > 0
+                            for j = 0 to np - 1
+                                if array.get(_allPicked, j) == i
+                                    already := true
+                        if not already
+                            bestDist := dist
+                            bestIdx  := i
+            if bestIdx >= 0
+                array.push(_allPicked, bestIdx)
+
+        // Resistances
+        for _ = 0 to maxNearResist - 1
+            float bestDist = 1.0e10
+            int   bestIdx  = -1
+            for i = 0 to nz - 1
+                if array.get(_zDir, i) == -1
+                    float zMid = (array.get(_zUpper, i) + array.get(_zLower, i)) / 2.0
+                    float dist = math.abs(close - zMid)
+                    if dist <= visRange and dist < bestDist
+                        bool already = false
+                        int np = array.size(_allPicked)
+                        if np > 0
+                            for j = 0 to np - 1
+                                if array.get(_allPicked, j) == i
+                                    already := true
+                        if not already
+                            bestDist := dist
+                            bestIdx  := i
+            if bestIdx >= 0
+                array.push(_allPicked, bestIdx)
+
+        int ap = array.size(_allPicked)
+        if ap > 0
+            for k = 0 to ap - 1
+                int   i  = array.get(_allPicked, k)
+                int   zd = array.get(_zDir,     i)
+                int   zg = array.get(_zGrade,   i)
+                float zu = array.get(_zUpper,   i)
+                float zl = array.get(_zLower,   i)
+                int   zt = array.get(_zTouches, i)
+                int   zb = array.get(_zBar,     i)
+
+                color baseC   = zd == 1 ? (zg == 2 ? strongSuppColor : weakSuppColor) : (zg == 2 ? strongResColor : weakResColor)
+                int   bgAlpha = zg == 2 ? 75 : 92
+                int   bdAlpha = zg == 2 ? 20 : 68
+
+                int x2 = bar_index + extendBars
+                b = box.new(zb, zu, x2, zl,
+                     bgcolor      = color.new(baseC, bgAlpha),
+                     border_color = color.new(baseC, bdAlpha),
+                     border_width = 1)
+
+                string gradeStr = showGrade   ? (zg == 2 ? "★★" : "★") : ""
+                string touchStr = showTouches and zt > 0 ? " ×" + str.tostring(zt) : ""
+                l = label.new(x2, (zu + zl) / 2.0, gradeStr + touchStr,
+                     style     = label.style_label_left,
+                     color     = color.new(color.black, 100),
+                     textcolor = color.new(baseC, 15),
+                     size      = size.small)
+
+                array.push(_rBox, b)
+                array.push(_rLbl, l)
+
+// ─── Data Window ─────────────────────────────────────────────────────────────
+plot(reversalLabel,        "Reversal Label",  color=color.new(color.gray, 100), display=display.data_window, offset=-extendedBars)
+plot(array.size(_zDir),    "Stored Zones",    color=color.new(color.gray, 100), display=display.data_window)
+plot(goLong  ? 1 : 0,      "Long Signal",     color=color.new(color.gray, 100), display=display.data_window)
+plot(goShort ? 1 : 0,      "Short Signal",    color=color.new(color.gray, 100), display=display.data_window)
+plot(_nearSupport ? 1 : 0, "Near Support",    color=color.new(color.gray, 100), display=display.data_window)
+plot(_nearResist  ? 1 : 0, "Near Resistance", color=color.new(color.gray, 100), display=display.data_window)

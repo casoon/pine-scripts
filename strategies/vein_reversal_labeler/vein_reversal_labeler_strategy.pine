@@ -1,0 +1,358 @@
+//@version=6
+// ============================================================================
+// Vein Reversal Labeler [WavesUnchained] — Strategy
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-05-06
+// ============================================================================
+// Research strategy built on the Vein Reversal Labeler forward-looking signal.
+// ⚠ Labels use forward data (evalOffset bars lookahead) — not for live trading.
+// Baseline validation only: measures theoretical PnL in perfect label selection.
+//
+// Features:
+//   ✓ Trades confirmed reversal labels (strong only or strong + weak per direction)
+//   ✓ ATR-based SL and TP frozen at entry bar
+//   ✓ Optional break-even stop triggered at configurable R×
+//   ✓ Optional trailing stop after configurable R× of progress
+//   ✓ Trade direction filter: Both / Long Only / Short Only
+//   ✓ Cooldown bars after exit
+//
+// ============================================================================
+
+strategy("Vein Reversal Labeler [WavesUnchained] — Strategy", overlay=true,
+     calc_on_order_fills = true,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 10,
+     initial_capital     = 10000,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.02,
+     slippage            = 1)
+
+// ─── Groups ──────────────────────────────────────────────────────────────────
+g_label   = "Labeling Parameters"
+g_quality = "Quality Criteria"
+g_cluster = "Cluster Filter"
+g_signal  = "Signal"
+g_risk    = "Risk"
+g_be      = "Break-Even"
+g_strat   = "Strategy"
+
+// ─── Labeling Parameters (mirror the indicator) ──────────────────────────────
+int   lblAtrLen     = input.int(14,   "ATR Length",                        minval=1,             group=g_label)
+int   forwardBars   = input.int(8,    "Forward Bars (min target)",          minval=1, maxval=50,  group=g_label)
+int   extendedBars  = input.int(16,   "Extended Bars (strong target)",      minval=2, maxval=80,  group=g_label)
+float targetATR     = input.float(1.5,"Weak Target (ATR×)",                 minval=0.1, step=0.1, group=g_label)
+float strongATR     = input.float(2.5,"Strong Target (ATR×)",               minval=0.5, step=0.1, group=g_label)
+float maxAdverseATR = input.float(0.6,"Max Adverse Move (ATR×)",            minval=0.1, step=0.1, group=g_label)
+bool  useClose      = input.bool(false,"Use Close instead of High/Low",                           group=g_label)
+
+// ─── Quality Criteria (mirror the indicator) ─────────────────────────────────
+int   fastBarsThresh  = input.int(4,   "Fast Reversal: bars to target ≤",  minval=1, maxval=20,  group=g_quality)
+float maeStrongThresh = input.float(0.3,"Strong: Max Adverse ≤ ATR×",       minval=0.0, step=0.1, group=g_quality)
+
+// ─── Cluster Filter (mirror the indicator) ───────────────────────────────────
+int minGapBars = input.int(3, "Min Bars Between Labels (same direction)", minval=0, maxval=20, group=g_cluster)
+
+// ─── Signal ──────────────────────────────────────────────────────────────────
+bool tradeLongStrong  = input.bool(true,  "Trade Strong Bull (label +2)", group=g_signal)
+bool tradeLongWeak    = input.bool(false, "Trade Weak Bull   (label +1)", group=g_signal)
+bool tradeShortStrong = input.bool(true,  "Trade Strong Bear (label -2)", group=g_signal)
+bool tradeShortWeak   = input.bool(false, "Trade Weak Bear   (label -1)", group=g_signal)
+
+// ─── Risk ────────────────────────────────────────────────────────────────────
+int   riskAtrLen = input.int(14,   "ATR Length",  minval=1,              group=g_risk)
+float slMult     = input.float(1.5,"SL (ATR×)",   minval=0.1, step=0.1, group=g_risk)
+float tpMult     = input.float(3.0,"TP (ATR×)",   minval=0.1, step=0.1, group=g_risk)
+
+// ─── Break-Even ──────────────────────────────────────────────────────────────
+bool  enableBE       = input.bool(true,  "Enable Break-Even Stop",            group=g_be)
+float beTrigR        = input.float(1.0,  "  Trigger (R×)",  minval=0.1, step=0.1, group=g_be)
+bool  enableTrail    = input.bool(false, "Enable Trailing Stop",              group=g_be)
+float trailTriggerR  = input.float(2.0,  "  Trail Trigger (R×)",  minval=0.1, step=0.1, group=g_be)
+float trailDistanceR = input.float(1.0,  "  Trail Distance (R×)", minval=0.1, step=0.1, group=g_be)
+
+// ─── Strategy ────────────────────────────────────────────────────────────────
+string dirMode  = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=g_strat)
+int    cooldown = input.int(0, "Cooldown Bars After Exit", minval=0, group=g_strat)
+
+// ─── Labeler Core Logic ──────────────────────────────────────────────────────
+lblAtr = ta.atr(lblAtrLen)
+
+int bufSize    = math.max(forwardBars, extendedBars) + 1
+int evalOffset = bufSize - 1
+
+var array<float> _bufClose = array.new_float(bufSize, na)
+var array<float> _bufHigh  = array.new_float(bufSize, na)
+var array<float> _bufLow   = array.new_float(bufSize, na)
+var array<float> _bufATR   = array.new_float(bufSize, na)
+
+array.shift(_bufClose)
+array.push(_bufClose, close)
+array.shift(_bufHigh)
+array.push(_bufHigh, high)
+array.shift(_bufLow)
+array.push(_bufLow, low)
+array.shift(_bufATR)
+array.push(_bufATR, lblAtr)
+
+float _startClose = array.get(_bufClose, 0)
+float _startATR   = array.get(_bufATR,   0)
+bool  _canEval    = not na(_startClose) and not na(_startATR) and _startATR > 0 and bar_index >= evalOffset
+
+// Returns [targetHit, maxAdverse, barsToTarget]
+f_evalBull(array<float> hi, array<float> lo, array<float> cl, int bars, float refC, float atr, float tgt, float maxAdv, bool clOnly) =>
+    float maxAdv2 = 0.0
+    int   barsToT = bars
+    bool  tgtHit  = false
+    bool  stpHit  = false
+    for i = 1 to bars
+        float bHi = clOnly ? array.get(cl, i) : array.get(hi, i)
+        float bLo = clOnly ? array.get(cl, i) : array.get(lo, i)
+        float mUp = bHi - refC
+        float mDn = refC - bLo
+        maxAdv2 := math.max(maxAdv2, mDn)
+        if not stpHit and mDn > maxAdv * atr
+            stpHit := true
+        if not tgtHit and not stpHit and mUp >= tgt * atr
+            tgtHit := true
+            barsToT := i
+    [tgtHit and not stpHit, maxAdv2, barsToT]
+
+f_evalBear(array<float> hi, array<float> lo, array<float> cl, int bars, float refC, float atr, float tgt, float maxAdv, bool clOnly) =>
+    float maxAdv2 = 0.0
+    int   barsToT = bars
+    bool  tgtHit  = false
+    bool  stpHit  = false
+    for i = 1 to bars
+        float bHi = clOnly ? array.get(cl, i) : array.get(hi, i)
+        float bLo = clOnly ? array.get(cl, i) : array.get(lo, i)
+        float mDn = refC - bLo
+        float mUp = bHi - refC
+        maxAdv2 := math.max(maxAdv2, mUp)
+        if not stpHit and mUp > maxAdv * atr
+            stpHit := true
+        if not tgtHit and not stpHit and mDn >= tgt * atr
+            tgtHit := true
+            barsToT := i
+    [tgtHit and not stpHit, maxAdv2, barsToT]
+
+// Weak window evaluation
+var bool  _bullWeak     = false
+var float _bullMAE      = 0.0
+var int   _bullBarsToTgt = 0
+var bool  _bearWeak     = false
+var float _bearMAE      = 0.0
+var int   _bearBarsToTgt = 0
+
+if _canEval
+    [h1, a1, b1] = f_evalBull(_bufHigh, _bufLow, _bufClose, forwardBars, _startClose, _startATR, targetATR, maxAdverseATR, useClose)
+    _bullWeak     := h1
+    _bullMAE      := a1
+    _bullBarsToTgt := b1
+    [h2, a2, b2] = f_evalBear(_bufHigh, _bufLow, _bufClose, forwardBars, _startClose, _startATR, targetATR, maxAdverseATR, useClose)
+    _bearWeak     := h2
+    _bearMAE      := a2
+    _bearBarsToTgt := b2
+else
+    _bullWeak      := false
+    _bullMAE       := 0.0
+    _bullBarsToTgt := forwardBars
+    _bearWeak      := false
+    _bearMAE       := 0.0
+    _bearBarsToTgt := forwardBars
+
+// Strong window evaluation
+var bool _bullStrong = false
+var bool _bearStrong = false
+
+if _canEval
+    [h3, a3, b3] = f_evalBull(_bufHigh, _bufLow, _bufClose, extendedBars, _startClose, _startATR, strongATR, maxAdverseATR, useClose)
+    _bullStrong := h3
+    [h4, a4, b4] = f_evalBear(_bufHigh, _bufLow, _bufClose, extendedBars, _startClose, _startATR, strongATR, maxAdverseATR, useClose)
+    _bearStrong := h4
+else
+    _bullStrong := false
+    _bearStrong := false
+
+// Quality grading
+bool _bullIsStrong = _bullStrong or (_bullWeak and _bullBarsToTgt <= fastBarsThresh and _startATR > 0 and _bullMAE <= maeStrongThresh * _startATR)
+bool _bullIsWeak   = _bullWeak and not _bullIsStrong
+bool _bearIsStrong = _bearStrong or (_bearWeak and _bearBarsToTgt <= fastBarsThresh and _startATR > 0 and _bearMAE <= maeStrongThresh * _startATR)
+bool _bearIsWeak   = _bearWeak and not _bearIsStrong
+
+// Raw label (+2/+1/-1/-2); conflict → 0
+int _rawLabel = _bullIsStrong ? 2 : _bullIsWeak ? 1 : _bearIsStrong ? -2 : _bearIsWeak ? -1 : 0
+if (_bullIsStrong or _bullIsWeak) and (_bearIsStrong or _bearIsWeak)
+    _rawLabel := 0
+
+// Cluster filter
+var int _barsSinceLastBull = 999
+var int _barsSinceLastBear = 999
+_barsSinceLastBull += 1
+_barsSinceLastBear += 1
+
+int reversalLabel = _rawLabel
+if minGapBars > 0
+    if _rawLabel > 0 and _barsSinceLastBull < minGapBars
+        reversalLabel := 0
+    if _rawLabel < 0 and _barsSinceLastBear < minGapBars
+        reversalLabel := 0
+
+if reversalLabel > 0
+    _barsSinceLastBull := 0
+if reversalLabel < 0
+    _barsSinceLastBear := 0
+
+// ─── Strategy Logic ──────────────────────────────────────────────────────────
+entryAtr = ta.atr(riskAtrLen)
+
+bool _canLong  = dirMode != "Short Only"
+bool _canShort = dirMode != "Long Only"
+
+bool _goLong  = _canLong  and ((tradeLongStrong  and reversalLabel ==  2) or (tradeLongWeak  and reversalLabel ==  1))
+bool _goShort = _canShort and ((tradeShortStrong and reversalLabel == -2) or (tradeShortWeak and reversalLabel == -1))
+
+// Trade state — varip survives calc_on_order_fills recalculations
+varip float _longSL    = na
+varip float _longTP    = na
+varip float _longRisk  = na
+varip bool  _longBE    = false
+varip float _shortSL   = na
+varip float _shortTP   = na
+varip float _shortRisk = na
+varip bool  _shortBE   = false
+varip float _maxCloseLong  = na
+varip float _minCloseShort = na
+varip int   _lastExitBar   = na
+varip int   _prevTotal     = 0
+varip int   _prevClosed    = 0
+
+// Per-trade arrays for exit log R calculation
+var array<float> _tradeRisk  = array.new<float>()
+var array<int>   _tradeLabel = array.new<int>()
+
+_totalTrades = strategy.closedtrades + strategy.opentrades
+_isNewEntry  = _totalTrades > _prevTotal
+_isNewLong   = _isNewEntry and strategy.position_size > 0
+_isNewShort  = _isNewEntry and strategy.position_size < 0
+_isFlat      = strategy.position_size == 0
+_isNewFlat   = strategy.closedtrades > _prevClosed
+
+if _isNewLong
+    _entry     = strategy.position_avg_price
+    _longSL   := _entry - slMult * entryAtr
+    _longTP   := _entry + tpMult * entryAtr
+    _longRisk := math.max(_entry - _longSL, syminfo.mintick)
+    _longBE   := false
+    _maxCloseLong := _entry
+    array.push(_tradeRisk, _longRisk)
+    array.push(_tradeLabel, reversalLabel)
+    log.info(str.format('VRL ENTRY | dir=long | bar={0} | label={1} | entry={2} | atr={3} | sl={4} | tp={5} | evalOffset={6} | tf={7}',
+         bar_index, reversalLabel,
+         str.tostring(_entry, format.mintick),
+         str.tostring(entryAtr, format.mintick),
+         str.tostring(_longSL, format.mintick),
+         str.tostring(_longTP, format.mintick),
+         evalOffset, timeframe.period))
+
+if _isNewShort
+    _entry     = strategy.position_avg_price
+    _shortSL  := _entry + slMult * entryAtr
+    _shortTP  := _entry - tpMult * entryAtr
+    _shortRisk := math.max(_shortSL - _entry, syminfo.mintick)
+    _shortBE  := false
+    _minCloseShort := _entry
+    array.push(_tradeRisk, _shortRisk)
+    array.push(_tradeLabel, reversalLabel)
+    log.info(str.format('VRL ENTRY | dir=short | bar={0} | label={1} | entry={2} | atr={3} | sl={4} | tp={5} | evalOffset={6} | tf={7}',
+         bar_index, reversalLabel,
+         str.tostring(_entry, format.mintick),
+         str.tostring(entryAtr, format.mintick),
+         str.tostring(_shortSL, format.mintick),
+         str.tostring(_shortTP, format.mintick),
+         evalOffset, timeframe.period))
+
+if _isNewFlat
+    _lastExitBar := bar_index
+
+_prevTotal  := _totalTrades
+_prevClosed := strategy.closedtrades
+
+if _isFlat
+    _longSL    := na
+    _longTP    := na
+    _longRisk  := na
+    _longBE    := false
+    _shortSL   := na
+    _shortTP   := na
+    _shortRisk := na
+    _shortBE   := false
+
+// ─── Bracket exit + break-even + trailing ────────────────────────────────────
+if strategy.position_size > 0 and not na(_longRisk)
+    _nextBar = bar_index > strategy.opentrades.entry_bar_index(0)
+    if enableBE and _nextBar and close >= strategy.position_avg_price + beTrigR * _longRisk
+        _longBE := true
+    if na(_maxCloseLong) or close > _maxCloseLong
+        _maxCloseLong := close
+    _longTrail = enableTrail and _nextBar and (close - strategy.position_avg_price) >= trailTriggerR * _longRisk
+                 ? _maxCloseLong - trailDistanceR * _longRisk : na
+    _longBase  = _longBE ? strategy.position_avg_price : _longSL
+    _longStop  = na(_longTrail) ? _longBase : math.max(_longBase, _longTrail)
+    strategy.exit("Long Exit", "Long", stop=_longStop, limit=_longTP,
+         comment_profit="tp", comment_loss=_longBE ? "be" : "sl")
+
+if strategy.position_size < 0 and not na(_shortRisk)
+    _nextBar = bar_index > strategy.opentrades.entry_bar_index(0)
+    if enableBE and _nextBar and close <= strategy.position_avg_price - beTrigR * _shortRisk
+        _shortBE := true
+    if na(_minCloseShort) or close < _minCloseShort
+        _minCloseShort := close
+    _shortTrail = enableTrail and _nextBar and (strategy.position_avg_price - close) >= trailTriggerR * _shortRisk
+                  ? _minCloseShort + trailDistanceR * _shortRisk : na
+    _shortBase  = _shortBE ? strategy.position_avg_price : _shortSL
+    _shortStop  = na(_shortTrail) ? _shortBase : math.min(_shortBase, _shortTrail)
+    strategy.exit("Short Exit", "Short", stop=_shortStop, limit=_shortTP,
+         comment_profit="tp", comment_loss=_shortBE ? "be" : "sl")
+
+// ─── Entries ─────────────────────────────────────────────────────────────────
+_cooldownOk = na(_lastExitBar) or (bar_index > _lastExitBar and (cooldown == 0 or (bar_index - _lastExitBar) > cooldown))
+
+if _isFlat and _cooldownOk
+    if _goLong
+        strategy.entry("Long", strategy.long)
+    else if _goShort
+        strategy.entry("Short", strategy.short)
+
+// ─── Exit log ────────────────────────────────────────────────────────────────
+varip int _lastLoggedTrade = 0
+if strategy.closedtrades > _lastLoggedTrade
+    for _idx = _lastLoggedTrade to strategy.closedtrades - 1
+        _ep    = strategy.closedtrades.entry_price(_idx)
+        _xp    = strategy.closedtrades.exit_price(_idx)
+        _pnl   = strategy.closedtrades.profit(_idx)
+        _barsH = strategy.closedtrades.exit_bar_index(_idx) - strategy.closedtrades.entry_bar_index(_idx)
+        _mfe   = strategy.closedtrades.max_runup(_idx)
+        _mae   = strategy.closedtrades.max_drawdown(_idx)
+        _size  = strategy.closedtrades.size(_idx)
+        _dir   = _size > 0 ? "long" : "short"
+        _riskDenom = array.size(_tradeRisk) > _idx ? array.get(_tradeRisk, _idx) : math.max(slMult * entryAtr, syminfo.mintick)
+        _lbl       = array.size(_tradeLabel) > _idx ? array.get(_tradeLabel, _idx) : 0
+        _R         = _dir == "long" ? (_xp - _ep) / _riskDenom : (_ep - _xp) / _riskDenom
+        _exitComment = strategy.closedtrades.exit_comment(_idx)
+        _exitReason  = na(_exitComment) or _exitComment == "" ? "unknown" : _exitComment
+        log.info(str.format('VRL REAL EXIT | tradeId={0} | dir={1} | label={2} | entryBar={3} | exitBar={4} | entry={5} | exitPx={6} | pnl={7} | R={8} | barsHeld={9} | MFE={10} | MAE={11} | exitReason={12} | tf={13}',
+             _idx + 1, _dir, _lbl,
+             strategy.closedtrades.entry_bar_index(_idx),
+             strategy.closedtrades.exit_bar_index(_idx),
+             str.tostring(_ep, format.mintick),
+             str.tostring(_xp, format.mintick),
+             str.tostring(_pnl, '#.##'),
+             str.tostring(_R, '#.##'),
+             _barsH,
+             str.tostring(_mfe, '#.##'),
+             str.tostring(_mae, '#.##'),
+             _exitReason,
+             timeframe.period))
+    _lastLoggedTrade := strategy.closedtrades
