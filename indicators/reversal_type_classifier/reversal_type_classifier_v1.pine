@@ -1,0 +1,862 @@
+//@version=6
+// ============================================================================
+// Reversal Type Classifier v1 [WavesUnchained]
+// Version: 1.2
+// Author: WavesUnchained
+// Build: 2026-05-06 00:00:00
+// ============================================================================
+// Ex-post diagnostic: classifies confirmed pivot reversals by outcome type
+// and computes filter-parameter statistics for indicator tuning.
+//
+// Features:
+//   ✓ Four reversal types: Snapback / Grind / Fake-Pullback / Chop-Unclear
+//   ✓ WaveTrend divergence and extreme-level context per pivot
+//   ✓ ATR-based R-outcome evaluation over configurable window
+//   ✓ Trend (EMA + ADX), StochRSI, BB Width context at each pivot bar
+//   ✓ Quality score per pivot (0–100) in label tooltip
+//   ✓ Pine log entry per classified pivot (all filter params)
+//   ✓ Filter statistics table: Good vs Bad — combined, long/short split, per-type, history split
+//   ✓ R-bucket analysis (% reaching 1R/2R/3R) and snap speed (avg bars to target)
+//   ✓ Optional background coloring by latest type
+//
+// ============================================================================
+
+indicator("Reversal Type Classifier [WavesUnchained]", overlay=true, max_labels_count=500, max_lines_count=200)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+g_pivot = "1) Pivot / Evaluation"
+g_wt    = "2) WaveTrend"
+g_risk  = "3) Outcome in R"
+g_ctx   = "4) Context / Quality"
+g_vis   = "5) Display"
+
+pivLen      = input.int(5,    "Pivot length left/right",          minval=2, maxval=30,  group=g_pivot)
+evalBars    = input.int(24,   "Evaluation window after pivot",    minval=5, maxval=200, group=g_pivot)
+minMoveAtr  = input.float(0.30, "Minimum pivot impulse ATR×",    minval=0.0, step=0.05, group=g_pivot,
+     tooltip="Filters very small pivots. 0.30 = pivot zone must show at least ~0.3 ATR excursion.")
+
+chLen   = input.int(10, "WT Channel Length",  minval=1, group=g_wt)
+avgLen  = input.int(21, "WT Average Length",  minval=1, group=g_wt)
+sigLen  = input.int(4,  "WT Signal Length",   minval=1, group=g_wt)
+osLevel = input.float(-45, "WT Oversold level",   step=1, group=g_wt)
+obLevel = input.float( 45, "WT Overbought level", step=1, group=g_wt)
+
+atrLen       = input.int(14,   "ATR Length",                  minval=1,  group=g_risk)
+riskAtrMult  = input.float(1.5, "Risk = ATR ×",              minval=0.1, step=0.1, group=g_risk)
+snapTargetR  = input.float(1.2, "Snapback target R",          minval=0.2, step=0.1, group=g_risk)
+grindTargetR = input.float(2.0, "Grind target R",             minval=0.5, step=0.1, group=g_risk)
+fakeFailR    = input.float(1.0, "Fail threshold R",           minval=0.3, step=0.1, group=g_risk)
+minFollowR   = input.float(0.45, "Minimum follow-through R",  minval=0.0, step=0.05, group=g_risk)
+snapBars     = input.int(6,    "Snapback max bars",            minval=1, maxval=50,  group=g_risk)
+
+emaLen      = input.int(100, "Trend EMA length",        minval=10, group=g_ctx)
+adxLen      = input.int(14,  "ADX length",              minval=5,  group=g_ctx)
+adxTrendMin = input.float(22, "ADX trend threshold",    minval=5,  step=1, group=g_ctx)
+atrRankLen  = input.int(100, "ATR / BBW rank lookback", minval=20, group=g_ctx)
+chopAdxMax  = input.float(16, "Chop: ADX below",        minval=5,  step=1, group=g_ctx)
+srsiLen     = input.int(14,  "StochRSI length",         minval=3,  group=g_ctx)
+srsiSmooth  = input.int(3,   "StochRSI K smooth",       minval=1,  group=g_ctx)
+bbLen       = input.int(20,  "BB length (width rank)",  minval=5,  group=g_ctx)
+
+showSnap  = input.bool(true,  "Show A: Snapback",                      group=g_vis)
+showGrind = input.bool(true,  "Show B: Grind",                         group=g_vis)
+showFake  = input.bool(true,  "Show C: Fake/Pullback",                 group=g_vis)
+showChop  = input.bool(true,  "Show D: Chop/Unclear",                  group=g_vis)
+showZones = input.bool(true,  "Color background by latest type",        group=g_vis)
+showTable = input.bool(true,  "Show statistics table",                  group=g_vis)
+splitDate = input.time(timestamp("2023-01-01"), "History split date (H1 / H2)", group=g_vis)
+
+// ─── Core calculations ───────────────────────────────────────────────────────
+f_wt(_src, _ch, _avg, _sig) =>
+    esa = ta.ema(_src, _ch)
+    dev = ta.ema(math.abs(_src - esa), _ch)
+    ci  = dev != 0.0 ? (_src - esa) / (0.015 * dev) : 0.0
+    wt1 = ta.ema(ci, _avg)
+    wt2 = ta.sma(wt1, _sig)
+    [wt1, wt2]
+
+[wt1, wt2]             = f_wt(hlc3, chLen, avgLen, sigLen)
+atr                    = ta.atr(atrLen)
+ema                    = ta.ema(close, emaLen)
+[plusDI, minusDI, adx] = ta.dmi(adxLen, adxLen)
+
+atrLo   = ta.lowest(atr, atrRankLen)
+atrHi   = ta.highest(atr, atrRankLen)
+atrRank = atrHi != atrLo ? 100.0 * (atr - atrLo) / (atrHi - atrLo) : 50.0
+
+rsi14        = ta.rsi(close, srsiLen)
+srsiRaw      = ta.stoch(rsi14, rsi14, rsi14, srsiLen)
+srsiK        = ta.ema(srsiRaw, srsiSmooth)
+
+[bbUp, bbBasis, bbLow] = ta.bb(close, bbLen, 2.0)
+bbWidth    = bbUp - bbLow
+bbWidthLo  = ta.lowest(bbWidth, atrRankLen)
+bbWidthHi  = ta.highest(bbWidth, atrRankLen)
+bbWidthRnk = bbWidthHi != bbWidthLo ? 100.0 * (bbWidth - bbWidthLo) / (bbWidthHi - bbWidthLo) : 50.0
+
+pl = ta.pivotlow(low,  pivLen, pivLen)
+ph = ta.pivothigh(high, pivLen, pivLen)
+
+plWt     = not na(pl) ? wt1[pivLen] : na
+phWt     = not na(ph) ? wt1[pivLen] : na
+prevPl   = ta.valuewhen(not na(pl), pl,   1)
+prevPh   = ta.valuewhen(not na(ph), ph,   1)
+prevPlWt = ta.valuewhen(not na(pl), plWt, 1)
+prevPhWt = ta.valuewhen(not na(ph), phWt, 1)
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+f_firstHitLong(_pivot, _risk, _targetR, _failR, _n) =>
+    int firstTarget = na
+    int firstFail   = na
+    for j = 0 to _n - 1
+        barsAgo = _n - 1 - j
+        if na(firstTarget) and high[barsAgo] >= _pivot + _targetR * _risk
+            firstTarget := j
+        if na(firstFail)   and low[barsAgo]  <= _pivot - _failR   * _risk
+            firstFail   := j
+    [firstTarget, firstFail]
+
+f_firstHitShort(_pivot, _risk, _targetR, _failR, _n) =>
+    int firstTarget = na
+    int firstFail   = na
+    for j = 0 to _n - 1
+        barsAgo = _n - 1 - j
+        if na(firstTarget) and low[barsAgo]  <= _pivot - _targetR * _risk
+            firstTarget := j
+        if na(firstFail)   and high[barsAgo] >= _pivot + _failR   * _risk
+            firstFail   := j
+    [firstTarget, firstFail]
+
+f_typeName(_t) =>
+    _t == 1 ? "A_SNAPBACK" : _t == 2 ? "B_GRIND" : _t == 3 ? "C_FAKE" : "D_CHOP"
+
+f_typeColor(_t) =>
+    _t == 1 ? color.new(color.lime, 0) : _t == 2 ? color.new(color.teal, 0) : _t == 3 ? color.new(color.red, 0) : color.new(color.gray, 0)
+
+f_shouldShow(_t) =>
+    (_t == 1 and showSnap) or (_t == 2 and showGrind) or (_t == 3 and showFake) or (_t == 4 and showChop)
+
+f_qualityScore(_div, _ext, _ta, _chop, _mfeR, _maeR, _atrRnk) =>
+    float s = 50.0
+    s += _div  ?  18.0 : 0.0
+    s += _ext  ?  12.0 : -8.0
+    s -= _ta   ?  14.0 : 0.0
+    s -= _chop ?   8.0 : 0.0
+    s += _mfeR >= grindTargetR ? 12.0 : _mfeR >= minFollowR ? 5.0 : -12.0
+    s -= _maeR >= fakeFailR    ? 10.0 : 0.0
+    s += _atrRnk >= 20 and _atrRnk <= 80 ? 4.0 : -3.0
+    math.max(0.0, math.min(100.0, s))
+
+barsFromPivot = evalBars + pivLen + 1
+
+// ─── Stat accumulators ───────────────────────────────────────────────────────
+// Combined good/bad
+var int   nSnap       = 0
+var int   nGrind      = 0
+var int   nFake       = 0
+var int   nChop       = 0
+var int   nGood       = 0
+var int   nBad        = 0
+var float sumAtrGood  = 0.0
+var float sumAtrBad   = 0.0
+var float sumAdxGood  = 0.0
+var float sumAdxBad   = 0.0
+var float sumWtGood   = 0.0
+var float sumWtBad    = 0.0
+var float sumSrsiGood = 0.0
+var float sumSrsiBad  = 0.0
+var float sumBbwGood  = 0.0
+var float sumBbwBad   = 0.0
+var int   nDivGood    = 0
+var int   nDivBad     = 0
+var int   nExtGood    = 0
+var int   nExtBad     = 0
+var int   nTaGood     = 0
+var int   nTaBad      = 0
+var float sumMfeGood  = 0.0
+var float sumMfeBad   = 0.0
+// Long/short split
+var int   nGoodL      = 0
+var int   nBadL       = 0
+var int   nGoodS      = 0
+var int   nBadS       = 0
+var float sumWtGL     = 0.0
+var float sumWtBL     = 0.0
+var float sumWtGS     = 0.0
+var float sumWtBS     = 0.0
+var float sumSrsiGL   = 0.0
+var float sumSrsiBL   = 0.0
+var float sumSrsiGS   = 0.0
+var float sumSrsiBS   = 0.0
+var float sumMfeGL    = 0.0
+var float sumMfeBL    = 0.0
+var float sumMfeGS    = 0.0
+var float sumMfeBS    = 0.0
+var int   nSnapL      = 0
+var int   nGrindL     = 0
+var int   nFakeL      = 0
+var int   nChopL      = 0
+var int   nSnapS      = 0
+var int   nGrindS     = 0
+var int   nFakeS      = 0
+var int   nChopS      = 0
+// R-buckets (combined)
+var int   nHit1RGood  = 0
+var int   nHit2RGood  = 0
+var int   nHit3RGood  = 0
+var int   nHit1RBad   = 0
+var int   nHit2RBad   = 0
+var int   nHit3RBad   = 0
+// Snap speed (combined long+short)
+var float sumSnapBars  = 0.0
+var int   nSnapPivots  = 0
+// Per-type (A/B/C/D, combined long+short)
+var float sumWtA    = 0.0
+var float sumWtB    = 0.0
+var float sumWtC    = 0.0
+var float sumWtD    = 0.0
+var float sumSrsiA  = 0.0
+var float sumSrsiB  = 0.0
+var float sumSrsiC  = 0.0
+var float sumSrsiD  = 0.0
+var float sumBbwA   = 0.0
+var float sumBbwB   = 0.0
+var float sumBbwC   = 0.0
+var float sumBbwD   = 0.0
+var float sumMfeA   = 0.0
+var float sumMfeB   = 0.0
+var float sumMfeC   = 0.0
+var float sumMfeD   = 0.0
+// History split (H1 = before splitDate, H2 = after)
+var int   nGoodH1    = 0
+var int   nBadH1     = 0
+var int   nGoodH2    = 0
+var int   nBadH2     = 0
+var float sumWtGH1   = 0.0
+var float sumWtBH1   = 0.0
+var float sumWtGH2   = 0.0
+var float sumWtBH2   = 0.0
+var float sumSrsiGH1 = 0.0
+var float sumSrsiBH1 = 0.0
+var float sumSrsiGH2 = 0.0
+var float sumSrsiBH2 = 0.0
+
+// ─── Long pivot ──────────────────────────────────────────────────────────────
+hasLongEval    = not na(pl[evalBars])
+longPivotPrice = pl[evalBars]
+longPivotBar   = bar_index - evalBars - pivLen
+longRisk       = atr[evalBars + pivLen] * riskAtrMult
+longWtAtPivot  = wt1[evalBars + pivLen]
+longPrevPivot  = prevPl[evalBars]
+longPrevWt     = prevPlWt[evalBars]
+longDiv          = hasLongEval and not na(longPrevPivot) and not na(longPrevWt) and longPivotPrice < longPrevPivot and longWtAtPivot > longPrevWt
+longExtreme      = longWtAtPivot <= osLevel
+longTrendAgainst = close[evalBars + pivLen] < ema[evalBars + pivLen] and adx[evalBars + pivLen] >= adxTrendMin
+longChop         = adx[evalBars + pivLen] <= chopAdxMax
+longImpulseOk    = hasLongEval and (ta.highest(high, barsFromPivot) - longPivotPrice) >= minMoveAtr * atr[evalBars + pivLen]
+
+[longFirstSnap,  longFirstFail]  = f_firstHitLong(longPivotPrice, longRisk, snapTargetR,  fakeFailR, barsFromPivot)
+[longFirstGrind, _longFail2]     = f_firstHitLong(longPivotPrice, longRisk, grindTargetR, fakeFailR, barsFromPivot)
+longMfeR = hasLongEval and longRisk > 0 ? (ta.highest(high, barsFromPivot) - longPivotPrice) / longRisk : na
+longMaeR = hasLongEval and longRisk > 0 ? (longPivotPrice - ta.lowest(low,  barsFromPivot)) / longRisk : na
+longGoodBeforeFailSnap  = not na(longFirstSnap)  and (na(longFirstFail) or longFirstSnap  < longFirstFail)
+longGoodBeforeFailGrind = not na(longFirstGrind) and (na(longFirstFail) or longFirstGrind < longFirstFail)
+
+int longType = na
+if hasLongEval and longImpulseOk
+    if longGoodBeforeFailSnap and longFirstSnap <= snapBars
+        longType := 1
+    else if longGoodBeforeFailGrind or (longMfeR >= minFollowR and longMaeR < fakeFailR and close > longPivotPrice)
+        longType := 2
+    else if (not na(longFirstFail) and (na(longFirstSnap) or longFirstFail < longFirstSnap)) or longMfeR < minFollowR
+        longType := 3
+    else
+        longType := 4
+
+longScore = hasLongEval ? f_qualityScore(longDiv, longExtreme, longTrendAgainst, longChop, longMfeR, longMaeR, atrRank[evalBars + pivLen]) : na
+
+if hasLongEval and not na(longType)
+    _atrVal  = nz(atrRank[evalBars + pivLen])
+    _adxVal  = nz(adx[evalBars + pivLen])
+    _wtVal   = nz(-longWtAtPivot)
+    _srsiVal = nz(srsiK[evalBars + pivLen])
+    _bbwVal  = nz(bbWidthRnk[evalBars + pivLen])
+    _mfeVal  = nz(longMfeR)
+    _isGood  = longType <= 2
+    // Combined counts
+    nSnap  += longType == 1 ? 1 : 0
+    nGrind += longType == 2 ? 1 : 0
+    nFake  += longType == 3 ? 1 : 0
+    nChop  += longType == 4 ? 1 : 0
+    if _isGood
+        nGood       += 1
+        sumAtrGood  += _atrVal
+        sumAdxGood  += _adxVal
+        sumWtGood   += _wtVal
+        sumSrsiGood += _srsiVal
+        sumBbwGood  += _bbwVal
+        nDivGood    += longDiv ? 1 : 0
+        nExtGood    += longExtreme ? 1 : 0
+        nTaGood     += longTrendAgainst ? 1 : 0
+        sumMfeGood  += _mfeVal
+    else
+        nBad        += 1
+        sumAtrBad   += _atrVal
+        sumAdxBad   += _adxVal
+        sumWtBad    += _wtVal
+        sumSrsiBad  += _srsiVal
+        sumBbwBad   += _bbwVal
+        nDivBad     += longDiv ? 1 : 0
+        nExtBad     += longExtreme ? 1 : 0
+        nTaBad      += longTrendAgainst ? 1 : 0
+        sumMfeBad   += _mfeVal
+    // Long split
+    nSnapL  += longType == 1 ? 1 : 0
+    nGrindL += longType == 2 ? 1 : 0
+    nFakeL  += longType == 3 ? 1 : 0
+    nChopL  += longType == 4 ? 1 : 0
+    if _isGood
+        nGoodL    += 1
+        sumWtGL   += _wtVal
+        sumSrsiGL += _srsiVal
+        sumMfeGL  += _mfeVal
+    else
+        nBadL     += 1
+        sumWtBL   += _wtVal
+        sumSrsiBL += _srsiVal
+        sumMfeBL  += _mfeVal
+    // R-buckets
+    if _isGood
+        nHit1RGood += _mfeVal >= 1.0 ? 1 : 0
+        nHit2RGood += _mfeVal >= 2.0 ? 1 : 0
+        nHit3RGood += _mfeVal >= 3.0 ? 1 : 0
+    else
+        nHit1RBad  += _mfeVal >= 1.0 ? 1 : 0
+        nHit2RBad  += _mfeVal >= 2.0 ? 1 : 0
+        nHit3RBad  += _mfeVal >= 3.0 ? 1 : 0
+    // Snap speed
+    if longType == 1 and not na(longFirstSnap)
+        sumSnapBars += longFirstSnap
+        nSnapPivots += 1
+    // Per-type
+    if longType == 1
+        sumWtA   += _wtVal
+        sumSrsiA += _srsiVal
+        sumBbwA  += _bbwVal
+        sumMfeA  += _mfeVal
+    else if longType == 2
+        sumWtB   += _wtVal
+        sumSrsiB += _srsiVal
+        sumBbwB  += _bbwVal
+        sumMfeB  += _mfeVal
+    else if longType == 3
+        sumWtC   += _wtVal
+        sumSrsiC += _srsiVal
+        sumBbwC  += _bbwVal
+        sumMfeC  += _mfeVal
+    else
+        sumWtD   += _wtVal
+        sumSrsiD += _srsiVal
+        sumBbwD  += _bbwVal
+        sumMfeD  += _mfeVal
+    // History split
+    _isH2 = time[evalBars + pivLen] >= splitDate
+    if _isH2
+        if _isGood
+            nGoodH2    += 1
+            sumWtGH2   += _wtVal
+            sumSrsiGH2 += _srsiVal
+        else
+            nBadH2     += 1
+            sumWtBH2   += _wtVal
+            sumSrsiBH2 += _srsiVal
+    else
+        if _isGood
+            nGoodH1    += 1
+            sumWtGH1   += _wtVal
+            sumSrsiGH1 += _srsiVal
+        else
+            nBadH1     += 1
+            sumWtBH1   += _wtVal
+            sumSrsiBH1 += _srsiVal
+    log.info("RTC LONG " + f_typeName(longType) +
+      " | price=" + str.tostring(longPivotPrice, format.mintick) +
+      " | MFE=" + str.tostring(longMfeR, "#.##") + "R MAE=" + str.tostring(longMaeR, "#.##") + "R" +
+      " | WT=" + str.tostring(longWtAtPivot, "#.1") + " div=" + (longDiv ? "Y" : "N") + " ext=" + (longExtreme ? "Y" : "N") +
+      " | ATR%=" + str.tostring(_atrVal, "#.0") + " ADX=" + str.tostring(_adxVal, "#.0") +
+      " SRSI=" + str.tostring(_srsiVal, "#.0") + " BBW%=" + str.tostring(_bbwVal, "#.0") +
+      " | trendAg=" + (longTrendAgainst ? "Y" : "N") + " score=" + str.tostring(longScore, "#.0"))
+    if f_shouldShow(longType)
+        txt = longType == 1 ? "A↑" : longType == 2 ? "B↑" : longType == 3 ? "C↑" : "D↑"
+        tip = "LONG " + f_typeName(longType) +
+          "\nPivot: "      + str.tostring(longPivotPrice, format.mintick) +
+          "\nMFE/MAE: "    + str.tostring(longMfeR, "#.##") + "R / " + str.tostring(longMaeR, "#.##") + "R" +
+          "\nWT@Pivot: "   + str.tostring(longWtAtPivot, "#.0") +
+          "\nDivergence: " + (longDiv ? "yes" : "no") +
+          "\nWT extreme: " + (longExtreme ? "yes" : "no") +
+          "\nTrend-ag: "   + (longTrendAgainst ? "yes" : "no") +
+          "\nChop: "       + (longChop ? "yes" : "no") +
+          "\nATR rank: "   + str.tostring(_atrVal, "#.0") +
+          "\nStochRSI: "   + str.tostring(_srsiVal, "#.0") +
+          "\nBB Width%: "  + str.tostring(_bbwVal, "#.0") +
+          "\nScore: "      + str.tostring(longScore, "#.0")
+        label.new(longPivotBar, longPivotPrice, txt, xloc=xloc.bar_index, yloc=yloc.price,
+          style=label.style_label_up, color=f_typeColor(longType), textcolor=color.white, tooltip=tip, size=size.small)
+
+// ─── Short pivot ─────────────────────────────────────────────────────────────
+hasShortEval    = not na(ph[evalBars])
+shortPivotPrice = ph[evalBars]
+shortPivotBar   = bar_index - evalBars - pivLen
+shortRisk       = atr[evalBars + pivLen] * riskAtrMult
+shortWtAtPivot  = wt1[evalBars + pivLen]
+shortPrevPivot  = prevPh[evalBars]
+shortPrevWt     = prevPhWt[evalBars]
+shortDiv          = hasShortEval and not na(shortPrevPivot) and not na(shortPrevWt) and shortPivotPrice > shortPrevPivot and shortWtAtPivot < shortPrevWt
+shortExtreme      = shortWtAtPivot >= obLevel
+shortTrendAgainst = close[evalBars + pivLen] > ema[evalBars + pivLen] and adx[evalBars + pivLen] >= adxTrendMin
+shortChop         = adx[evalBars + pivLen] <= chopAdxMax
+shortImpulseOk    = hasShortEval and (shortPivotPrice - ta.lowest(low, barsFromPivot)) >= minMoveAtr * atr[evalBars + pivLen]
+
+[shortFirstSnap,  shortFirstFail]  = f_firstHitShort(shortPivotPrice, shortRisk, snapTargetR,  fakeFailR, barsFromPivot)
+[shortFirstGrind, _shortFail2]     = f_firstHitShort(shortPivotPrice, shortRisk, grindTargetR, fakeFailR, barsFromPivot)
+shortMfeR = hasShortEval and shortRisk > 0 ? (shortPivotPrice - ta.lowest(low,  barsFromPivot)) / shortRisk : na
+shortMaeR = hasShortEval and shortRisk > 0 ? (ta.highest(high, barsFromPivot) - shortPivotPrice) / shortRisk : na
+shortGoodBeforeFailSnap  = not na(shortFirstSnap)  and (na(shortFirstFail) or shortFirstSnap  < shortFirstFail)
+shortGoodBeforeFailGrind = not na(shortFirstGrind) and (na(shortFirstFail) or shortFirstGrind < shortFirstFail)
+
+int shortType = na
+if hasShortEval and shortImpulseOk
+    if shortGoodBeforeFailSnap and shortFirstSnap <= snapBars
+        shortType := 1
+    else if shortGoodBeforeFailGrind or (shortMfeR >= minFollowR and shortMaeR < fakeFailR and close < shortPivotPrice)
+        shortType := 2
+    else if (not na(shortFirstFail) and (na(shortFirstSnap) or shortFirstFail < shortFirstSnap)) or shortMfeR < minFollowR
+        shortType := 3
+    else
+        shortType := 4
+
+shortScore = hasShortEval ? f_qualityScore(shortDiv, shortExtreme, shortTrendAgainst, shortChop, shortMfeR, shortMaeR, atrRank[evalBars + pivLen]) : na
+
+if hasShortEval and not na(shortType)
+    _atrVal  = nz(atrRank[evalBars + pivLen])
+    _adxVal  = nz(adx[evalBars + pivLen])
+    _wtVal   = nz(shortWtAtPivot)
+    _srsiVal = nz(100 - srsiK[evalBars + pivLen])
+    _bbwVal  = nz(bbWidthRnk[evalBars + pivLen])
+    _mfeVal  = nz(shortMfeR)
+    _isGood  = shortType <= 2
+    // Combined counts
+    nSnap  += shortType == 1 ? 1 : 0
+    nGrind += shortType == 2 ? 1 : 0
+    nFake  += shortType == 3 ? 1 : 0
+    nChop  += shortType == 4 ? 1 : 0
+    if _isGood
+        nGood       += 1
+        sumAtrGood  += _atrVal
+        sumAdxGood  += _adxVal
+        sumWtGood   += _wtVal
+        sumSrsiGood += _srsiVal
+        sumBbwGood  += _bbwVal
+        nDivGood    += shortDiv ? 1 : 0
+        nExtGood    += shortExtreme ? 1 : 0
+        nTaGood     += shortTrendAgainst ? 1 : 0
+        sumMfeGood  += _mfeVal
+    else
+        nBad        += 1
+        sumAtrBad   += _atrVal
+        sumAdxBad   += _adxVal
+        sumWtBad    += _wtVal
+        sumSrsiBad  += _srsiVal
+        sumBbwBad   += _bbwVal
+        nDivBad     += shortDiv ? 1 : 0
+        nExtBad     += shortExtreme ? 1 : 0
+        nTaBad      += shortTrendAgainst ? 1 : 0
+        sumMfeBad   += _mfeVal
+    // Short split
+    nSnapS  += shortType == 1 ? 1 : 0
+    nGrindS += shortType == 2 ? 1 : 0
+    nFakeS  += shortType == 3 ? 1 : 0
+    nChopS  += shortType == 4 ? 1 : 0
+    if _isGood
+        nGoodS    += 1
+        sumWtGS   += _wtVal
+        sumSrsiGS += _srsiVal
+        sumMfeGS  += _mfeVal
+    else
+        nBadS     += 1
+        sumWtBS   += _wtVal
+        sumSrsiBS += _srsiVal
+        sumMfeBS  += _mfeVal
+    // R-buckets
+    if _isGood
+        nHit1RGood += _mfeVal >= 1.0 ? 1 : 0
+        nHit2RGood += _mfeVal >= 2.0 ? 1 : 0
+        nHit3RGood += _mfeVal >= 3.0 ? 1 : 0
+    else
+        nHit1RBad  += _mfeVal >= 1.0 ? 1 : 0
+        nHit2RBad  += _mfeVal >= 2.0 ? 1 : 0
+        nHit3RBad  += _mfeVal >= 3.0 ? 1 : 0
+    // Snap speed
+    if shortType == 1 and not na(shortFirstSnap)
+        sumSnapBars += shortFirstSnap
+        nSnapPivots += 1
+    // Per-type
+    if shortType == 1
+        sumWtA   += _wtVal
+        sumSrsiA += _srsiVal
+        sumBbwA  += _bbwVal
+        sumMfeA  += _mfeVal
+    else if shortType == 2
+        sumWtB   += _wtVal
+        sumSrsiB += _srsiVal
+        sumBbwB  += _bbwVal
+        sumMfeB  += _mfeVal
+    else if shortType == 3
+        sumWtC   += _wtVal
+        sumSrsiC += _srsiVal
+        sumBbwC  += _bbwVal
+        sumMfeC  += _mfeVal
+    else
+        sumWtD   += _wtVal
+        sumSrsiD += _srsiVal
+        sumBbwD  += _bbwVal
+        sumMfeD  += _mfeVal
+    // History split
+    _isH2 = time[evalBars + pivLen] >= splitDate
+    if _isH2
+        if _isGood
+            nGoodH2    += 1
+            sumWtGH2   += _wtVal
+            sumSrsiGH2 += _srsiVal
+        else
+            nBadH2     += 1
+            sumWtBH2   += _wtVal
+            sumSrsiBH2 += _srsiVal
+    else
+        if _isGood
+            nGoodH1    += 1
+            sumWtGH1   += _wtVal
+            sumSrsiGH1 += _srsiVal
+        else
+            nBadH1     += 1
+            sumWtBH1   += _wtVal
+            sumSrsiBH1 += _srsiVal
+    log.info("RTC SHORT " + f_typeName(shortType) +
+      " | price=" + str.tostring(shortPivotPrice, format.mintick) +
+      " | MFE=" + str.tostring(shortMfeR, "#.##") + "R MAE=" + str.tostring(shortMaeR, "#.##") + "R" +
+      " | WT=" + str.tostring(shortWtAtPivot, "#.1") + " div=" + (shortDiv ? "Y" : "N") + " ext=" + (shortExtreme ? "Y" : "N") +
+      " | ATR%=" + str.tostring(_atrVal, "#.0") + " ADX=" + str.tostring(_adxVal, "#.0") +
+      " SRSI=" + str.tostring(_srsiVal, "#.0") + " BBW%=" + str.tostring(_bbwVal, "#.0") +
+      " | trendAg=" + (shortTrendAgainst ? "Y" : "N") + " score=" + str.tostring(shortScore, "#.0"))
+    if f_shouldShow(shortType)
+        txt = shortType == 1 ? "A↓" : shortType == 2 ? "B↓" : shortType == 3 ? "C↓" : "D↓"
+        tip = "SHORT " + f_typeName(shortType) +
+          "\nPivot: "      + str.tostring(shortPivotPrice, format.mintick) +
+          "\nMFE/MAE: "    + str.tostring(shortMfeR, "#.##") + "R / " + str.tostring(shortMaeR, "#.##") + "R" +
+          "\nWT@Pivot: "   + str.tostring(shortWtAtPivot, "#.0") +
+          "\nDivergence: " + (shortDiv ? "yes" : "no") +
+          "\nWT extreme: " + (shortExtreme ? "yes" : "no") +
+          "\nTrend-ag: "   + (shortTrendAgainst ? "yes" : "no") +
+          "\nChop: "       + (shortChop ? "yes" : "no") +
+          "\nATR rank: "   + str.tostring(_atrVal, "#.0") +
+          "\nStochRSI: "   + str.tostring(_srsiVal, "#.0") +
+          "\nBB Width%: "  + str.tostring(_bbwVal, "#.0") +
+          "\nScore: "      + str.tostring(shortScore, "#.0")
+        label.new(shortPivotBar, shortPivotPrice, txt, xloc=xloc.bar_index, yloc=yloc.price,
+          style=label.style_label_down, color=f_typeColor(shortType), textcolor=color.white, tooltip=tip, size=size.small)
+
+// ─── Background zones ────────────────────────────────────────────────────────
+var int lastType = na
+if hasLongEval and not na(longType)
+    lastType := longType
+if hasShortEval and not na(shortType)
+    lastType := shortType
+
+bgcolor(showZones and not na(lastType) ? color.new(f_typeColor(lastType), 92) : na)
+
+// ─── Table ───────────────────────────────────────────────────────────────────
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+f_avg(_sum, _n)  => _n > 0 ? str.tostring(_sum / _n, "#.0") : "—"
+f_pct(_num, _den) => _den > 0 ? str.tostring(100.0 * _num / _den, "#") + "%" : "—"
+f_avgR(_sum, _n) => _n > 0 ? str.tostring(_sum / _n, "#.##") : "—"
+
+f_sep(_t, _r) =>
+    table.cell(_t, 0, _r, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(_t, 1, _r, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(_t, 2, _r, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(_t, 3, _r, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(_t, 4, _r, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+
+// 5 cols × 45 rows
+var table t = table.new(position.top_right, 5, 45,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+if barstate.islast and showTable
+    // ── Section 1: Filter Params (rows 0–7) ──────────────────────────────────
+    table.cell(t, 0, 0, "Filter Params",    text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, "Good A+B",         text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 0, "Bad  C+D",         text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 3, 0, "",                 text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 4, 0, "",                 text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 1, "Count",            text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 1, str.tostring(nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 1, "",                  text_size=size.small)
+    table.cell(t, 4, 1, "",                  text_size=size.small)
+
+    table.cell(t, 0, 2, "ATR Rank %",       text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, f_avg(sumAtrGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 2, f_avg(sumAtrBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 2, "",                  text_size=size.small)
+    table.cell(t, 4, 2, "",                  text_size=size.small)
+
+    table.cell(t, 0, 3, "ADX",              text_color=tc, text_size=size.small)
+    table.cell(t, 1, 3, f_avg(sumAdxGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 3, f_avg(sumAdxBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 3, "",                  text_size=size.small)
+    table.cell(t, 4, 3, "",                  text_size=size.small)
+
+    table.cell(t, 0, 4, "WT depth ↑=OS/OB", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 4, f_avg(sumWtGood,  nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 4, f_avg(sumWtBad,   nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 4, "",                  text_size=size.small)
+    table.cell(t, 4, 4, "",                  text_size=size.small)
+
+    table.cell(t, 0, 5, "StochRSI ↓=OS/OB", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 5, f_avg(sumSrsiGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 5, f_avg(sumSrsiBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 5, "",                  text_size=size.small)
+    table.cell(t, 4, 5, "",                  text_size=size.small)
+
+    table.cell(t, 0, 6, "BB Width %",       text_color=tc, text_size=size.small)
+    table.cell(t, 1, 6, f_avg(sumBbwGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 6, f_avg(sumBbwBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 6, "",                  text_size=size.small)
+    table.cell(t, 4, 6, "",                  text_size=size.small)
+
+    table.cell(t, 0, 7, "Avg MFE/R",        text_color=tc, text_size=size.small)
+    table.cell(t, 1, 7, f_avgR(sumMfeGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 7, f_avgR(sumMfeBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 7, "",                  text_size=size.small)
+    table.cell(t, 4, 7, "",                  text_size=size.small)
+
+    f_sep(t, 8)
+
+    // ── Section 2: Signal Quality (rows 9–13) ────────────────────────────────
+    table.cell(t, 0,  9, "Signal Quality",  text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1,  9, "Good A+B",        text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2,  9, "Bad  C+D",        text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 3,  9, "",                text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 4,  9, "",                text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 10, "Divergence",      text_color=tc, text_size=size.small)
+    table.cell(t, 1, 10, f_pct(nDivGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 10, f_pct(nDivBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 10, "",                text_size=size.small)
+    table.cell(t, 4, 10, "",                text_size=size.small)
+
+    table.cell(t, 0, 11, "WT Extreme",      text_color=tc, text_size=size.small)
+    table.cell(t, 1, 11, f_pct(nExtGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 11, f_pct(nExtBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 11, "",                text_size=size.small)
+    table.cell(t, 4, 11, "",                text_size=size.small)
+
+    table.cell(t, 0, 12, "Trend-Against",   text_color=tc, text_size=size.small)
+    table.cell(t, 1, 12, f_pct(nTaGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 12, f_pct(nTaBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 12, "",                text_size=size.small)
+    table.cell(t, 4, 12, "",                text_size=size.small)
+
+    f_sep(t, 13)
+
+    // ── Section 3: Long / Short Split (rows 14–18) ───────────────────────────
+    table.cell(t, 0, 14, "L/S Split",       text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 14, "L-Good",          text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 14, "L-Bad",           text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 3, 14, "S-Good",          text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 4, 14, "S-Bad",           text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 15, "Count",           text_color=tc, text_size=size.small)
+    table.cell(t, 1, 15, str.tostring(nGoodL), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 15, str.tostring(nBadL),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 15, str.tostring(nGoodS), text_color=tc, text_size=size.small)
+    table.cell(t, 4, 15, str.tostring(nBadS),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 16, "WT depth",        text_color=tc, text_size=size.small)
+    table.cell(t, 1, 16, f_avg(sumWtGL, nGoodL), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 16, f_avg(sumWtBL, nBadL),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 16, f_avg(sumWtGS, nGoodS), text_color=tc, text_size=size.small)
+    table.cell(t, 4, 16, f_avg(sumWtBS, nBadS),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 17, "StochRSI dir.",   text_color=tc, text_size=size.small)
+    table.cell(t, 1, 17, f_avg(sumSrsiGL, nGoodL), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 17, f_avg(sumSrsiBL, nBadL),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 17, f_avg(sumSrsiGS, nGoodS), text_color=tc, text_size=size.small)
+    table.cell(t, 4, 17, f_avg(sumSrsiBS, nBadS),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 18, "Avg MFE/R",       text_color=tc, text_size=size.small)
+    table.cell(t, 1, 18, f_avgR(sumMfeGL, nGoodL), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 18, f_avgR(sumMfeBL, nBadL),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 18, f_avgR(sumMfeGS, nGoodS), text_color=tc, text_size=size.small)
+    table.cell(t, 4, 18, f_avgR(sumMfeBS, nBadS),  text_color=tc, text_size=size.small)
+
+    f_sep(t, 19)
+
+    // ── Section 4: R-Buckets + Snap Speed (rows 20–24) ───────────────────────
+    table.cell(t, 0, 20, "R-Buckets",       text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 20, "Good A+B",        text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 20, "Bad  C+D",        text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 3, 20, "",                text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 4, 20, "",                text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 21, "MFE ≥ 1R",        text_color=tc, text_size=size.small)
+    table.cell(t, 1, 21, f_pct(nHit1RGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 21, f_pct(nHit1RBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 21, "",                text_size=size.small)
+    table.cell(t, 4, 21, "",                text_size=size.small)
+
+    table.cell(t, 0, 22, "MFE ≥ 2R",        text_color=tc, text_size=size.small)
+    table.cell(t, 1, 22, f_pct(nHit2RGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 22, f_pct(nHit2RBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 22, "",                text_size=size.small)
+    table.cell(t, 4, 22, "",                text_size=size.small)
+
+    table.cell(t, 0, 23, "MFE ≥ 3R",        text_color=tc, text_size=size.small)
+    table.cell(t, 1, 23, f_pct(nHit3RGood, nGood), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 23, f_pct(nHit3RBad,  nBad),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 23, "",                text_size=size.small)
+    table.cell(t, 4, 23, "",                text_size=size.small)
+
+    table.cell(t, 0, 24, "Avg Snap Bars",   text_color=tc, text_size=size.small)
+    table.cell(t, 1, 24, f_avg(sumSnapBars, nSnapPivots), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 24, "(A-type only)",   text_color=tc, text_size=size.tiny)
+    table.cell(t, 3, 24, "",                text_size=size.small)
+    table.cell(t, 4, 24, "",                text_size=size.small)
+
+    f_sep(t, 25)
+
+    // ── Section 5: Per-Type Stats (rows 26–31) ───────────────────────────────
+    table.cell(t, 0, 26, "By Type",         text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 26, "A Snap",          text_color=color.new(color.lime, 20),  bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 26, "B Grind",         text_color=color.new(color.teal, 20),  bgcolor=hd, text_size=size.small)
+    table.cell(t, 3, 26, "C Fake",          text_color=color.new(color.red, 20),   bgcolor=hd, text_size=size.small)
+    table.cell(t, 4, 26, "D Chop",          text_color=tc,                         bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 27, "Count",           text_color=tc, text_size=size.small)
+    table.cell(t, 1, 27, str.tostring(nSnap),  text_color=tc, text_size=size.small)
+    table.cell(t, 2, 27, str.tostring(nGrind), text_color=tc, text_size=size.small)
+    table.cell(t, 3, 27, str.tostring(nFake),  text_color=tc, text_size=size.small)
+    table.cell(t, 4, 27, str.tostring(nChop),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 28, "WT depth",        text_color=tc, text_size=size.small)
+    table.cell(t, 1, 28, f_avg(sumWtA, nSnap),  text_color=tc, text_size=size.small)
+    table.cell(t, 2, 28, f_avg(sumWtB, nGrind), text_color=tc, text_size=size.small)
+    table.cell(t, 3, 28, f_avg(sumWtC, nFake),  text_color=tc, text_size=size.small)
+    table.cell(t, 4, 28, f_avg(sumWtD, nChop),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 29, "StochRSI dir.",   text_color=tc, text_size=size.small)
+    table.cell(t, 1, 29, f_avg(sumSrsiA, nSnap),  text_color=tc, text_size=size.small)
+    table.cell(t, 2, 29, f_avg(sumSrsiB, nGrind), text_color=tc, text_size=size.small)
+    table.cell(t, 3, 29, f_avg(sumSrsiC, nFake),  text_color=tc, text_size=size.small)
+    table.cell(t, 4, 29, f_avg(sumSrsiD, nChop),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 30, "BB Width %",      text_color=tc, text_size=size.small)
+    table.cell(t, 1, 30, f_avg(sumBbwA, nSnap),  text_color=tc, text_size=size.small)
+    table.cell(t, 2, 30, f_avg(sumBbwB, nGrind), text_color=tc, text_size=size.small)
+    table.cell(t, 3, 30, f_avg(sumBbwC, nFake),  text_color=tc, text_size=size.small)
+    table.cell(t, 4, 30, f_avg(sumBbwD, nChop),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 31, "Avg MFE/R",       text_color=tc, text_size=size.small)
+    table.cell(t, 1, 31, f_avgR(sumMfeA, nSnap),  text_color=tc, text_size=size.small)
+    table.cell(t, 2, 31, f_avgR(sumMfeB, nGrind), text_color=tc, text_size=size.small)
+    table.cell(t, 3, 31, f_avgR(sumMfeC, nFake),  text_color=tc, text_size=size.small)
+    table.cell(t, 4, 31, f_avgR(sumMfeD, nChop),  text_color=tc, text_size=size.small)
+
+    f_sep(t, 32)
+
+    // ── Section 6: History Split (rows 33–37) ────────────────────────────────
+    table.cell(t, 0, 33, "History",         text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 33, "H1-Good",         text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 33, "H1-Bad",          text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 3, 33, "H2-Good",         text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 4, 33, "H2-Bad",          text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 34, "Count",           text_color=tc, text_size=size.small)
+    table.cell(t, 1, 34, str.tostring(nGoodH1), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 34, str.tostring(nBadH1),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 34, str.tostring(nGoodH2), text_color=tc, text_size=size.small)
+    table.cell(t, 4, 34, str.tostring(nBadH2),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 35, "Good %",          text_color=tc, text_size=size.small)
+    table.cell(t, 1, 35, f_pct(nGoodH1, nGoodH1 + nBadH1), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 35, f_pct(nBadH1,  nGoodH1 + nBadH1), text_color=tc, text_size=size.small)
+    table.cell(t, 3, 35, f_pct(nGoodH2, nGoodH2 + nBadH2), text_color=tc, text_size=size.small)
+    table.cell(t, 4, 35, f_pct(nBadH2,  nGoodH2 + nBadH2), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 36, "WT depth",        text_color=tc, text_size=size.small)
+    table.cell(t, 1, 36, f_avg(sumWtGH1, nGoodH1), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 36, f_avg(sumWtBH1, nBadH1),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 36, f_avg(sumWtGH2, nGoodH2), text_color=tc, text_size=size.small)
+    table.cell(t, 4, 36, f_avg(sumWtBH2, nBadH2),  text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 37, "StochRSI dir.",   text_color=tc, text_size=size.small)
+    table.cell(t, 1, 37, f_avg(sumSrsiGH1, nGoodH1), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 37, f_avg(sumSrsiBH1, nBadH1),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 37, f_avg(sumSrsiGH2, nGoodH2), text_color=tc, text_size=size.small)
+    table.cell(t, 4, 37, f_avg(sumSrsiBH2, nBadH2),  text_color=tc, text_size=size.small)
+
+    f_sep(t, 38)
+
+    // ── Section 7: Distribution (rows 39–44) ─────────────────────────────────
+    table.cell(t, 0, 39, "Type",            text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 39, "Long",            text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 39, "Short",           text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 3, 39, "Total",           text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 4, 39, "",               text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 40, "A Snapback",      text_color=tc, bgcolor=color.new(color.lime, 75), text_size=size.small)
+    table.cell(t, 1, 40, str.tostring(nSnapL),  text_color=tc, text_size=size.small)
+    table.cell(t, 2, 40, str.tostring(nSnapS),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 40, str.tostring(nSnap),   text_color=tc, text_size=size.small)
+    table.cell(t, 4, 40, "",                text_size=size.small)
+
+    table.cell(t, 0, 41, "B Grind",         text_color=tc, bgcolor=color.new(color.teal, 75), text_size=size.small)
+    table.cell(t, 1, 41, str.tostring(nGrindL), text_color=tc, text_size=size.small)
+    table.cell(t, 2, 41, str.tostring(nGrindS), text_color=tc, text_size=size.small)
+    table.cell(t, 3, 41, str.tostring(nGrind),  text_color=tc, text_size=size.small)
+    table.cell(t, 4, 41, "",                text_size=size.small)
+
+    table.cell(t, 0, 42, "C Fake",          text_color=tc, bgcolor=color.new(color.red,  75), text_size=size.small)
+    table.cell(t, 1, 42, str.tostring(nFakeL),  text_color=tc, text_size=size.small)
+    table.cell(t, 2, 42, str.tostring(nFakeS),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 42, str.tostring(nFake),   text_color=tc, text_size=size.small)
+    table.cell(t, 4, 42, "",                text_size=size.small)
+
+    table.cell(t, 0, 43, "D Chop",          text_color=tc, bgcolor=color.new(color.gray, 80), text_size=size.small)
+    table.cell(t, 1, 43, str.tostring(nChopL),  text_color=tc, text_size=size.small)
+    table.cell(t, 2, 43, str.tostring(nChopS),  text_color=tc, text_size=size.small)
+    table.cell(t, 3, 43, str.tostring(nChop),   text_color=tc, text_size=size.small)
+    table.cell(t, 4, 43, "",                text_size=size.small)
+
+    nTotalL = nSnapL + nGrindL + nFakeL + nChopL
+    nTotalS = nSnapS + nGrindS + nFakeS + nChopS
+    table.cell(t, 0, 44, "Total",           text_color=tc, text_size=size.small)
+    table.cell(t, 1, 44, str.tostring(nTotalL),              text_color=tc, text_size=size.small)
+    table.cell(t, 2, 44, str.tostring(nTotalS),              text_color=tc, text_size=size.small)
+    table.cell(t, 3, 44, str.tostring(nTotalL + nTotalS),    text_color=tc, text_size=size.small)
+    table.cell(t, 4, 44, "",                text_size=size.small)
+
+// ─── Hidden plots for Data Window ────────────────────────────────────────────
+plot(wt1,        "WT1",        display=display.data_window)
+plot(wt2,        "WT2",        display=display.data_window)
+plot(adx,        "ADX",        display=display.data_window)
+plot(atrRank,    "ATR Rank",   display=display.data_window)
+plot(srsiK,      "StochRSI K", display=display.data_window)
+plot(bbWidthRnk, "BB Width %", display=display.data_window)

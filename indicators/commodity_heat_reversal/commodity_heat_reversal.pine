@@ -1,0 +1,198 @@
+//@version=6
+// ============================================================================
+// Commodity Heat Reversal [WavesUnchained]
+// Version: 1.1
+// Author: WavesUnchained
+// Build: 2026-05-06 00:00:00
+// ============================================================================
+// Score-based mean-reversion reversal signals for commodity futures (4H).
+//
+// Features:
+//   ✓ Dual Heat Score (long / short, 0–7 points)
+//   ✓ ATR-distance, ATR-expansion, RSI extremes, wick pressure, BB breach
+//   ✓ Optional EMA-200 trend filter with extreme-score override
+//   ✓ Swing-high / swing-low stops + MA20 mean-reversion TP
+//   ✓ Selectable MA smoothing (EMA / RMA / SMA / WMA / HMA / JMA)
+//   ✓ Score dashboard table
+//
+// ============================================================================
+
+indicator("Commodity Heat Reversal [WavesUnchained]",
+         shorttitle="CHR",
+         overlay=true)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+var string GRP_SMOOTH  = "Smoothing"
+var string GRP_FILTER  = "Trend Filter"
+var string GRP_LEN     = "Lengths"
+var string GRP_SCORE   = "Score"
+var string GRP_RISK    = "Risk"
+var string GRP_VIS     = "Display"
+
+maType   = input.string("HMA", "MA Type", options=["EMA","RMA","SMA","WMA","HMA","JMA"], group=GRP_SMOOTH)
+jmaPhase = input.int(50,   "  JMA Phase", minval=-100, maxval=100,             group=GRP_SMOOTH)
+jmaPower = input.float(2.0,"  JMA Power", minval=1.0,  maxval=4.0, step=0.25, group=GRP_SMOOTH)
+
+useTrendFilter           = input.bool(false, "Enable Trend Filter",            group=GRP_FILTER)
+allowCounterTrendExtreme = input.bool(true,  "Allow Counter-Trend at Extreme", group=GRP_FILTER)
+
+maFastLen   = input.int(20,  "MA Fast (TP)",  group=GRP_LEN)
+maMeanLen   = input.int(50,  "MA Mean",       group=GRP_LEN)
+maTrendLen  = input.int(200, "MA Trend",      group=GRP_LEN)
+atrFastLen  = input.int(14,  "ATR Fast",      group=GRP_LEN)
+atrSlowLen  = input.int(50,  "ATR Slow (SMA)",group=GRP_LEN)
+rsiLen      = input.int(14,  "RSI",           group=GRP_LEN)
+
+scoreThreshold        = input.int(4, "Score Threshold",         minval=1, maxval=7, group=GRP_SCORE)
+extremeScoreThreshold = input.int(6, "Extreme Score Threshold", minval=1, maxval=7, group=GRP_SCORE)
+
+atrDistanceMult  = input.float(2.5, "ATR Distance to MA50", step=0.1, group=GRP_RISK)
+atrExpansionMult = input.float(1.5, "ATR Expansion Mult",   step=0.1, group=GRP_RISK)
+slAtrMult        = input.float(1.2, "SL ATR Multiplier",    step=0.1, group=GRP_RISK)
+
+showTable = input.bool(true, "Show Score Table", group=GRP_VIS)
+tablePos  = input.string("Top Right", "Table Position",
+         options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=GRP_VIS)
+
+// ── Smoothing ─────────────────────────────────────────────────────────────────
+f_jma(src, length, phase, power) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+    _pr    = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    _beta  = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    _alpha = math.pow(_beta, power)
+    e0    := (1 - _alpha) * src + _alpha * nz(e0[1], src)
+    e1    := (src - e0) * (1 - _beta) + _beta * nz(e1[1], 0)
+    e2    := (e0 + _pr * e1 - nz(jma[1], src)) * math.pow(1 - _alpha, 2) + math.pow(_alpha, 2) * nz(e2[1], 0)
+    jma   := nz(jma[1], src) + e2
+    jma
+
+f_smooth(src, length, mode) =>
+    switch mode
+        'SMA' => ta.sma(src, length)
+        'RMA' => ta.rma(src, length)
+        'HMA' => ta.hma(src, length)
+        'WMA' => ta.wma(src, length)
+        'JMA' => f_jma(src, length, jmaPhase, jmaPower)
+        =>       ta.ema(src, length)
+
+// ── Indicators ───────────────────────────────────────────────────────────────
+ma20   = f_smooth(close, maFastLen,  maType)
+ma50   = f_smooth(close, maMeanLen,  maType)
+ma200  = f_smooth(close, maTrendLen, maType)
+ma9    = f_smooth(close, 9,          maType)
+
+atr14  = ta.atr(atrFastLen)
+atr50  = ta.sma(atr14, atrSlowLen)
+
+rsi = ta.rsi(close, rsiLen)
+
+bbBasis = ta.sma(close, 20)
+bbDev   = ta.stdev(close, 20)
+bbUpper = bbBasis + bbDev * 2
+bbLower = bbBasis - bbDev * 2
+
+// ── Candle anatomy ───────────────────────────────────────────────────────────
+candleRange  = high - low
+upperWick    = high - math.max(open, close)
+lowerWick    = math.min(open, close) - low
+upperWickPct = candleRange > 0 ? upperWick / candleRange : 0.0
+lowerWickPct = candleRange > 0 ? lowerWick / candleRange : 0.0
+
+// ── Heat Scores ──────────────────────────────────────────────────────────────
+shortScore = 0
+shortScore += close > ma50 + atrDistanceMult * atr14  ? 2 : 0
+shortScore += atr14 > atr50 * atrExpansionMult        ? 2 : 0
+shortScore += rsi > 72                                ? 1 : 0
+shortScore += upperWickPct > 0.35                     ? 1 : 0
+shortScore += close > bbUpper                         ? 1 : 0
+
+longScore = 0
+longScore += close < ma50 - atrDistanceMult * atr14   ? 2 : 0
+longScore += atr14 > atr50 * atrExpansionMult         ? 2 : 0
+longScore += rsi < 28                                 ? 1 : 0
+longScore += lowerWickPct > 0.35                      ? 1 : 0
+longScore += close < bbLower                          ? 1 : 0
+
+// ── Confirmation ─────────────────────────────────────────────────────────────
+shortConfirm = close < low[1] or close < ma9
+longConfirm  = close > high[1] or close > ma9
+
+// ── Trend filter ─────────────────────────────────────────────────────────────
+upTrend   = close > ma200
+downTrend = close < ma200
+
+shortAllowed = not useTrendFilter or downTrend or (allowCounterTrendExtreme and shortScore >= extremeScoreThreshold)
+longAllowed  = not useTrendFilter or upTrend   or (allowCounterTrendExtreme and longScore  >= extremeScoreThreshold)
+
+// ── Signals ──────────────────────────────────────────────────────────────────
+shortSignal = shortScore >= scoreThreshold and shortConfirm and shortAllowed
+longSignal  = longScore  >= scoreThreshold and longConfirm  and longAllowed
+
+// ── SL / TP levels ───────────────────────────────────────────────────────────
+swingHigh = ta.highest(high, 10)
+swingLow  = ta.lowest(low,  10)
+
+shortSL = swingHigh + slAtrMult * atr14
+longSL  = swingLow  - slAtrMult * atr14
+
+// ── Plots ─────────────────────────────────────────────────────────────────────
+plot(ma20,  "MA 20",  color=color.new(color.blue,   0), linewidth=1)
+plot(ma50,  "MA 50",  color=color.new(color.orange, 0), linewidth=1)
+plot(ma200, "MA 200", color=color.new(color.gray,   0), linewidth=1)
+
+plot(shortSignal ? shortSL : na, "Short SL", color=color.new(#d50000, 60), style=plot.style_linebr, linewidth=1)
+plot(longSignal  ? longSL  : na, "Long SL",  color=color.new(#00c853, 60), style=plot.style_linebr, linewidth=1)
+plot(shortSignal ? ma20    : na, "Short TP", color=color.new(#00c853, 60), style=plot.style_linebr, linewidth=1)
+plot(longSignal  ? ma20    : na, "Long TP",  color=color.new(#d50000, 60), style=plot.style_linebr, linewidth=1)
+
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar,
+         color=#d50000, size=size.small)
+plotshape(longSignal,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar,
+         color=#00c853, size=size.small)
+
+// ── Score table ──────────────────────────────────────────────────────────────
+if showTable
+    tpos = switch tablePos
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        =>               position.top_right
+
+    color tc = color.new(color.gray, 20)
+    color hd = color.new(color.gray, 90)
+
+    var table t = table.new(tpos, 3, 5,
+         bgcolor=color.new(color.white, 5),
+         border_color=color.new(color.gray, 60),
+         border_width=1,
+         frame_color=color.new(color.gray, 40),
+         frame_width=1)
+
+    table.cell(t, 0, 0, "CHR",    text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, "Score",  text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 0, "Signal", text_color=tc, bgcolor=hd, text_size=size.small)
+
+    shortBg = shortSignal ? color.new(#d50000, 20) : color.new(color.gray, 80)
+    longBg  = longSignal  ? color.new(#00c853, 20) : color.new(color.gray, 80)
+    shortTc = shortSignal ? color.white : tc
+    longTc  = longSignal  ? color.white : tc
+
+    table.cell(t, 0, 1, "Short", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(shortScore) + " / 7", text_color=tc, text_size=size.small)
+    table.cell(t, 2, 1, shortSignal ? "▼ SHORT" : "–", bgcolor=shortBg, text_color=shortTc, text_size=size.small)
+
+    table.cell(t, 0, 2, "Long", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(longScore) + " / 7", text_color=tc, text_size=size.small)
+    table.cell(t, 2, 2, longSignal ? "▲ LONG" : "–", bgcolor=longBg, text_color=longTc, text_size=size.small)
+
+    table.cell(t, 0, 3, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(t, 1, 3, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(t, 2, 3, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+
+    trendLabel = not useTrendFilter ? "Off" : upTrend ? "Up" : "Down"
+    table.cell(t, 0, 4, "Trend",    text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 4, trendLabel, text_color=tc, text_size=size.tiny)
+    table.cell(t, 2, 4, "RSI " + str.tostring(math.round(rsi, 1)), text_color=tc, text_size=size.tiny)
