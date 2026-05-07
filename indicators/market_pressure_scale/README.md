@@ -1,6 +1,8 @@
 # Market Pressure Scale
 
-Two-component oscillator that separates **Setup Pressure** (market coiling for a move) from **Impulse Pressure** (active directional momentum). Both run on a 0–100 scale in the same sub-pane. A phase label, signal markers, StochRSI overlay, and Impulse divergence complete the picture.
+**TradingView:** https://de.tradingview.com/script/y36Lhppi/
+
+Two-component oscillator that separates **Setup Pressure** (market coiling for a move) from **Impulse Pressure** (active directional momentum). Both run on a 0–100 scale in the same sub-pane. A phase label, signal markers, StochRSI and MFI overlays with divergences, and price-chart markers complete the picture.
 
 ## Why two components?
 
@@ -13,7 +15,8 @@ Classic volatility indicators (ATR, Bollinger Width) measure compression but go 
 | Setup Pressure | Orange (thick) | ATR compression, BB compression, S/R proximity, relative volume |
 | Impulse Pressure | Green (thick) | Range expansion vs ATR, relative volume, candle body ratio |
 | StochRSI K | Blue (thin, optional) | Standard StochRSI K line |
-| StochRSI D | Orange-blue (thin, optional) | Standard StochRSI D line |
+| StochRSI D | Orange-red (thin, optional) | Standard StochRSI D line |
+| MFI | Lavender (thin, optional) | Money Flow Index — RSI applied to Typical Price × Volume |
 
 ## Phases
 
@@ -40,11 +43,27 @@ Small labels in the oscillator panel with hover tooltips. Each marker is individ
 | `DP` purple | Both components above 65 simultaneously | Double Peak — sharp move imminent |
 | `DF` gray | Both falling from above 60, one crosses below 55 | Dual Fade — momentum exhausting |
 
-## Impulse divergence
+## Divergences
 
-Bullish/bearish divergence between price pivots and Impulse Pressure, drawn the same way as WaveTrend v4:
-- **Bull** — price makes lower low, Impulse makes higher low → momentum holds despite price weakness
-- **Bear** — price makes higher high, Impulse makes lower high → momentum fading despite price strength
+All divergences share the same pivot lookback and bar range settings. A master toggle controls all sources; Bull/Bear are individually toggleable beneath it.
+
+**Impulse Pressure** — divergence between price pivots and Impulse Pressure, drawn on the oscillator in the same visual style as WaveTrend v4.
+
+**StochRSI K** — same pivot logic applied to the StochRSI K line. Shown in the oscillator when StochRSI is enabled.
+
+**MFI** — same pivot logic applied to the MFI line. Detects when directional volume flow diverges from price. Oscillator markers shown when MFI curve is enabled; `◆` price-chart markers are independently toggleable (visible even with MFI curve off).
+
+## Price-chart markers
+
+Markers drawn directly on the candlestick chart, decoupled from oscillator curve visibility:
+
+| Marker | Color | Meaning |
+|---|---|---|
+| `●` green | Lavender | StochRSI K crosses above D in oversold zone |
+| `●` red | Red | StochRSI K crosses below D in overbought zone |
+| `◆` lavender | Lavender | MFI divergence (bullish or bearish) |
+
+StochRSI cross dot size scales with Setup Pressure — larger dot = more structural backing.
 
 ## Dashboard table
 
@@ -68,6 +87,8 @@ Top-right panel, 5 rows:
 
 **Signal Markers** — master toggle + individual toggle per marker
 
-**StochRSI** — show toggle, K smoothing, D smoothing, RSI length, Stoch length
+**StochRSI** — show toggle; Divergences sub-toggle; Crosses sub-toggle with Zone Low / Zone High thresholds (cross dots only in overbought / oversold zone, sized by Setup Pressure); K smoothing, D smoothing, RSI length, Stoch length
 
-**Divergence** — Bull / Bear toggles, pivot left / right lookback, min / max bar range
+**MFI** — show toggle; Divergences sub-toggle (oscillator, active only when MFI on); Chart Markers sub-toggle (price chart, independent of MFI curve); Length
+
+**Divergence** — master Show Divergences toggle; Bull / Bear sub-toggles; pivot left / right lookback, min / max bar range
