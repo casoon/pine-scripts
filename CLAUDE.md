@@ -19,9 +19,28 @@ The publication description for TradingView, written in BBCode. Structure:
 - Opening bold title line
 - `[b]What it does[/b]` — plain-language explanation of the purpose
 - Key sections as `[b]Section[/b]` headings with `[list][*]...[/list]` for feature lists
-- Closing `[hr]` followed by the standard trading disclaimer in `[i]...[/i]`:
+- Closing standard trading disclaimer in `[i]...[/i]`:
 
   > This script is provided for educational and informational purposes only. It does not constitute financial advice. Trading commodities and other financial instruments involves substantial risk of loss and is not suitable for all investors. Past performance of any indicator or system is not indicative of future results. Always conduct your own research, apply proper risk management, and consider consulting a qualified financial advisor before making trading decisions.
+
+### TradingView BBCode — supported tags
+
+TradingView supports only a subset of BBCode. Use only these tags:
+
+| Tag | Purpose |
+|---|---|
+| `[b]...[/b]` | Bold |
+| `[i]...[/i]` | Italic |
+| `[u]...[/u]` | Underline |
+| `[s]...[/s]` | Strikethrough |
+| `[url=...]...[/url]` | Hyperlink |
+| `[img]...[/img]` | Image |
+| `[list][*]...[/list]` | Unordered list |
+| `[list=1][*]...[/list]` | Ordered list |
+| `[code]...[/code]` | Code block |
+| `[quote]...[/quote]` | Quote block |
+
+**Not supported:** `[hr]`, `[h1]`/`[h2]` headings, `[table]`, `[center]`, `[color]`, `[size]`.
 
 ### The `.pine` file(s)
 The script itself. No additional wrapper or build files.
