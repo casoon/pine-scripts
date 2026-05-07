@@ -63,6 +63,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`coilforge_zones_v1.pine`](indicators/coilforge_zones/coilforge_zones_v1.pine) | Compression zone detection with multi-module scoring and post-zone breakout watch |
 | [`reversal_engine_score_v1.pine`](indicators/reversal_engine_score/reversal_engine_score_v1.pine) | Score-based liquidity sweep reversal signals with HTF trend filter and configurable evidence threshold |
 | [`reversal_type_classifier_v1.pine`](indicators/reversal_type_classifier/reversal_type_classifier_v1.pine) | Ex-post diagnostic: classifies confirmed pivot reversals as Snapback / Grind / Fake / Chop with WT context and R-outcome scoring |
+| [`commodity_heat_reversal.pine`](indicators/commodity_heat_reversal/commodity_heat_reversal.pine) | Score-based mean-reversion reversal signals for commodity futures — ATR distance, expansion, RSI extreme, wick pressure, BB breach |
 
 ### Trend & Regime
 
@@ -95,6 +96,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | Script | What it does |
 |--------|--------------|
 | [`volume_strata.pine`](indicators/volume_strata/volume_strata.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN/LVN zones, naked POC tracking |
+| [`money_flow_delta_profile.pine`](indicators/money_flow_delta_profile/money_flow_delta_profile.pine) | Center-out diverging profile — green (right) = net buying, red (left) = net selling at each price level; POC, Value Area, optional recency weighting |
 | [`vwap_cross_visuals.pine`](indicators/liquidity/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
 | [`liquidity_hunter.pine`](indicators/liquidity/liquidity_hunter.pine) | Institutional liquidity zone mapping `[RTA]` |
 | [`smart_money_dashboard.pine`](indicators/liquidity/smart_money_dashboard.pine) | Order flow, SMC, and liquidity dashboard |

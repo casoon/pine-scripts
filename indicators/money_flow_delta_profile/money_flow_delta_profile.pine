@@ -1,0 +1,312 @@
+//@version=6
+// ============================================================================
+// Money Flow Delta Profile [WavesUnchained]
+// Version: 1.1
+// Author: WavesUnchained
+// Build: 2026-05-07 00:00:00
+// ============================================================================
+// Center-out diverging profile: green bars (right of center) = net buying
+// pressure, red bars (left) = net selling pressure at each price level.
+//
+// Features:
+//   ✓ Proportional or Binary flow split per bar
+//   ✓ Total flow reference bars as background context
+//   ✓ Point of Control (POC) — price level with highest total flow
+//   ✓ Value Area High / Low (configurable %)
+//   ✓ Delta POC — most decisively directional level
+//   ✓ Optional recency weighting (exponential decay)
+//   ✓ Volume or Money Flow (volume × price) source
+//   ✓ Level labels (POC / VAH / VAL / ΔPOC)
+//   ✓ Dashboard with bias summary
+//
+// ============================================================================
+
+indicator("Money Flow Delta Profile [WavesUnchained]", "MF Delta [WU]", overlay = true,
+     max_bars_back = 1500, max_boxes_count = 500, max_lines_count = 500)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+
+grP = "Profile"
+rpLN  = input.int(200,               "Lookback",     minval = 10, maxval = 1500, step = 10, group = grP)
+rpNR  = input.int(25,                "Rows",         minval = 10, maxval = 100,  step = 5,  group = grP)
+rpSRC = input.string("Money Flow",   "Source",       options = ["Money Flow", "Volume"],    group = grP)
+rpDM  = input.string("Proportional", "Delta Mode",
+     options = ["Proportional", "Binary"],
+     tooltip = "Proportional: each bar contributes fractionally based on close location in its range. Binary: whole bar counts as bull or bear (Polarity method below applies).",
+     group = grP)
+rpPTY = input.string("Bar Polarity", "Polarity (Binary only)",
+     options = ["Bar Polarity", "Buying/Selling Pressure"],
+     tooltip = "Only used in Binary mode. Bar Polarity: close > open. Buying/Selling Pressure: close location in high–low range.",
+     group = grP)
+useSynVol = input.bool(true, "Synthetic volume if missing",
+     tooltip = "CFDs (e.g. Capital.com) often report volume = 0 or na. When enabled, bars with no volume count as 1.0 so the profile is built from price action alone.",
+     group = grP)
+
+grW = "Weighting"
+useDecay    = input.bool(false,   "Recency Weighting",
+     tooltip = "Exponential decay: recent bars count more. Higher factor = faster fade of older bars.",
+     group = grW)
+decayFactor = input.float(0.015, "Decay Factor", minval = 0.001, maxval = 0.10, step = 0.005, group = grW)
+
+grV = "Visualization"
+showRef      = input.bool(true,   "Total Flow Reference",  group = grV)
+showPOC      = input.bool(true,   "POC Line",              group = grV)
+showVA       = input.bool(true,   "Value Area",            group = grV)
+vaPct        = input.int(70,      "Value Area %",    minval = 10, maxval = 95, step = 5, group = grV) / 100
+showDeltaPOC = input.bool(false,  "Delta POC Line",        group = grV)
+showLabels   = input.bool(true,   "Level Labels",          group = grV)
+showDash     = input.bool(true,   "Dashboard",             group = grV)
+showRange    = input.bool(false,  "Show Lookback Range",   group = grV)
+profileWInp  = input.int(60,      "Profile Width (bars)",  minval = 10, maxval = 200, group = grV)
+vpHO         = input.int(40,      "Bar Offset",            group = grV)
+
+bullC = input.color(color.new(#26a69a, 20), "Bull",          inline = "c1", group = grV)
+bearC = input.color(color.new(#ef5350, 20), "Bear",          inline = "c1", group = grV)
+refC  = input.color(color.new(color.gray, 80), "Ref / POC",  inline = "c2", group = grV)
+pocC  = input.color(#ffd600,                   "",            inline = "c2", group = grV)
+vaC   = input.color(color.new(#2962ff, 85),    "VA / ΔPOC",  inline = "c3", group = grV)
+dpC   = input.color(color.new(#ff6f00, 0),     "",            inline = "c3", group = grV)
+
+// ─── State ────────────────────────────────────────────────────────────────────
+
+var array<box>   drwBoxes  = array.new<box>()
+var array<line>  drwLines  = array.new<line>()
+var array<label> drwLabels = array.new<label>()
+var table        dash      = na
+
+// ─── Compute and draw (last bar only) ────────────────────────────────────────
+
+if barstate.islast
+
+    rpLN_adj = math.min(rpLN - 1, last_bar_index)
+
+    float pLo = low
+    float pHi = high
+    for i = 0 to rpLN_adj
+        pLo := math.min(pLo, low[i])
+        pHi := math.max(pHi, high[i])
+
+    if not na(pLo) and pHi > pLo
+
+        // Clear previous drawings
+        for b in drwBoxes
+            box.delete(b)
+        for l in drwLines
+            line.delete(l)
+        for lb in drwLabels
+            label.delete(lb)
+        drwBoxes.clear()
+        drwLines.clear()
+        drwLabels.clear()
+
+        pSTP = (pHi - pLo) / rpNR
+
+        // Accumulate flow per price row
+        totFlow  = array.new_float(rpNR, 0.)
+        bullFlow = array.new_float(rpNR, 0.)
+
+        for bI = rpLN_adj to 0
+            h_ = high[bI]
+            l_ = low[bI]
+            c_ = close[bI]
+            o_ = open[bI]
+            vRaw = nz(volume[bI])
+            v_   = vRaw > 0 ? vRaw : useSynVol ? 1.0 : 0.0
+            if v_ > 0 and h_ > l_
+                // Buy ratio: fraction of flow attributed to buying pressure
+                buyRatio = rpDM == "Proportional"
+                         ? math.max(0.0, math.min(1.0, (c_ - l_) / (h_ - l_)))
+                         : rpPTY == "Bar Polarity"
+                           ? (c_ > o_ ? 1.0 : c_ < o_ ? 0.0 : 0.5)
+                           : ((c_ - l_) > (h_ - c_) ? 1.0 : 0.0)
+
+                wt = useDecay ? math.exp(-decayFactor * bI) : 1.0
+
+                for r = 0 to rpNR - 1
+                    pLL = pLo + r * pSTP
+                    if h_ >= pLL and l_ < pLL + pSTP
+                        vPOR = if l_ >= pLL and h_ > pLL + pSTP
+                            (pLL + pSTP - l_) / (h_ - l_)
+                        else if h_ <= pLL + pSTP and l_ < pLL
+                            (h_ - pLL) / (h_ - l_)
+                        else if l_ >= pLL and h_ <= pLL + pSTP
+                            1.0
+                        else
+                            pSTP / (h_ - l_)
+
+                        flow = rpSRC == "Money Flow"
+                             ? v_ * vPOR * (pLo + (r + 0.5) * pSTP) * wt
+                             : v_ * vPOR * wt
+
+                        totFlow.set(r,  totFlow.get(r)  + flow)
+                        bullFlow.set(r, bullFlow.get(r) + flow * buyRatio)
+
+        totMax = totFlow.max()
+
+        if totMax > 0
+            totSum   = totFlow.sum()
+            pocIdx   = totFlow.indexof(totMax)
+            pocPrice = pLo + (pocIdx + 0.5) * pSTP
+
+            // Delta per row
+            deltaArr = array.new_float(rpNR, 0.)
+            deltaMax = 0.0
+            for r = 0 to rpNR - 1
+                d = 2.0 * bullFlow.get(r) - totFlow.get(r)
+                deltaArr.set(r, d)
+                if math.abs(d) > deltaMax
+                    deltaMax := math.abs(d)
+            if deltaMax == 0.0
+                deltaMax := 1.0
+
+            // Value Area: expand from POC toward highest adjacent row
+            vaLo  = pocIdx
+            vaHi  = pocIdx
+            vaAcc = totFlow.get(pocIdx)
+            vaTgt = totSum * vaPct
+
+            while vaAcc < vaTgt
+                addLo = vaLo > 0        ? totFlow.get(vaLo - 1) : -1.0
+                addHi = vaHi < rpNR - 1 ? totFlow.get(vaHi + 1) : -1.0
+                if addLo < 0 and addHi < 0
+                    break
+                if addLo >= addHi
+                    vaLo  -= 1
+                    vaAcc += addLo
+                else
+                    vaHi  += 1
+                    vaAcc += addHi
+
+            vahPrice = pLo + (vaHi + 1) * pSTP
+            valPrice = pLo + vaLo * pSTP
+
+            // Delta POC: row with highest absolute delta
+            dPocIdx    = 0
+            dPocAbsMax = 0.0
+            for r = 0 to rpNR - 1
+                ad = math.abs(deltaArr.get(r))
+                if ad > dPocAbsMax
+                    dPocAbsMax := ad
+                    dPocIdx    := r
+            dPocPrice = pLo + (dPocIdx + 0.5) * pSTP
+
+            // Layout
+            profileW = profileWInp
+            halfW    = math.max(int(profileW / 2), 1)
+            leftBI   = bar_index + vpHO + 1
+            centerBI = leftBI + halfW
+
+            // Lookback range overlay
+            if showRange
+                drwBoxes.push(box.new(bar_index - rpLN_adj, pHi, bar_index, pLo,
+                     border_color = color.new(color.orange, 40),
+                     bgcolor      = color.new(color.orange, 92)))
+            rightBI  = leftBI + profileW
+
+            // Value Area drawn first so profile bars render on top
+            if showVA
+                drwBoxes.push(box.new(leftBI, vahPrice, rightBI, valPrice,
+                     vaC, bgcolor = color.new(vaC, 92)))
+
+            // ── Profile rows ─────────────────────────────────────────────
+
+            for r = 0 to rpNR - 1
+                yLo = pLo + r * pSTP + pSTP * 0.04
+                yHi = pLo + (r + 1) * pSTP - pSTP * 0.04
+
+                rowTot = totFlow.get(r)
+
+                if showRef
+                    refEnd = leftBI + math.max(int((rowTot / totMax) * profileW), 1)
+                    drwBoxes.push(box.new(leftBI, yHi, refEnd, yLo, color(na), bgcolor = refC))
+
+                delta      = deltaArr.get(r)
+                deltaRatio = math.abs(delta) / deltaMax
+                dW         = math.max(int(deltaRatio * halfW), 0)
+                if dW > 0
+                    if delta >= 0.0
+                        drwBoxes.push(box.new(centerBI, yHi, centerBI + dW, yLo, color(na), bgcolor = bullC))
+                    else
+                        drwBoxes.push(box.new(centerBI - dW, yHi, centerBI, yLo, color(na), bgcolor = bearC))
+
+            // Center (zero) line
+            drwLines.push(line.new(centerBI, pHi, centerBI, pLo,
+                 xloc = xloc.bar_index, color = color.new(color.gray, 50),
+                 style = line.style_solid, width = 1))
+
+            // POC
+            if showPOC
+                drwLines.push(line.new(leftBI, pocPrice, rightBI, pocPrice,
+                     xloc = xloc.bar_index, color = pocC,
+                     style = line.style_dashed, width = 2))
+                if showLabels
+                    drwLabels.push(label.new(rightBI + 1, pocPrice, "POC",
+                         xloc = xloc.bar_index, yloc = yloc.price,
+                         color = color(na), style = label.style_none,
+                         textcolor = pocC, size = size.small,
+                         textalign = text.align_left))
+
+            // Delta POC
+            if showDeltaPOC
+                drwLines.push(line.new(leftBI, dPocPrice, rightBI, dPocPrice,
+                     xloc = xloc.bar_index, color = dpC,
+                     style = line.style_dotted, width = 2))
+                if showLabels
+                    drwLabels.push(label.new(rightBI + 1, dPocPrice, "ΔPOC",
+                         xloc = xloc.bar_index, yloc = yloc.price,
+                         color = color(na), style = label.style_none,
+                         textcolor = dpC, size = size.small,
+                         textalign = text.align_left))
+
+            // Value Area labels (box already drawn before profile rows)
+            if showVA
+                if showLabels
+                    drwLabels.push(label.new(rightBI + 1, vahPrice, "VAH",
+                         xloc = xloc.bar_index, yloc = yloc.price,
+                         color = color(na), style = label.style_none,
+                         textcolor = vaC, size = size.small,
+                         textalign = text.align_left))
+                    drwLabels.push(label.new(rightBI + 1, valPrice, "VAL",
+                         xloc = xloc.bar_index, yloc = yloc.price,
+                         color = color(na), style = label.style_none,
+                         textcolor = vaC, size = size.small,
+                         textalign = text.align_left))
+
+            // ── Dashboard ────────────────────────────────────────────────
+
+            if showDash
+                bullPct = bullFlow.sum() / totSum * 100
+                biasC   = bullPct > 52.0 ? #00c853 : bullPct < 48.0 ? #d50000 : color.new(color.gray, 20)
+                color tc = color.new(color.gray, 20)
+                color hd = color.new(color.gray, 90)
+
+                if na(dash)
+                    dash := table.new(position.top_right, 2, 6,
+                         bgcolor      = color.new(color.white, 5),
+                         border_color = color.new(color.gray, 60), border_width = 1,
+                         frame_color  = color.new(color.gray, 40), frame_width  = 1)
+
+                table.cell(dash, 0, 0, "MF Delta Profile",
+                     text_color = tc, bgcolor = hd, text_size = size.small)
+                table.cell(dash, 1, 0, str.tostring(rpLN_adj + 1) + "b · " + rpSRC,
+                     text_color = tc, bgcolor = hd, text_size = size.small)
+                table.cell(dash, 0, 1, "POC",
+                     text_color = tc, text_size = size.small)
+                table.cell(dash, 1, 1, str.tostring(pocPrice, format.mintick),
+                     text_color = tc, text_size = size.small)
+                table.cell(dash, 0, 2, "VAH",
+                     text_color = tc, text_size = size.small)
+                table.cell(dash, 1, 2, str.tostring(vahPrice, format.mintick),
+                     text_color = tc, text_size = size.small)
+                table.cell(dash, 0, 3, "VAL",
+                     text_color = tc, text_size = size.small)
+                table.cell(dash, 1, 3, str.tostring(valPrice, format.mintick),
+                     text_color = tc, text_size = size.small)
+                table.cell(dash, 0, 4, "Bull%",
+                     text_color = tc, text_size = size.small)
+                table.cell(dash, 1, 4, str.tostring(bullPct, "#.#") + "%",
+                     text_color = biasC, text_size = size.small)
+                table.cell(dash, 0, 5, "VA",
+                     text_color = tc, text_size = size.small)
+                table.cell(dash, 1, 5, str.tostring(int(vaPct * 100)) + "%",
+                     text_color = tc, text_size = size.small)
