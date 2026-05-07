@@ -49,9 +49,9 @@ All divergences share the same pivot lookback and bar range settings. A master t
 
 **Impulse Pressure** — divergence between price pivots and Impulse Pressure, drawn on the oscillator in the same visual style as WaveTrend v4.
 
-**StochRSI K** — same pivot logic applied to the StochRSI K line. Shown in the oscillator when StochRSI is enabled.
+**StochRSI K** — same pivot logic applied to the StochRSI K line. Divergence lines shown in the oscillator when StochRSI is enabled.
 
-**MFI** — same pivot logic applied to the MFI line. Detects when directional volume flow diverges from price. Oscillator markers shown when MFI curve is enabled; `◆` price-chart markers are independently toggleable (visible even with MFI curve off).
+**MFI** — same pivot logic applied to the MFI line. Detects when directional volume flow diverges from price. Divergence lines shown in the oscillator when MFI curve is enabled; `◆` price-chart markers are independently toggleable (visible even with MFI curve off).
 
 ## Price-chart markers
 
