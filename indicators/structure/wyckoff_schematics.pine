@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Wyckoff Schematics [WavesUnchained]
-// Version: 4.1.0
+// Version: 4.2.0
 // Author: WavesUnchained
 // Build: 2026-05-08 00:00:00
 // ============================================================================
@@ -137,7 +137,7 @@ type WyckoffState
     string              setupQuality
     int                 rangeScore
     string              rangeQuality
-    float               pocPrice
+    float               avwapPrice
     float               vwapNum
     float               vwapDen
     string              htfBias
@@ -218,13 +218,14 @@ detectBuyingClimax(float volumeRatio, WyckoffConfig config) =>
      and (high - low) / close > 0.02
      and (high - close) / (high - low) < 0.3
 
-detectST(float climaxRef, float climaxVolRatio, float volumeRatio, bool isAccum) =>
+detectST(float climaxRef, float climaxVolRatio, float volumeRatio, bool isAccum, float spreadAvg) =>
+    narrowSpread = (high - low) < spreadAvg * 1.2
     if isAccum
-        // ST: low retests SC zone from above on reduced volume
-        low >= climaxRef * 0.97 and low <= climaxRef * 1.05 and volumeRatio < climaxVolRatio
+        // ST: low retests SC zone on reduced volume + narrow spread (no panic)
+        low >= climaxRef * 0.97 and low <= climaxRef * 1.05 and volumeRatio < climaxVolRatio and narrowSpread
     else
-        // ST: high retests BC zone from below on reduced volume
-        high <= climaxRef * 1.03 and high >= climaxRef * 0.95 and volumeRatio < climaxVolRatio
+        // ST: high retests BC zone on reduced volume + narrow spread (no euphoria)
+        high <= climaxRef * 1.03 and high >= climaxRef * 0.95 and volumeRatio < climaxVolRatio and narrowSpread
 
 detectSpring(float rangeLow, WyckoffConfig config) =>
     (rangeLow - low) / rangeLow * 100 >= config.springThreshold and close > rangeLow and close > open
@@ -489,7 +490,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
         state.vwapNum := state.vwapNum + volume * close
         state.vwapDen := state.vwapDen + volume
         if state.vwapDen > 0
-            state.pocPrice := state.vwapNum / state.vwapDen
+            state.avwapPrice := state.vwapNum / state.vwapDen
 
     // === Phase A–E state machine ===
     if isAccumOrDistrib and phaseAge > 0
@@ -514,7 +515,8 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
                     pushEvent(state.events, arEvt)
             else if not na(currentPhase.arBar)
                 climaxRef = not na(currentPhase.climaxPrice) ? currentPhase.climaxPrice : (isAccum ? currentPhase.rangeLow : currentPhase.rangeHigh)
-                if detectST(climaxRef, currentPhase.climaxVolRatio, volumeRatio, isAccum)
+                arAge     = bar_index - currentPhase.arBar
+                if arAge >= 3 and detectST(climaxRef, currentPhase.climaxVolRatio, volumeRatio, isAccum, spreadAvg)
                     currentPhase.phaseAE  := "B"
                     currentPhase.subphase := "ST"
                     stEvt = newWyckoffEvent("ST", "Secondary Test — tests climax level on lower volume", isAccum ? low : high, not isAccum)
@@ -527,7 +529,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
         // ── Phase B ──
         else if phaseAE == "B"
             climaxRef = not na(currentPhase.climaxPrice) ? currentPhase.climaxPrice : (isAccum ? currentPhase.rangeLow : currentPhase.rangeHigh)
-            if detectST(climaxRef, currentPhase.climaxVolRatio, volumeRatio, isAccum) and currentPhase.subphase != "ST"
+            if detectST(climaxRef, currentPhase.climaxVolRatio, volumeRatio, isAccum, spreadAvg) and currentPhase.subphase != "ST"
                 currentPhase.subphase := "ST"
                 stEvt = newWyckoffEvent("ST", "Secondary Test — re-test of climax level", isAccum ? low : high, not isAccum)
                 stEvt.volumeRatio := volumeRatio
@@ -623,7 +625,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
                     currentPhase.subphase := "LPS"
                     lpsEvt = newWyckoffEvent("LPS", "Last Point of Support — pivot low on low volume", low[config.pivotLen])
                     lpsEvt.bar := bar_index - config.pivotLen
-                    lpsEvt.volumeRatio  := volumeRatio
+                    lpsEvt.volumeRatio  := volumeAvg > 0 ? volume[config.pivotLen] / volumeAvg : 0.0
                     lpsEvt.significance := 75.0
                     pushEvent(state.events, lpsEvt)
             else
@@ -637,7 +639,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
                     currentPhase.subphase := "LPSY"
                     lpsyEvt = newWyckoffEvent("LPSY", "Last Point of Supply — pivot high on low volume", high[config.pivotLen], true)
                     lpsyEvt.bar := bar_index - config.pivotLen
-                    lpsyEvt.volumeRatio  := volumeRatio
+                    lpsyEvt.volumeRatio  := volumeAvg > 0 ? volume[config.pivotLen] / volumeAvg : 0.0
                     lpsyEvt.significance := 75.0
                     pushEvent(state.events, lpsyEvt)
 
@@ -653,12 +655,18 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
             state.compositeOperator := "NEUTRAL"
             state.springConfirmed := false
             state.utadConfirmed   := false
+            state.avwapPrice := na
+            state.vwapNum    := 0.0
+            state.vwapDen    := 0.0
         else if close < currentPhase.rangeLow - invalidBuffer
             state.previousPhase := currentPhase
             state.currentPhase := newWyckoffPhase("RANGING", "FAIL", "", priorTrend)
             state.compositeOperator := "NEUTRAL"
             state.springConfirmed := false
             state.utadConfirmed   := false
+            state.avwapPrice := na
+            state.vwapNum    := 0.0
+            state.vwapDen    := 0.0
     else if currentPhase.name == "DISTRIBUTION" and rangeFrozen
         if close < currentPhase.rangeLow
             state.previousPhase := currentPhase
@@ -667,12 +675,18 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
             state.compositeOperator := "NEUTRAL"
             state.springConfirmed := false
             state.utadConfirmed   := false
+            state.avwapPrice := na
+            state.vwapNum    := 0.0
+            state.vwapDen    := 0.0
         else if close > currentPhase.rangeHigh + invalidBuffer
             state.previousPhase := currentPhase
             state.currentPhase := newWyckoffPhase("RANGING", "FAIL", "", priorTrend)
             state.compositeOperator := "NEUTRAL"
             state.springConfirmed := false
             state.utadConfirmed   := false
+            state.avwapPrice := na
+            state.vwapNum    := 0.0
+            state.vwapDen    := 0.0
     else if currentPhase.name == "MARKUP"
         if high > currentPhase.rangeHigh
             currentPhase.rangeHigh := high
@@ -682,6 +696,9 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
             state.compositeOperator := "NEUTRAL"
             state.springConfirmed := false
             state.utadConfirmed   := false
+            state.avwapPrice := na
+            state.vwapNum    := 0.0
+            state.vwapDen    := 0.0
     else if currentPhase.name == "MARKDOWN"
         if low < currentPhase.rangeLow
             currentPhase.rangeLow := low
@@ -691,6 +708,9 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
             state.compositeOperator := "NEUTRAL"
             state.springConfirmed := false
             state.utadConfirmed   := false
+            state.avwapPrice := na
+            state.vwapNum    := 0.0
+            state.vwapDen    := 0.0
 
     // === Cause & Effect ===
     finalPhase = state.currentPhase
@@ -963,8 +983,9 @@ if showDashboard and barstate.islast
         table.cell(dashboard, 0, 12, "Range",       text_color=tc, text_size=size.small)
         table.cell(dashboard, 1, 12, str.tostring(rangeBars) + "b  " + str.tostring(rangeWPct, "#.#") + "%", text_color=tc, text_size=size.small)
 
-        // Anchored VWAP (phase-anchored, used as value area proxy)
-        avwapStr = not na(wyckoffState.pocPrice) ? str.tostring(wyckoffState.pocPrice, "#.####") : "—"
+        // Anchored VWAP — only meaningful while accumulating/distributing
+        bool avwapActive = (phaseName == "ACCUMULATION" or phaseName == "DISTRIBUTION") and not na(wyckoffState.avwapPrice)
+        avwapStr = avwapActive ? str.tostring(wyckoffState.avwapPrice, "#.####") : "—"
         table.cell(dashboard, 0, 13, "AVWAP", text_color=tc, text_size=size.small)
         table.cell(dashboard, 1, 13, avwapStr, text_color=tc, text_size=size.small)
 
