@@ -1,0 +1,305 @@
+//@version=6
+// ============================================================================
+// MTF StochRSI Pair Score [WavesUnchained]
+// Version: 1.1.0
+// Author: WavesUnchained
+// Build: 2026-05-11 00:00:00
+// ============================================================================
+// Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus
+// and conflict penalty.
+//
+// Features:
+//   ✓ Per-TF StochRSI score with exhaustion dampening
+//   ✓ Pair confluence with sync bonus and conflict penalty
+//   ✓ Weighted total across up to 5 configurable TF pairs
+//   ✓ Smoothed total score (EMA / RMA / SMA / WMA / HMA / JMA)
+//   ✓ TF Agreement Index — directional consensus across all 6 TFs
+//   ✓ Signal markers for strong long / short bias
+//   ✓ Dashboard table — per-TF, per-pair, agreement, and total
+//
+// ============================================================================
+
+indicator("MTF StochRSI Pair Score [WavesUnchained]", shorttitle="MTF StochRSI Score", overlay=false, max_labels_count=500)
+
+// ─────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────
+groupStoch = "StochRSI Settings"
+rsiLen     = input.int(14, "RSI Length",   minval=1, group=groupStoch)
+stochLen   = input.int(14, "Stoch Length", minval=1, group=groupStoch)
+kSmooth    = input.int(3,  "K Smoothing",  minval=1, group=groupStoch)
+dSmooth    = input.int(3,  "D Smoothing",  minval=1, group=groupStoch)
+upper      = input.float(80, "Upper Zone", minval=50, maxval=100, group=groupStoch)
+lower      = input.float(20, "Lower Zone", minval=0,  maxval=50,  group=groupStoch)
+
+groupTF = "Timeframes"
+tf1 = input.timeframe("15",  "TF 1", group=groupTF)
+tf2 = input.timeframe("30",  "TF 2", group=groupTF)
+tf3 = input.timeframe("60",  "TF 3", group=groupTF)
+tf4 = input.timeframe("120", "TF 4", group=groupTF)
+tf5 = input.timeframe("240", "TF 5", group=groupTF)
+tf6 = input.timeframe("D",   "TF 6", group=groupTF)
+
+groupPair = "Pair Settings"
+minorWeight     = input.float(0.4,  "Lower TF Weight in Pair",  minval=0,   maxval=1,   step=0.05, group=groupPair)
+syncBonus       = input.float(1.15, "Sync Bonus",               minval=1.0, maxval=2.0, step=0.05, group=groupPair)
+conflictPenalty = input.float(0.75, "Conflict Penalty",         minval=0.1, maxval=1.0, step=0.05, group=groupPair)
+
+useP12 = input.bool(true,  "Use Pair 1: TF1 + TF2", group=groupPair)
+useP23 = input.bool(true,  "Use Pair 2: TF2 + TF3", group=groupPair)
+useP34 = input.bool(true,  "Use Pair 3: TF3 + TF4", group=groupPair)
+useP45 = input.bool(true,  "Use Pair 4: TF4 + TF5", group=groupPair)
+useP56 = input.bool(false, "Use Pair 5: TF5 + TF6", group=groupPair)
+
+wP12 = input.float(1.0, "Weight Pair 1", minval=0, step=0.1, group=groupPair)
+wP23 = input.float(1.5, "Weight Pair 2", minval=0, step=0.1, group=groupPair)
+wP34 = input.float(1.3, "Weight Pair 3", minval=0, step=0.1, group=groupPair)
+wP45 = input.float(1.2, "Weight Pair 4", minval=0, step=0.1, group=groupPair)
+wP56 = input.float(1.0, "Weight Pair 5", minval=0, step=0.1, group=groupPair)
+
+groupSmooth = "Smoothing"
+smoothMode = input.string("EMA", "Mode",       options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"], group=groupSmooth)
+smoothLen  = input.int(5,        "Length",      minval=1, maxval=50,                                group=groupSmooth)
+jmaPhase   = input.int(50,       "  JMA Phase", minval=-100, maxval=100,                            group=groupSmooth)
+jmaPower   = input.float(2.0,    "  JMA Power", minval=1.0,  maxval=4.0, step=0.25,                group=groupSmooth)
+
+groupDiv = "Divergences"
+showDiv      = input.bool(true, "Show Divergence Markers", group=groupDiv)
+divLen       = input.int(5,     "Lookback Bars",            minval=2, maxval=20, group=groupDiv)
+divMinAgreement = input.float(33, "Min Agreement Δ",        minval=0, maxval=100, step=33, group=groupDiv,
+     tooltip="Minimum change in Agreement Index over the lookback window to qualify. 33 = one TF flipped.")
+divMinTotal  = input.float(10,  "Min Total Score Δ",        minval=0, maxval=50,  group=groupDiv,
+     tooltip="Minimum move in Total Score in the opposite direction.")
+
+groupDisplay = "Display"
+showTable   = input.bool(true,  "Show Table",           group=groupDisplay)
+showSignals = input.bool(true,  "Show Signal Markers",  group=groupDisplay)
+longLevel   = input.float(60,   "Strong Long Level",    minval=0,    maxval=100, group=groupDisplay)
+shortLevel  = input.float(-60,  "Strong Short Level",   minval=-100, maxval=0,   group=groupDisplay)
+
+// ─────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────
+f_clamp(x, minVal, maxVal) =>
+    math.max(minVal, math.min(maxVal, x))
+
+f_state(score) =>
+    score >= 70 ? "Strong Bull" :
+     score >= 30 ? "Bull" :
+     score <= -70 ? "Strong Bear" :
+     score <= -30 ? "Bear" : "Neutral"
+
+f_bg(score) =>
+    score >= 70 ? color.new(#00c853, 65) :
+     score >= 30 ? color.new(#00c853, 82) :
+     score <= -70 ? color.new(#d50000, 65) :
+     score <= -30 ? color.new(#d50000, 82) :
+     color.new(color.gray, 80)
+
+f_tc_cell(score) =>
+    math.abs(score) >= 30 ? color.white : color.new(color.gray, 20)
+
+f_jma(src, length, phase, power) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+    _pr    = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    _beta  = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    _alpha = math.pow(_beta, power)
+    e0    := (1 - _alpha) * src + _alpha * nz(e0[1], src)
+    e1    := (src - e0) * (1 - _beta) + _beta * nz(e1[1], 0)
+    e2    := (e0 + _pr * e1 - nz(jma[1], src)) * math.pow(1 - _alpha, 2) + math.pow(_alpha, 2) * nz(e2[1], 0)
+    jma   := nz(jma[1], src) + e2
+    jma
+
+f_smooth(src, length, mode) =>
+    switch mode
+        'SMA' => ta.sma(src, length)
+        'RMA' => ta.rma(src, length)
+        'HMA' => ta.hma(src, length)
+        'WMA' => ta.wma(src, length)
+        'JMA' => f_jma(src, length, jmaPhase, jmaPower)
+        =>       ta.ema(src, length)
+
+f_score() =>
+    r   = ta.rsi(close, rsiLen)
+    raw = ta.stoch(r, r, r, stochLen)
+    k   = ta.sma(raw, kSmooth)
+    d   = ta.sma(k, dSmooth)
+
+    kAboveD = k > d
+    kRising = k > k[1]
+    crossUp = ta.crossover(k, d)
+    crossDn = ta.crossunder(k, d)
+
+    score = 0.0
+
+    score += kAboveD ? 20 : -20
+    score += kRising ? 20 : -20
+
+    score += crossUp ? 30 : 0
+    score += crossDn ? -30 : 0
+
+    score += crossUp and k < lower ? 30 : 0
+    score += crossDn and k > upper ? -30 : 0
+
+    score += k > upper and kRising ? 10 : 0
+    score += k < lower and not kRising ? -10 : 0
+
+    // Reduce score when both lines are already deep in extreme zone with no fresh counter-cross
+    exhaustedHigh = k > upper and d > upper and not crossDn
+    exhaustedLow  = k < lower and d < lower and not crossUp
+    score := exhaustedHigh or exhaustedLow ? score * 0.65 : score
+
+    [f_clamp(score, -100, 100), k, d]
+
+f_pair(sMinor, sMajor) =>
+    majorWeight = 1.0 - minorWeight
+    base        = sMinor * minorWeight + sMajor * majorWeight
+
+    sameDirection = sMinor > 0 and sMajor > 0 or sMinor < 0 and sMajor < 0
+    conflict      = sMinor > 0 and sMajor < 0 or sMinor < 0 and sMajor > 0
+
+    adjusted = sameDirection ? base * syncBonus : conflict ? base * conflictPenalty : base
+    f_clamp(adjusted, -100, 100)
+
+// ─────────────────────────────────────
+// MTF Values
+// ─────────────────────────────────────
+[s1, k1, d1] = request.security(syminfo.tickerid, tf1, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
+[s2, k2, d2] = request.security(syminfo.tickerid, tf2, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
+[s3, k3, d3] = request.security(syminfo.tickerid, tf3, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
+[s4, k4, d4] = request.security(syminfo.tickerid, tf4, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
+[s5, k5, d5] = request.security(syminfo.tickerid, tf5, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
+[s6, k6, d6] = request.security(syminfo.tickerid, tf6, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
+
+// ─────────────────────────────────────
+// Pair Scores
+// ─────────────────────────────────────
+p12 = f_pair(s1, s2)
+p23 = f_pair(s2, s3)
+p34 = f_pair(s3, s4)
+p45 = f_pair(s4, s5)
+p56 = f_pair(s5, s6)
+
+weightedSum = 0.0
+weightSum   = 0.0
+
+if useP12
+    weightedSum += p12 * wP12
+    weightSum   += wP12
+
+if useP23
+    weightedSum += p23 * wP23
+    weightSum   += wP23
+
+if useP34
+    weightedSum += p34 * wP34
+    weightSum   += wP34
+
+if useP45
+    weightedSum += p45 * wP45
+    weightSum   += wP45
+
+if useP56
+    weightedSum += p56 * wP56
+    weightSum   += wP56
+
+totalScore = weightSum > 0 ? weightedSum / weightSum : na
+
+// ─────────────────────────────────────
+// Derived Series
+// ─────────────────────────────────────
+
+// Smoothed total — tames crossover spikes from f_score
+smoothedTotal = f_smooth(totalScore, smoothLen, smoothMode)
+
+// Agreement Index: how many of the 6 TFs point in the same direction
+// Steps of ±33.3 per TF: +100 = all 6 bullish, -100 = all 6 bearish
+bullCount    = (s1 > 0 ? 1 : 0) + (s2 > 0 ? 1 : 0) + (s3 > 0 ? 1 : 0) + (s4 > 0 ? 1 : 0) + (s5 > 0 ? 1 : 0) + (s6 > 0 ? 1 : 0)
+bearCount    = (s1 < 0 ? 1 : 0) + (s2 < 0 ? 1 : 0) + (s3 < 0 ? 1 : 0) + (s4 < 0 ? 1 : 0) + (s5 < 0 ? 1 : 0) + (s6 < 0 ? 1 : 0)
+agreementIdx = (bullCount - bearCount) / 6.0 * 100
+
+// ─────────────────────────────────────
+// Plots
+// ─────────────────────────────────────
+hline(0,          "Neutral",      color=color.new(color.gray,  60))
+hline(longLevel,  "Strong Long",  color=color.new(color.green, 70))
+hline(shortLevel, "Strong Short", color=color.new(color.red,   70))
+
+plot(agreementIdx, "TF Agreement", linewidth=1, color=color.new(color.blue,  30))
+plot(smoothedTotal,"Total Score",  linewidth=2, color=color.new(color.teal,   0))
+
+// Strong signal: magnitude (total score) + consensus (agreement)
+strongLong  = smoothedTotal >= longLevel  and agreementIdx > 0
+strongShort = smoothedTotal <= shortLevel and agreementIdx < 0
+
+plotshape(showSignals and strongLong,  title="Long Bias",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.green, text="LONG")
+plotshape(showSignals and strongShort, title="Short Bias", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.red,   text="SHORT")
+
+alertcondition(strongLong,  "MTF StochRSI Long Bias",  "MTF StochRSI Score: Long Bias")
+alertcondition(strongShort, "MTF StochRSI Short Bias", "MTF StochRSI Score: Short Bias")
+
+// ─────────────────────────────────────
+// Divergences
+// ─────────────────────────────────────
+// Bullish: Agreement rising (breadth building) while Total falling (score still weak)
+// Bearish: Agreement falling (breadth eroding) while Total rising (score driven by few extreme TFs)
+agreementDelta = agreementIdx  - agreementIdx[divLen]
+totalDelta     = smoothedTotal - smoothedTotal[divLen]
+
+bullDiv = agreementDelta >=  divMinAgreement and totalDelta <= -divMinTotal
+bearDiv = agreementDelta <= -divMinAgreement and totalDelta >=  divMinTotal
+
+plotshape(showDiv and bullDiv, title="Bullish Divergence", style=shape.circle, location=location.bottom, size=size.tiny, color=color.new(#00c853, 0))
+plotshape(showDiv and bearDiv, title="Bearish Divergence", style=shape.circle, location=location.top,    size=size.tiny, color=color.new(#d50000, 0))
+
+alertcondition(bullDiv, "MTF StochRSI Bullish Divergence", "MTF StochRSI: Breadth rising while score weak")
+alertcondition(bearDiv, "MTF StochRSI Bearish Divergence", "MTF StochRSI: Breadth eroding while score high")
+
+// ─────────────────────────────────────
+// Table
+// ─────────────────────────────────────
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table t = table.new(position.top_right, 3, 15,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+f_row(row, name, score) =>
+    cellTc = f_tc_cell(score)
+    cellBg = f_bg(score)
+    table.cell(t, 0, row, name,                       text_color=tc,     bgcolor=na,     text_size=size.small)
+    table.cell(t, 1, row, str.tostring(score, "#.0"), text_color=cellTc, bgcolor=cellBg, text_size=size.small)
+    table.cell(t, 2, row, f_state(score),             text_color=cellTc, bgcolor=cellBg, text_size=size.small)
+
+if showTable and barstate.islast
+    table.cell(t, 0, 0, "TF / Pair",  text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, "Score",      text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 0, "State",      text_color=tc, bgcolor=hd, text_size=size.small)
+
+    f_row(1, "TF1 " + tf1, s1)
+    f_row(2, "TF2 " + tf2, s2)
+    f_row(3, "TF3 " + tf3, s3)
+    f_row(4, "TF4 " + tf4, s4)
+    f_row(5, "TF5 " + tf5, s5)
+    f_row(6, "TF6 " + tf6, s6)
+
+    f_row(7,  tf1 + " + " + tf2, p12)
+    f_row(8,  tf2 + " + " + tf3, p23)
+    f_row(9,  tf3 + " + " + tf4, p34)
+    f_row(10, tf4 + " + " + tf5, p45)
+    f_row(11, tf5 + " + " + tf6, p56)
+
+    // Separator
+    table.cell(t, 0, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+    table.cell(t, 1, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+    table.cell(t, 2, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+
+    f_row(13, "Agreement", agreementIdx)
+    f_row(14, "Total",     smoothedTotal)

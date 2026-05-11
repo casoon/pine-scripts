@@ -90,6 +90,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`candle_pressure_response_jma.pine`](indicators/momentum/candle_pressure_response_jma.pine) | JMA-smoothed candle pressure and response scoring |
 | [`oscillator_divergence_zones.pine`](indicators/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI; regular + hidden; ATR-wide zones with retest counter |
 | [`market_pressure_scale.pine`](indicators/market_pressure_scale/market_pressure_scale.pine) | Dual-component oscillator — Setup Pressure (coiling) vs Impulse Pressure (expansion), phase labels, signal markers, POC/range context lines |
+| [`mtf_stochrsi_pair_score.pine`](indicators/mtf_stochrsi_pair_score/mtf_stochrsi_pair_score.pine) | Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus and conflict penalty, weighted total, signal markers |
 
 ### Liquidity & Order Flow
 
