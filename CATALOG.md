@@ -32,7 +32,6 @@ Quality columns (★ 1–5):
 | [ma_regime_bands](indicators/ma_regime_bands/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [mtf_trend_alignment](indicators/mtf_trend_alignment/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | Requires RTA libs |
 | [relative_leg_efficiency](indicators/relative_leg_efficiency/) | — | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [relative_leg_efficiency_panel_chart](indicators/relative_leg_efficiency_panel_chart/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | Panel variant |
 
 ## Momentum & Oscillators
 
@@ -106,6 +105,7 @@ Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederher
 | [pattern_recognition](archive/indicators/pattern_recognition/) | Overengineered, kaum getestet |
 | [wave_navigator](archive/indicators/wave_navigator/) | Elliott-Wave-Autoerkennung konzeptionell schwach |
 | [rj_wave](archive/indicators/rj_wave/) | Zu nische, kein aktiver Einsatz |
+| [relative_leg_efficiency_panel_chart](archive/indicators/relative_leg_efficiency_panel_chart/) | Visualisierungs-Experiment, Basis-Version ist vollständiger |
 | [wavetrend_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
 | [wavetrend_base_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
 | [wavetrend_v3_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |

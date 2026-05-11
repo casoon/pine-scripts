@@ -73,7 +73,6 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`regime_detector.pine`](indicators/regime_detector/regime_detector.pine) | MA-zone based trend regime overlay |
 | [`ma_regime_bands.pine`](indicators/ma_regime_bands/ma_regime_bands.pine) | Moving average regime classification bands |
 | [`relative_leg_efficiency.pine`](indicators/relative_leg_efficiency/relative_leg_efficiency.pine) | Efficiency ratio per price leg — how directional each move is |
-| [`relative_leg_efficiency_panel_chart.pine`](indicators/relative_leg_efficiency_panel_chart/relative_leg_efficiency_panel_chart.pine) | RLE in combined panel and chart overlay view |
 | [`auto_trendlines.pine`](indicators/auto_trendlines/auto_trendlines.pine) | Combinatorial trendline detection with OLS refinement, quality scoring, and greedy selection |
 | [`chandelier_flip_radar.pine`](indicators/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips |
 | [`smooth_trend_radar.pine`](indicators/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — auto-scaled per timeframe, pivot-based rejections, statistical overextension via candle coloring, automatic SL/TP setup on flips |
