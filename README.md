@@ -82,10 +82,8 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | Script | What it does |
 |--------|--------------|
 | [`wavetrend.pine`](indicators/wavetrend/wavetrend.pine) | WaveTrend oscillator — cross signals, divergence, overextension duration, slope quality filter, zone persistence |
-| [`flow_bias.pine`](indicators/flow_bias/flow_bias.pine) | Directional flow bias from CMF, volume delta, Stochastic, Ultimate Oscillator |
 | [`market_stress_oscillator.pine`](indicators/market_stress_oscillator/market_stress_oscillator.pine) | Composite stress index — WVF with JMA and ADX filters |
 | [`market_exhaustion.pine`](indicators/market_exhaustion/market_exhaustion.pine) | Exhaustion signals via MFI and StochRSI with divergence detection |
-| [`candle_pressure_response_jma.pine`](indicators/candle_pressure_response_jma/candle_pressure_response_jma.pine) | JMA-smoothed candle pressure and response scoring |
 | [`oscillator_divergence_zones.pine`](indicators/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI; regular + hidden; ATR-wide zones with retest counter |
 | [`market_pressure_scale.pine`](indicators/market_pressure_scale/market_pressure_scale.pine) | Dual-component oscillator — Setup Pressure (coiling) vs Impulse Pressure (expansion), phase labels, signal markers, POC/range context lines |
 | [`mtf_stochrsi_pair_score.pine`](indicators/mtf_stochrsi_pair_score/mtf_stochrsi_pair_score.pine) | Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus and conflict penalty, weighted total, signal markers |

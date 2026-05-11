@@ -41,10 +41,8 @@ Quality columns (★ 1–5):
 | [market_pressure_scale](indicators/market_pressure_scale/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [oscillator_divergence_zones](indicators/oscillator_divergence_zones/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [mtf_stochrsi_pair_score](indicators/mtf_stochrsi_pair_score/) | 1.1.0 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | New, untested |
-| [flow_bias](indicators/flow_bias/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [market_exhaustion](indicators/market_exhaustion/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [market_stress_oscillator](indicators/market_stress_oscillator/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [candle_pressure_response_jma](indicators/candle_pressure_response_jma/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 
 ## Reversal & Entry
 
@@ -106,6 +104,8 @@ Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederher
 | [wave_navigator](archive/indicators/wave_navigator/) | Elliott-Wave-Autoerkennung konzeptionell schwach |
 | [rj_wave](archive/indicators/rj_wave/) | Zu nische, kein aktiver Einsatz |
 | [relative_leg_efficiency_panel_chart](archive/indicators/relative_leg_efficiency_panel_chart/) | Visualisierungs-Experiment, Basis-Version ist vollständiger |
+| [flow_bias](archive/indicators/flow_bias/) | Überschneidung mit market_pressure_scale und mtf_stochrsi_pair_score |
+| [candle_pressure_response_jma](archive/indicators/candle_pressure_response_jma/) | Candle-Metriken bereits in Vein suite (vein_exhaustion, vein_feature_exporter) |
 | [wavetrend_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
 | [wavetrend_base_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
 | [wavetrend_v3_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
