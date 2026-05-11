@@ -14,80 +14,79 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [wyckoff_schematics](indicators/wyckoff_schematics/) | 4.3.1 | Aktiv | ★★★★★ | ★★★★☆ | ★★★☆☆ | Phase D/E validation still weak |
-| [smc_structure_expectation](indicators/smc_structure_expectation/) | — | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [sr_zones_mtf_v2](indicators/sr_zones_mtf_v2/) | — | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [tweezer_kangaroo_zones](indicators/tweezer_kangaroo_zones/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [jma_struct](indicators/jma_struct/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [time_to_react_volatility_time](indicators/time_to_react_volatility_time/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [coilforge_zones](indicators/coilforge_zones/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [smc_structure_expectation](indicators/smc_structure_expectation/) | 1.0.0 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [sr_zones_mtf_v2](indicators/sr_zones_mtf_v2/) | 3.0.0 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [tweezer_kangaroo_zones](indicators/tweezer_kangaroo_zones/) | 3.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [jma_struct](indicators/jma_struct/) | 2.3.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [time_to_react_volatility_time](indicators/time_to_react_volatility_time/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [coilforge_zones](indicators/coilforge_zones/) | 1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 
 ## Trend & Regime
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [chandelier_flip_radar](indicators/chandelier_flip_radar/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | Promising PF 1.22 |
-| [smooth_trend_radar](indicators/smooth_trend_radar/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [auto_trendlines](indicators/auto_trendlines/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | |
-| [regime_detector](indicators/regime_detector/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [ma_regime_bands](indicators/ma_regime_bands/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [mtf_trend_alignment](indicators/mtf_trend_alignment/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | Requires RTA libs |
-| [relative_leg_efficiency](indicators/relative_leg_efficiency/) | — | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [chandelier_flip_radar](indicators/chandelier_flip_radar/) | 1.4 | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | Promising PF 1.22 |
+| [smooth_trend_radar](indicators/smooth_trend_radar/) | 3.3 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [auto_trendlines](indicators/auto_trendlines/) | 1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | |
+| [regime_detector](indicators/regime_detector/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [ma_regime_bands](indicators/ma_regime_bands/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [relative_leg_efficiency](indicators/relative_leg_efficiency/) | 1.0.0 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
 
 ## Momentum & Oscillators
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [wavetrend](indicators/wavetrend/) | — | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Core, best PF in repo |
-| [market_pressure_scale](indicators/market_pressure_scale/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [oscillator_divergence_zones](indicators/oscillator_divergence_zones/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [wavetrend](indicators/wavetrend/) | 1.0 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Core, best PF in repo |
+| [market_pressure_scale](indicators/market_pressure_scale/) | 1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [oscillator_divergence_zones](indicators/oscillator_divergence_zones/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [mtf_stochrsi_pair_score](indicators/mtf_stochrsi_pair_score/) | 1.1.0 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | New, untested |
-| [market_exhaustion](indicators/market_exhaustion/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [market_stress_oscillator](indicators/market_stress_oscillator/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [market_exhaustion](indicators/market_exhaustion/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [market_stress_oscillator](indicators/market_stress_oscillator/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 
 ## Reversal & Entry
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [reversal_engine_score](indicators/reversal_engine_score/) | — | Aktiv | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Score logic needs rework (test131) |
-| [reversal_type_classifier](indicators/reversal_type_classifier/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [commodity_heat_reversal](indicators/commodity_heat_reversal/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [reversal_engine_score](indicators/reversal_engine_score/) | 1.5 | Aktiv | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Score logic needs rework (test131) |
+| [reversal_type_classifier](indicators/reversal_type_classifier/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [commodity_heat_reversal](indicators/commodity_heat_reversal/) | 1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 
 ## Liquidity & Volume
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [volume_strata](indicators/volume_strata/) | — | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
-| [money_flow_delta_profile](indicators/money_flow_delta_profile/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [vwap_cross_visuals](indicators/vwap_cross_visuals/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [volume_strata](indicators/volume_strata/) | 1.9 | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
+| [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [vwap_cross_visuals](indicators/vwap_cross_visuals/) | 2.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 
 ## Pattern & Wave
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [zigzag_patterns_framework](indicators/zigzag_patterns_framework/) | — | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [zigzag_fibo_pullback_map](indicators/zigzag_fibo_pullback_map/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [zigzag_patterns_framework](indicators/zigzag_patterns_framework/) | 1.0.0 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [zigzag_fibo_pullback_map](indicators/zigzag_fibo_pullback_map/) | 1.2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 
 ## Commodity / Multi-TF Matrix
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [commodity_pulse_matrix](indicators/commodity_pulse_matrix/) | v3 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Published, v4 in progress |
+| [commodity_pulse_matrix](indicators/commodity_pulse_matrix/) | 3.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Published, v4 in progress |
 
 ## Vein Suite
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [vein_trend](indicators/vein/) | — | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
-| [vein_pullback](indicators/vein/) | — | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
-| [vein_exhaustion](indicators/vein/) | — | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
-| [vein_accumulation_phase](indicators/vein/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | NatGas focused |
-| [vein_reversal_score](indicators/vein/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [vein_structure_zones](indicators/vein/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [vein_execution](indicators/vein/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | 15m timing overlay |
-| [vein_spread_context](indicators/vein/) | — | Stabil | ★★★☆☆ | ★★★★☆ | ★★★☆☆ | Commodity spread modifier |
-| [vein_feature_exporter](indicators/vein/) | — | Stabil | ★★★★★ | ★★★★☆ | ★★★★★ | Research tooling |
-| [vein_reversal_labeler](indicators/vein/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | ML labeling only |
-| [vein_reversal_zones](indicators/vein/vein_reversal_zones/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [vein_trend](indicators/vein/) | 2.0 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
+| [vein_pullback](indicators/vein/) | 2.0 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
+| [vein_exhaustion](indicators/vein/) | 2.0 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
+| [vein_accumulation_phase](indicators/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | NatGas focused |
+| [vein_reversal_score](indicators/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [vein_structure_zones](indicators/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [vein_execution](indicators/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | 15m timing overlay |
+| [vein_spread_context](indicators/vein/) | 2.0 | Stabil | ★★★☆☆ | ★★★★☆ | ★★★☆☆ | Commodity spread modifier |
+| [vein_feature_exporter](indicators/vein/) | 2.0 | Stabil | ★★★★★ | ★★★★☆ | ★★★★★ | Research tooling |
+| [vein_reversal_labeler](indicators/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | ML labeling only |
+| [vein_reversal_zones](indicators/vein/vein_reversal_zones/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 
 ---
 
