@@ -62,8 +62,6 @@ Quality columns (★ 1–5):
 | [volume_strata](indicators/volume_strata/) | — | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
 | [money_flow_delta_profile](indicators/money_flow_delta_profile/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [vwap_cross_visuals](indicators/vwap_cross_visuals/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [liquidity_hunter](indicators/liquidity_hunter/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | Requires RTA libs |
-| [smart_money_dashboard](indicators/smart_money_dashboard/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | Requires RTA libs |
 
 ## Pattern & Wave
 
@@ -71,9 +69,6 @@ Quality columns (★ 1–5):
 |---|---|---|---|---|---|---|
 | [zigzag_patterns_framework](indicators/zigzag_patterns_framework/) | — | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [zigzag_fibo_pullback_map](indicators/zigzag_fibo_pullback_map/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [wave_navigator](indicators/wave_navigator/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [pattern_recognition](indicators/pattern_recognition/) | — | Overengineered | ★★★☆☆ | ★★☆☆☆ | ★★☆☆☆ | Too broad, cleanup candidate |
-| [rj_wave](indicators/rj_wave/) | — | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | Niche |
 
 ## Commodity / Multi-TF Matrix
 
@@ -96,3 +91,21 @@ Quality columns (★ 1–5):
 | [vein_feature_exporter](indicators/vein/) | — | Stabil | ★★★★★ | ★★★★☆ | ★★★★★ | Research tooling |
 | [vein_reversal_labeler](indicators/vein/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | ML labeling only |
 | [vein_reversal_zones](indicators/vein/vein_reversal_zones/) | — | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+
+---
+
+## Archiv
+
+Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederhergestellt werden.
+
+| Indikator / Datei | Grund |
+|---|---|
+| [liquidity_hunter](archive/indicators/liquidity_hunter/) | Erfordert nicht gepflegte RTA-Libraries |
+| [smart_money_dashboard](archive/indicators/smart_money_dashboard/) | Erfordert nicht gepflegte RTA-Libraries |
+| [mtf_trend_alignment](archive/indicators/mtf_trend_alignment/) | Erfordert nicht gepflegte RTA-Libraries |
+| [pattern_recognition](archive/indicators/pattern_recognition/) | Overengineered, kaum getestet |
+| [wave_navigator](archive/indicators/wave_navigator/) | Elliott-Wave-Autoerkennung konzeptionell schwach |
+| [rj_wave](archive/indicators/rj_wave/) | Zu nische, kein aktiver Einsatz |
+| [wavetrend_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
+| [wavetrend_base_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
+| [wavetrend_v3_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |

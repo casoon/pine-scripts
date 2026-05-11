@@ -74,7 +74,6 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`ma_regime_bands.pine`](indicators/ma_regime_bands/ma_regime_bands.pine) | Moving average regime classification bands |
 | [`relative_leg_efficiency.pine`](indicators/relative_leg_efficiency/relative_leg_efficiency.pine) | Efficiency ratio per price leg — how directional each move is |
 | [`relative_leg_efficiency_panel_chart.pine`](indicators/relative_leg_efficiency_panel_chart/relative_leg_efficiency_panel_chart.pine) | RLE in combined panel and chart overlay view |
-| [`mtf_trend_alignment.pine`](indicators/mtf_trend_alignment/mtf_trend_alignment.pine) | 4-timeframe Supertrend consensus dashboard `[RTA]` |
 | [`auto_trendlines.pine`](indicators/auto_trendlines/auto_trendlines.pine) | Combinatorial trendline detection with OLS refinement, quality scoring, and greedy selection |
 | [`chandelier_flip_radar.pine`](indicators/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips |
 | [`smooth_trend_radar.pine`](indicators/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — auto-scaled per timeframe, pivot-based rejections, statistical overextension via candle coloring, automatic SL/TP setup on flips |
@@ -99,8 +98,6 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`volume_strata.pine`](indicators/volume_strata/volume_strata.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN/LVN zones, naked POC tracking |
 | [`money_flow_delta_profile.pine`](indicators/money_flow_delta_profile/money_flow_delta_profile.pine) | Center-out diverging profile — green (right) = net buying, red (left) = net selling at each price level; POC, Value Area, optional recency weighting |
 | [`vwap_cross_visuals.pine`](indicators/vwap_cross_visuals/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
-| [`liquidity_hunter.pine`](indicators/liquidity_hunter/liquidity_hunter.pine) | Institutional liquidity zone mapping `[RTA]` |
-| [`smart_money_dashboard.pine`](indicators/smart_money_dashboard/smart_money_dashboard.pine) | Order flow, SMC, and liquidity dashboard |
 
 ### Pattern & Wave Analysis
 
@@ -108,9 +105,6 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 |--------|--------------|
 | [`zigzag_patterns_framework.pine`](indicators/zigzag_patterns_framework/zigzag_patterns_framework.pine) | ZigZag-based pattern detection — ABC, triangles, Wolfe waves |
 | [`zigzag_fibo_pullback_map.pine`](indicators/zigzag_fibo_pullback_map/zigzag_fibo_pullback_map.pine) | Confirmed ZigZag pivots with pullback-to-Fibonacci labeling and active fib fan |
-| [`wave_navigator.pine`](indicators/wave_navigator/wave_navigator.pine) | Elliott Wave recognition and labeling |
-| [`pattern_recognition.pine`](indicators/pattern_recognition/pattern_recognition.pine) | Geometric chart pattern detection with divergence analysis |
-| [`rj_wave.pine`](indicators/rj_wave/rj_wave.pine) | Fibonacci structure validator for RJ-Wave patterns |
 
 ---
 
@@ -128,7 +122,7 @@ python3 scripts/build_strategies.py indicators/chandelier_flip_radar/
 | [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising (PF 1.22, NatGas 4H) |
 | [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising (PF 1.14, NatGas 4H) |
 | [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (PF 1.13, NatGas 4H) |
-| [`wavetrend_strategy.pine`](strategies/wavetrend_strategy.pine) | WaveTrend | Trailing | Promising (PF 3.07, +69.7%, NatGas 1D — best in repo) |
+| [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Promising (PF 3.07, +69.7%, NatGas 1D — best in repo) |
 
 Full backtest results and parameter notes: `strategies/*_assessment.md`. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
 
