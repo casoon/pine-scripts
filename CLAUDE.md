@@ -14,6 +14,25 @@ Technical documentation for developers and users reading the code. Structure:
 - `## Features` — bullet list of capabilities
 - Additional sections as needed (e.g. `## Scoring`, `## Modes`) explaining the logic and UI
 
+### `CHANGELOG.md`
+Incremental version history for TradingView update posts. One entry per published version. Use this as the source for TV update notes — copy the relevant section rather than rewriting the full description.
+
+Format:
+```markdown
+## vX.Y.Z — YYYY-MM-DD
+- What changed (user-visible, one bullet per meaningful change)
+```
+
+### `screenshots/` (optional)
+Visual documentation for README and TradingView update posts.
+
+Naming convention: `<indicatorname>_<context>_<optional-version>.png`
+
+Examples:
+- `wyckoff_schematics_overview.png` — main chart view
+- `wyckoff_schematics_spring_example.png` — specific setup
+- `wyckoff_schematics_v4.3_update.png` — screenshot for a TV update post
+
 ### `DESCRIPTION_TV.bbcode`
 The publication description for TradingView, written in BBCode. Structure:
 - Opening bold title line
@@ -113,8 +132,12 @@ color hd = color.new(color.gray, 90)   // header row background (very light gray
 1. Create a subdirectory under `indicators/<name>/`
 2. Place the `.pine` file there
 3. Write `README.md` following the structure above
-4. Write `DESCRIPTION_TV.bbcode` if the script is intended for TradingView publication
-5. Add an entry to the root `README.md` under the appropriate section with a one-line description
+4. Create `CHANGELOG.md` with the initial version entry
+5. Write `DESCRIPTION_TV.bbcode` if the script is intended for TradingView publication
+6. Add an entry to the root `README.md` under the appropriate section with a one-line description
+7. Add an entry to `CATALOG.md` with status and quality ratings
+
+`CATALOG.md` at the root is the operational status overview. Keep it up to date when indicator status or quality changes.
 
 ## Strategy infrastructure
 
