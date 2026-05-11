@@ -90,6 +90,21 @@ Quality columns (★ 1–5):
 
 ---
 
+## Strategies
+
+Ratings: **Not ready** (PF < 1.15 or Return/DD < 1.5) · **Promising** (PF ≥ 1.15, nicht out-of-sample validiert) · **Ready** (PF ≥ 1.3, ≥ 2 Instrumente validiert)
+
+| Strategy | Basisindikator | SL-Typ | Best TF | Best PF | Rating | Notiz |
+|---|---|---|---|---|---|---|
+| [wavetrend_v4_strategy](strategies/wavetrend/) | WaveTrend | Trailing | 1D | 3.07 | Promising | Bestes PF im Repo; 4H 1.49, 1H 1.37; out-of-sample ausstehend |
+| [chandelier_flip_radar_strategy](strategies/chandelier_flip_radar/) | Chandelier Flip Radar | Trailing | 4H | 1.60 | Promising | Return/DD 5.87; beide Richtungen profitabel |
+| [smooth_trend_radar_strategy](strategies/smooth_trend_radar/) | Smooth Trend Radar | Fixed TP | 4H | 1.71 (Long) | Promising (Long Only) | Short-Seite durch NatGas-Bull-Bias strukturell schwach |
+| [oscillator_divergence_zones_strategy](strategies/oscillator_divergence_zones/) | Oscillator Divergence Zones | Pivot ATR | 4H | 1.14 | Promising | Long PF 1.32; Short Entry-Delay durch pivRight |
+| [reversal_engine_score_strategy](strategies/reversal_engine_score/) | Reversal Engine Score | — | 15M | 0.95 | Not ready | Score-Logik fehlerhaft (test131); v1.2 in Arbeit |
+| [commodity_pulse_matrix_v4_strategy](strategies/commodity_pulse_matrix/) | Commodity Pulse Matrix v4 | — | — | — | Not ready | Kein Backtest vorhanden |
+
+---
+
 ## Archiv
 
 Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederhergestellt werden.
