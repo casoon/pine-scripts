@@ -58,6 +58,7 @@ Quality columns (★ 1–5):
 | [volume_strata](indicators/volume_strata/) | 1.9 | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
 | [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [vwap_cross_visuals](indicators/vwap_cross_visuals/) | 2.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [liquidity_hunter](indicators/liquidity_hunter/) | 3.0.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | Ranked BSL/SSL levels, sweep & reclaim scoring |
 
 ## Pattern & Wave
 
@@ -111,7 +112,6 @@ Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederher
 
 | Indikator / Datei | Grund |
 |---|---|
-| [liquidity_hunter](archive/indicators/liquidity_hunter/) | Erfordert nicht gepflegte RTA-Libraries |
 | [smart_money_dashboard](archive/indicators/smart_money_dashboard/) | Erfordert nicht gepflegte RTA-Libraries |
 | [mtf_trend_alignment](archive/indicators/mtf_trend_alignment/) | Erfordert nicht gepflegte RTA-Libraries |
 | [pattern_recognition](archive/indicators/pattern_recognition/) | Overengineered, kaum getestet |

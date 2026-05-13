@@ -95,6 +95,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`volume_strata.pine`](indicators/volume_strata/volume_strata.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN/LVN zones, naked POC tracking |
 | [`money_flow_delta_profile.pine`](indicators/money_flow_delta_profile/money_flow_delta_profile.pine) | Center-out diverging profile — green (right) = net buying, red (left) = net selling at each price level; POC, Value Area, optional recency weighting |
 | [`vwap_cross_visuals.pine`](indicators/vwap_cross_visuals/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
+| [`liquidity_hunter.pine`](indicators/liquidity_hunter/liquidity_hunter.pine) | Ranked equal highs/lows — quality-scored BSL/SSL levels, sweep markers, reclaim detection with event scoring |
 
 ### Pattern & Wave Analysis
 
