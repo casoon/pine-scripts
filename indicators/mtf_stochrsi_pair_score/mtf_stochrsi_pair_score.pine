@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // MTF StochRSI Pair Score [WavesUnchained]
-// Version: 1.2.0
+// Version: 1.5.0
 // Author: WavesUnchained
 // Build: 2026-05-14 00:00:00
 // ============================================================================
@@ -17,6 +17,10 @@
 //   ✓ Signal markers for strong long / short bias
 //   ✓ Dashboard table — per-TF, per-pair, agreement, and total
 //   ✓ Bidirectional Williams VIX Fix background (bull fear / bear greed extremes)
+//   ✓ Squeeze Momentum: BB vs KC compression state + linreg momentum histogram
+//   ✓ QQE Agreement Layer: weighted RSI + trailing stop across all 6 TFs, optional gate on signals
+//   ✓ QQE Scoring: per-TF score boost/penalty when QQE confirms or conflicts StochRSI direction
+//   ✓ QQE Divergences: price vs QQE Agreement — classic bull/bear divergence detection
 //
 // ============================================================================
 
@@ -91,6 +95,40 @@ wvfBullColor = input.color(color.new(color.green, 85), "Bull Color", group=group
      tooltip="Fear spike: low is far below recent highs — potential bullish reversal")
 wvfBearColor = input.color(color.new(color.red,   85), "Bear Color", group=groupWvf,
      tooltip="Greed spike: high is far above recent lows — potential bearish reversal")
+
+groupSqz = "Squeeze Momentum"
+showSqzDot = input.bool(true,  "Show Squeeze State Dot",      group=groupSqz,
+     tooltip="Cross on zero line: black = ON (compression), gray = OFF (expansion), blue = no squeeze")
+showSqzMom = input.bool(true,  "Show Momentum Histogram",     group=groupSqz,
+     tooltip="LinReg momentum relative to KC midpoint — green/dark-green rising, red/dark-red falling")
+showSqzBg  = input.bool(true,  "Compress Phase Background",   group=groupSqz,
+     tooltip="Muted gray when squeeze is ON — score direction is less reliable during compression")
+sqzBBLen   = input.int(20,     "BB Length",                   group=groupSqz, minval=5)
+sqzBBMult  = input.float(2.0,  "BB Mult",                     group=groupSqz, minval=0.5, step=0.5)
+sqzKCLen   = input.int(20,     "KC Length",                   group=groupSqz, minval=5)
+sqzKCMult  = input.float(1.5,  "KC Mult",                     group=groupSqz, minval=0.5, step=0.5)
+sqzUseTR   = input.bool(true,  "Use True Range (KC)",         group=groupSqz)
+
+groupQqe = "QQE Layer"
+showQqe    = input.bool(false, "Show QQE Agreement",          group=groupQqe,
+     tooltip="QQE Agreement Index: how many of the 6 TFs have QQE in bullish state (rsi > trailing stop)")
+useQqeGate = input.bool(false, "Gate Signals on QQE",         group=groupQqe,
+     tooltip="Strong Long/Short only fires when QQE Agreement also agrees — reduces false signals")
+qqeLen     = input.int(14,     "RSI Length",                  group=groupQqe, minval=1)
+qqeFactor  = input.float(4.236,"Factor",                      group=groupQqe, minval=0.1, step=0.1)
+qqeSmooth  = input.int(5,      "RSI Smoothing",               group=groupQqe, minval=1)
+qqeWeight  = input.float(2.0,  "Momentum Weight",             group=groupQqe, minval=1.0, step=0.25,
+     tooltip="Weight applied when price delta is in the same direction as the RSI-TS relationship — makes RSI more responsive to aligned moves")
+useQqeScore   = input.bool(false, "Score Boost/Penalty",       group=groupQqe,
+     tooltip="Multiply per-TF StochRSI score by Boost when QQE agrees, by Penalty when it conflicts — applied before pair calculation")
+qqeScoreBoost   = input.float(1.25, "  Confirm Boost",         group=groupQqe, minval=1.0, maxval=2.0, step=0.05)
+qqeScorePenalty = input.float(0.75, "  Conflict Penalty",      group=groupQqe, minval=0.1, maxval=1.0, step=0.05)
+showQqeDiv    = input.bool(true,  "Show QQE Divergences",      group=groupQqe,
+     tooltip="Bullish: price makes lower low but QQE Agreement holds up — bearish: price makes higher high but QQE fades")
+qqeDivMinAg   = input.float(33,   "  Min QQE Agreement Δ",    group=groupQqe, minval=0, step=33,
+     tooltip="Minimum QQE Agreement change required (33 = one TF flipped state)")
+qqeDivMinAtr  = input.float(0.5,  "  Min Price Move (ATR)",   group=groupQqe, minval=0.1, step=0.1,
+     tooltip="Minimum price move in ATR units required to qualify as a divergence leg")
 
 // ─────────────────────────────────────
 // Helpers
@@ -179,6 +217,30 @@ f_pair(sMinor, sMajor) =>
     adjusted = sameDirection ? base * syncBonus : conflict ? base * conflictPenalty : base
     f_clamp(adjusted, -100, 100)
 
+// QQE: weighted RSI with adaptive trailing stop
+// Weight amplifies delta when price moves in the direction of the current RSI-TS relationship
+f_qqe(_len, _factor, _smooth, _weight) =>
+    var float _ts  = 0.0
+    var float _rsi = 0.0
+    _delta = close - close[1]
+    _w     = nz(_delta * (_rsi - _ts) > 0 ? _weight : 1.0, 1.0)
+    _num   = ta.rma(_delta * _w, _len)
+    _den   = ta.rma(math.abs(_delta * _w), _len)
+    _rsi  := 50.0 * ta.ema(_num / _den, _smooth) + 50.0
+    _diff  = ta.rma(math.abs(_rsi - _rsi[1]), _len)
+    _cup   = ta.crossover(_rsi, _ts)
+    _cdn   = ta.crossunder(_rsi, _ts)
+    _ts   := nz(_cup ? _rsi - _diff * _factor :
+         _cdn ? _rsi + _diff * _factor :
+         _rsi > _ts ? math.max(_rsi - _diff * _factor, _ts) :
+         math.min(_rsi + _diff * _factor, _ts), _rsi)
+    _rsi > _ts ? 1 : -1
+
+// Apply QQE confirmation to a StochRSI score: boost when aligned, penalty when conflicting
+f_qqe_weight(s, q, boost, penalty) =>
+    q > 0 and s > 0 or q < 0 and s < 0 ? f_clamp(s * boost, -100.0, 100.0) :
+     q > 0 and s < 0 or q < 0 and s > 0 ? f_clamp(s * penalty, -100.0, 100.0) : s
+
 // ─────────────────────────────────────
 // MTF Values
 // ─────────────────────────────────────
@@ -189,14 +251,30 @@ f_pair(sMinor, sMajor) =>
 [s5, k5, d5] = request.security(syminfo.tickerid, tf5, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
 [s6, k6, d6] = request.security(syminfo.tickerid, tf6, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
 
+q1 = request.security(syminfo.tickerid, tf1, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q2 = request.security(syminfo.tickerid, tf2, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q3 = request.security(syminfo.tickerid, tf3, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q4 = request.security(syminfo.tickerid, tf4, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q5 = request.security(syminfo.tickerid, tf5, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q6 = request.security(syminfo.tickerid, tf6, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+
 // ─────────────────────────────────────
 // Pair Scores
 // ─────────────────────────────────────
-p12 = f_pair(s1, s2)
-p23 = f_pair(s2, s3)
-p34 = f_pair(s3, s4)
-p45 = f_pair(s4, s5)
-p56 = f_pair(s5, s6)
+
+// QQE-weighted per-TF scores (table still shows raw s1..s6)
+ws1 = useQqeScore ? f_qqe_weight(s1, q1, qqeScoreBoost, qqeScorePenalty) : s1
+ws2 = useQqeScore ? f_qqe_weight(s2, q2, qqeScoreBoost, qqeScorePenalty) : s2
+ws3 = useQqeScore ? f_qqe_weight(s3, q3, qqeScoreBoost, qqeScorePenalty) : s3
+ws4 = useQqeScore ? f_qqe_weight(s4, q4, qqeScoreBoost, qqeScorePenalty) : s4
+ws5 = useQqeScore ? f_qqe_weight(s5, q5, qqeScoreBoost, qqeScorePenalty) : s5
+ws6 = useQqeScore ? f_qqe_weight(s6, q6, qqeScoreBoost, qqeScorePenalty) : s6
+
+p12 = f_pair(ws1, ws2)
+p23 = f_pair(ws2, ws3)
+p34 = f_pair(ws3, ws4)
+p45 = f_pair(ws4, ws5)
+p56 = f_pair(ws5, ws6)
 
 weightedSum = 0.0
 weightSum   = 0.0
@@ -236,6 +314,11 @@ bullCount    = (s1 > 0 ? 1 : 0) + (s2 > 0 ? 1 : 0) + (s3 > 0 ? 1 : 0) + (s4 > 0 
 bearCount    = (s1 < 0 ? 1 : 0) + (s2 < 0 ? 1 : 0) + (s3 < 0 ? 1 : 0) + (s4 < 0 ? 1 : 0) + (s5 < 0 ? 1 : 0) + (s6 < 0 ? 1 : 0)
 agreementIdx = (bullCount - bearCount) / 6.0 * 100
 
+// QQE Agreement Index: same scale, based on QQE trailing stop state per TF
+qqeBull = (q1 > 0 ? 1 : 0) + (q2 > 0 ? 1 : 0) + (q3 > 0 ? 1 : 0) + (q4 > 0 ? 1 : 0) + (q5 > 0 ? 1 : 0) + (q6 > 0 ? 1 : 0)
+qqeBear = (q1 < 0 ? 1 : 0) + (q2 < 0 ? 1 : 0) + (q3 < 0 ? 1 : 0) + (q4 < 0 ? 1 : 0) + (q5 < 0 ? 1 : 0) + (q6 < 0 ? 1 : 0)
+qqeAgreement = (qqeBull - qqeBear) / 6.0 * 100
+
 // ─────────────────────────────────────
 // Plots
 // ─────────────────────────────────────
@@ -256,17 +339,43 @@ wvfBearPct   = ta.highest(wvfBear, wvfPctLen) * wvfPctHigh
 wvfBullFire  = wvfBull >= wvfBullBand or wvfBull >= wvfBullPct
 wvfBearFire  = wvfBear >= wvfBearBand or wvfBear >= wvfBearPct
 
-bgcolor(showWvfBg ?
-     wvfBullFire ? wvfBullColor :
-     wvfBearFire ? wvfBearColor : na
-     : na, title="VIX Fix Background")
+// Squeeze Momentum — BB vs KC compression state + LinReg momentum
+sqzUpperBB = ta.sma(close, sqzBBLen) + sqzBBMult * ta.stdev(close, sqzBBLen)
+sqzLowerBB = ta.sma(close, sqzBBLen) - sqzBBMult * ta.stdev(close, sqzBBLen)
+sqzRangeMA = ta.sma(sqzUseTR ? ta.tr : high - low, sqzKCLen)
+sqzUpperKC = ta.sma(close, sqzKCLen) + sqzRangeMA * sqzKCMult
+sqzLowerKC = ta.sma(close, sqzKCLen) - sqzRangeMA * sqzKCMult
+sqzOn      = sqzLowerBB > sqzLowerKC and sqzUpperBB < sqzUpperKC
+sqzOff     = sqzLowerBB < sqzLowerKC and sqzUpperBB > sqzUpperKC
+noSqz      = not sqzOn and not sqzOff
+sqzMid     = math.avg(math.avg(ta.highest(high, sqzKCLen), ta.lowest(low, sqzKCLen)), ta.sma(close, sqzKCLen))
+sqzMomRaw  = ta.linreg(close - sqzMid, sqzKCLen, 0)
+sqzMomPeak = ta.highest(math.abs(sqzMomRaw), 100)
+sqzMom     = sqzMomPeak > 0 ? sqzMomRaw / sqzMomPeak * 80 : sqzMomRaw
 
-plot(agreementIdx, "TF Agreement", linewidth=1, color=color.new(color.blue,  30))
-plot(smoothedTotal,"Total Score",  linewidth=2, color=color.new(color.teal,   0))
+// Background priority: WVF extreme > squeeze compression
+wvfBg  = showWvfBg ? wvfBullFire ? wvfBullColor : wvfBearFire ? wvfBearColor : na : na
+sqzBg  = showSqzBg and sqzOn ? color.new(#FF6D00, 96) : na
+bgcolor(not na(wvfBg) ? wvfBg : sqzBg, title="Background")
 
-// Strong signal: magnitude (total score) + consensus (agreement)
-strongLong  = smoothedTotal >= longLevel  and agreementIdx > 0
-strongShort = smoothedTotal <= shortLevel and agreementIdx < 0
+// Squeeze state dot on zero line: orange = ON (compression), teal = OFF (expansion), gray = no squeeze
+sqzDotColor = noSqz ? color.new(color.gray, 50) : sqzOn ? #FF6D00 : #26a69a
+plot(showSqzDot ? 0 : na, "Squeeze State", color=sqzDotColor, style=plot.style_circles, linewidth=4)
+
+// Squeeze momentum histogram — acceleration color: bright = rising, dark = falling
+sqzMomColor = sqzMom > 0 ?
+     sqzMom > nz(sqzMom[1]) ? color.new(#26a69a, 50) : color.new(#00695c, 50) :
+     sqzMom < nz(sqzMom[1]) ? color.new(#ef5350, 50) : color.new(#b71c1c, 50)
+plot(showSqzMom ? sqzMom : na, "Squeeze Momentum", style=plot.style_histogram, linewidth=4, color=sqzMomColor)
+
+plot(agreementIdx,  "StochRSI Agreement", linewidth=1, color=color.new(color.blue,   30))
+plot(showQqe ? qqeAgreement : na, "QQE Agreement", linewidth=1, color=color.new(color.purple, 30))
+plot(smoothedTotal, "Total Score",        linewidth=2, color=color.new(color.teal,   0))
+
+// Strong signal: magnitude + StochRSI consensus + optional QQE gate
+qqeAligned  = not useQqeGate or (smoothedTotal > 0 ? qqeAgreement > 0 : qqeAgreement < 0)
+strongLong  = smoothedTotal >= longLevel  and agreementIdx > 0 and qqeAligned
+strongShort = smoothedTotal <= shortLevel and agreementIdx < 0 and qqeAligned
 
 plotshape(showSignals and strongLong,  title="Long Bias",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.green, text="LONG")
 plotshape(showSignals and strongShort, title="Short Bias", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.red,   text="SHORT")
@@ -290,6 +399,22 @@ plotshape(showDiv and bearDiv, title="Bearish Divergence", style=shape.circle, l
 
 alertcondition(bullDiv, "MTF StochRSI Bullish Divergence", "MTF StochRSI: Breadth rising while score weak")
 alertcondition(bearDiv, "MTF StochRSI Bearish Divergence", "MTF StochRSI: Breadth eroding while score high")
+
+// QQE Divergences — price vs QQE Agreement (classic oscillator divergence)
+// Bullish: price lower low, QQE Agreement holds up → hidden bullish strength
+// Bearish: price higher high, QQE Agreement fades → hidden bearish weakness
+atr14Div      = ta.atr(14)
+priceDelta    = close - close[divLen]
+qqeAgDelta    = qqeAgreement - qqeAgreement[divLen]
+
+qqeBullDiv = showQqeDiv and priceDelta <= -(qqeDivMinAtr * atr14Div) and qqeAgDelta >=  qqeDivMinAg
+qqeBearDiv = showQqeDiv and priceDelta >=  (qqeDivMinAtr * atr14Div) and qqeAgDelta <= -qqeDivMinAg
+
+plotshape(qqeBullDiv, title="QQE Bull Divergence", style=shape.diamond, location=location.bottom, size=size.small, color=color.new(#00c853, 10))
+plotshape(qqeBearDiv, title="QQE Bear Divergence", style=shape.diamond, location=location.top,    size=size.small, color=color.new(#d50000, 10))
+
+alertcondition(qqeBullDiv, "QQE Bullish Divergence", "QQE: Price lower low but QQE Agreement holds — hidden bullish strength")
+alertcondition(qqeBearDiv, "QQE Bearish Divergence", "QQE: Price higher high but QQE Agreement fades — hidden bearish weakness")
 
 // ─────────────────────────────────────
 // Table
