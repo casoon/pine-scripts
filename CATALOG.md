@@ -58,7 +58,7 @@ Quality columns (★ 1–5):
 | [volume_strata](indicators/volume_strata/) | 1.9 | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
 | [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [vwap_cross_visuals](indicators/vwap_cross_visuals/) | 2.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [liquidity_hunter](indicators/liquidity_hunter/) | 3.1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | Ranked BSL/SSL levels, sweep & reclaim scoring |
+| [liquidity_hunter](indicators/liquidity_hunter/) | 2.2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | EQH/EQL, Round Numbers, Gaps, Stop Hunts, Confluence |
 
 ## Pattern & Wave
 
