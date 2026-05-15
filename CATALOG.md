@@ -13,7 +13,7 @@ Quality columns (★ 1–5):
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [wyckoff_schematics](indicators/wyckoff_schematics/) | 4.3.1 | Aktiv | ★★★★★ | ★★★★☆ | ★★★☆☆ | Phase D/E validation still weak |
+| [wyckoff_schematics](indicators/wyckoff_schematics/) | 4.4.0 | Aktiv | ★★★★★ | ★★★★☆ | ★★★☆☆ | Phase D/E validation still weak |
 | [smc_structure_expectation](indicators/smc_structure_expectation/) | 1.0.0 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [sr_zones_mtf_v2](indicators/sr_zones_mtf_v2/) | 3.0.0 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [tweezer_kangaroo_zones](indicators/tweezer_kangaroo_zones/) | 3.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
@@ -39,7 +39,7 @@ Quality columns (★ 1–5):
 | [wavetrend](indicators/wavetrend/) | 1.0 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Core, best PF in repo |
 | [market_pressure_scale](indicators/market_pressure_scale/) | 1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [oscillator_divergence_zones](indicators/oscillator_divergence_zones/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [mtf_stochrsi_pair_score](indicators/mtf_stochrsi_pair_score/) | 1.5.0 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | New, untested |
+| [mtf_stochrsi_pair_score](indicators/mtf_stochrsi_pair_score/) | 1.6.0 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | New, untested |
 | [market_exhaustion](indicators/market_exhaustion/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [market_stress_oscillator](indicators/market_stress_oscillator/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 
@@ -56,7 +56,7 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [volume_strata](indicators/volume_strata/) | 1.9 | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
-| [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 1.4 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [vwap_cross_visuals](indicators/vwap_cross_visuals/) | 2.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [liquidity_hunter](indicators/liquidity_hunter/) | 3.1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | BSL/SSL scoring + Gaps + Stop Hunts |
 

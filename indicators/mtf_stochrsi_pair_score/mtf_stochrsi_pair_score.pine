@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // MTF StochRSI Pair Score [WavesUnchained]
-// Version: 1.5.0
+// Version: 1.6.0
 // Author: WavesUnchained
 // Build: 2026-05-14 00:00:00
 // ============================================================================
@@ -14,13 +14,13 @@
 //   ✓ Weighted total across up to 5 configurable TF pairs
 //   ✓ Smoothed total score (EMA / RMA / SMA / WMA / HMA / JMA)
 //   ✓ TF Agreement Index — directional consensus across all 6 TFs
-//   ✓ Signal markers for strong long / short bias
-//   ✓ Dashboard table — per-TF, per-pair, agreement, and total
+//   ✓ Signal markers — edge-triggered, optional confirmed-bar gate
+//   ✓ Dashboard table — per-TF, per-pair (disabled pairs grayed), agreement, and total
 //   ✓ Bidirectional Williams VIX Fix background (bull fear / bear greed extremes)
 //   ✓ Squeeze Momentum: BB vs KC compression state + linreg momentum histogram
 //   ✓ QQE Agreement Layer: weighted RSI + trailing stop across all 6 TFs, optional gate on signals
 //   ✓ QQE Scoring: per-TF score boost/penalty when QQE confirms or conflicts StochRSI direction
-//   ✓ QQE Divergences: price vs QQE Agreement — classic bull/bear divergence detection
+//   ✓ Breadth discrepancy markers (StochRSI + QQE vs price)
 //
 // ============================================================================
 
@@ -68,8 +68,9 @@ smoothLen  = input.int(5,        "Length",      minval=1, maxval=50,            
 jmaPhase   = input.int(50,       "  JMA Phase", minval=-100, maxval=100,                            group=groupSmooth)
 jmaPower   = input.float(2.0,    "  JMA Power", minval=1.0,  maxval=4.0, step=0.25,                group=groupSmooth)
 
-groupDiv = "Divergences"
-showDiv      = input.bool(true, "Show Divergence Markers", group=groupDiv)
+groupDiv = "Breadth Discrepancy"
+showDiv      = input.bool(true, "Show Discrepancy Markers", group=groupDiv,
+     tooltip="Marks bars where Agreement Index and Total Score move in opposite directions — not pivot-based divergences, but useful breadth/momentum mismatches")
 divLen       = input.int(5,     "Lookback Bars",            minval=2, maxval=20, group=groupDiv)
 divMinAgreement = input.float(33, "Min Agreement Δ",        minval=0, maxval=100, step=33, group=groupDiv,
      tooltip="Minimum change in Agreement Index over the lookback window to qualify. 33 = one TF flipped.")
@@ -77,10 +78,14 @@ divMinTotal  = input.float(10,  "Min Total Score Δ",        minval=0, maxval=50
      tooltip="Minimum move in Total Score in the opposite direction.")
 
 groupDisplay = "Display"
-showTable   = input.bool(true,  "Show Table",           group=groupDisplay)
-showSignals = input.bool(true,  "Show Signal Markers",  group=groupDisplay)
-longLevel   = input.float(60,   "Strong Long Level",    minval=0,    maxval=100, group=groupDisplay)
-shortLevel  = input.float(-60,  "Strong Short Level",   minval=-100, maxval=0,   group=groupDisplay)
+showTable      = input.bool(true,  "Show Table",                  group=groupDisplay)
+showSignals    = input.bool(true,  "Show Signal Markers",         group=groupDisplay)
+confirmedOnly  = input.bool(true,  "Only Confirmed Bar Signals",  group=groupDisplay,
+     tooltip="Prevents signals from appearing and disappearing on open HTF bars — strongly recommended")
+longLevel      = input.float(60,   "Strong Long Level",           minval=0,    maxval=100, group=groupDisplay)
+shortLevel     = input.float(-60,  "Strong Short Level",          minval=-100, maxval=0,   group=groupDisplay)
+minAgreement   = input.float(33,   "Min Agreement for Signals",   minval=0,    maxval=100, step=33, group=groupDisplay,
+     tooltip="33 = at least 4:2 majority across 6 TFs. 0 = any majority (3:2 with one neutral).")
 
 groupWvf = "Williams VIX Fix Background"
 showWvfBg    = input.bool(true,  "Enable",                    group=groupWvf)
@@ -226,7 +231,8 @@ f_qqe(_len, _factor, _smooth, _weight) =>
     _w     = nz(_delta * (_rsi - _ts) > 0 ? _weight : 1.0, 1.0)
     _num   = ta.rma(_delta * _w, _len)
     _den   = ta.rma(math.abs(_delta * _w), _len)
-    _rsi  := 50.0 * ta.ema(_num / _den, _smooth) + 50.0
+    _ratio = _den != 0.0 ? _num / _den : 0.0
+    _rsi  := 50.0 * ta.ema(_ratio, _smooth) + 50.0
     _diff  = ta.rma(math.abs(_rsi - _rsi[1]), _len)
     _cup   = ta.crossover(_rsi, _ts)
     _cdn   = ta.crossunder(_rsi, _ts)
@@ -372,33 +378,43 @@ plot(agreementIdx,  "StochRSI Agreement", linewidth=1, color=color.new(color.blu
 plot(showQqe ? qqeAgreement : na, "QQE Agreement", linewidth=1, color=color.new(color.purple, 30))
 plot(smoothedTotal, "Total Score",        linewidth=2, color=color.new(color.teal,   0))
 
-// Strong signal: magnitude + StochRSI consensus + optional QQE gate
+// Strong signal: magnitude + StochRSI consensus (min agreement) + optional QQE gate
 qqeAligned  = not useQqeGate or (smoothedTotal > 0 ? qqeAgreement > 0 : qqeAgreement < 0)
-strongLong  = smoothedTotal >= longLevel  and agreementIdx > 0 and qqeAligned
-strongShort = smoothedTotal <= shortLevel and agreementIdx < 0 and qqeAligned
+strongLong  = smoothedTotal >= longLevel  and agreementIdx >=  minAgreement and qqeAligned
+strongShort = smoothedTotal <= shortLevel and agreementIdx <= -minAgreement and qqeAligned
 
-plotshape(showSignals and strongLong,  title="Long Bias",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.green, text="LONG")
-plotshape(showSignals and strongShort, title="Short Bias", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.red,   text="SHORT")
+// Confirmed-bar gate: block intrabar state changes on open HTF candles
+sigOk        = not confirmedOnly or barstate.isconfirmed
+finalLong    = strongLong  and sigOk
+finalShort   = strongShort and sigOk
 
-alertcondition(strongLong,  "MTF StochRSI Long Bias",  "MTF StochRSI Score: Long Bias")
-alertcondition(strongShort, "MTF StochRSI Short Bias", "MTF StochRSI Score: Short Bias")
+// Edge-triggered: fire only on state change, not every bar the condition holds
+longTrigger  = finalLong  and not finalLong[1]
+shortTrigger = finalShort and not finalShort[1]
+
+plotshape(showSignals and longTrigger,  title="Long Bias",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.green, text="LONG")
+plotshape(showSignals and shortTrigger, title="Short Bias", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.red,   text="SHORT")
+
+alertcondition(longTrigger,  "MTF StochRSI Long Bias",  "MTF StochRSI Score: Long Bias")
+alertcondition(shortTrigger, "MTF StochRSI Short Bias", "MTF StochRSI Score: Short Bias")
 
 // ─────────────────────────────────────
-// Divergences
+// Breadth Discrepancy
 // ─────────────────────────────────────
-// Bullish: Agreement rising (breadth building) while Total falling (score still weak)
-// Bearish: Agreement falling (breadth eroding) while Total rising (score driven by few extreme TFs)
+// Bull: Agreement rising (more TFs turning bullish) while Total Score still falling
+// Bear: Agreement falling (breadth eroding) while Total Score still rising
+// Note: delta-based, not pivot-based — measures momentum mismatch, not classical divergence
 agreementDelta = agreementIdx  - agreementIdx[divLen]
 totalDelta     = smoothedTotal - smoothedTotal[divLen]
 
-bullDiv = agreementDelta >=  divMinAgreement and totalDelta <= -divMinTotal
-bearDiv = agreementDelta <= -divMinAgreement and totalDelta >=  divMinTotal
+bullDisc = agreementDelta >=  divMinAgreement and totalDelta <= -divMinTotal
+bearDisc = agreementDelta <= -divMinAgreement and totalDelta >=  divMinTotal
 
-plotshape(showDiv and bullDiv, title="Bullish Divergence", style=shape.circle, location=location.bottom, size=size.tiny, color=color.new(#00c853, 0))
-plotshape(showDiv and bearDiv, title="Bearish Divergence", style=shape.circle, location=location.top,    size=size.tiny, color=color.new(#d50000, 0))
+plotshape(showDiv and bullDisc, title="Bull Breadth Discrepancy", style=shape.circle, location=location.bottom, size=size.tiny, color=color.new(#00c853, 0))
+plotshape(showDiv and bearDisc, title="Bear Breadth Discrepancy", style=shape.circle, location=location.top,    size=size.tiny, color=color.new(#d50000, 0))
 
-alertcondition(bullDiv, "MTF StochRSI Bullish Divergence", "MTF StochRSI: Breadth rising while score weak")
-alertcondition(bearDiv, "MTF StochRSI Bearish Divergence", "MTF StochRSI: Breadth eroding while score high")
+alertcondition(bullDisc, "MTF StochRSI Bull Discrepancy", "MTF StochRSI: Breadth rising while score weak")
+alertcondition(bearDisc, "MTF StochRSI Bear Discrepancy", "MTF StochRSI: Breadth eroding while score high")
 
 // QQE Divergences — price vs QQE Agreement (classic oscillator divergence)
 // Bullish: price lower low, QQE Agreement holds up → hidden bullish strength
@@ -422,42 +438,54 @@ alertcondition(qqeBearDiv, "QQE Bearish Divergence", "QQE: Price higher high but
 color tc = color.new(color.gray, 20)
 color hd = color.new(color.gray, 90)
 
-var table t = table.new(position.top_right, 3, 15,
+var table t = table.new(position.top_right, 4, 9,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
      frame_color=color.new(color.gray, 40),
      frame_width=1)
 
-f_row(row, name, score) =>
-    cellTc = f_tc_cell(score)
-    cellBg = f_bg(score)
-    table.cell(t, 0, row, name,                       text_color=tc,     bgcolor=na,     text_size=size.small)
-    table.cell(t, 1, row, str.tostring(score, "#.0"), text_color=cellTc, bgcolor=cellBg, text_size=size.small)
-    table.cell(t, 2, row, f_state(score),             text_color=cellTc, bgcolor=cellBg, text_size=size.small)
+// Fills two adjacent columns: label | score-colored-cell
+f_cell(col, row, name, score, enabled=true) =>
+    cellTc = enabled ? f_tc_cell(score) : color.new(color.gray, 60)
+    cellBg = enabled ? f_bg(score)      : color.new(color.gray, 85)
+    table.cell(t, col,     row, name,
+         text_color=tc, bgcolor=na, text_size=size.tiny)
+    table.cell(t, col + 1, row, enabled ? str.tostring(score, "#") : "off",
+         text_color=cellTc, bgcolor=cellBg, text_size=size.tiny)
+
+f_sep(row) =>
+    table.cell(t, 0, row, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, row, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 2, row, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 3, row, "", bgcolor=color.new(color.gray, 80))
 
 if showTable and barstate.islast
-    table.cell(t, 0, 0, "TF / Pair",  text_color=tc, bgcolor=hd, text_size=size.small)
-    table.cell(t, 1, 0, "Score",      text_color=tc, bgcolor=hd, text_size=size.small)
-    table.cell(t, 2, 0, "State",      text_color=tc, bgcolor=hd, text_size=size.small)
+    // Header
+    table.cell(t, 0, 0, "TF",   text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 1, 0, "Scr",  text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 2, 0, "TF",   text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 3, 0, "Scr",  text_color=tc, bgcolor=hd, text_size=size.tiny)
 
-    f_row(1, "TF1 " + tf1, s1)
-    f_row(2, "TF2 " + tf2, s2)
-    f_row(3, "TF3 " + tf3, s3)
-    f_row(4, "TF4 " + tf4, s4)
-    f_row(5, "TF5 " + tf5, s5)
-    f_row(6, "TF6 " + tf6, s6)
+    // TFs — 2 per row
+    f_cell(0, 1, tf1, s1)
+    f_cell(2, 1, tf2, s2)
+    f_cell(0, 2, tf3, s3)
+    f_cell(2, 2, tf4, s4)
+    f_cell(0, 3, tf5, s5)
+    f_cell(2, 3, tf6, s6)
 
-    f_row(7,  tf1 + " + " + tf2, p12)
-    f_row(8,  tf2 + " + " + tf3, p23)
-    f_row(9,  tf3 + " + " + tf4, p34)
-    f_row(10, tf4 + " + " + tf5, p45)
-    f_row(11, tf5 + " + " + tf6, p56)
+    // Pairs — 2 per row
+    f_cell(0, 4, "P " + tf1 + "+" + tf2, p12, useP12)
+    f_cell(2, 4, "P " + tf2 + "+" + tf3, p23, useP23)
+    f_cell(0, 5, "P " + tf3 + "+" + tf4, p34, useP34)
+    f_cell(2, 5, "P " + tf4 + "+" + tf5, p45, useP45)
+    f_cell(0, 6, "P " + tf5 + "+" + tf6, p56, useP56)
+    table.cell(t, 2, 6, "", bgcolor=color.new(color.gray, 92))
+    table.cell(t, 3, 6, "", bgcolor=color.new(color.gray, 92))
 
-    // Separator
-    table.cell(t, 0, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
-    table.cell(t, 1, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
-    table.cell(t, 2, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+    f_sep(7)
 
-    f_row(13, "Agreement", agreementIdx)
-    f_row(14, "Total",     smoothedTotal)
+    // Totals
+    f_cell(0, 8, "Agree", agreementIdx)
+    f_cell(2, 8, "Total", smoothedTotal)

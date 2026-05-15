@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Money Flow Delta Profile [WavesUnchained]
-// Version: 1.1
+// Version: 1.4
 // Author: WavesUnchained
-// Build: 2026-05-07 00:00:00
+// Build: 2026-05-15 00:00:00
 // ============================================================================
 // Center-out diverging profile: green bars (right of center) = net buying
 // pressure, red bars (left) = net selling pressure at each price level.
@@ -15,7 +15,7 @@
 //   ✓ Value Area High / Low (configurable %)
 //   ✓ Delta POC — most decisively directional level
 //   ✓ Optional recency weighting (exponential decay)
-//   ✓ Volume or Money Flow (volume × price) source
+//   ✓ Volume or Money Flow (volume × price) source — Row Mid / HL2 / Typical / Close
 //   ✓ Level labels (POC / VAH / VAL / ΔPOC)
 //   ✓ Dashboard with bias summary
 //
@@ -30,13 +30,15 @@ grP = "Profile"
 rpLN  = input.int(200,               "Lookback",     minval = 10, maxval = 1500, step = 10, group = grP)
 rpNR  = input.int(25,                "Rows",         minval = 10, maxval = 100,  step = 5,  group = grP)
 rpSRC = input.string("Money Flow",   "Source",       options = ["Money Flow", "Volume"],    group = grP)
+rpMFP = input.string("Row Mid",      "  MF Price",   options = ["Row Mid", "HL2", "Typical", "Close"], group = grP,
+     tooltip = "Price multiplier for Money Flow mode. Row Mid = price midpoint of the row bucket. HL2/Typical/Close use the bar's own price — typically more accurate for narrow rows.")
 rpDM  = input.string("Proportional", "Delta Mode",
      options = ["Proportional", "Binary"],
-     tooltip = "Proportional: each bar contributes fractionally based on close location in its range. Binary: whole bar counts as bull or bear (Polarity method below applies).",
+     tooltip = "Proportional: each bar contributes fractionally based on close location in its range. Binary: whole bar counts as bull or bear.",
      group = grP)
 rpPTY = input.string("Bar Polarity", "Polarity (Binary only)",
-     options = ["Bar Polarity", "Buying/Selling Pressure"],
-     tooltip = "Only used in Binary mode. Bar Polarity: close > open. Buying/Selling Pressure: close location in high–low range.",
+     options = ["Bar Polarity", "Close Location"],
+     tooltip = "Only used in Binary mode. Bar Polarity: close > open. Close Location: close nearer to high = bull, nearer to low = bear.",
      group = grP)
 useSynVol = input.bool(true, "Synthetic volume if missing",
      tooltip = "CFDs (e.g. Capital.com) often report volume = 0 or na. When enabled, bars with no volume count as 1.0 so the profile is built from price action alone.",
@@ -74,17 +76,15 @@ var array<line>  drwLines  = array.new<line>()
 var array<label> drwLabels = array.new<label>()
 var table        dash      = na
 
+// ─── Price range — computed on every bar so Pine maintains proper series history
+float pLo = ta.lowest(low,   rpLN)
+float pHi = ta.highest(high, rpLN)
+
 // ─── Compute and draw (last bar only) ────────────────────────────────────────
 
 if barstate.islast
 
     rpLN_adj = math.min(rpLN - 1, last_bar_index)
-
-    float pLo = low
-    float pHi = high
-    for i = 0 to rpLN_adj
-        pLo := math.min(pLo, low[i])
-        pHi := math.max(pHi, high[i])
 
     if not na(pLo) and pHi > pLo
 
@@ -114,13 +114,23 @@ if barstate.islast
             v_   = vRaw > 0 ? vRaw : useSynVol ? 1.0 : 0.0
             if v_ > 0 and h_ > l_
                 // Buy ratio: fraction of flow attributed to buying pressure
+                // Proportional: continuous (c-l)/(h-l) ratio — smoothest signal
+                // Binary Bar Polarity: whole bar to bull/bear based on close vs open (doji = 50%)
+                // Binary Close Location: continuous (c-l)/(h-l) ratio, but applied as a binary
+                //   threshold in the original sense — now made proportional for less noise
+                clRatio  = math.max(0.0, math.min(1.0, (c_ - l_) / (h_ - l_)))
                 buyRatio = rpDM == "Proportional"
-                         ? math.max(0.0, math.min(1.0, (c_ - l_) / (h_ - l_)))
+                         ? clRatio
                          : rpPTY == "Bar Polarity"
                            ? (c_ > o_ ? 1.0 : c_ < o_ ? 0.0 : 0.5)
-                           : ((c_ - l_) > (h_ - c_) ? 1.0 : 0.0)
+                           : clRatio
 
                 wt = useDecay ? math.exp(-decayFactor * bI) : 1.0
+
+                // MF price per bar (used for all rows of this bar when not Row Mid)
+                barMFPrice = rpMFP == "Close"   ? c_ :
+                             rpMFP == "HL2"     ? (h_ + l_) / 2.0 :
+                             rpMFP == "Typical" ? (h_ + l_ + c_) / 3.0 : 0.0
 
                 for r = 0 to rpNR - 1
                     pLL = pLo + r * pSTP
@@ -134,8 +144,9 @@ if barstate.islast
                         else
                             pSTP / (h_ - l_)
 
+                        mfPrice = rpMFP == "Row Mid" ? pLo + (r + 0.5) * pSTP : barMFPrice
                         flow = rpSRC == "Money Flow"
-                             ? v_ * vPOR * (pLo + (r + 0.5) * pSTP) * wt
+                             ? v_ * vPOR * mfPrice * wt
                              : v_ * vPOR * wt
 
                         totFlow.set(r,  totFlow.get(r)  + flow)
@@ -191,52 +202,87 @@ if barstate.islast
             dPocPrice = pLo + (dPocIdx + 0.5) * pSTP
 
             // Layout
+            // anchorBI = left edge of profile
+            // Gray reference extends RIGHT (total flow)
+            // Bull and bear bars both extend RIGHT from anchor, overlaid on gray
             profileW = profileWInp
-            halfW    = math.max(int(profileW / 2), 1)
-            leftBI   = bar_index + vpHO + 1
-            centerBI = leftBI + halfW
+            maxOH    = math.max(int(profileW / 2), 1)  // max delta bar width
+            anchorBI = bar_index + vpHO + 1
+            rightBI  = anchorBI + profileW
 
             // Lookback range overlay
             if showRange
                 drwBoxes.push(box.new(bar_index - rpLN_adj, pHi, bar_index, pLo,
                      border_color = color.new(color.orange, 40),
                      bgcolor      = color.new(color.orange, 92)))
-            rightBI  = leftBI + profileW
 
             // Value Area drawn first so profile bars render on top
             if showVA
-                drwBoxes.push(box.new(leftBI, vahPrice, rightBI, valPrice,
+                drwBoxes.push(box.new(anchorBI, vahPrice, rightBI, valPrice,
                      vaC, bgcolor = color.new(vaC, 92)))
 
             // ── Profile rows ─────────────────────────────────────────────
 
             for r = 0 to rpNR - 1
-                yLo = pLo + r * pSTP + pSTP * 0.04
-                yHi = pLo + (r + 1) * pSTP - pSTP * 0.04
+                // Row bounds with gap for visual spacing
+                yBot = pLo + r * pSTP
+                yTop = pLo + (r + 1) * pSTP
+                if yTop <= yBot + syminfo.mintick
+                    yTop := yBot + syminfo.mintick
+                gap  = pSTP * 0.08
+                yLo  = yBot + gap
+                yHi  = yTop - gap
+                if yHi <= yLo + syminfo.mintick
+                    yLo := yBot
+                    yHi := yTop
 
-                rowTot = totFlow.get(r)
+                rowTot   = totFlow.get(r)
+                rowShare = totMax > 0 ? rowTot / totMax : 0.0
 
+                // Total flow reference bar — bordered frame
                 if showRef
-                    refEnd = leftBI + math.max(int((rowTot / totMax) * profileW), 1)
-                    drwBoxes.push(box.new(leftBI, yHi, refEnd, yLo, color(na), bgcolor = refC))
+                    refEnd = anchorBI + math.max(int(rowShare * profileW), 1)
+                    drwBoxes.push(box.new(anchorBI, yHi, refEnd, yLo,
+                         border_color = color.new(color.gray, 60),
+                         bgcolor = refC))
 
+                // Delta bar — 2-stop gradient, fading from anchor outward
                 delta      = deltaArr.get(r)
                 deltaRatio = math.abs(delta) / deltaMax
-                dW         = math.max(int(deltaRatio * halfW), 0)
+                dW         = math.max(int(deltaRatio * maxOH), 0)
                 if dW > 0
-                    if delta >= 0.0
-                        drwBoxes.push(box.new(centerBI, yHi, centerBI + dW, yLo, color(na), bgcolor = bullC))
-                    else
-                        drwBoxes.push(box.new(centerBI - dW, yHi, centerBI, yLo, color(na), bgcolor = bearC))
+                    barColor = delta >= 0.0 ? bullC : bearC
+                    split    = anchorBI + math.max(dW * 2 / 3, 1)
+                    tip      = anchorBI + dW
+                    drwBoxes.push(box.new(anchorBI, yHi, split, yLo, color(na), bgcolor = color.new(barColor, 10)))
+                    if split < tip
+                        drwBoxes.push(box.new(split, yHi, tip, yLo, color(na), bgcolor = color.new(barColor, 55)))
 
-            // Center (zero) line
-            drwLines.push(line.new(centerBI, pHi, centerBI, pLo,
-                 xloc = xloc.bar_index, color = color.new(color.gray, 50),
-                 style = line.style_solid, width = 1))
+                // Bull% label: buying share at this price level (independent of bar width)
+                if rowShare > 0.04
+                    bullPct_r = rowTot > 0 ? bullFlow.get(r) / rowTot * 100 : 50.0
+                    midY      = (yLo + yHi) / 2
+                    color lCol = if bullPct_r > 55.0
+                        color.new(#00c853, 0)
+                    else if bullPct_r < 45.0
+                        color.new(#ef5350, 0)
+                    else
+                        color.new(color.gray, 20)
+                    drwLabels.push(label.new(anchorBI + 1, midY,
+                         str.tostring(math.round(bullPct_r)) + "%",
+                         xloc      = xloc.bar_index, yloc = yloc.price,
+                         color     = color(na),      style = label.style_none,
+                         textcolor = lCol,           size  = size.tiny,
+                         textalign = text.align_left))
+
+            // Anchor (zero) line
+            drwLines.push(line.new(anchorBI, pHi, anchorBI, pLo,
+                 xloc = xloc.bar_index, color = color.new(color.gray, 40),
+                 style = line.style_solid, width = 2))
 
             // POC
             if showPOC
-                drwLines.push(line.new(leftBI, pocPrice, rightBI, pocPrice,
+                drwLines.push(line.new(anchorBI, pocPrice, rightBI, pocPrice,
                      xloc = xloc.bar_index, color = pocC,
                      style = line.style_dashed, width = 2))
                 if showLabels
@@ -248,7 +294,7 @@ if barstate.islast
 
             // Delta POC
             if showDeltaPOC
-                drwLines.push(line.new(leftBI, dPocPrice, rightBI, dPocPrice,
+                drwLines.push(line.new(anchorBI, dPocPrice, rightBI, dPocPrice,
                      xloc = xloc.bar_index, color = dpC,
                      style = line.style_dotted, width = 2))
                 if showLabels

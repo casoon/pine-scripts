@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.6.0 — 2026-05-14
+- Signal hygiene: edge-triggered Long/Short (fire on state change only, not every bar)
+- Confirmed-bar gate: optional barstate.isconfirmed filter on signals (default on)
+- Configurable minimum Agreement for signals (default 33 = 4:2 majority across 6 TFs)
+- QQE division-by-zero fix: _den == 0 now returns ratio 0 instead of na
+- Renamed "Divergences" → "Breadth Discrepancy" (honest: delta-based, not pivot-based)
+- Table: disabled pairs shown as grayed out with "off" label
+
 ## v1.5.0 — 2026-05-14
 - QQE Scoring: optional boost/penalty applied to per-TF StochRSI scores before pair calculation (default off)
 - QQE Divergences: price vs QQE Agreement — bullish (price lower, QQE holds) / bearish (price higher, QQE fades), shown as diamonds
