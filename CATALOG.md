@@ -83,6 +83,14 @@ Quality columns (★ 1–5):
 | [adaptive_cycle_detector](indicators/adaptive_cycle_detector/) | 1.0 | Draft | ★★★★☆ | ★★★☆☆ | ★☆☆☆☆ | Dominant cycle from WT zero-crossings |
 | [oscillator_topology](indicators/oscillator_topology/) | 1.0 | Draft | ★★★★★ | ★★★★☆ | ★☆☆☆☆ | Curvature + shape classification of WT pivots |
 
+## Price Structure & Conviction
+
+| Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
+|---|---|---|---|---|---|---|
+| [candle_pressure_index](indicators/candle_pressure_index/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Raw microstructure bias — no derived oscillators |
+| [mtf_structure_bias](indicators/mtf_structure_bias/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | HH/HL/LH/LL alignment across 4 TFs |
+| [swing_conviction_radar](indicators/swing_conviction_radar/) | 1.0 | Draft | ★★★★★ | ★★★★☆ | ★☆☆☆☆ | Per-leg speed + cleanliness + vol gradient → divergence signals |
+
 ## Vein Suite
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
@@ -123,12 +131,12 @@ Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederher
 | Indikator / Datei | Grund |
 |---|---|
 | [smart_money_dashboard](archive/indicators/smart_money_dashboard/) | Erfordert nicht gepflegte RTA-Libraries |
-| [mtf_trend_alignment](archive/indicators/mtf_trend_alignment/) | Erfordert nicht gepflegte RTA-Libraries |
+| [mtf_trend_alignment](archive/indicators/mtf_trend_alignment/) | Erfordert nicht gepflegte RTA-Libraries → reimpl. als mtf_structure_bias |
 | [pattern_recognition](archive/indicators/pattern_recognition/) | Overengineered, kaum getestet |
 | [wave_navigator](archive/indicators/wave_navigator/) | Elliott-Wave-Autoerkennung konzeptionell schwach |
 | [rj_wave](archive/indicators/rj_wave/) | Zu nische, kein aktiver Einsatz |
-| [relative_leg_efficiency_panel_chart](archive/indicators/relative_leg_efficiency_panel_chart/) | Visualisierungs-Experiment, Basis-Version ist vollständiger |
-| [flow_bias](archive/indicators/flow_bias/) | Überschneidung mit market_pressure_scale und mtf_stochrsi_pair_score |
+| [relative_leg_efficiency_panel_chart](archive/indicators/relative_leg_efficiency_panel_chart/) | Visualisierungs-Experiment → reimpl. als swing_conviction_radar |
+| [flow_bias](archive/indicators/flow_bias/) | Überschneidung mit market_pressure_scale → reimpl. als candle_pressure_index |
 | [candle_pressure_response_jma](archive/indicators/candle_pressure_response_jma/) | Candle-Metriken bereits in Vein suite (vein_exhaustion, vein_feature_exporter) |
 | [wavetrend_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
 | [wavetrend_base_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |
