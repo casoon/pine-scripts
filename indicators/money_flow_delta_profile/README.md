@@ -1,5 +1,7 @@
 # Money Flow Delta Profile
 
+**TradingView:** https://de.tradingview.com/script/NUAePC98/
+
 A center-out diverging volume/money flow profile. Instead of the classic sideways histogram, each price row shows a bar that extends **right** (green, net buying) or **left** (red, net selling) from a center zero line — so you see at a glance which levels are demand zones and which are supply zones, without mentally comparing two bar widths.
 
 ## Features
