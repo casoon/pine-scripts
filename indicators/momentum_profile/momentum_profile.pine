@@ -1,0 +1,240 @@
+//@version=6
+// ============================================================================
+// Momentum Profile [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-05-15 00:00:00
+// ============================================================================
+// Analog to Money Flow Delta Profile but for momentum: maps average WaveTrend
+// and MFI values per price zone to identify dominant-momentum levels (strong moves
+// backed by oscillator conviction) vs mixed levels (fragile zones likely to be
+// revisited).
+//
+// Features:
+//   ✓ WaveTrend average per price zone — center-out profile (bullish right, bearish left)
+//   ✓ MFI average per zone as colored reference band (green = volume-backed, red = selling)
+//   ✓ Momentum POC — zone with highest absolute average WaveTrend
+//   ✓ Configurable lookback, rows, profile width and offset
+//   ✓ Dashboard with overall bias, average WT, average MFI, mPOC
+//
+// ============================================================================
+
+indicator("Momentum Profile [WavesUnchained]", "Mom Profile [WU]", overlay=true,
+     max_bars_back=1500, max_boxes_count=500, max_lines_count=100)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+
+grP  = "Profile"
+rpLN = input.int(200, "Lookback",          minval=10, maxval=1500, step=10, group=grP)
+rpNR = input.int(25,  "Rows",              minval=10, maxval=100,  step=5,  group=grP)
+
+grWT    = "WaveTrend"
+wtChLen = input.int(10, "Channel Length",  minval=1, group=grWT)
+wtAvLen = input.int(21, "Average Length",  minval=1, group=grWT)
+
+grMfi   = "MFI"
+showMfi = input.bool(true, "Show MFI Reference Band", group=grMfi,
+     tooltip="Colors the reference bar by average MFI at that zone. Green = net buying pressure, red = net selling, gray = neutral/mixed.")
+mfiLen  = input.int(14, "MFI Length", minval=1, group=grMfi)
+
+grV          = "Visualization"
+showPOC      = input.bool(true,  "Momentum POC",        group=grV)
+showDash     = input.bool(true,  "Dashboard",           group=grV)
+showRange    = input.bool(false, "Show Lookback Range", group=grV)
+profileWInp  = input.int(60,    "Profile Width (bars)", minval=10, maxval=200, group=grV)
+vpHO         = input.int(40,    "Bar Offset",           group=grV)
+
+bullC = input.color(color.new(#26a69a, 20), "Bull",       inline="c1", group=grV)
+bearC = input.color(color.new(#ef5350, 20), "Bear",       inline="c1", group=grV)
+refN  = input.color(color.new(color.gray, 80), "Ref/POC", inline="c2", group=grV)
+pocC  = input.color(#ffd600,               "",            inline="c2", group=grV)
+
+// ─── State ────────────────────────────────────────────────────────────────────
+
+var array<box>   drwBoxes  = array.new<box>()
+var array<line>  drwLines  = array.new<line>()
+var array<label> drwLabels = array.new<label>()
+var table        dash      = na
+
+// ─── Series computed every bar for history access ─────────────────────────────
+
+float pLo = ta.lowest(low,   rpLN)
+float pHi = ta.highest(high, rpLN)
+
+_wtEsa = ta.ema(hlc3, wtChLen)
+_wtD   = ta.ema(math.abs(hlc3 - _wtEsa), wtChLen)
+_wtCi  = (hlc3 - _wtEsa) / (0.015 * math.max(_wtD, syminfo.mintick))
+wtOsc  = ta.ema(_wtCi, wtAvLen)
+
+_mfiTyp = (high + low + close) / 3
+_mfiRaw = _mfiTyp * math.max(nz(volume), 1.0)
+_mfiPos = math.sum(_mfiTyp > _mfiTyp[1] ? _mfiRaw : 0.0, mfiLen)
+_mfiNeg = math.sum(_mfiTyp < _mfiTyp[1] ? _mfiRaw : 0.0, mfiLen)
+mfiSer  = _mfiNeg == 0 ? 100.0 : 100.0 - 100.0 / (1.0 + _mfiPos / _mfiNeg)
+
+// ─── Compute and draw (last bar only) ─────────────────────────────────────────
+
+if barstate.islast
+
+    rpLN_adj = math.min(rpLN - 1, last_bar_index)
+
+    if not na(pLo) and pHi > pLo
+
+        for b in drwBoxes
+            box.delete(b)
+        for l in drwLines
+            line.delete(l)
+        for lb in drwLabels
+            label.delete(lb)
+        drwBoxes.clear()
+        drwLines.clear()
+        drwLabels.clear()
+
+        pSTP = (pHi - pLo) / rpNR
+
+        // Per-row accumulators (weighted by overlap fraction)
+        wtSum    = array.new_float(rpNR, 0.0)
+        mfiSum   = array.new_float(rpNR, 0.0)
+        rowCount = array.new_int(rpNR, 0)
+
+        for bI = rpLN_adj to 0
+            h_   = high[bI]
+            l_   = low[bI]
+            wt_  = nz(wtOsc[bI])
+            mfi_ = nz(mfiSer[bI], 50.0)
+
+            if h_ > l_
+                for r = 0 to rpNR - 1
+                    rowLo = pLo + r * pSTP
+                    rowHi = rowLo + pSTP
+                    if h_ >= rowLo and l_ < rowHi
+                        ovLo = math.max(l_, rowLo)
+                        ovHi = math.min(h_, rowHi)
+                        frac = (ovHi - ovLo) / (h_ - l_)
+                        wtSum.set(r,    wtSum.get(r)  + wt_ * frac)
+                        mfiSum.set(r,   mfiSum.get(r) + mfi_ * frac)
+                        rowCount.set(r, rowCount.get(r) + 1)
+
+        // Per-row averages and max|avgWT|
+        wtAvg    = array.new_float(rpNR, 0.0)
+        mfiAvg   = array.new_float(rpNR, 50.0)
+        maxAbsWT = 0.0
+        pocIdx   = 0
+
+        for r = 0 to rpNR - 1
+            cnt = rowCount.get(r)
+            if cnt > 0
+                av = wtSum.get(r) / cnt
+                wtAvg.set(r,  av)
+                mfiAvg.set(r, mfiSum.get(r) / cnt)
+                if math.abs(av) > maxAbsWT
+                    maxAbsWT := math.abs(av)
+                    pocIdx   := r
+
+        if maxAbsWT == 0.0
+            maxAbsWT := 1.0
+
+        pocPrice = pLo + (pocIdx + 0.5) * pSTP
+
+        profileW = profileWInp
+        maxOH    = math.max(int(profileW / 2), 1)
+        anchorBI = bar_index + vpHO + 1
+        rightBI  = anchorBI + profileW
+
+        if showRange
+            drwBoxes.push(box.new(bar_index - rpLN_adj, pHi, bar_index, pLo,
+                 border_color=color.new(color.orange, 40),
+                 bgcolor=color.new(color.orange, 92)))
+
+        // Profile rows
+        for r = 0 to rpNR - 1
+            yBot = pLo + r * pSTP
+            yTop = pLo + (r + 1) * pSTP
+            if yTop <= yBot + syminfo.mintick
+                yTop := yBot + syminfo.mintick
+            gap  = pSTP * 0.08
+            yLo  = yBot + gap
+            yHi  = yTop - gap
+            if yHi <= yLo + syminfo.mintick
+                yLo := yBot
+                yHi := yTop
+
+            avgWT  = wtAvg.get(r)
+            avgMfi = mfiAvg.get(r)
+            cnt    = rowCount.get(r)
+
+            // MFI reference band
+            refColor = if showMfi and cnt > 0
+                avgMfi > 60 ? color.new(#00c853, 85) :
+                avgMfi < 40 ? color.new(#ef5350, 85) : refN
+            else
+                refN
+            drwBoxes.push(box.new(anchorBI, yHi, rightBI, yLo,
+                 border_color=color.new(color.gray, 70),
+                 bgcolor=refColor))
+
+            // WaveTrend momentum bar (center-out)
+            wtRatio = math.abs(avgWT) / maxAbsWT
+            wtW     = math.max(int(wtRatio * maxOH), 0)
+            if wtW > 0
+                barColor = avgWT >= 0 ? bullC : bearC
+                split    = anchorBI + math.max(wtW * 2 / 3, 1)
+                tip      = anchorBI + wtW
+                drwBoxes.push(box.new(anchorBI, yHi, split, yLo, color(na), bgcolor=color.new(barColor, 10)))
+                if split < tip
+                    drwBoxes.push(box.new(split, yHi, tip, yLo, color(na), bgcolor=color.new(barColor, 55)))
+
+        // Anchor line
+        drwLines.push(line.new(anchorBI, pHi, anchorBI, pLo,
+             xloc=xloc.bar_index, color=color.new(color.gray, 40),
+             style=line.style_solid, width=2))
+
+        // Momentum POC line
+        if showPOC
+            drwLines.push(line.new(anchorBI, pocPrice, rightBI, pocPrice,
+                 xloc=xloc.bar_index, color=pocC,
+                 style=line.style_dashed, width=2))
+            drwLabels.push(label.new(rightBI + 1, pocPrice, "mPOC",
+                 xloc=xloc.bar_index, yloc=yloc.price,
+                 color=color(na), style=label.style_none,
+                 textcolor=pocC, size=size.small,
+                 textalign=text.align_left))
+
+        // Dashboard
+        if showDash
+            wtTotal   = wtSum.sum()
+            cntTotal  = rowCount.sum()
+            avgAllWT  = cntTotal > 0 ? wtTotal / cntTotal : 0.0
+            avgAllMfi = cntTotal > 0 ? mfiSum.sum() / cntTotal : 50.0
+            biasC     = avgAllWT > 5 ? color.new(#00c853, 0) : avgAllWT < -5 ? color.new(#d50000, 0) : color.new(color.gray, 20)
+            color tc  = color.new(color.gray, 20)
+            color hd  = color.new(color.gray, 90)
+
+            if na(dash)
+                dash := table.new(position.top_right, 2, 5,
+                     bgcolor=color.new(color.white, 5),
+                     border_color=color.new(color.gray, 60), border_width=1,
+                     frame_color=color.new(color.gray, 40), frame_width=1)
+
+            table.cell(dash, 0, 0, "Momentum Profile",
+                 text_color=tc, bgcolor=hd, text_size=size.small)
+            table.cell(dash, 1, 0, str.tostring(rpLN_adj + 1) + "b",
+                 text_color=tc, bgcolor=hd, text_size=size.small)
+            table.cell(dash, 0, 1, "mPOC",
+                 text_color=tc, text_size=size.small)
+            table.cell(dash, 1, 1, str.tostring(pocPrice, format.mintick),
+                 text_color=tc, text_size=size.small)
+            table.cell(dash, 0, 2, "Avg WT",
+                 text_color=tc, text_size=size.small)
+            table.cell(dash, 1, 2, str.tostring(avgAllWT, "#.#"),
+                 text_color=biasC, text_size=size.small)
+            table.cell(dash, 0, 3, "Avg MFI",
+                 text_color=tc, text_size=size.small)
+            table.cell(dash, 1, 3, str.tostring(avgAllMfi, "#.#"),
+                 text_color=tc, text_size=size.small)
+            table.cell(dash, 0, 4, "mPOC WT",
+                 text_color=tc, text_size=size.small)
+            pocWT = wtAvg.get(pocIdx)
+            pocWTC = pocWT > 0 ? color.new(#00c853, 0) : color.new(#d50000, 0)
+            table.cell(dash, 1, 4, str.tostring(pocWT, "#.#"),
+                 text_color=pocWTC, text_size=size.small)

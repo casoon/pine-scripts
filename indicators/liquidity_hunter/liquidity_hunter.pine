@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Liquidity Hunter [WavesUnchained]
-// Version: 3.1.0
+// Version: 3.2.0
 // Author: WavesUnchained
-// Build: 2026-05-14 00:00:00
+// Build: 2026-05-15 00:00:00
 // ============================================================================
 // Focused premium liquidity tool:
 //   ✓ Ranks equal highs/lows by quality score (touches, age, ATR distance)
@@ -12,6 +12,7 @@
 //   ✓ Stop hunt detection: same-bar sweep reversal with volume spike
 //   ✓ Reduces chart clutter to the few levels that matter
 //   ✓ Session-aware scoring and tighter alerts
+//   ✓ Momentum Hybrid: qualifies sweeps/hunts with WaveTrend + MFI extremes (Exhaustion Events)
 //
 // ============================================================================
 
@@ -57,6 +58,14 @@ useSessionFilter   = input.bool(false, "Use Active Session Filter",      group=g
 activeSession      = input.session("0700-1700", "Active Session",        group=g3)
 alertDistanceAtr   = input.float(1.0,  "Alert Distance (ATR)",           group=g3, minval=0.25, maxval=5.0, step=0.25)
 eventMemoryBars    = input.int(30,     "Recent Event Memory (bars)",     group=g3, minval=5, maxval=100)
+
+var g_mom = "Momentum Hybrid"
+enableExhaustion = input.bool(true,  "Exhaustion Event Detection", group=g_mom,
+     tooltip="Qualifies sweep and stop-hunt events with WaveTrend extremes. When a sweep fires at an oscillator extreme, the probability of a genuine reversal rises — marked as an Exhaustion Event.")
+lhWtExtThr   = input.float(53.0, "WT Extreme Threshold", minval=30, maxval=80, step=1, group=g_mom,
+     tooltip="Absolute WaveTrend level considered extreme. BSL sweep above +threshold = bearish exhaustion. SSL sweep below -threshold = bullish exhaustion.")
+lhMfiLen     = input.int(14,     "MFI Length",           minval=5, maxval=50, group=g_mom)
+exhaustColor = input.color(color.new(#e91e63, 20), "Exhaustion Color", group=g_mom)
 
 var g4 = "Display"
 showDashboard      = input.bool(true,  "Show Dashboard",                 group=g4)
@@ -124,6 +133,17 @@ inSession    = not useSessionFilter or not na(time(timeframe.period, activeSessi
 toleranceAbs = math.max(atr14 * eqToleranceAtr, syminfo.mintick * 2.0)
 sweepAbs     = atr14 * minSweepAtr
 closeBackAbs = atr14 * minCloseBackAtr
+
+// Momentum Hybrid (#8): WaveTrend + MFI for exhaustion event qualification
+_lhWtEsa     = ta.ema(hlc3, 10)
+_lhWtD       = ta.ema(math.abs(hlc3 - _lhWtEsa), 10)
+_lhWtCi      = (hlc3 - _lhWtEsa) / (0.015 * math.max(_lhWtD, syminfo.mintick))
+lhWtOsc      = ta.ema(_lhWtCi, 21)
+_lhMfiTyp    = (high + low + close) / 3
+_lhMfiRaw    = _lhMfiTyp * volume
+_lhMfiPosSum = math.sum(_lhMfiTyp > _lhMfiTyp[1] ? _lhMfiRaw : 0.0, lhMfiLen)
+_lhMfiNegSum = math.sum(_lhMfiTyp < _lhMfiTyp[1] ? _lhMfiRaw : 0.0, lhMfiLen)
+lhMfi        = _lhMfiNegSum == 0 ? 100.0 : 100.0 - 100.0 / (1.0 + _lhMfiPosSum / _lhMfiNegSum)
 
 f_level_score(_touches, _ageBars, _distAtr) =>
     touchScore  = math.min(_touches, 5) * 20.0
@@ -302,6 +322,10 @@ if array.size(recentEvents) > 0
         if bar_index - evt.eventBar > eventMemoryBars
             array.remove(recentEvents, i)
 
+// Exhaustion Events (#8): sweep/hunt at WT oscillator extreme — highest-probability reversals
+exhaustionBear = enableExhaustion and (bslSweep or bslHunt) and lhWtOsc >  lhWtExtThr
+exhaustionBull = enableExhaustion and (sslSweep or sslHunt) and lhWtOsc < -lhWtExtThr
+
 // ============================================================================
 // ACTIVE LEVEL SCORING
 // ============================================================================
@@ -408,6 +432,11 @@ plotshape(enableReclaims and bearishReclaim, "Bearish Reclaim", shape.xcross,
      location.abovebar, bearReclaimColor, size=size.small, text="R")
 plotshape(enableReclaims and bullishReclaim, "Bullish Reclaim", shape.xcross,
      location.belowbar, bullReclaimColor, size=size.small, text="R")
+
+plotshape(exhaustionBear, "Exhaustion Bear", shape.triangledown,
+     location.abovebar, exhaustColor, size=size.normal, text="EX")
+plotshape(exhaustionBull, "Exhaustion Bull", shape.triangleup,
+     location.belowbar, exhaustColor, size=size.normal, text="EX")
 
 var array<box>   drawBoxes  = array.new_box()
 var array<line>  drawLines  = array.new_line()
@@ -532,7 +561,7 @@ if barstate.islast
 // ============================================================================
 
 if showDashboard and barstate.islast
-    var table dash = table.new(position.top_right, 3, 10,
+    var table dash = table.new(position.top_right, 3, 12,
          bgcolor=color.new(color.black, 82),
          border_color=color.new(color.gray, 65),
          border_width=1,
@@ -614,6 +643,23 @@ if showDashboard and barstate.islast
     table.cell(dash, 1, 9, "", bgcolor=color.new(color.gray, 80))
     table.cell(dash, 2, 9, "", bgcolor=color.new(color.gray, 80))
 
+    // Momentum context (#8)
+    wtStateText = lhWtOsc >  lhWtExtThr ? "Extreme ↑" :
+                  lhWtOsc < -lhWtExtThr ? "Extreme ↓" :
+                  lhWtOsc > 20 ? "Bull" : lhWtOsc < -20 ? "Bear" : "Neutral"
+    wtStateColor = lhWtOsc >  lhWtExtThr ? exhaustColor :
+                   lhWtOsc < -lhWtExtThr ? exhaustColor :
+                   lhWtOsc > 20 ? bullReclaimColor : lhWtOsc < -20 ? bearReclaimColor : color.new(color.gray, 60)
+    exText  = exhaustionBear ? "EX BEAR" : exhaustionBull ? "EX BULL" : "—"
+    exColor = exhaustionBear or exhaustionBull ? exhaustColor : color.new(color.gray, 60)
+    table.cell(dash, 0, 10, "WT State", text_color=muted,        text_size=size.small)
+    table.cell(dash, 1, 10, wtStateText, text_color=color.white, bgcolor=color.new(wtStateColor, 20), text_size=size.small)
+    table.cell(dash, 2, 10, str.format("MFI {0}", str.tostring(lhMfi, "#")), text_color=muted, text_size=size.small)
+
+    table.cell(dash, 0, 11, "Exhaustion", text_color=muted,     text_size=size.small)
+    table.cell(dash, 1, 11, exText,       text_color=color.white, bgcolor=color.new(exColor, 20), text_size=size.small)
+    table.cell(dash, 2, 11, str.format("WT {0}", str.tostring(lhWtOsc, "#.#")), text_color=muted, text_size=size.small)
+
 // ============================================================================
 // ALERTS
 // ============================================================================
@@ -630,5 +676,7 @@ alertcondition(bearishReclaim, "Bearish Reclaim", "Buy-side liquidity sweep recl
 alertcondition(bullishReclaim, "Bullish Reclaim", "Sell-side liquidity sweep reclaimed bullish")
 alertcondition(bearishReclaim and bearishReclaimScore >= 65,
      "Premium Bearish Reclaim", "High-quality bearish reclaim detected")
+alertcondition(exhaustionBear, "Exhaustion Bear", "Sweep at WT extreme — high-probability bearish reversal")
+alertcondition(exhaustionBull, "Exhaustion Bull", "Sweep at WT extreme — high-probability bullish reversal")
 alertcondition(bullishReclaim and bullishReclaimScore >= 65,
      "Premium Bullish Reclaim", "High-quality bullish reclaim detected")

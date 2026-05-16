@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.2.0 — 2026-05-15
+- Momentum Hybrid: built-in WaveTrend + MFI calculation to qualify sweep/hunt events; Exhaustion Events fire when a BSL sweep/hunt coincides with WT above +threshold (bearish exhaustion) or an SSL sweep/hunt with WT below -threshold (bullish exhaustion)
+- Exhaustion markers on chart: large triangles labeled "EX" above/below the triggering bar
+- Dashboard extended: WT state (Neutral/Bull/Bear/Extreme) + MFI value row; Exhaustion state row
+- 2 new alert conditions: Exhaustion Bear, Exhaustion Bull
+
 ## v3.1.0 — 2026-05-14
 - Added unfilled gap detection with box visualization (gap magnet zones)
 - Added stop hunt detection: same-bar sweep + volume spike + reversal close — distinct from reclaim

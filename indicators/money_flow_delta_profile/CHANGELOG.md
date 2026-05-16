@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.5 — 2026-05-15
+- HVN / LVN / AVN node classification: reference bars now colored by relative flow density (warm orange = HVN, faded gray = LVN, neutral gray = AVN) — immediately shows which price rows were densely vs thinly traded
+- Configurable HVN/LVN thresholds (default 80%/20% of row maximum)
+- LVN Supply/Demand Zone Overlay: adjacent Low Volume Node rows are merged into zone boxes projected across the lookback period, colored by position relative to POC (red = supply above POC, green = demand below)
+
 ## v1.4 — 2026-05-15
 - Row spacing: 8% gap between bars for visual separation
 - Delta bar gradient: 2-stop fade from anchor (solid) to tip (translucent)

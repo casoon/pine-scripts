@@ -37,9 +37,9 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [wavetrend](indicators/wavetrend/) | 1.0 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Core, best PF in repo |
-| [market_pressure_scale](indicators/market_pressure_scale/) | 1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [market_pressure_scale](indicators/market_pressure_scale/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Regime Map + Market Character Score |
 | [oscillator_divergence_zones](indicators/oscillator_divergence_zones/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [mtf_stochrsi_pair_score](indicators/mtf_stochrsi_pair_score/) | 1.6.0 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | New, untested |
+| [mtf_stochrsi_pair_score](indicators/mtf_stochrsi_pair_score/) | 1.7.0 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | Fractal Alignment + Compression Detector |
 | [market_exhaustion](indicators/market_exhaustion/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [market_stress_oscillator](indicators/market_stress_oscillator/) | 1.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 
@@ -56,9 +56,9 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [volume_strata](indicators/volume_strata/) | 1.9 | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
-| [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 1.4 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 1.5 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | HVN/LVN/AVN classification + LVN zone overlay |
 | [vwap_cross_visuals](indicators/vwap_cross_visuals/) | 2.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [liquidity_hunter](indicators/liquidity_hunter/) | 3.1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | BSL/SSL scoring + Gaps + Stop Hunts |
+| [liquidity_hunter](indicators/liquidity_hunter/) | 3.2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | BSL/SSL scoring + Gaps + Stop Hunts + Exhaustion Events |
 
 ## Pattern & Wave
 
@@ -72,6 +72,16 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [commodity_pulse_matrix](indicators/commodity_pulse_matrix/) | 3.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Published, v4 in progress |
+
+## Momentum Intelligence Suite
+
+| Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
+|---|---|---|---|---|---|---|
+| [momentum_profile](indicators/momentum_profile/) | 1.0 | Draft | ★★★★☆ | ★★★☆☆ | ★☆☆☆☆ | WT+MFI volume profile overlay |
+| [momentum_trajectory](indicators/momentum_trajectory/) | 1.0 | Draft | ★★★★☆ | ★★★☆☆ | ★☆☆☆☆ | Velocity + acceleration of WT/StochRSI/MFI |
+| [oscillator_footprint](indicators/oscillator_footprint/) | 1.0 | Draft | ★★★☆☆ | ★★★☆☆ | ★☆☆☆☆ | Per-bar mini oscillator overlay on price |
+| [adaptive_cycle_detector](indicators/adaptive_cycle_detector/) | 1.0 | Draft | ★★★★☆ | ★★★☆☆ | ★☆☆☆☆ | Dominant cycle from WT zero-crossings |
+| [oscillator_topology](indicators/oscillator_topology/) | 1.0 | Draft | ★★★★★ | ★★★★☆ | ★☆☆☆☆ | Curvature + shape classification of WT pivots |
 
 ## Vein Suite
 
