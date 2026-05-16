@@ -90,6 +90,8 @@ Quality columns (★ 1–5):
 | [candle_pressure_index](indicators/candle_pressure_index/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Raw microstructure bias — no derived oscillators |
 | [mtf_structure_bias](indicators/mtf_structure_bias/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | HH/HL/LH/LL alignment across 4 TFs |
 | [swing_conviction_radar](indicators/swing_conviction_radar/) | 1.0 | Draft | ★★★★★ | ★★★★☆ | ★☆☆☆☆ | Per-leg speed + cleanliness + vol gradient → divergence signals |
+| [cvd_bias](indicators/cvd_bias/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Rolling cumulative volume delta, normalized; price/CVD divergence |
+| [fib_retracement_quality](indicators/fib_retracement_quality/) | 1.0 | Draft | ★★★★★ | ★★★★☆ | ★☆☆☆☆ | Scores Fibonacci level adherence per retracement pivot |
 
 ## Vein Suite
 
@@ -130,11 +132,11 @@ Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederher
 
 | Indikator / Datei | Grund |
 |---|---|
-| [smart_money_dashboard](archive/indicators/smart_money_dashboard/) | Erfordert nicht gepflegte RTA-Libraries |
+| [smart_money_dashboard](archive/indicators/smart_money_dashboard/) | Erfordert nicht gepflegte RTA-Libraries → CVD-Kern reimpl. als cvd_bias |
 | [mtf_trend_alignment](archive/indicators/mtf_trend_alignment/) | Erfordert nicht gepflegte RTA-Libraries → reimpl. als mtf_structure_bias |
 | [pattern_recognition](archive/indicators/pattern_recognition/) | Overengineered, kaum getestet |
 | [wave_navigator](archive/indicators/wave_navigator/) | Elliott-Wave-Autoerkennung konzeptionell schwach |
-| [rj_wave](archive/indicators/rj_wave/) | Zu nische, kein aktiver Einsatz |
+| [rj_wave](archive/indicators/rj_wave/) | Zu nische, State-Machine fragil → Fib-Konzept reimpl. als fib_retracement_quality |
 | [relative_leg_efficiency_panel_chart](archive/indicators/relative_leg_efficiency_panel_chart/) | Visualisierungs-Experiment → reimpl. als swing_conviction_radar |
 | [flow_bias](archive/indicators/flow_bias/) | Überschneidung mit market_pressure_scale → reimpl. als candle_pressure_index |
 | [candle_pressure_response_jma](archive/indicators/candle_pressure_response_jma/) | Candle-Metriken bereits in Vein suite (vein_exhaustion, vein_feature_exporter) |

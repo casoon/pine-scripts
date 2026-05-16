@@ -1,0 +1,232 @@
+//@version=6
+// ============================================================================
+// Fibonacci Retracement Quality [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-05-16 00:00:00
+// ============================================================================
+// Scores how cleanly each confirmed retracement aligns with a Fibonacci level.
+// After each pivot-to-pivot swing, the following retracement is measured:
+// how close did price pull back to 0.236 / 0.382 / 0.5 / 0.618 / 0.786?
+// High-quality scores (near 100) indicate precise Fibonacci adherence —
+// historically associated with higher-probability reversal zones.
+//
+// Features:
+//   ✓ Bullish retracement quality: prior low → swing high → retracement low
+//   ✓ Bearish retracement quality: prior high → swing low → retracement high
+//   ✓ Nearest Fibonacci level identified at each retracement pivot
+//   ✓ Quality score 0–100 (proximity × level multiplier)
+//   ✓ Signal: high-quality Fibonacci retracement (above threshold)
+//   ✓ Labels at exact pivot bars showing score and level hit
+//   ✓ Dashboard: last bull/bear quality score and level
+//
+// ============================================================================
+
+indicator("Fibonacci Retracement Quality [WavesUnchained]", "FibQ [WU]", overlay=false,
+     max_labels_count=200)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+
+grPiv      = "Pivot Settings"
+pivLbL     = input.int(5,   "Left Bars",   minval=2, maxval=20, group=grPiv)
+pivLbR     = input.int(5,   "Right Bars",  minval=2, maxval=20, group=grPiv)
+
+grFib      = "Fibonacci Scoring"
+maxDist    = input.float(0.05, "Level Tolerance (ratio units)", minval=0.01, maxval=0.15, step=0.01, group=grFib,
+     tooltip="Maximum distance from a Fibonacci level to score. 0.05 = within 5% of the swing size.")
+minSwingR  = input.float(0.5,  "Min Swing Size (ATR×)",         minval=0.1,  maxval=5.0,  step=0.1,  group=grFib,
+     tooltip="Minimum swing distance in ATR multiples. Smaller swings are ignored as noise.")
+atrLen     = input.int(14, "ATR Length", minval=5, maxval=50, group=grFib)
+
+grSig      = "Signals"
+sigThresh  = input.int(65, "Signal Threshold (quality ≥)", minval=10, maxval=100, group=grSig,
+     tooltip="Minimum quality score to emit a long/short signal.")
+showSig    = input.bool(true, "Show Signals", group=grSig)
+
+grD        = "Display"
+showLbls   = input.bool(true, "Show Score Labels", group=grD)
+showDash   = input.bool(true, "Show Dashboard",    group=grD)
+
+// ─── Fibonacci helpers ────────────────────────────────────────────────────────
+
+// Returns [nearestLevel, qualityMultiplier, distance] for a given retracement ratio.
+// Level multipliers reflect historical reversal probability: 0.618 = strongest.
+f_nearestFib(ratio) =>
+    d236 = math.abs(ratio - 0.236)
+    d382 = math.abs(ratio - 0.382)
+    d500 = math.abs(ratio - 0.5)
+    d618 = math.abs(ratio - 0.618)
+    d786 = math.abs(ratio - 0.786)
+    minD = math.min(d236, math.min(d382, math.min(d500, math.min(d618, d786))))
+    nearFib = minD == d236 ? 0.236 :
+              minD == d382 ? 0.382 :
+              minD == d500 ? 0.5   :
+              minD == d618 ? 0.618 : 0.786
+    qualMult = nearFib == 0.618 ? 1.0 :
+               nearFib == 0.5   ? 0.9 :
+               nearFib == 0.382 ? 0.8 :
+               nearFib == 0.786 ? 0.7 : 0.5
+    [nearFib, qualMult, minD]
+
+f_score(ratio) =>
+    [nearFib, qualMult, dist] = f_nearestFib(ratio)
+    prox  = dist < maxDist ? 1.0 - dist / maxDist : 0.0
+    score = prox * qualMult * 100.0
+    [score, nearFib]
+
+// ─── Pivot detection ──────────────────────────────────────────────────────────
+
+pivHigh = ta.pivothigh(high, pivLbL, pivLbR)
+pivLow  = ta.pivotlow(low,  pivLbL, pivLbR)
+
+atrVal  = ta.atr(atrLen)
+
+// ─── Pivot sequence state ─────────────────────────────────────────────────────
+// Tracks 4 pivots to identify swing + retracement:
+//   Bull retrace: prevLow (A) → lastHigh (B) → retracement low (C)
+//   Bear retrace: prevHigh (A) → lastLow (B) → retracement high (C)
+
+var float lastHigh   = na
+var float lastLow    = na
+var float prevHigh   = na   // high before lastLow (for bear retrace)
+var float prevLow    = na   // low before lastHigh (for bull retrace)
+var int   lastHighBar = 0
+var int   lastLowBar  = 0
+
+// Score tracking for dashboard
+var float lastBullScore = na
+var float lastBullFib   = na
+var float lastBearScore = na
+var float lastBearFib   = na
+
+// Step-line history
+var float bullStep = na
+var float bearStep = na
+
+// Signals
+var bool bullSignal = false
+var bool bearSignal = false
+bullSignal := false
+bearSignal := false
+
+// ─── Process pivot highs ──────────────────────────────────────────────────────
+
+if not na(pivHigh)
+    pivBar = bar_index - pivLbR
+    pivVal = high[pivLbR]
+
+    // Bear retracement: prevHigh (A) → lastLow (B) → current high (C)
+    if not na(prevHigh) and not na(lastLow)
+        swing   = prevHigh - lastLow         // A to B distance (downswing)
+        retrace = pivVal   - lastLow         // B to C (retracement up)
+        ratio   = swing > 0 ? retrace / swing : na
+
+        if not na(ratio) and ratio > 0.05 and ratio < 1.05
+            if swing >= atrVal * minSwingR
+                [sc, fib] = f_score(ratio)
+                if sc > 0
+                    bearStep       := -sc
+                    lastBearScore  := sc
+                    lastBearFib    := fib
+                    if sc >= sigThresh
+                        bearSignal := true
+                    if showLbls
+                        fibStr = str.tostring(fib, "#.###")
+                        label.new(pivBar, -sc, str.tostring(math.round(sc)) + "\n" + fibStr,
+                             color=color.new(#d50000, 20), textcolor=color.white,
+                             style=label.style_label_up, size=size.tiny)
+
+    // Update pivot state (after scoring, before overwriting)
+    prevLow   := lastLow
+    lastHigh  := pivVal
+    lastHighBar := pivBar
+
+// ─── Process pivot lows ───────────────────────────────────────────────────────
+
+if not na(pivLow)
+    pivBar = bar_index - pivLbR
+    pivVal = low[pivLbR]
+
+    // Bull retracement: prevLow (A) → lastHigh (B) → current low (C)
+    if not na(prevLow) and not na(lastHigh)
+        swing   = lastHigh - prevLow         // A to B distance (upswing)
+        retrace = lastHigh - pivVal          // B to C (retracement down)
+        ratio   = swing > 0 ? retrace / swing : na
+
+        if not na(ratio) and ratio > 0.05 and ratio < 1.05
+            if swing >= atrVal * minSwingR
+                [sc, fib] = f_score(ratio)
+                if sc > 0
+                    bullStep       := sc
+                    lastBullScore  := sc
+                    lastBullFib    := fib
+                    if sc >= sigThresh
+                        bullSignal := true
+                    if showLbls
+                        fibStr = str.tostring(fib, "#.###")
+                        label.new(pivBar, sc, str.tostring(math.round(sc)) + "\n" + fibStr,
+                             color=color.new(#00c853, 20), textcolor=color.white,
+                             style=label.style_label_down, size=size.tiny)
+
+    // Update pivot state
+    prevHigh  := lastHigh
+    lastLow   := pivVal
+    lastLowBar := pivBar
+
+// ─── Plots ────────────────────────────────────────────────────────────────────
+
+bullC = color.new(#00c853, 0)
+bearC = color.new(#d50000, 0)
+
+hline(0,          "Zero",     color=color.new(color.gray, 50))
+hline(sigThresh,  "Signal +", color=color.new(#00c853, 60), linestyle=hline.style_dotted)
+hline(-sigThresh, "Signal −", color=color.new(#d50000, 60), linestyle=hline.style_dotted)
+
+plot(bullStep, "Bull Fib Quality", color=color.new(#00c853, 30), linewidth=1,
+     style=plot.style_stepline)
+plot(bearStep, "Bear Fib Quality", color=color.new(#d50000, 30), linewidth=1,
+     style=plot.style_stepline)
+
+plotshape(showSig and bullSignal, "Long",  shape.triangleup,   location.bottom, color=bullC, size=size.small)
+plotshape(showSig and bearSignal, "Short", shape.triangledown, location.top,    color=bearC, size=size.small)
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table t = table.new(position.top_right, 3, 5,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60), border_width=1,
+     frame_color=color.new(color.gray, 40), frame_width=1)
+
+if showDash and barstate.islast
+    table.cell(t, 0, 0, "Fib Quality",  text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, "Score",        text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 0, "Level",        text_color=tc, bgcolor=hd, text_size=size.small)
+
+    bsStr  = na(lastBullScore) ? "—" : str.tostring(math.round(lastBullScore))
+    bfStr  = na(lastBullFib)   ? "—" : str.tostring(lastBullFib, "#.###")
+    bsC    = na(lastBullScore) ? tc : lastBullScore >= sigThresh ? bullC : tc
+
+    table.cell(t, 0, 1, "Bull Retrace", text_color=tc,  text_size=size.small)
+    table.cell(t, 1, 1, bsStr,          text_color=bsC, text_size=size.small)
+    table.cell(t, 2, 1, bfStr,          text_color=tc,  text_size=size.small)
+
+    rsStr  = na(lastBearScore) ? "—" : str.tostring(math.round(lastBearScore))
+    rfStr  = na(lastBearFib)   ? "—" : str.tostring(lastBearFib, "#.###")
+    rsC    = na(lastBearScore) ? tc : lastBearScore >= sigThresh ? bearC : tc
+
+    table.cell(t, 0, 2, "Bear Retrace", text_color=tc,  text_size=size.small)
+    table.cell(t, 1, 2, rsStr,          text_color=rsC, text_size=size.small)
+    table.cell(t, 2, 2, rfStr,          text_color=tc,  text_size=size.small)
+
+    table.cell(t, 0, 3, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 3, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 2, 3, "", bgcolor=color.new(color.gray, 80))
+
+    sigState = bullSignal ? "Long ▲" : bearSignal ? "Short ▼" : "—"
+    sigC     = bullSignal ? bullC : bearSignal ? bearC : tc
+    table.cell(t, 0, 4, "Signal",       text_color=tc,   text_size=size.small)
+    table.cell(t, 1, 4, sigState,       text_color=sigC, text_size=size.small)
+    table.cell(t, 2, 4, "",             text_color=tc,   text_size=size.small)
