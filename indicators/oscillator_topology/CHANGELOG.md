@@ -1,0 +1,10 @@
+# Changelog
+
+## v1.0 — 2026-05-15
+- Initial release
+- Curvature measurement at WT pivot extremes (2nd derivative normalized by ATR)
+- Width tracking: bars spent near extreme for each peak/trough
+- Asymmetry index: rise speed vs. fall speed at each pivot
+- Shape classification per pivot: V-Spike / Round / Flat / Asymmetric
+- Curvature plot and shape label drawn at each classified pivot
+- Dashboard with current dominant shape and topology summary

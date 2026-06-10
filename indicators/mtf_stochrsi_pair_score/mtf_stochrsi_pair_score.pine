@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // MTF StochRSI Pair Score [WavesUnchained]
-// Version: 1.1.0
+// Version: 1.7.0
 // Author: WavesUnchained
-// Build: 2026-05-11 00:00:00
+// Build: 2026-05-15 00:00:00
 // ============================================================================
 // Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus
 // and conflict penalty.
@@ -14,8 +14,15 @@
 //   ✓ Weighted total across up to 5 configurable TF pairs
 //   ✓ Smoothed total score (EMA / RMA / SMA / WMA / HMA / JMA)
 //   ✓ TF Agreement Index — directional consensus across all 6 TFs
-//   ✓ Signal markers for strong long / short bias
-//   ✓ Dashboard table — per-TF, per-pair, agreement, and total
+//   ✓ Signal markers — edge-triggered, optional confirmed-bar gate
+//   ✓ Dashboard table — per-TF, per-pair (disabled pairs grayed), agreement, and total
+//   ✓ Bidirectional Williams VIX Fix background (bull fear / bear greed extremes)
+//   ✓ Squeeze Momentum: BB vs KC compression state + linreg momentum histogram
+//   ✓ QQE Agreement Layer: weighted RSI + trailing stop across all 6 TFs, optional gate on signals
+//   ✓ QQE Scoring: per-TF score boost/penalty when QQE confirms or conflicts StochRSI direction
+//   ✓ Breadth discrepancy markers (StochRSI + QQE vs price)
+//   ✓ Fractal Momentum Alignment — gradient consistency across the TF chain (0=chaos, 100=ordered)
+//   ✓ Oscillator Compression Detector — all TFs near zero signals pressure buildup
 //
 // ============================================================================
 
@@ -58,13 +65,14 @@ wP45 = input.float(1.2, "Weight Pair 4", minval=0, step=0.1, group=groupPair)
 wP56 = input.float(1.0, "Weight Pair 5", minval=0, step=0.1, group=groupPair)
 
 groupSmooth = "Smoothing"
-smoothMode = input.string("EMA", "Mode",       options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"], group=groupSmooth)
+smoothMode = input.string("JMA", "Mode",       options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"], group=groupSmooth)
 smoothLen  = input.int(5,        "Length",      minval=1, maxval=50,                                group=groupSmooth)
 jmaPhase   = input.int(50,       "  JMA Phase", minval=-100, maxval=100,                            group=groupSmooth)
 jmaPower   = input.float(2.0,    "  JMA Power", minval=1.0,  maxval=4.0, step=0.25,                group=groupSmooth)
 
-groupDiv = "Divergences"
-showDiv      = input.bool(true, "Show Divergence Markers", group=groupDiv)
+groupDiv = "Breadth Discrepancy"
+showDiv      = input.bool(true, "Show Discrepancy Markers", group=groupDiv,
+     tooltip="Marks bars where Agreement Index and Total Score move in opposite directions — not pivot-based divergences, but useful breadth/momentum mismatches")
 divLen       = input.int(5,     "Lookback Bars",            minval=2, maxval=20, group=groupDiv)
 divMinAgreement = input.float(33, "Min Agreement Δ",        minval=0, maxval=100, step=33, group=groupDiv,
      tooltip="Minimum change in Agreement Index over the lookback window to qualify. 33 = one TF flipped.")
@@ -72,10 +80,73 @@ divMinTotal  = input.float(10,  "Min Total Score Δ",        minval=0, maxval=50
      tooltip="Minimum move in Total Score in the opposite direction.")
 
 groupDisplay = "Display"
-showTable   = input.bool(true,  "Show Table",           group=groupDisplay)
-showSignals = input.bool(true,  "Show Signal Markers",  group=groupDisplay)
-longLevel   = input.float(60,   "Strong Long Level",    minval=0,    maxval=100, group=groupDisplay)
-shortLevel  = input.float(-60,  "Strong Short Level",   minval=-100, maxval=0,   group=groupDisplay)
+showTable      = input.bool(true,  "Show Table",                  group=groupDisplay)
+showSignals    = input.bool(true,  "Show Signal Markers",         group=groupDisplay)
+confirmedOnly  = input.bool(true,  "Only Confirmed Bar Signals",  group=groupDisplay,
+     tooltip="Prevents signals from appearing and disappearing on open HTF bars — strongly recommended")
+longLevel      = input.float(60,   "Strong Long Level",           minval=0,    maxval=100, group=groupDisplay)
+shortLevel     = input.float(-60,  "Strong Short Level",          minval=-100, maxval=0,   group=groupDisplay)
+minAgreement   = input.float(33,   "Min Agreement for Signals",   minval=0,    maxval=100, step=33, group=groupDisplay,
+     tooltip="33 = at least 4:2 majority across 6 TFs. 0 = any majority (3:2 with one neutral).")
+
+groupWvf = "Williams VIX Fix Background"
+showWvfBg    = input.bool(true,  "Enable",                    group=groupWvf)
+wvfLen       = input.int(22,     "Length",                    group=groupWvf, minval=5)
+wvfBLen      = input.int(20,     "BB Lookback",               group=groupWvf, minval=5)
+wvfBMult     = input.float(2.0,  "BB Multiplier",             group=groupWvf, minval=0.5, step=0.5)
+wvfPctLen    = input.int(50,     "Percentile Lookback",       group=groupWvf, minval=10,
+     tooltip="Dual threshold: fires when WVF exceeds its Bollinger band OR its historical percentile — both criteria are checked independently")
+wvfPctHigh   = input.float(0.85, "Percentile Level",          group=groupWvf, minval=0.5, maxval=0.99, step=0.01,
+     tooltip="0.85 = 85th percentile of the lookback window (highest WVF × 0.85)")
+wvfBullColor = input.color(color.new(color.green, 85), "Bull Color", group=groupWvf,
+     tooltip="Fear spike: low is far below recent highs — potential bullish reversal")
+wvfBearColor = input.color(color.new(color.red,   85), "Bear Color", group=groupWvf,
+     tooltip="Greed spike: high is far above recent lows — potential bearish reversal")
+
+groupSqz = "Squeeze Momentum"
+showSqzDot = input.bool(true,  "Show Squeeze State Dot",      group=groupSqz,
+     tooltip="Cross on zero line: black = ON (compression), gray = OFF (expansion), blue = no squeeze")
+showSqzMom = input.bool(true,  "Show Momentum Histogram",     group=groupSqz,
+     tooltip="LinReg momentum relative to KC midpoint — green/dark-green rising, red/dark-red falling")
+showSqzBg  = input.bool(true,  "Compress Phase Background",   group=groupSqz,
+     tooltip="Muted gray when squeeze is ON — score direction is less reliable during compression")
+sqzBBLen   = input.int(20,     "BB Length",                   group=groupSqz, minval=5)
+sqzBBMult  = input.float(2.0,  "BB Mult",                     group=groupSqz, minval=0.5, step=0.5)
+sqzKCLen   = input.int(20,     "KC Length",                   group=groupSqz, minval=5)
+sqzKCMult  = input.float(1.5,  "KC Mult",                     group=groupSqz, minval=0.5, step=0.5)
+sqzUseTR   = input.bool(true,  "Use True Range (KC)",         group=groupSqz)
+
+groupQqe = "QQE Layer"
+showQqe    = input.bool(false, "Show QQE Agreement",          group=groupQqe,
+     tooltip="QQE Agreement Index: how many of the 6 TFs have QQE in bullish state (rsi > trailing stop)")
+useQqeGate = input.bool(false, "Gate Signals on QQE",         group=groupQqe,
+     tooltip="Strong Long/Short only fires when QQE Agreement also agrees — reduces false signals")
+qqeLen     = input.int(14,     "RSI Length",                  group=groupQqe, minval=1)
+qqeFactor  = input.float(4.236,"Factor",                      group=groupQqe, minval=0.1, step=0.1)
+qqeSmooth  = input.int(5,      "RSI Smoothing",               group=groupQqe, minval=1)
+qqeWeight  = input.float(2.0,  "Momentum Weight",             group=groupQqe, minval=1.0, step=0.25,
+     tooltip="Weight applied when price delta is in the same direction as the RSI-TS relationship — makes RSI more responsive to aligned moves")
+useQqeScore   = input.bool(false, "Score Boost/Penalty",       group=groupQqe,
+     tooltip="Multiply per-TF StochRSI score by Boost when QQE agrees, by Penalty when it conflicts — applied before pair calculation")
+qqeScoreBoost   = input.float(1.25, "  Confirm Boost",         group=groupQqe, minval=1.0, maxval=2.0, step=0.05)
+qqeScorePenalty = input.float(0.75, "  Conflict Penalty",      group=groupQqe, minval=0.1, maxval=1.0, step=0.05)
+showQqeDiv    = input.bool(true,  "Show QQE Divergences",      group=groupQqe,
+     tooltip="Bullish: price makes lower low but QQE Agreement holds up — bearish: price makes higher high but QQE fades")
+qqeDivMinAg   = input.float(33,   "  Min QQE Agreement Δ",    group=groupQqe, minval=0, step=33,
+     tooltip="Minimum QQE Agreement change required (33 = one TF flipped state)")
+qqeDivMinAtr  = input.float(0.5,  "  Min Price Move (ATR)",   group=groupQqe, minval=0.1, step=0.1,
+     tooltip="Minimum price move in ATR units required to qualify as a divergence leg")
+
+groupAlign = "Fractal Alignment"
+showAlignScore = input.bool(false, "Show Alignment Quality", group=groupAlign,
+     tooltip="Gradient consistency across the TF chain. 100 = all adjacent TF pairs agree in direction (ordered). 0 = every adjacent pair disagrees (chaotic).")
+
+groupOscComp  = "Oscillator Compression"
+showOscComp   = input.bool(true,  "Show Compression Background", group=groupOscComp,
+     tooltip="Fires when all TF StochRSI scores cluster near zero — potential pressure buildup before a directional move.")
+oscCompThresh = input.float(120,  "Threshold (Σ |scores|)",   minval=30, maxval=300, step=10, group=groupOscComp,
+     tooltip="Sum of absolute per-TF scores. 120 ≈ avg |score| < 20 per TF. Lower = stricter compression required.")
+oscCompC      = input.color(color.new(#7e57c2, 90), "Background Color", group=groupOscComp)
 
 // ─────────────────────────────────────
 // Helpers
@@ -164,6 +235,31 @@ f_pair(sMinor, sMajor) =>
     adjusted = sameDirection ? base * syncBonus : conflict ? base * conflictPenalty : base
     f_clamp(adjusted, -100, 100)
 
+// QQE: weighted RSI with adaptive trailing stop
+// Weight amplifies delta when price moves in the direction of the current RSI-TS relationship
+f_qqe(_len, _factor, _smooth, _weight) =>
+    var float _ts  = 0.0
+    var float _rsi = 0.0
+    _delta = close - close[1]
+    _w     = nz(_delta * (_rsi - _ts) > 0 ? _weight : 1.0, 1.0)
+    _num   = ta.rma(_delta * _w, _len)
+    _den   = ta.rma(math.abs(_delta * _w), _len)
+    _ratio = _den != 0.0 ? _num / _den : 0.0
+    _rsi  := 50.0 * ta.ema(_ratio, _smooth) + 50.0
+    _diff  = ta.rma(math.abs(_rsi - _rsi[1]), _len)
+    _cup   = ta.crossover(_rsi, _ts)
+    _cdn   = ta.crossunder(_rsi, _ts)
+    _ts   := nz(_cup ? _rsi - _diff * _factor :
+         _cdn ? _rsi + _diff * _factor :
+         _rsi > _ts ? math.max(_rsi - _diff * _factor, _ts) :
+         math.min(_rsi + _diff * _factor, _ts), _rsi)
+    _rsi > _ts ? 1 : -1
+
+// Apply QQE confirmation to a StochRSI score: boost when aligned, penalty when conflicting
+f_qqe_weight(s, q, boost, penalty) =>
+    q > 0 and s > 0 or q < 0 and s < 0 ? f_clamp(s * boost, -100.0, 100.0) :
+     q > 0 and s < 0 or q < 0 and s > 0 ? f_clamp(s * penalty, -100.0, 100.0) : s
+
 // ─────────────────────────────────────
 // MTF Values
 // ─────────────────────────────────────
@@ -174,14 +270,30 @@ f_pair(sMinor, sMajor) =>
 [s5, k5, d5] = request.security(syminfo.tickerid, tf5, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
 [s6, k6, d6] = request.security(syminfo.tickerid, tf6, f_score(), barmerge.gaps_off, barmerge.lookahead_off)
 
+q1 = request.security(syminfo.tickerid, tf1, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q2 = request.security(syminfo.tickerid, tf2, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q3 = request.security(syminfo.tickerid, tf3, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q4 = request.security(syminfo.tickerid, tf4, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q5 = request.security(syminfo.tickerid, tf5, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+q6 = request.security(syminfo.tickerid, tf6, f_qqe(qqeLen, qqeFactor, qqeSmooth, qqeWeight), barmerge.gaps_off, barmerge.lookahead_off)
+
 // ─────────────────────────────────────
 // Pair Scores
 // ─────────────────────────────────────
-p12 = f_pair(s1, s2)
-p23 = f_pair(s2, s3)
-p34 = f_pair(s3, s4)
-p45 = f_pair(s4, s5)
-p56 = f_pair(s5, s6)
+
+// QQE-weighted per-TF scores (table still shows raw s1..s6)
+ws1 = useQqeScore ? f_qqe_weight(s1, q1, qqeScoreBoost, qqeScorePenalty) : s1
+ws2 = useQqeScore ? f_qqe_weight(s2, q2, qqeScoreBoost, qqeScorePenalty) : s2
+ws3 = useQqeScore ? f_qqe_weight(s3, q3, qqeScoreBoost, qqeScorePenalty) : s3
+ws4 = useQqeScore ? f_qqe_weight(s4, q4, qqeScoreBoost, qqeScorePenalty) : s4
+ws5 = useQqeScore ? f_qqe_weight(s5, q5, qqeScoreBoost, qqeScorePenalty) : s5
+ws6 = useQqeScore ? f_qqe_weight(s6, q6, qqeScoreBoost, qqeScorePenalty) : s6
+
+p12 = f_pair(ws1, ws2)
+p23 = f_pair(ws2, ws3)
+p34 = f_pair(ws3, ws4)
+p45 = f_pair(ws4, ws5)
+p56 = f_pair(ws5, ws6)
 
 weightedSum = 0.0
 weightSum   = 0.0
@@ -221,6 +333,25 @@ bullCount    = (s1 > 0 ? 1 : 0) + (s2 > 0 ? 1 : 0) + (s3 > 0 ? 1 : 0) + (s4 > 0 
 bearCount    = (s1 < 0 ? 1 : 0) + (s2 < 0 ? 1 : 0) + (s3 < 0 ? 1 : 0) + (s4 < 0 ? 1 : 0) + (s5 < 0 ? 1 : 0) + (s6 < 0 ? 1 : 0)
 agreementIdx = (bullCount - bearCount) / 6.0 * 100
 
+// QQE Agreement Index: same scale, based on QQE trailing stop state per TF
+qqeBull = (q1 > 0 ? 1 : 0) + (q2 > 0 ? 1 : 0) + (q3 > 0 ? 1 : 0) + (q4 > 0 ? 1 : 0) + (q5 > 0 ? 1 : 0) + (q6 > 0 ? 1 : 0)
+qqeBear = (q1 < 0 ? 1 : 0) + (q2 < 0 ? 1 : 0) + (q3 < 0 ? 1 : 0) + (q4 < 0 ? 1 : 0) + (q5 < 0 ? 1 : 0) + (q6 < 0 ? 1 : 0)
+qqeAgreement = (qqeBull - qqeBear) / 6.0 * 100
+
+// Fractal Momentum Alignment (#10): gradient consistency across the TF chain
+// Each adjacent pair (TF1↔TF2 … TF5↔TF6) contributes 1 when both scores agree in direction.
+// 5 pairs → 0 (all disagree = chaos) to 100 (all agree = perfect order).
+alignedPairs = ((s1 > 0 and s2 > 0) or (s1 < 0 and s2 < 0) ? 1 : 0)
+             + ((s2 > 0 and s3 > 0) or (s2 < 0 and s3 < 0) ? 1 : 0)
+             + ((s3 > 0 and s4 > 0) or (s3 < 0 and s4 < 0) ? 1 : 0)
+             + ((s4 > 0 and s5 > 0) or (s4 < 0 and s5 < 0) ? 1 : 0)
+             + ((s5 > 0 and s6 > 0) or (s5 < 0 and s6 < 0) ? 1 : 0)
+alignmentQuality = alignedPairs / 5.0 * 100
+
+// Oscillator Compression (#4): all TFs near zero — pressure building, no direction yet
+oscAbsSum    = math.abs(s1) + math.abs(s2) + math.abs(s3) + math.abs(s4) + math.abs(s5) + math.abs(s6)
+oscCompressed = oscAbsSum < oscCompThresh
+
 // ─────────────────────────────────────
 // Plots
 // ─────────────────────────────────────
@@ -228,35 +359,107 @@ hline(0,          "Neutral",      color=color.new(color.gray,  60))
 hline(longLevel,  "Strong Long",  color=color.new(color.green, 70))
 hline(shortLevel, "Strong Short", color=color.new(color.red,   70))
 
-plot(agreementIdx, "TF Agreement", linewidth=1, color=color.new(color.blue,  30))
-plot(smoothedTotal,"Total Score",  linewidth=2, color=color.new(color.teal,   0))
+// Williams VIX Fix — bidirectional fear/greed extremes
+// Bull: low far below recent highest close → fear spike → potential reversal up
+// Bear: high far above recent lowest close → greed spike → potential reversal down
+// Dual threshold: BB upper band OR percentile (matches TheeHoganator reference approach)
+wvfBull      = (ta.highest(close, wvfLen) - low)  / ta.highest(close, wvfLen) * 100
+wvfBear      = (high - ta.lowest(close, wvfLen))   / ta.lowest(close, wvfLen)  * 100
+wvfBullBand  = ta.sma(wvfBull, wvfBLen) + wvfBMult * ta.stdev(wvfBull, wvfBLen)
+wvfBearBand  = ta.sma(wvfBear, wvfBLen) + wvfBMult * ta.stdev(wvfBear, wvfBLen)
+wvfBullPct   = ta.highest(wvfBull, wvfPctLen) * wvfPctHigh
+wvfBearPct   = ta.highest(wvfBear, wvfPctLen) * wvfPctHigh
+wvfBullFire  = wvfBull >= wvfBullBand or wvfBull >= wvfBullPct
+wvfBearFire  = wvfBear >= wvfBearBand or wvfBear >= wvfBearPct
 
-// Strong signal: magnitude (total score) + consensus (agreement)
-strongLong  = smoothedTotal >= longLevel  and agreementIdx > 0
-strongShort = smoothedTotal <= shortLevel and agreementIdx < 0
+// Squeeze Momentum — BB vs KC compression state + LinReg momentum
+sqzUpperBB = ta.sma(close, sqzBBLen) + sqzBBMult * ta.stdev(close, sqzBBLen)
+sqzLowerBB = ta.sma(close, sqzBBLen) - sqzBBMult * ta.stdev(close, sqzBBLen)
+sqzRangeMA = ta.sma(sqzUseTR ? ta.tr : high - low, sqzKCLen)
+sqzUpperKC = ta.sma(close, sqzKCLen) + sqzRangeMA * sqzKCMult
+sqzLowerKC = ta.sma(close, sqzKCLen) - sqzRangeMA * sqzKCMult
+sqzOn      = sqzLowerBB > sqzLowerKC and sqzUpperBB < sqzUpperKC
+sqzOff     = sqzLowerBB < sqzLowerKC and sqzUpperBB > sqzUpperKC
+noSqz      = not sqzOn and not sqzOff
+sqzMid     = math.avg(math.avg(ta.highest(high, sqzKCLen), ta.lowest(low, sqzKCLen)), ta.sma(close, sqzKCLen))
+sqzMomRaw  = ta.linreg(close - sqzMid, sqzKCLen, 0)
+sqzMomPeak = ta.highest(math.abs(sqzMomRaw), 100)
+sqzMom     = sqzMomPeak > 0 ? sqzMomRaw / sqzMomPeak * 80 : sqzMomRaw
 
-plotshape(showSignals and strongLong,  title="Long Bias",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.green, text="LONG")
-plotshape(showSignals and strongShort, title="Short Bias", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.red,   text="SHORT")
+// Background priority: WVF extreme > oscillator compression > squeeze compression
+wvfBg  = showWvfBg ? wvfBullFire ? wvfBullColor : wvfBearFire ? wvfBearColor : na : na
+sqzBg  = showSqzBg and sqzOn ? color.new(#FF6D00, 96) : na
+compBg = showOscComp and oscCompressed ? oscCompC : na
+bgcolor(not na(wvfBg) ? wvfBg : not na(compBg) ? compBg : sqzBg, title="Background")
 
-alertcondition(strongLong,  "MTF StochRSI Long Bias",  "MTF StochRSI Score: Long Bias")
-alertcondition(strongShort, "MTF StochRSI Short Bias", "MTF StochRSI Score: Short Bias")
+// Squeeze state dot on zero line: orange = ON (compression), teal = OFF (expansion), gray = no squeeze
+sqzDotColor = noSqz ? color.new(color.gray, 50) : sqzOn ? #FF6D00 : #26a69a
+plot(showSqzDot ? 0 : na, "Squeeze State", color=sqzDotColor, style=plot.style_circles, linewidth=4)
+
+// Squeeze momentum histogram — acceleration color: bright = rising, dark = falling
+sqzMomColor = sqzMom > 0 ?
+     sqzMom > nz(sqzMom[1]) ? color.new(#26a69a, 50) : color.new(#00695c, 50) :
+     sqzMom < nz(sqzMom[1]) ? color.new(#ef5350, 50) : color.new(#b71c1c, 50)
+plot(showSqzMom ? sqzMom : na, "Squeeze Momentum", style=plot.style_histogram, linewidth=4, color=sqzMomColor)
+
+plot(agreementIdx,  "StochRSI Agreement", linewidth=1, color=color.new(color.blue,   30))
+plot(showQqe ? qqeAgreement : na, "QQE Agreement", linewidth=1, color=color.new(color.purple, 30))
+plot(smoothedTotal, "Total Score",        linewidth=2, color=color.new(color.teal,   0))
+plot(showAlignScore ? alignmentQuality : na, "Alignment Quality", linewidth=1, color=color.new(#9c27b0, 30))
+
+// Strong signal: magnitude + StochRSI consensus (min agreement) + optional QQE gate
+qqeAligned  = not useQqeGate or (smoothedTotal > 0 ? qqeAgreement > 0 : qqeAgreement < 0)
+strongLong  = smoothedTotal >= longLevel  and agreementIdx >=  minAgreement and qqeAligned
+strongShort = smoothedTotal <= shortLevel and agreementIdx <= -minAgreement and qqeAligned
+
+// Confirmed-bar gate: block intrabar state changes on open HTF candles
+sigOk        = not confirmedOnly or barstate.isconfirmed
+finalLong    = strongLong  and sigOk
+finalShort   = strongShort and sigOk
+
+// Edge-triggered: fire only on state change, not every bar the condition holds
+longTrigger  = finalLong  and not finalLong[1]
+shortTrigger = finalShort and not finalShort[1]
+
+plotshape(showSignals and longTrigger,  title="Long Bias",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.green, text="LONG")
+plotshape(showSignals and shortTrigger, title="Short Bias", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.red,   text="SHORT")
+
+alertcondition(longTrigger,  "MTF StochRSI Long Bias",  "MTF StochRSI Score: Long Bias")
+alertcondition(shortTrigger, "MTF StochRSI Short Bias", "MTF StochRSI Score: Short Bias")
 
 // ─────────────────────────────────────
-// Divergences
+// Breadth Discrepancy
 // ─────────────────────────────────────
-// Bullish: Agreement rising (breadth building) while Total falling (score still weak)
-// Bearish: Agreement falling (breadth eroding) while Total rising (score driven by few extreme TFs)
+// Bull: Agreement rising (more TFs turning bullish) while Total Score still falling
+// Bear: Agreement falling (breadth eroding) while Total Score still rising
+// Note: delta-based, not pivot-based — measures momentum mismatch, not classical divergence
 agreementDelta = agreementIdx  - agreementIdx[divLen]
 totalDelta     = smoothedTotal - smoothedTotal[divLen]
 
-bullDiv = agreementDelta >=  divMinAgreement and totalDelta <= -divMinTotal
-bearDiv = agreementDelta <= -divMinAgreement and totalDelta >=  divMinTotal
+bullDisc = agreementDelta >=  divMinAgreement and totalDelta <= -divMinTotal
+bearDisc = agreementDelta <= -divMinAgreement and totalDelta >=  divMinTotal
 
-plotshape(showDiv and bullDiv, title="Bullish Divergence", style=shape.circle, location=location.bottom, size=size.tiny, color=color.new(#00c853, 0))
-plotshape(showDiv and bearDiv, title="Bearish Divergence", style=shape.circle, location=location.top,    size=size.tiny, color=color.new(#d50000, 0))
+plotshape(showDiv and bullDisc, title="Bull Breadth Discrepancy", style=shape.circle, location=location.bottom, size=size.tiny, color=color.new(#00c853, 0))
+plotshape(showDiv and bearDisc, title="Bear Breadth Discrepancy", style=shape.circle, location=location.top,    size=size.tiny, color=color.new(#d50000, 0))
 
-alertcondition(bullDiv, "MTF StochRSI Bullish Divergence", "MTF StochRSI: Breadth rising while score weak")
-alertcondition(bearDiv, "MTF StochRSI Bearish Divergence", "MTF StochRSI: Breadth eroding while score high")
+alertcondition(bullDisc, "MTF StochRSI Bull Discrepancy", "MTF StochRSI: Breadth rising while score weak")
+alertcondition(bearDisc, "MTF StochRSI Bear Discrepancy", "MTF StochRSI: Breadth eroding while score high")
+
+// QQE Divergences — price vs QQE Agreement (classic oscillator divergence)
+// Bullish: price lower low, QQE Agreement holds up → hidden bullish strength
+// Bearish: price higher high, QQE Agreement fades → hidden bearish weakness
+atr14Div      = ta.atr(14)
+priceDelta    = close - close[divLen]
+qqeAgDelta    = qqeAgreement - qqeAgreement[divLen]
+
+qqeBullDiv = showQqeDiv and priceDelta <= -(qqeDivMinAtr * atr14Div) and qqeAgDelta >=  qqeDivMinAg
+qqeBearDiv = showQqeDiv and priceDelta >=  (qqeDivMinAtr * atr14Div) and qqeAgDelta <= -qqeDivMinAg
+
+plotshape(qqeBullDiv, title="QQE Bull Divergence", style=shape.diamond, location=location.bottom, size=size.small, color=color.new(#00c853, 10))
+plotshape(qqeBearDiv, title="QQE Bear Divergence", style=shape.diamond, location=location.top,    size=size.small, color=color.new(#d50000, 10))
+
+alertcondition(qqeBullDiv, "QQE Bullish Divergence", "QQE: Price lower low but QQE Agreement holds — hidden bullish strength")
+alertcondition(qqeBearDiv, "QQE Bearish Divergence", "QQE: Price higher high but QQE Agreement fades — hidden bearish weakness")
 
 // ─────────────────────────────────────
 // Table
@@ -264,42 +467,65 @@ alertcondition(bearDiv, "MTF StochRSI Bearish Divergence", "MTF StochRSI: Breadt
 color tc = color.new(color.gray, 20)
 color hd = color.new(color.gray, 90)
 
-var table t = table.new(position.top_right, 3, 15,
+var table t = table.new(position.top_right, 4, 11,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
      frame_color=color.new(color.gray, 40),
      frame_width=1)
 
-f_row(row, name, score) =>
-    cellTc = f_tc_cell(score)
-    cellBg = f_bg(score)
-    table.cell(t, 0, row, name,                       text_color=tc,     bgcolor=na,     text_size=size.small)
-    table.cell(t, 1, row, str.tostring(score, "#.0"), text_color=cellTc, bgcolor=cellBg, text_size=size.small)
-    table.cell(t, 2, row, f_state(score),             text_color=cellTc, bgcolor=cellBg, text_size=size.small)
+// Fills two adjacent columns: label | score-colored-cell
+f_cell(col, row, name, score, enabled=true) =>
+    cellTc = enabled ? f_tc_cell(score) : color.new(color.gray, 60)
+    cellBg = enabled ? f_bg(score)      : color.new(color.gray, 85)
+    table.cell(t, col,     row, name,
+         text_color=tc, bgcolor=na, text_size=size.tiny)
+    table.cell(t, col + 1, row, enabled ? str.tostring(score, "#") : "off",
+         text_color=cellTc, bgcolor=cellBg, text_size=size.tiny)
+
+f_sep(row) =>
+    table.cell(t, 0, row, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, row, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 2, row, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 3, row, "", bgcolor=color.new(color.gray, 80))
 
 if showTable and barstate.islast
-    table.cell(t, 0, 0, "TF / Pair",  text_color=tc, bgcolor=hd, text_size=size.small)
-    table.cell(t, 1, 0, "Score",      text_color=tc, bgcolor=hd, text_size=size.small)
-    table.cell(t, 2, 0, "State",      text_color=tc, bgcolor=hd, text_size=size.small)
+    // Header
+    table.cell(t, 0, 0, "TF",   text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 1, 0, "Scr",  text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 2, 0, "TF",   text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 3, 0, "Scr",  text_color=tc, bgcolor=hd, text_size=size.tiny)
 
-    f_row(1, "TF1 " + tf1, s1)
-    f_row(2, "TF2 " + tf2, s2)
-    f_row(3, "TF3 " + tf3, s3)
-    f_row(4, "TF4 " + tf4, s4)
-    f_row(5, "TF5 " + tf5, s5)
-    f_row(6, "TF6 " + tf6, s6)
+    // TFs — 2 per row
+    f_cell(0, 1, tf1, s1)
+    f_cell(2, 1, tf2, s2)
+    f_cell(0, 2, tf3, s3)
+    f_cell(2, 2, tf4, s4)
+    f_cell(0, 3, tf5, s5)
+    f_cell(2, 3, tf6, s6)
 
-    f_row(7,  tf1 + " + " + tf2, p12)
-    f_row(8,  tf2 + " + " + tf3, p23)
-    f_row(9,  tf3 + " + " + tf4, p34)
-    f_row(10, tf4 + " + " + tf5, p45)
-    f_row(11, tf5 + " + " + tf6, p56)
+    // Pairs — 2 per row
+    f_cell(0, 4, "P " + tf1 + "+" + tf2, p12, useP12)
+    f_cell(2, 4, "P " + tf2 + "+" + tf3, p23, useP23)
+    f_cell(0, 5, "P " + tf3 + "+" + tf4, p34, useP34)
+    f_cell(2, 5, "P " + tf4 + "+" + tf5, p45, useP45)
+    f_cell(0, 6, "P " + tf5 + "+" + tf6, p56, useP56)
+    table.cell(t, 2, 6, "", bgcolor=color.new(color.gray, 92))
+    table.cell(t, 3, 6, "", bgcolor=color.new(color.gray, 92))
 
-    // Separator
-    table.cell(t, 0, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
-    table.cell(t, 1, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
-    table.cell(t, 2, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+    f_sep(7)
 
-    f_row(13, "Agreement", agreementIdx)
-    f_row(14, "Total",     smoothedTotal)
+    // Totals
+    f_cell(0, 8, "Agree", agreementIdx)
+    f_cell(2, 8, "Total", smoothedTotal)
+
+    f_sep(9)
+
+    // Fractal Alignment + Oscillator Compression
+    alignC = alignmentQuality > 70 ? color.new(#00c853, 0) : alignmentQuality < 30 ? color.new(#d50000, 0) : tc
+    table.cell(t, 0, 10, "Align",  text_color=tc,    bgcolor=na, text_size=size.tiny)
+    table.cell(t, 1, 10, str.tostring(int(alignmentQuality)) + "%",
+         text_color=alignC, bgcolor=na, text_size=size.tiny)
+    compC = oscCompressed ? color.new(#7e57c2, 0) : color.new(color.gray, 60)
+    table.cell(t, 2, 10, "OscCom", text_color=tc,    bgcolor=na, text_size=size.tiny)
+    table.cell(t, 3, 10, oscCompressed ? "ON" : "—", text_color=compC, bgcolor=na, text_size=size.tiny)

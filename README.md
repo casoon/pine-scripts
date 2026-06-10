@@ -74,6 +74,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`ma_regime_bands.pine`](indicators/ma_regime_bands/ma_regime_bands.pine) | Moving average regime classification bands |
 | [`relative_leg_efficiency.pine`](indicators/relative_leg_efficiency/relative_leg_efficiency.pine) | Efficiency ratio per price leg — how directional each move is |
 | [`auto_trendlines.pine`](indicators/auto_trendlines/auto_trendlines.pine) | Combinatorial trendline detection with OLS refinement, quality scoring, and greedy selection |
+| [`adaptive_supertrend_v1.pine`](indicators/adaptive_supertrend/adaptive_supertrend_v1.pine) | Supertrend with conviction-adaptive band width — narrows in strong trends, widens in chop |
 | [`chandelier_flip_radar.pine`](indicators/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips |
 | [`smooth_trend_radar.pine`](indicators/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — auto-scaled per timeframe, pivot-based rejections, statistical overextension via candle coloring, automatic SL/TP setup on flips |
 
@@ -95,6 +96,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`volume_strata.pine`](indicators/volume_strata/volume_strata.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN/LVN zones, naked POC tracking |
 | [`money_flow_delta_profile.pine`](indicators/money_flow_delta_profile/money_flow_delta_profile.pine) | Center-out diverging profile — green (right) = net buying, red (left) = net selling at each price level; POC, Value Area, optional recency weighting |
 | [`vwap_cross_visuals.pine`](indicators/vwap_cross_visuals/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
+| [`liquidity_hunter.pine`](indicators/liquidity_hunter/liquidity_hunter.pine) | Ranked equal highs/lows — quality-scored BSL/SSL levels, sweep markers, reclaim detection with event scoring |
 
 ### Pattern & Wave Analysis
 

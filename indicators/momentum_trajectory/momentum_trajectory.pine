@@ -1,0 +1,169 @@
+//@version=6
+// ============================================================================
+// Momentum Trajectory [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-05-15 00:00:00
+// ============================================================================
+// Treats WaveTrend, StochRSI and MFI as movement vectors and decomposes them
+// into direction, velocity (1st derivative) and acceleration (2nd derivative).
+//
+// Key insight: "Momentum still rising but acceleration falling → trend dying
+// slowly." The acceleration line crossing zero while velocity is still positive
+// is an early warning of trend exhaustion — before the oscillator itself turns.
+//
+// Features:
+//   ✓ WaveTrend velocity (1-bar rate of change) and acceleration (2nd derivative)
+//   ✓ StochRSI velocity and acceleration
+//   ✓ MFI velocity and acceleration
+//   ✓ Smoothed velocity lines to reduce noise
+//   ✓ State classification: Building / Peaking / Collapsing / Recovering
+//   ✓ Background highlight on critical transitions (acceleration zero-cross)
+//   ✓ Dashboard showing current state per oscillator
+//
+// ============================================================================
+
+indicator("Momentum Trajectory [WavesUnchained]", "Mom Trajectory [WU]", overlay=false)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+
+grWT    = "WaveTrend"
+showWT  = input.bool(true, "Show WaveTrend Trajectory", group=grWT)
+wtChLen = input.int(10,   "Channel Length",             minval=1, group=grWT)
+wtAvLen = input.int(21,   "Average Length",             minval=1, group=grWT)
+
+grSt     = "StochRSI"
+showSt   = input.bool(true, "Show StochRSI Trajectory", group=grSt)
+rsiLen   = input.int(14,   "RSI Length",               minval=1, group=grSt)
+stochLen = input.int(14,   "Stoch Length",              minval=1, group=grSt)
+kSmooth  = input.int(3,    "K Smoothing",               minval=1, group=grSt)
+
+grMfi   = "MFI"
+showMfi = input.bool(true, "Show MFI Trajectory", group=grMfi)
+mfiLen  = input.int(14,   "MFI Length",           minval=1, group=grMfi)
+
+grV       = "Display"
+smoothLen = input.int(3,   "Velocity Smoothing", minval=1, maxval=10, group=grV,
+     tooltip="Smoothing applied to velocity lines to reduce tick noise. 1 = raw.")
+showDash  = input.bool(true, "Show Dashboard",    group=grV)
+showAccBg = input.bool(true, "Acceleration Zero-Cross Background", group=grV,
+     tooltip="Highlights bars where WT acceleration crosses zero while velocity is positive (peaking) or negative (recovering) — early exhaustion/reversal warning.")
+
+// ─── Oscillator series ────────────────────────────────────────────────────────
+
+_wtEsa = ta.ema(hlc3, wtChLen)
+_wtD   = ta.ema(math.abs(hlc3 - _wtEsa), wtChLen)
+_wtCi  = (hlc3 - _wtEsa) / (0.015 * math.max(_wtD, syminfo.mintick))
+wtOsc  = ta.ema(_wtCi, wtAvLen)
+
+_r1     = ta.rsi(close, rsiLen)
+_stRaw  = ta.stoch(_r1, _r1, _r1, stochLen)
+stochK  = ta.sma(_stRaw, kSmooth)
+
+_mfiTyp = (high + low + close) / 3
+_mfiRaw = _mfiTyp * math.max(nz(volume), 1.0)
+_mfiPos = math.sum(_mfiTyp > _mfiTyp[1] ? _mfiRaw : 0.0, mfiLen)
+_mfiNeg = math.sum(_mfiTyp < _mfiTyp[1] ? _mfiRaw : 0.0, mfiLen)
+mfi     = _mfiNeg == 0 ? 100.0 : 100.0 - 100.0 / (1.0 + _mfiPos / _mfiNeg)
+
+// ─── Velocity + Acceleration ──────────────────────────────────────────────────
+
+// WaveTrend (centered: WT ranges ~-100 to +100, no centering needed)
+wtVelRaw = wtOsc - wtOsc[1]
+wtVel    = ta.sma(wtVelRaw, smoothLen)
+wtAcc    = wtVel - wtVel[1]
+
+// StochRSI (centered around 50: stochK 0–100, shift to -50/+50 for velocity)
+stVelRaw = stochK - stochK[1]
+stVel    = ta.sma(stVelRaw, smoothLen)
+stAcc    = stVel - stVel[1]
+
+// MFI (centered around 50)
+mfiVelRaw = mfi - mfi[1]
+mfiVel    = ta.sma(mfiVelRaw, smoothLen)
+mfiAcc    = mfiVel - mfiVel[1]
+
+// ─── State classification ─────────────────────────────────────────────────────
+
+f_state(vel, acc) =>
+    vel > 0 and acc > 0 ? "Building" :
+     vel > 0 and acc < 0 ? "Peaking"   :
+     vel < 0 and acc < 0 ? "Collapsing" :
+     vel < 0 and acc > 0 ? "Recovering" : "Flat"
+
+f_stateColor(vel, acc) =>
+    vel > 0 and acc > 0 ? color.new(#00c853, 0) :
+     vel > 0 and acc < 0 ? color.new(#ffd600, 0)   :
+     vel < 0 and acc < 0 ? color.new(#d50000, 0)    :
+     vel < 0 and acc > 0 ? color.new(#00bcd4, 0)    : color.new(color.gray, 30)
+
+wtState  = f_state(wtVel, wtAcc)
+stState  = f_state(stVel, stAcc)
+mfiState = f_state(mfiVel, mfiAcc)
+
+// ─── Background: acceleration zero-cross at non-zero velocity ─────────────────
+
+// WT acceleration crossing zero while vel positive = Peaking transition (exhaustion)
+// WT acceleration crossing zero while vel negative = Recovering transition (reversal)
+wtAccCrossPeak    = ta.crossunder(wtAcc, 0) and wtVel > 0
+wtAccCrossRecover = ta.crossover(wtAcc,  0) and wtVel < 0
+
+accBg = showAccBg ?
+     wtAccCrossPeak    ? color.new(#ffd600, 88) :
+     wtAccCrossRecover ? color.new(#00bcd4, 88) : na : na
+
+bgcolor(accBg, title="Acceleration Cross")
+
+// ─── Plots ────────────────────────────────────────────────────────────────────
+
+hline(0, "Zero", color=color.new(color.gray, 50))
+
+wtVelColor = wtVel > 0 ? color.new(#26a69a, 0) : color.new(#ef5350, 0)
+stVelColor = stVel > 0 ? color.new(#26a69a, 30) : color.new(#ef5350, 30)
+mfiVelColor = mfiVel > 0 ? color.new(#ce93d8, 0) : color.new(#ce93d8, 50)
+
+plot(showWT  ? wtVel  : na, "WT Velocity",     color=wtVelColor,  linewidth=2, style=plot.style_histogram)
+plot(showSt  ? stVel  : na, "StochRSI Velocity", color=stVelColor,  linewidth=1, style=plot.style_line)
+plot(showMfi ? mfiVel : na, "MFI Velocity",    color=mfiVelColor, linewidth=1, style=plot.style_line)
+
+// Acceleration as thin line — the critical early-warning signal
+wtAccColor = wtAcc > 0 ? color.new(color.white, 30) : color.new(color.gray, 30)
+plot(showWT ? wtAcc : na, "WT Acceleration", color=wtAccColor, linewidth=1, style=plot.style_line)
+
+// State markers: dots at transition
+plotshape(showWT and wtAccCrossPeak,    "WT Peaking",    shape.circle, location.top,    color.new(#ffd600, 20), size=size.tiny)
+plotshape(showWT and wtAccCrossRecover, "WT Recovering", shape.circle, location.bottom, color.new(#00bcd4, 20), size=size.tiny)
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table t = table.new(position.top_right, 4, 4,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60), border_width=1,
+     frame_color=color.new(color.gray, 40), frame_width=1)
+
+if showDash and barstate.islast
+    table.cell(t, 0, 0, "Oscillator", text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 1, 0, "Vel",        text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 2, 0, "Acc",        text_color=tc, bgcolor=hd, text_size=size.tiny)
+    table.cell(t, 3, 0, "State",      text_color=tc, bgcolor=hd, text_size=size.tiny)
+
+    table.cell(t, 0, 1, "WaveTrend",  text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 1, str.tostring(wtVel,  "#.##"), text_color=wtVelColor,  text_size=size.tiny)
+    table.cell(t, 2, 1, str.tostring(wtAcc,  "#.##"), text_color=wtAccColor,  text_size=size.tiny)
+    table.cell(t, 3, 1, wtState,  text_color=f_stateColor(wtVel, wtAcc),  text_size=size.tiny)
+
+    table.cell(t, 0, 2, "StochRSI",   text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 2, str.tostring(stVel,  "#.##"), text_color=stVelColor,  text_size=size.tiny)
+    table.cell(t, 2, 2, str.tostring(stAcc,  "#.##"), text_color=color.new(color.gray, 30), text_size=size.tiny)
+    table.cell(t, 3, 2, stState,  text_color=f_stateColor(stVel, stAcc),  text_size=size.tiny)
+
+    table.cell(t, 0, 3, "MFI",        text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 3, str.tostring(mfiVel, "#.##"), text_color=mfiVelColor, text_size=size.tiny)
+    table.cell(t, 2, 3, str.tostring(mfiAcc, "#.##"), text_color=color.new(color.gray, 30), text_size=size.tiny)
+    table.cell(t, 3, 3, mfiState, text_color=f_stateColor(mfiVel, mfiAcc), text_size=size.tiny)
+
+alertcondition(wtAccCrossPeak,    "WT Momentum Peaking",    "WaveTrend acceleration turned negative while still rising — early exhaustion warning")
+alertcondition(wtAccCrossRecover, "WT Momentum Recovering", "WaveTrend acceleration turned positive while still falling — potential reversal building")

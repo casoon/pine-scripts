@@ -1,0 +1,682 @@
+//@version=6
+// ============================================================================
+// Liquidity Hunter [WavesUnchained]
+// Version: 3.2.0
+// Author: WavesUnchained
+// Build: 2026-05-15 00:00:00
+// ============================================================================
+// Focused premium liquidity tool:
+//   ✓ Ranks equal highs/lows by quality score (touches, age, ATR distance)
+//   ✓ Detects sweeps and scored reclaim events
+//   ✓ Unfilled price gaps as magnet zones
+//   ✓ Stop hunt detection: same-bar sweep reversal with volume spike
+//   ✓ Reduces chart clutter to the few levels that matter
+//   ✓ Session-aware scoring and tighter alerts
+//   ✓ Momentum Hybrid: qualifies sweeps/hunts with WaveTrend + MFI extremes (Exhaustion Events)
+//
+// ============================================================================
+
+indicator("Liquidity Hunter [WavesUnchained]", "Liquidity Hunter", overlay=true,
+     max_boxes_count=100, max_lines_count=150, max_labels_count=150)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+var g1 = "Liquidity Levels"
+enableLevels       = input.bool(true,  "Show Liquidity Levels",         group=g1)
+pivotLen           = input.int(8,      "Pivot Length",                   group=g1, minval=3, maxval=30)
+eqToleranceAtr     = input.float(0.12, "Equal Level Tolerance (ATR)",    group=g1, minval=0.02, maxval=1.0, step=0.01)
+minTouches         = input.int(2,      "Minimum Touches",                group=g1, minval=2, maxval=5)
+maxTrackedLevels   = input.int(30,     "Max Tracked Levels / Side",      group=g1, minval=10, maxval=60)
+maxLevelAge        = input.int(400,    "Max Level Age (bars)",           group=g1, minval=50, maxval=1500)
+maxLevelDistance   = input.float(8.0,  "Max Level Distance (ATR)",       group=g1, minval=1.0, maxval=20.0, step=0.5)
+
+var g2 = "Premium Events"
+enableSweeps       = input.bool(true,  "Show Sweep Markers",             group=g2)
+enableReclaims     = input.bool(true,  "Show Reclaim Labels",            group=g2)
+minSweepAtr        = input.float(0.05, "Minimum Sweep Depth (ATR)",      group=g2, minval=0.0, maxval=1.0, step=0.01)
+reclaimBars        = input.int(3,      "Reclaim Window (bars)",          group=g2, minval=1, maxval=10)
+minCloseBackAtr    = input.float(0.10, "Minimum Close-Back Distance (ATR)", group=g2, minval=0.02, maxval=1.5, step=0.01)
+minVolumeRatio     = input.float(1.2,  "Minimum Volume Ratio",           group=g2, minval=0.5, maxval=5.0, step=0.1)
+maxEventsDisplay   = input.int(6,      "Max Premium Events",             group=g2, minval=1, maxval=20)
+
+var g_hunt = "Stop Hunts"
+enableStopHunts    = input.bool(true,  "Detect Stop Hunts",              group=g_hunt,
+     tooltip="Same-bar sweep: wick through known level + volume spike + reversal close — premium signal")
+huntVolMultiplier  = input.float(1.5,  "Volume Spike Multiplier",        group=g_hunt, minval=1.0, maxval=5.0, step=0.1)
+maxHuntsDisplay    = input.int(8,      "Max Hunts to Show",              group=g_hunt, minval=1, maxval=30)
+
+var g_gaps = "Gaps"
+enableGaps         = input.bool(true,  "Show Unfilled Gaps",             group=g_gaps,
+     tooltip="Price gaps between consecutive bars — act as magnets, price tends to return to fill them")
+maxGapsDisplay     = input.int(5,      "Max Gaps to Display",            group=g_gaps, minval=1, maxval=20)
+minGapSizePct      = input.float(0.05, "Min Gap Size %",                 group=g_gaps, minval=0.0, maxval=5.0, step=0.05) / 100
+
+var g3 = "Context"
+useSessionFilter   = input.bool(false, "Use Active Session Filter",      group=g3)
+activeSession      = input.session("0700-1700", "Active Session",        group=g3)
+alertDistanceAtr   = input.float(1.0,  "Alert Distance (ATR)",           group=g3, minval=0.25, maxval=5.0, step=0.25)
+eventMemoryBars    = input.int(30,     "Recent Event Memory (bars)",     group=g3, minval=5, maxval=100)
+
+var g_mom = "Momentum Hybrid"
+enableExhaustion = input.bool(true,  "Exhaustion Event Detection", group=g_mom,
+     tooltip="Qualifies sweep and stop-hunt events with WaveTrend extremes. When a sweep fires at an oscillator extreme, the probability of a genuine reversal rises — marked as an Exhaustion Event.")
+lhWtExtThr   = input.float(53.0, "WT Extreme Threshold", minval=30, maxval=80, step=1, group=g_mom,
+     tooltip="Absolute WaveTrend level considered extreme. BSL sweep above +threshold = bearish exhaustion. SSL sweep below -threshold = bullish exhaustion.")
+lhMfiLen     = input.int(14,     "MFI Length",           minval=5, maxval=50, group=g_mom)
+exhaustColor = input.color(color.new(#e91e63, 20), "Exhaustion Color", group=g_mom)
+
+var g4 = "Display"
+showDashboard      = input.bool(false, "Show Dashboard",                 group=g4)
+showBackground     = input.bool(true,  "Highlight Armed Levels",         group=g4)
+showSecondary      = input.bool(true,  "Show Secondary Levels",          group=g4)
+extendBars         = input.int(15,     "Forward Extend Bars",            group=g4, minval=5, maxval=50)
+debugMode          = input.bool(false, "Debug: Show Level Counts",       group=g4,
+     tooltip="Adds a dashboard row showing how many levels are tracked and how many pass the active filter — use to diagnose why no lines appear")
+
+var g5 = "Styling"
+bslColor           = input.color(color.new(color.red, 10),    "BSL Color",        group=g5)
+sslColor           = input.color(color.new(color.lime, 10),   "SSL Color",        group=g5)
+sweepColor         = input.color(color.new(color.orange, 0),  "Sweep Color",      group=g5)
+bearReclaimColor   = input.color(color.new(color.red, 0),     "Bearish Reclaim",  group=g5)
+bullReclaimColor   = input.color(color.new(color.green, 0),   "Bullish Reclaim",  group=g5)
+stopHuntColor      = input.color(color.new(color.yellow, 20), "Stop Hunt",        group=g5)
+gapBullColor       = input.color(color.new(color.teal, 80),   "Gap Bullish",      group=g5)
+gapBearColor       = input.color(color.new(color.orange, 80), "Gap Bearish",      group=g5)
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+type LiquidityLevel
+    float price
+    int   pivotBar
+    int   lastTouchBar
+    int   touches
+    bool  swept
+    int   sweepBar
+    bool  reclaimed
+    int   reclaimDir
+    float lastScore
+
+type LiquidityEvent
+    int   eventBar
+    float eventPrice
+    int   direction
+    float score
+    float levelPrice
+    float volumeRatio
+
+type GapLevel
+    int   gapBar
+    float gapHigh
+    float gapLow
+    float gapSize
+    int   direction
+
+type StopHunt
+    int   huntBar
+    float huntPrice
+    int   direction
+    float volumeRatio
+    float levelPrice
+
+// ============================================================================
+// COMMON
+// ============================================================================
+
+atr14        = ta.atr(14)
+avgVol       = ta.sma(volume, 20)
+volRatio     = avgVol > 0 ? volume / avgVol : 1.0
+inSession    = not useSessionFilter or not na(time(timeframe.period, activeSession))
+toleranceAbs = math.max(atr14 * eqToleranceAtr, syminfo.mintick * 2.0)
+sweepAbs     = atr14 * minSweepAtr
+closeBackAbs = atr14 * minCloseBackAtr
+
+// Momentum Hybrid (#8): WaveTrend + MFI for exhaustion event qualification
+_lhWtEsa     = ta.ema(hlc3, 10)
+_lhWtD       = ta.ema(math.abs(hlc3 - _lhWtEsa), 10)
+_lhWtCi      = (hlc3 - _lhWtEsa) / (0.015 * math.max(_lhWtD, syminfo.mintick))
+lhWtOsc      = ta.ema(_lhWtCi, 21)
+_lhMfiTyp    = (high + low + close) / 3
+_lhMfiRaw    = _lhMfiTyp * volume
+_lhMfiPosSum = math.sum(_lhMfiTyp > _lhMfiTyp[1] ? _lhMfiRaw : 0.0, lhMfiLen)
+_lhMfiNegSum = math.sum(_lhMfiTyp < _lhMfiTyp[1] ? _lhMfiRaw : 0.0, lhMfiLen)
+lhMfi        = _lhMfiNegSum == 0 ? 100.0 : 100.0 - 100.0 / (1.0 + _lhMfiPosSum / _lhMfiNegSum)
+
+f_level_score(_touches, _ageBars, _distAtr) =>
+    touchScore  = math.min(_touches, 5) * 20.0
+    agePenalty  = math.min(_ageBars / maxLevelAge, 1.0) * 18.0
+    distPenalty = math.min(_distAtr, maxLevelDistance) * 7.0
+    math.max(0.0, touchScore + 18.0 - agePenalty - distPenalty)
+
+f_event_score(_touches, _wickAtr, _closeBackAtr, _volRatio, _sessionBoost) =>
+    touchScore = math.min(_touches, 5) * 12.0
+    wickScore  = math.min(_wickAtr, 1.5) * 18.0
+    closeScore = math.min(_closeBackAtr, 1.5) * 24.0
+    volScore   = math.max(0.0, math.min(_volRatio, 3.0) - 1.0) * 12.0
+    math.min(100.0, touchScore + wickScore + closeScore + volScore + _sessionBoost)
+
+// ============================================================================
+// LEVEL REGISTRY
+// ============================================================================
+
+var array<LiquidityLevel> bslLevels    = array.new<LiquidityLevel>()
+var array<LiquidityLevel> sslLevels    = array.new<LiquidityLevel>()
+var array<LiquidityEvent> recentEvents = array.new<LiquidityEvent>()
+
+pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pivotLow  = ta.pivotlow(low,  pivotLen, pivotLen)
+
+if not na(pivotHigh)
+    pivotBar = bar_index - pivotLen
+    found = false
+    for lvl in bslLevels
+        if math.abs(lvl.price - pivotHigh) <= toleranceAbs
+            lvl.touches      += 1
+            lvl.lastTouchBar := pivotBar
+            lvl.price        := (lvl.price * (lvl.touches - 1) + pivotHigh) / lvl.touches
+            found            := true
+            break
+    if not found
+        array.push(bslLevels, LiquidityLevel.new(pivotHigh, pivotBar, pivotBar, 1, false, na, false, 0, 0.0))
+    if array.size(bslLevels) > maxTrackedLevels
+        array.shift(bslLevels)
+
+if not na(pivotLow)
+    pivotBar = bar_index - pivotLen
+    found = false
+    for lvl in sslLevels
+        if math.abs(lvl.price - pivotLow) <= toleranceAbs
+            lvl.touches      += 1
+            lvl.lastTouchBar := pivotBar
+            lvl.price        := (lvl.price * (lvl.touches - 1) + pivotLow) / lvl.touches
+            found            := true
+            break
+    if not found
+        array.push(sslLevels, LiquidityLevel.new(pivotLow, pivotBar, pivotBar, 1, false, na, false, 0, 0.0))
+    if array.size(sslLevels) > maxTrackedLevels
+        array.shift(sslLevels)
+
+if atr14 > 0 and array.size(bslLevels) > 0
+    for i = array.size(bslLevels) - 1 to 0
+        lvl = array.get(bslLevels, i)
+        if bar_index - lvl.lastTouchBar > maxLevelAge or math.abs(close - lvl.price) / atr14 > maxLevelDistance
+            array.remove(bslLevels, i)
+
+if atr14 > 0 and array.size(sslLevels) > 0
+    for i = array.size(sslLevels) - 1 to 0
+        lvl = array.get(sslLevels, i)
+        if bar_index - lvl.lastTouchBar > maxLevelAge or math.abs(close - lvl.price) / atr14 > maxLevelDistance
+            array.remove(sslLevels, i)
+
+// ============================================================================
+// GAP DETECTION
+// ============================================================================
+
+var array<GapLevel> gapLevels = array.new<GapLevel>()
+
+if low > high[1]
+    gapSz = low - high[1]
+    if gapSz / close >= minGapSizePct
+        array.unshift(gapLevels, GapLevel.new(bar_index, low, high[1], gapSz, 1))
+        if array.size(gapLevels) > maxGapsDisplay * 3
+            array.pop(gapLevels)
+
+if high < low[1]
+    gapSz = low[1] - high
+    if gapSz / close >= minGapSizePct
+        array.unshift(gapLevels, GapLevel.new(bar_index, low[1], high, gapSz, -1))
+        if array.size(gapLevels) > maxGapsDisplay * 3
+            array.pop(gapLevels)
+
+for gap in gapLevels
+    if gap.gapSize > 0
+        if gap.direction == 1 and low <= gap.gapHigh
+            gap.gapSize := 0
+        else if gap.direction == -1 and high >= gap.gapLow
+            gap.gapSize := 0
+
+f_unfilled_gaps() =>
+    result = array.new<GapLevel>()
+    count  = 0
+    for gap in gapLevels
+        if gap.gapSize > 0 and count < maxGapsDisplay
+            array.push(result, gap)
+            count += 1
+    result
+
+curGaps = f_unfilled_gaps()
+
+// ============================================================================
+// SWEEP / RECLAIM ENGINE + STOP HUNT DETECTION
+// ============================================================================
+
+bslSweep           = false
+sslSweep           = false
+bearishReclaim     = false
+bullishReclaim     = false
+bearishReclaimScore = 0.0
+bullishReclaimScore = 0.0
+bslHunt            = false
+sslHunt            = false
+
+var array<StopHunt> stopHunts = array.new<StopHunt>()
+
+for lvl in bslLevels
+    if lvl.touches >= minTouches
+        wickAtr      = atr14 > 0 ? math.max(0.0, high - lvl.price) / atr14 : 0.0
+        closeBackAtr = atr14 > 0 ? math.max(0.0, lvl.price - close) / atr14 : 0.0
+        rawSweep     = high >= lvl.price + sweepAbs
+        if not lvl.swept and rawSweep
+            lvl.swept    := true
+            lvl.sweepBar := bar_index
+            bslSweep     := true
+            if enableStopHunts and close < lvl.price and close < open and volRatio >= huntVolMultiplier
+                bslHunt := true
+                array.unshift(stopHunts, StopHunt.new(bar_index, high, -1, volRatio, lvl.price))
+                if array.size(stopHunts) > maxHuntsDisplay
+                    array.pop(stopHunts)
+        canReclaim = lvl.swept and not lvl.reclaimed and bar_index <= lvl.sweepBar + reclaimBars
+        if canReclaim and close <= lvl.price - closeBackAbs and volRatio >= minVolumeRatio and high >= lvl.price
+            lvl.reclaimed    := true
+            lvl.reclaimDir   := -1
+            bearishReclaim   := true
+            sessionBoost     = inSession ? 10.0 : 0.0
+            eventScore       = f_event_score(lvl.touches, wickAtr, closeBackAtr, volRatio, sessionBoost)
+            bearishReclaimScore := math.max(bearishReclaimScore, eventScore)
+            array.unshift(recentEvents, LiquidityEvent.new(bar_index, high, -1, eventScore, lvl.price, volRatio))
+            if array.size(recentEvents) > maxEventsDisplay
+                array.pop(recentEvents)
+
+for lvl in sslLevels
+    if lvl.touches >= minTouches
+        wickAtr      = atr14 > 0 ? math.max(0.0, lvl.price - low) / atr14 : 0.0
+        closeBackAtr = atr14 > 0 ? math.max(0.0, close - lvl.price) / atr14 : 0.0
+        rawSweep     = low <= lvl.price - sweepAbs
+        if not lvl.swept and rawSweep
+            lvl.swept    := true
+            lvl.sweepBar := bar_index
+            sslSweep     := true
+            if enableStopHunts and close > lvl.price and close > open and volRatio >= huntVolMultiplier
+                sslHunt := true
+                array.unshift(stopHunts, StopHunt.new(bar_index, low, 1, volRatio, lvl.price))
+                if array.size(stopHunts) > maxHuntsDisplay
+                    array.pop(stopHunts)
+        canReclaim = lvl.swept and not lvl.reclaimed and bar_index <= lvl.sweepBar + reclaimBars
+        if canReclaim and close >= lvl.price + closeBackAbs and volRatio >= minVolumeRatio and low <= lvl.price
+            lvl.reclaimed    := true
+            lvl.reclaimDir   := 1
+            bullishReclaim   := true
+            sessionBoost     = inSession ? 10.0 : 0.0
+            eventScore       = f_event_score(lvl.touches, wickAtr, closeBackAtr, volRatio, sessionBoost)
+            bullishReclaimScore := math.max(bullishReclaimScore, eventScore)
+            array.unshift(recentEvents, LiquidityEvent.new(bar_index, low, 1, eventScore, lvl.price, volRatio))
+            if array.size(recentEvents) > maxEventsDisplay
+                array.pop(recentEvents)
+
+if array.size(recentEvents) > 0
+    for i = array.size(recentEvents) - 1 to 0
+        evt = array.get(recentEvents, i)
+        if bar_index - evt.eventBar > eventMemoryBars
+            array.remove(recentEvents, i)
+
+// Exhaustion Events (#8): sweep/hunt at WT oscillator extreme — highest-probability reversals
+exhaustionBear = enableExhaustion and (bslSweep or bslHunt) and lhWtOsc >  lhWtExtThr
+exhaustionBull = enableExhaustion and (sslSweep or sslHunt) and lhWtOsc < -lhWtExtThr
+
+// ============================================================================
+// ACTIVE LEVEL SCORING
+// ============================================================================
+
+primaryBslPrice   = float(na)
+primaryBslScore   = 0.0
+primaryBslTouches = 0
+secondaryBslPrice   = float(na)
+secondaryBslScore   = 0.0
+secondaryBslTouches = 0
+
+primarySslPrice   = float(na)
+primarySslScore   = 0.0
+primarySslTouches = 0
+secondarySslPrice   = float(na)
+secondarySslScore   = 0.0
+secondarySslTouches = 0
+
+activeBslCount = 0
+activeSslCount = 0
+
+for lvl in bslLevels
+    if lvl.touches >= minTouches and not lvl.reclaimed and lvl.price > close and atr14 > 0
+        ageBars      = bar_index - lvl.lastTouchBar
+        distAtr      = (lvl.price - close) / atr14
+        score        = f_level_score(lvl.touches, ageBars, distAtr)
+        lvl.lastScore := score
+        activeBslCount += 1
+        if score > primaryBslScore
+            secondaryBslPrice   := primaryBslPrice
+            secondaryBslScore   := primaryBslScore
+            secondaryBslTouches := primaryBslTouches
+            primaryBslPrice     := lvl.price
+            primaryBslScore     := score
+            primaryBslTouches   := lvl.touches
+        else if score > secondaryBslScore
+            secondaryBslPrice   := lvl.price
+            secondaryBslScore   := score
+            secondaryBslTouches := lvl.touches
+
+for lvl in sslLevels
+    if lvl.touches >= minTouches and not lvl.reclaimed and lvl.price < close and atr14 > 0
+        ageBars      = bar_index - lvl.lastTouchBar
+        distAtr      = (close - lvl.price) / atr14
+        score        = f_level_score(lvl.touches, ageBars, distAtr)
+        lvl.lastScore := score
+        activeSslCount += 1
+        if score > primarySslScore
+            secondarySslPrice   := primarySslPrice
+            secondarySslScore   := primarySslScore
+            secondarySslTouches := primarySslTouches
+            primarySslPrice     := lvl.price
+            primarySslScore     := score
+            primarySslTouches   := lvl.touches
+        else if score > secondarySslScore
+            secondarySslPrice   := lvl.price
+            secondarySslScore   := score
+            secondarySslTouches := lvl.touches
+
+nearPrimaryBsl = not na(primaryBslPrice) and atr14 > 0 and (primaryBslPrice - close) / atr14 <= alertDistanceAtr
+nearPrimarySsl = not na(primarySslPrice) and atr14 > 0 and (close - primarySslPrice) / atr14 <= alertDistanceAtr
+
+recentBullScore = 0.0
+recentBearScore = 0.0
+for evt in recentEvents
+    if evt.direction == 1
+        recentBullScore := math.max(recentBullScore, evt.score)
+    if evt.direction == -1
+        recentBearScore := math.max(recentBearScore, evt.score)
+
+biasValue = 0
+biasValue += bullishReclaim ? 2 : 0
+biasValue -= bearishReclaim ? 2 : 0
+biasValue += recentBullScore >= 65 ? 1 : 0
+biasValue -= recentBearScore >= 65 ? 1 : 0
+biasValue += primarySslScore > primaryBslScore and nearPrimarySsl ? 1 : 0
+biasValue -= primaryBslScore > primarySslScore and nearPrimaryBsl ? 1 : 0
+
+biasText  = biasValue >= 2 ? "Bullish" : biasValue <= -2 ? "Bearish" : "Neutral"
+biasColor = biasValue >= 2 ? bullReclaimColor : biasValue <= -2 ? bearReclaimColor : color.new(color.gray, 50)
+
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+
+bgcolor(showBackground ?
+     nearPrimaryBsl and primaryBslScore >= primarySslScore ? color.new(bslColor, 90) :
+     nearPrimarySsl and primarySslScore > primaryBslScore  ? color.new(sslColor, 90) : na
+     : na,
+     title="Armed Liquidity")
+
+plotshape(enableSweeps and bslSweep and not bslHunt, "BSL Sweep", shape.triangledown,
+     location.abovebar, sweepColor, size=size.tiny, text="SWP")
+plotshape(enableSweeps and sslSweep and not sslHunt, "SSL Sweep", shape.triangleup,
+     location.belowbar, sweepColor, size=size.tiny, text="SWP")
+
+plotshape(enableStopHunts and bslHunt, "BSL Stop Hunt", shape.xcross,
+     location.abovebar, stopHuntColor, size=size.small, text="HUNT")
+plotshape(enableStopHunts and sslHunt, "SSL Stop Hunt", shape.xcross,
+     location.belowbar, stopHuntColor, size=size.small, text="HUNT")
+
+plotshape(enableReclaims and bearishReclaim, "Bearish Reclaim", shape.xcross,
+     location.abovebar, bearReclaimColor, size=size.small, text="R")
+plotshape(enableReclaims and bullishReclaim, "Bullish Reclaim", shape.xcross,
+     location.belowbar, bullReclaimColor, size=size.small, text="R")
+
+plotshape(exhaustionBear, "Exhaustion Bear", shape.triangledown,
+     location.abovebar, exhaustColor, size=size.normal, text="EX")
+plotshape(exhaustionBull, "Exhaustion Bull", shape.triangleup,
+     location.belowbar, exhaustColor, size=size.normal, text="EX")
+
+var array<box>   drawBoxes  = array.new_box()
+var array<line>  drawLines  = array.new_line()
+var array<label> drawLabels = array.new_label()
+
+if barstate.islast
+    for bx in drawBoxes
+        box.delete(bx)
+    array.clear(drawBoxes)
+    for ln in drawLines
+        line.delete(ln)
+    array.clear(drawLines)
+    for lb in drawLabels
+        label.delete(lb)
+    array.clear(drawLabels)
+
+    // --- Unfilled Gaps ---
+    if enableGaps and array.size(curGaps) > 0
+        for i = 0 to array.size(curGaps) - 1
+            gap    = array.get(curGaps, i)
+            gapCol = gap.direction == 1 ? gapBullColor : gapBearColor
+            pct    = gap.gapSize / close * 100
+            array.push(drawBoxes, box.new(gap.gapBar, gap.gapHigh, bar_index + extendBars, gap.gapLow,
+                 border_color=gapCol, bgcolor=gapCol, border_width=1,
+                 border_style=line.style_dashed))
+            array.push(drawLabels, label.new(gap.gapBar,
+                 gap.direction == 1 ? gap.gapLow : gap.gapHigh,
+                 str.format("GAP {0}  {1}%", gap.direction == 1 ? "UP" : "DN", str.tostring(pct, "#.##")),
+                 color=gapCol, textcolor=color.white,
+                 style=gap.direction == 1 ? label.style_label_up : label.style_label_down,
+                 size=size.small,
+                 tooltip=str.format("{0} gap\nRange: {1} - {2}\nSize: {3}%\nUnfilled since bar {4}",
+                     gap.direction == 1 ? "Bullish" : "Bearish",
+                     str.tostring(gap.gapLow, format.mintick),
+                     str.tostring(gap.gapHigh, format.mintick),
+                     str.tostring(pct, "#.##"),
+                     str.tostring(bar_index - gap.gapBar))))
+
+    // --- BSL/SSL Levels ---
+    if enableLevels
+        if not na(primaryBslPrice)
+            array.push(drawLines, line.new(bar_index - 60, primaryBslPrice, bar_index + extendBars, primaryBslPrice,
+                 color=bslColor, width=3))
+            array.push(drawLabels, label.new(bar_index + extendBars, primaryBslPrice,
+                 str.format("BSL  {0}x  {1}", primaryBslTouches, str.tostring(primaryBslScore, "#")),
+                 style=label.style_label_left, color=bslColor, textcolor=color.white, size=size.small,
+                 tooltip=str.format("Buy-Side Liquidity (primary)\nPrice: {0}\nTouches: {1}\nScore: {2}\nDistance: {3} ATR",
+                     str.tostring(primaryBslPrice, format.mintick),
+                     str.tostring(primaryBslTouches),
+                     str.tostring(primaryBslScore, "#.#"),
+                     atr14 > 0 ? str.tostring((primaryBslPrice - close) / atr14, "#.##") : "n/a")))
+        if showSecondary and not na(secondaryBslPrice)
+            array.push(drawLines, line.new(bar_index - 40, secondaryBslPrice, bar_index + extendBars, secondaryBslPrice,
+                 color=color.new(bslColor, 45), style=line.style_dashed, width=1))
+            array.push(drawLabels, label.new(bar_index + extendBars, secondaryBslPrice,
+                 str.format("BSL 2  {0}", str.tostring(secondaryBslScore, "#")),
+                 style=label.style_label_left, color=color.new(bslColor, 35), textcolor=color.white, size=size.tiny,
+                 tooltip=str.format("Buy-Side Liquidity (secondary)\nPrice: {0}\nTouches: {1}\nScore: {2}",
+                     str.tostring(secondaryBslPrice, format.mintick),
+                     str.tostring(secondaryBslTouches),
+                     str.tostring(secondaryBslScore, "#.#"))))
+
+        if not na(primarySslPrice)
+            array.push(drawLines, line.new(bar_index - 60, primarySslPrice, bar_index + extendBars, primarySslPrice,
+                 color=sslColor, width=3))
+            array.push(drawLabels, label.new(bar_index + extendBars, primarySslPrice,
+                 str.format("SSL  {0}x  {1}", primarySslTouches, str.tostring(primarySslScore, "#")),
+                 style=label.style_label_left, color=sslColor, textcolor=color.white, size=size.small,
+                 tooltip=str.format("Sell-Side Liquidity (primary)\nPrice: {0}\nTouches: {1}\nScore: {2}\nDistance: {3} ATR",
+                     str.tostring(primarySslPrice, format.mintick),
+                     str.tostring(primarySslTouches),
+                     str.tostring(primarySslScore, "#.#"),
+                     atr14 > 0 ? str.tostring((close - primarySslPrice) / atr14, "#.##") : "n/a")))
+        if showSecondary and not na(secondarySslPrice)
+            array.push(drawLines, line.new(bar_index - 40, secondarySslPrice, bar_index + extendBars, secondarySslPrice,
+                 color=color.new(sslColor, 45), style=line.style_dashed, width=1))
+            array.push(drawLabels, label.new(bar_index + extendBars, secondarySslPrice,
+                 str.format("SSL 2  {0}", str.tostring(secondarySslScore, "#")),
+                 style=label.style_label_left, color=color.new(sslColor, 35), textcolor=color.white, size=size.tiny,
+                 tooltip=str.format("Sell-Side Liquidity (secondary)\nPrice: {0}\nTouches: {1}\nScore: {2}",
+                     str.tostring(secondarySslPrice, format.mintick),
+                     str.tostring(secondarySslTouches),
+                     str.tostring(secondarySslScore, "#.#"))))
+
+        if enableReclaims and array.size(recentEvents) > 0
+            for i = 0 to array.size(recentEvents) - 1
+                evt     = array.get(recentEvents, i)
+                evtCol  = evt.direction == 1 ? bullReclaimColor : bearReclaimColor
+                evtStyl = evt.direction == 1 ? label.style_label_up : label.style_label_down
+                evtText = str.format("{0} R  {1}  x{2}  @ {3}",
+                     evt.direction == 1 ? "BULL" : "BEAR",
+                     str.tostring(evt.score, "#"),
+                     str.tostring(evt.volumeRatio, "#.#"),
+                     str.tostring(evt.levelPrice, format.mintick))
+                array.push(drawLabels, label.new(evt.eventBar, evt.eventPrice, evtText,
+                     style=evtStyl, color=evtCol, textcolor=color.white, size=size.small,
+                     tooltip=str.format("{0} reclaim\nLevel: {1}\nScore: {2} / 100\nVolume: x{3}",
+                         evt.direction == 1 ? "Bullish" : "Bearish",
+                         str.tostring(evt.levelPrice, format.mintick),
+                         str.tostring(evt.score, "#"),
+                         str.tostring(evt.volumeRatio, "#.##"))))
+
+    // --- Stop Hunt Labels ---
+    if enableStopHunts and array.size(stopHunts) > 0
+        for i = 0 to array.size(stopHunts) - 1
+            hunt = array.get(stopHunts, i)
+            if bar_index - hunt.huntBar <= 500
+                huntText = str.format("HUNT  x{0}  @ {1}",
+                     str.tostring(hunt.volumeRatio, "#.#"),
+                     str.tostring(hunt.levelPrice, format.mintick))
+                array.push(drawLabels, label.new(hunt.huntBar, hunt.huntPrice, huntText,
+                     color=stopHuntColor, textcolor=color.black,
+                     style=hunt.direction == -1 ? label.style_label_down : label.style_label_up,
+                     size=size.small,
+                     tooltip=str.format("{0} stop hunt\nLevel swept: {1}\nVolume spike: x{2}\nSame-bar reversal close",
+                         hunt.direction == -1 ? "Bearish" : "Bullish",
+                         str.tostring(hunt.levelPrice, format.mintick),
+                         str.tostring(hunt.volumeRatio, "#.##"))))
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+if showDashboard and barstate.islast
+    var table dash = table.new(position.top_right, 3, 12,
+         bgcolor=color.new(color.white, 5),
+         border_color=color.new(color.gray, 60),
+         border_width=1,
+         frame_color=color.new(color.gray, 40),
+         frame_width=1)
+
+    muted  = color.new(color.gray, 20)
+    headBg = color.new(color.gray, 90)
+
+    table.cell(dash, 0, 0, "Liquidity Hunter", text_color=muted, bgcolor=headBg, text_size=size.small)
+    table.cell(dash, 1, 0, "Value",            text_color=muted, bgcolor=headBg, text_size=size.small)
+    table.cell(dash, 2, 0, "State",            text_color=muted, bgcolor=headBg, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Bias",    text_color=muted,         text_size=size.small)
+    table.cell(dash, 1, 1, biasText,  text_color=color.white, bgcolor=biasColor, text_size=size.small)
+    table.cell(dash, 2, 1, str.tostring(biasValue), text_color=color.white, bgcolor=biasColor, text_size=size.small)
+
+    bslDist = not na(primaryBslPrice) and atr14 > 0 ? (primaryBslPrice - close) / atr14 : na
+    table.cell(dash, 0, 2, "Primary BSL", text_color=muted, text_size=size.small)
+    table.cell(dash, 1, 2, not na(primaryBslPrice) ? str.tostring(primaryBslPrice, format.mintick) : "---",
+         text_color=not na(primaryBslPrice) ? bslColor : muted, text_size=size.small)
+    table.cell(dash, 2, 2, not na(bslDist) ? str.format("S {0} | {1} ATR", str.tostring(primaryBslScore, "#"), str.tostring(bslDist, "#.#")) : "---",
+         text_color=not na(primaryBslPrice) ? color.white : muted, text_size=size.tiny)
+
+    sslDist = not na(primarySslPrice) and atr14 > 0 ? (close - primarySslPrice) / atr14 : na
+    table.cell(dash, 0, 3, "Primary SSL", text_color=muted, text_size=size.small)
+    table.cell(dash, 1, 3, not na(primarySslPrice) ? str.tostring(primarySslPrice, format.mintick) : "---",
+         text_color=not na(primarySslPrice) ? sslColor : muted, text_size=size.small)
+    table.cell(dash, 2, 3, not na(sslDist) ? str.format("S {0} | {1} ATR", str.tostring(primarySslScore, "#"), str.tostring(sslDist, "#.#")) : "---",
+         text_color=not na(primarySslPrice) ? color.white : muted, text_size=size.tiny)
+
+    lastEventText  = "---"
+    lastEventColor = muted
+    if array.size(recentEvents) > 0
+        evt           = array.get(recentEvents, 0)
+        lastEventText := str.format("{0} {1}", evt.direction == 1 ? "Bull" : "Bear", str.tostring(evt.score, "#"))
+        lastEventColor := evt.direction == 1 ? bullReclaimColor : bearReclaimColor
+
+    table.cell(dash, 0, 4, "Last Event",   text_color=muted, text_size=size.small)
+    table.cell(dash, 1, 4, lastEventText,  text_color=color.white, bgcolor=color.new(lastEventColor, 15), text_size=size.small)
+    table.cell(dash, 2, 4, str.format("{0} / {1}", activeBslCount, activeSslCount), text_color=muted, text_size=size.small)
+
+    armedText  = nearPrimaryBsl ? "BSL Armed" : nearPrimarySsl ? "SSL Armed" : "None"
+    armedColor = nearPrimaryBsl ? bslColor : nearPrimarySsl ? sslColor : color.new(color.gray, 60)
+    table.cell(dash, 0, 5, "Armed",    text_color=muted, text_size=size.small)
+    table.cell(dash, 1, 5, armedText,  text_color=color.white, bgcolor=color.new(armedColor, 20), text_size=size.small)
+    table.cell(dash, 2, 5, inSession ? "Session On" : "Session Off", text_color=muted, text_size=size.small)
+
+    qualityText = str.format("Bull {0} | Bear {1}", str.tostring(recentBullScore, "#"), str.tostring(recentBearScore, "#"))
+    table.cell(dash, 0, 6, "Premium",    text_color=muted, text_size=size.small)
+    table.cell(dash, 1, 6, qualityText,  text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 6, str.format("VR {0}", str.tostring(volRatio, "#.#")), text_color=muted, text_size=size.small)
+
+    gapCount  = array.size(curGaps)
+    huntCount = array.size(stopHunts)
+    table.cell(dash, 0, 7, "Gaps",                  text_color=muted, text_size=size.small)
+    table.cell(dash, 1, 7, str.format("{0} open", gapCount),
+         text_color=gapCount > 0 ? color.new(color.teal, 0) : muted, text_size=size.small)
+    table.cell(dash, 2, 7, str.format("{0} hunts", huntCount),
+         text_color=huntCount > 0 ? stopHuntColor : muted, text_size=size.small)
+
+    if debugMode
+        bslTracked = array.size(bslLevels)
+        sslTracked = array.size(sslLevels)
+        table.cell(dash, 0, 8, "Debug",
+             text_color=color.new(color.orange, 20), bgcolor=headBg, text_size=size.tiny)
+        table.cell(dash, 1, 8,
+             str.format("BSL {0} tracked / {1} active", bslTracked, activeBslCount),
+             text_color=activeBslCount > 0 ? bslColor : muted, text_size=size.tiny)
+        table.cell(dash, 2, 8,
+             str.format("SSL {0} tracked / {1} active", sslTracked, activeSslCount),
+             text_color=activeSslCount > 0 ? sslColor : muted, text_size=size.tiny)
+    else
+        table.cell(dash, 0, 8, "", bgcolor=color.new(color.gray, 80))
+        table.cell(dash, 1, 8, "", bgcolor=color.new(color.gray, 80))
+        table.cell(dash, 2, 8, "", bgcolor=color.new(color.gray, 80))
+
+    table.cell(dash, 0, 9, "", bgcolor=color.new(color.gray, 80))
+    table.cell(dash, 1, 9, "", bgcolor=color.new(color.gray, 80))
+    table.cell(dash, 2, 9, "", bgcolor=color.new(color.gray, 80))
+
+    // Momentum context (#8)
+    wtStateText = lhWtOsc >  lhWtExtThr ? "Extreme ↑" :
+                  lhWtOsc < -lhWtExtThr ? "Extreme ↓" :
+                  lhWtOsc > 20 ? "Bull" : lhWtOsc < -20 ? "Bear" : "Neutral"
+    wtStateColor = lhWtOsc >  lhWtExtThr ? exhaustColor :
+                   lhWtOsc < -lhWtExtThr ? exhaustColor :
+                   lhWtOsc > 20 ? bullReclaimColor : lhWtOsc < -20 ? bearReclaimColor : color.new(color.gray, 60)
+    exText  = exhaustionBear ? "EX BEAR" : exhaustionBull ? "EX BULL" : "—"
+    exColor = exhaustionBear or exhaustionBull ? exhaustColor : color.new(color.gray, 60)
+    table.cell(dash, 0, 10, "WT State", text_color=muted,        text_size=size.small)
+    table.cell(dash, 1, 10, wtStateText, text_color=color.white, bgcolor=color.new(wtStateColor, 20), text_size=size.small)
+    table.cell(dash, 2, 10, str.format("MFI {0}", str.tostring(lhMfi, "#")), text_color=muted, text_size=size.small)
+
+    table.cell(dash, 0, 11, "Exhaustion", text_color=muted,     text_size=size.small)
+    table.cell(dash, 1, 11, exText,       text_color=color.white, bgcolor=color.new(exColor, 20), text_size=size.small)
+    table.cell(dash, 2, 11, str.format("WT {0}", str.tostring(lhWtOsc, "#.#")), text_color=muted, text_size=size.small)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(nearPrimaryBsl and not nearPrimaryBsl[1],
+     "Primary BSL Near", "Price is approaching the primary buy-side liquidity level")
+alertcondition(nearPrimarySsl and not nearPrimarySsl[1],
+     "Primary SSL Near", "Price is approaching the primary sell-side liquidity level")
+alertcondition(bslSweep, "BSL Swept", "Buy-side liquidity sweep detected")
+alertcondition(sslSweep, "SSL Swept", "Sell-side liquidity sweep detected")
+alertcondition(bslHunt, "BSL Stop Hunt", "Stop hunt at buy-side liquidity — sweep + volume reversal")
+alertcondition(sslHunt, "SSL Stop Hunt", "Stop hunt at sell-side liquidity — sweep + volume reversal")
+alertcondition(bearishReclaim, "Bearish Reclaim", "Buy-side liquidity sweep reclaimed bearish")
+alertcondition(bullishReclaim, "Bullish Reclaim", "Sell-side liquidity sweep reclaimed bullish")
+alertcondition(bearishReclaim and bearishReclaimScore >= 65,
+     "Premium Bearish Reclaim", "High-quality bearish reclaim detected")
+alertcondition(exhaustionBear, "Exhaustion Bear", "Sweep at WT extreme — high-probability bearish reversal")
+alertcondition(exhaustionBull, "Exhaustion Bull", "Sweep at WT extreme — high-probability bullish reversal")
+alertcondition(bullishReclaim and bullishReclaimScore >= 65,
+     "Premium Bullish Reclaim", "High-quality bullish reclaim detected")
