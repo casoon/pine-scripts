@@ -3,16 +3,17 @@
 // Commodity Pulse Matrix v4 [WavesUnchained]
 // Version: 4.0
 // Author: WavesUnchained
-// Build: 2026-04-29 00:00:00
+// Build: 2026-06-10 14:58:00
 // ============================================================================
-// Strategy-focused multi-timeframe confluence indicator for commodities.
-// Slimmed down from v3 (~7200 lines) to focus on signal generation.
+// Chart-timeframe entry engine with multi-timeframe confluence context.
+// Slimmed down from v3 (~7200 lines) to focus on filtered signal generation.
 //
 // Features:
 //   ✓ 6-Category Multi-Timeframe Scoring (Flow, Mom, Trend, Vol, Struct, Div)
 //   ✓ Heat Score System (setup quality 0-1)
-//   ✓ Entry Engine V2 (finalLong/finalShort signals)
+//   ✓ Chart-TF Entry Engine V2 (finalLong/finalShort signals)
 //   ✓ Signal Quality Gate (ATR + Volume filter)
+//   ✓ Early Reversal Candidates (informational pre-entry layer)
 //   ✓ A-Setup detection (premium signal marker)
 //   ✓ Diamond Zones (support/resistance for SL context)
 //   ✓ Divergence Detection
@@ -50,7 +51,7 @@ bool usePullbackEntries = input.bool(true, "Enable Pullback Entries", group="Ent
 bool useContinuationEntries = input.bool(true, "Enable Continuation Entries", group="Entry Engine", tooltip="Trigger on trend continuations after mini-pullbacks")
 
 bool allowCounterTrendEntries = input.bool(false, "Allow Counter-Trend Entries", group="Entry Engine", tooltip="Allow entries against trend (requires 1.5x stronger momentum)")
-bool useTrendFilter             = input.bool(true,  "Trend Filter (regime + JMA50)", group="Entry Engine", tooltip="Require trending regime AND price on the correct side of JMA50 for final signals. Strongly reduces counter-trend entries.")
+bool useTrendFilter             = input.bool(true,  "Trend Filter (regime + JMA50)", group="Entry Engine", tooltip="Require trending regime AND price on the correct side of JMA50 for final entry signals. Strongly reduces counter-trend entries.")
 
 float volStopATRMult = input.float(2.0, "VolStop ATR Multiplier", minval=1.0, maxval=4.0, step=0.1, group="Entry Engine", tooltip="ATR multiplier for volatility stop calculation")
 
@@ -67,7 +68,16 @@ float wt1BoostThreshold = input.float(60.0, "WT1 Extreme Threshold", minval=40.0
 float wt1BoostAmount = input.float(0.10, "WT1 Boost Amount", minval=0.05, maxval=0.25, step=0.01, group="Signal Boost", tooltip="Strength added when WT1 is extreme (0.10 = 10%)")
 
 float strengthThreshold = input.float(0.55, "Strength Threshold", minval=0.20, maxval=0.70, step=0.05, group="Signal Boost", tooltip="Minimum strength required for final signal (lower = more signals)")
-float entryHeatMin       = input.float(0.40, "Entry Heat Filter (min)", minval=0.0, maxval=1.0, step=0.05, group="Signal Boost", tooltip="Final entry only fires when Heat Score is at least this value. Filters out low-quality setups (~50% of raw entries on most charts).")
+float entryHeatMin       = input.float(0.40, "Entry Heat Filter (min)", minval=0.0, maxval=1.0, step=0.05, group="Signal Boost", tooltip="Final entry only fires when the MTF/context Heat Score is at least this value. Filters out low-quality setups.")
+
+// ==== EARLY REVERSAL CANDIDATES ====
+bool showEarlyReversal = input.bool(true, "Show Early Reversal Candidates", group="Early Reversal", tooltip="Shows early reversal candidates before final entries. Informational only, not used by strategy signals.")
+bool earlyRequirePriceReaction = input.bool(true, "Require JMA20 Reclaim/Reject", group="Early Reversal", tooltip="Require price to reclaim JMA20 for long candidates or reject below JMA20 for short candidates.")
+bool earlyUseDivergence = input.bool(true, "Use Divergence Zones", group="Early Reversal", tooltip="Use active RSI/price divergence zones as early reversal evidence.")
+bool earlyUseExhaustion = input.bool(true, "Use Exhaustion", group="Early Reversal", tooltip="Use exhaustion watch/confirmed states as early reversal evidence.")
+bool earlyUseExtreme = input.bool(true, "Use RSI/WT Extremes", group="Early Reversal", tooltip="Use RSI or WaveTrend extreme readings as early reversal evidence.")
+float earlyMinHeat = input.float(0.25, "Early Min Heat", minval=0.0, maxval=1.0, step=0.05, group="Early Reversal", tooltip="Minimum Heat Score for early reversal candidates. Lower than final entry heat by design.")
+int earlyCooldown = input.int(8, "Early Signal Cooldown", minval=1, maxval=50, group="Early Reversal", tooltip="Minimum bars between early reversal candidate markers in the same direction.")
 
 // ==== SIGNAL QUALITY GATE ====
 bool useQualityGate = input.bool(true, "Enable Quality Gate", group="Signal Quality", tooltip="Filter signals based on ATR + Volume conditions")
@@ -87,16 +97,16 @@ float tp1ATRMult = input.float(1.0, "TP1: ATR × (Quick Profit)", minval=0.5, ma
 float tp2ATRMult = input.float(1.5, "TP2: ATR × (Mid)", minval=1.0, maxval=3.0, step=0.1, group="Take-Profit", tooltip="Second target (default: 1.5 ATR)")
 float tp3ATRMult = input.float(2.0, "TP3: ATR × (Extended)", minval=1.0, maxval=4.0, step=0.1, group="Take-Profit", tooltip="Third target - extended move (default: 2.0 ATR)")
 
-// ==== REVERSAL LAYER (confirmed-pivot markers) ====
-bool showReversal      = input.bool(true,  "Show Reversal Markers",     group="Reversal Layer", tooltip="Plots arrows AT confirmed swing highs/lows. Lags by Pivot Right Bars (price must close past the pivot to confirm). For visual analysis — not used as strategy signal.")
-int  revPivLeft         = input.int(10,    "Pivot Left Bars",  minval=2, group="Reversal Layer", tooltip="Bars before pivot used for detection. Larger = only deeper local extrema.")
-int  revPivRight        = input.int(8,     "Pivot Right Bars", minval=1, group="Reversal Layer", tooltip="Bars after pivot used for confirmation. Larger = more confirmation lag but fewer false signals.")
-bool revRequireRegime   = input.bool(false, "Filter by Heat Score",      group="Reversal Layer", tooltip="Only mark a reversal when Heat Score ≥ threshold at the pivot bar.")
-float revHeatMin        = input.float(0.20, "Min Heat at Pivot",         minval=0.0, maxval=1.0, step=0.05, group="Reversal Layer")
-bool revStrictMode      = input.bool(true,  "Strict Pivot Confirmation", group="Reversal Layer", tooltip="Pivot must equal the lowest/highest within the strict window. Eliminates pivots that were confirmed locally but a deeper extreme exists nearby.")
-int  revStrictWindow    = input.int(100,    "Strict Confirmation Window", minval=5, maxval=500, group="Reversal Layer", tooltip="Bars to validate against. Larger = only major swings. 100 = pivot must be the absolute extreme over ~100 bars.")
-bool revUseSwingFilter  = input.bool(true,  "Filter by Swing Magnitude",  group="Reversal Layer", tooltip="Pivot only accepted if subsequent price moved at least N×ATR away. Filters pivots that didn't actually reverse.")
-float revMinSwingATR    = input.float(1.5,  "Min Swing Size (ATR×)", minval=0.1, step=0.1, group="Reversal Layer", tooltip="Minimum post-pivot move in ATR multiples within the lookforward window (revPivRight bars).")
+// ==== CONFIRMED SWING LAYER (visual context only) ====
+bool showReversal      = input.bool(true,  "Show Confirmed Swing Markers", group="Confirmed Swing Layer", tooltip="Plots arrows at confirmed swing highs/lows. Lags by Pivot Right Bars. Visual context only, not an entry or strategy signal.")
+int  revPivLeft         = input.int(10,    "Pivot Left Bars",  minval=2, group="Confirmed Swing Layer", tooltip="Bars before pivot used for detection. Larger = only deeper local extrema.")
+int  revPivRight        = input.int(8,     "Pivot Right Bars", minval=1, group="Confirmed Swing Layer", tooltip="Bars after pivot used for confirmation. Larger = more confirmation lag but fewer false signals.")
+bool revRequireRegime   = input.bool(false, "Filter by Heat Score",      group="Confirmed Swing Layer", tooltip="Only mark a confirmed swing when Heat Score >= threshold at the pivot bar.")
+float revHeatMin        = input.float(0.20, "Min Heat at Pivot",         minval=0.0, maxval=1.0, step=0.05, group="Confirmed Swing Layer")
+bool revStrictMode      = input.bool(true,  "Strict Pivot Confirmation", group="Confirmed Swing Layer", tooltip="Pivot must equal the lowest/highest within the strict window. Eliminates pivots that were confirmed locally but a deeper extreme exists nearby.")
+int  revStrictWindow    = input.int(100,    "Strict Confirmation Window", minval=5, maxval=500, group="Confirmed Swing Layer", tooltip="Bars to validate against. Larger = only major swings. 100 = pivot must be the absolute extreme over ~100 bars.")
+bool revUseSwingFilter  = input.bool(true,  "Filter by Swing Magnitude",  group="Confirmed Swing Layer", tooltip="Pivot only accepted if subsequent price moved at least N×ATR away. Filters pivots that did not produce a meaningful swing.")
+float revMinSwingATR    = input.float(1.5,  "Min Swing Size (ATR×)", minval=0.1, step=0.1, group="Confirmed Swing Layer", tooltip="Minimum post-pivot move in ATR multiples within the lookforward window (revPivRight bars).")
 
 // ==== DEBUG ====
 bool dbgEnabled        = input.bool(false, "Enable Debug Log",          group="Debug", tooltip="Logs detailed signal diagnostics to TradingView's Pine Logs panel. Compare detected pivot vs actual extreme in the lookback window.")
@@ -108,6 +118,7 @@ bool showMatrix = input.bool(true, "Show Matrix Table", group="Visualization", t
 string matrixPos = input.string("Top Right", "Matrix Position", ["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Visualization")
 
 bool showJMAGradient = input.bool(true, "Show JMA Gradient Fill", group="Visualization", tooltip="4-layer JMA gradient background (lower lag than EMA)")
+float jmaNeutralATRBand = input.float(0.10, "JMA Neutral Band (ATR)", minval=0.0, maxval=1.0, step=0.05, group="Visualization", tooltip="Treat small price/JMA differences as neutral gray in the gradient fill. Prevents green/red background during flat or undecided phases.")
 bool showDiamondBoxes = input.bool(true, "Show Diamond Zone Boxes", group="Visualization", tooltip="Display support/resistance zone boxes")
 bool showStopLines = input.bool(true, "Show Stop-Loss/Take-Profit Lines", group="Visualization", tooltip="Display SL/TP lines on chart at signal bars")
 
@@ -3184,7 +3195,7 @@ type DualScore
 
 calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW, float volW, float structW, float divW) =>
 
-    // [TEST] Re-enable request.security() ALONE to test if it's the problem
+    // Fetch timeframe-local indicator context.
     IndicatorSet indicators = request.security(syminfo.tickerid, timeframe, calculateEssentialIndicators(close), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
 
     // Extract all score calculations for consistency (always called)
@@ -4669,16 +4680,20 @@ isTakeProfitHit(float currentPrice, float takeProfit, string direction) =>
 // COLOR CODING FUNCTIONS
 // ===========================================================================
 
+const float MATRIX_NEUTRAL_DEADZONE = 0.10
+
 getCellColor(float score, bool isHeader = false) =>
     if isHeader
         color.new(#1976D2, 0)  // Blue for headers
+    else if math.abs(score) < MATRIX_NEUTRAL_DEADZONE
+        color.new(#616161, 0)  // Neutral - Dark Gray for contrast
     else if score > 2.5
         color.new(#00E676, 0)  // Very Strong Bullish - Bright Green
     else if score > 1.5
         color.new(#4CAF50, 0)  // Strong Bullish - Green
     else if score > 0.5
         color.new(#81C784, 0)  // Moderate Bullish - Medium Green
-    else if score > 0
+    else if score >= MATRIX_NEUTRAL_DEADZONE
         color.new(#66BB6A, 0)  // Weak Bullish - Darker Green for readability
     else if score < -2.5
         color.new(#FF1744, 0)  // Very Strong Bearish - Bright Red
@@ -4686,19 +4701,21 @@ getCellColor(float score, bool isHeader = false) =>
         color.new(#F44336, 0)  // Strong Bearish - Red
     else if score < -0.5
         color.new(#E57373, 0)  // Moderate Bearish - Medium Red
-    else if score < 0
+    else if score <= -MATRIX_NEUTRAL_DEADZONE
         color.new(#EF5350, 0)  // Weak Bearish - Darker Red for readability
     else
         color.new(#616161, 0)  // Neutral - Dark Gray for contrast
 
 getScoreSymbol(float score) =>
-    if score > 2.5
+    if math.abs(score) < MATRIX_NEUTRAL_DEADZONE
+        "○"   // Neutral
+    else if score > 2.5
         "▲▲"  // Very strong up
     else if score > 1.5
         "▲"   // Strong up
     else if score > 0.5
         "△"   // Moderate up
-    else if score > 0
+    else if score >= MATRIX_NEUTRAL_DEADZONE
         "·"   // Weak up
     else if score < -2.5
         "▼▼"  // Very strong down
@@ -4706,7 +4723,7 @@ getScoreSymbol(float score) =>
         "▼"   // Strong down
     else if score < -0.5
         "▽"   // Moderate down
-    else if score < 0
+    else if score <= -MATRIX_NEUTRAL_DEADZONE
         "·"   // Weak down
     else
         "○"   // Neutral
@@ -4924,7 +4941,7 @@ if na(structureState)
 // MAIN CALCULATION PIPELINE
 // ============================================================================
 
-// === STEP 1: CALCULATE MULTI-TIMEFRAME SCORES ===
+// === CALCULATE MULTI-TIMEFRAME SCORES ===
 // Chart TF ENABLED: Now safe with hardcoded TF hierarchy (4 timeframes total)
 // WCM DISABLED: Memory optimization for 2H+ timeframes
 // HARDCODED TFs: Parameters ignored, actual TFs selected via getSmartTF1/2/3() in scoring_engine
@@ -4950,29 +4967,36 @@ float recentLow5 = ta.lowest(low[1], 5)
 float swingHigh20 = ta.highest(high, 20)
 float swingLow20 = ta.lowest(low, 20)
 
-// === STEP 2: DETECT MARKET REGIME (Standalone) ===
+// === DETECT MARKET REGIME (Standalone) ===
 MarketRegime regime = analyzeMarketStructure(structureState, jma20, jma50, jma200, atr)
 
-// === STEP 3: CALCULATE HEAT SCORE ===
-HeatScoreBreakdown heatBreakdown = getHeatScoreBreakdown(mtfScores.tf1.totalScore, mtfScores.tf2.totalScore, mtfScores.tf3.totalScore, mtfScores.chartTF.isValid ? mtfScores.chartTF.totalScore : 0.0, false, "BUILDING SETUP", stochRSI, macdHist, atr, atrSMA, mtfScores.tf1.flowScore, mtfScores.tf1.momentumScore, mtfScores.tf1.trendScore, mtfScores.tf1.volatilityScore, mtfScores.tf1.structureScore, mtfScores.tf1.divergenceScore)
-
-// === STEP 4: CALCULATE MV CONFLUENCE ===
+// === CALCULATE MV CONFLUENCE ===
 // WCM REMOVED: Using RSI-based momentum for MV Confluence
 MVInterpretation mvInterp = analyzeMVConfluence(rsi, volume, 20)
 
-// === STEP 5: DETECT EXHAUSTION ===
+// === DETECT EXHAUSTION ===
 ExhaustionResult exhaust = detectExhaustion(3, 14, 14, 20)
 
-// === STEP 6: DETECT DIAMOND ZONES ===
+// === DETECT DIAMOND ZONES ===
 // proximityThreshold increased to 1.5% for better zone detection by Entry Engine
 DiamondZoneResult zones = detectDiamondZonesWithConfluence(5, 5, 14, 0.3, 0.015, exhaust.bullWatch or exhaust.bullConfirmed, exhaust.bearWatch or exhaust.bearConfirmed, exhaust.bullWatch or exhaust.bullConfirmed, exhaust.bearWatch or exhaust.bearConfirmed)
 
-// === STEP 6.5: DETECT DIVERGENCE ZONES (NEW - Phase 1) ===
+// === DETECT DIVERGENCE ZONES ===
 // RSI-Price Divergence with smaller lookbacks for earlier detection
 // NOTE: Reusing 'rsi' from consolidated TA calculations
 DivergenceZonesResult divZones = analyzeDivergenceZones(rsi, 2, 2, 5, 100, 1.0, color.new(color.lime, 0), color.new(color.red, 0))
 
-// === STEP 6.6: NEW ENTRY ENGINE (Chart-TF Only, No MTF) ===
+string setupContext = exhaust.bullConfirmed or exhaust.bearConfirmed ? "STRONG REVERSAL ZONE" :
+     divZones.nearBullZone or divZones.nearBearZone ? "DIVERGENCE CONFIRMED" :
+     regime.isRanging ? "CONSOLIDATION" :
+     regime.isTrending ? "TREND CONTINUATION" :
+     "BUILDING SETUP"
+
+// === CALCULATE HEAT SCORE ===
+bool includeChartInHeat = mtfScores.chartTF.isValid and mtfScores.totalTFs == 4
+HeatScoreBreakdown heatBreakdown = getHeatScoreBreakdown(mtfScores.tf1.totalScore, mtfScores.tf2.totalScore, mtfScores.tf3.totalScore, mtfScores.chartTF.isValid ? mtfScores.chartTF.totalScore : 0.0, includeChartInHeat, setupContext, stochRSI, macdHist, atr, atrSMA, mtfScores.chartTF.flowScore, mtfScores.chartTF.momentumScore, mtfScores.chartTF.trendScore, mtfScores.chartTF.volatilityScore, mtfScores.chartTF.structureScore, mtfScores.chartTF.divergenceScore)
+
+// === NEW ENTRY ENGINE (Chart-TF Only, No MTF) ===
 // Lightweight entry signals using only chart timeframe data
 // NO request.security() calls - memory efficient for all timeframes
 
@@ -5063,7 +5087,7 @@ var EntryState entryState = newEntryState()
 )
 entryState := newEntryState
 
-// === STEP 8: GENERATE SIGNALS (legacy SignalResult, used by Matrix Table only) ===
+// === GENERATE SIGNALS (legacy SignalResult, used by Matrix Table only) ===
 TimeframeScores chartTF = mtfScores.chartTF
 
 float signalOptimizedScore = (chartTF.flowScore * 0.40) + (chartTF.momentumScore * 0.40) + (chartTF.trendScore * 0.10) + (chartTF.volatilityScore * 0.05) + (chartTF.structureScore * 0.05)
@@ -5072,7 +5096,7 @@ MultiTimeframeScores chartOnlyScores = MultiTimeframeScores.new(mtfScores.tf1, m
 
 SignalResult signal = generateSignals(chartOnlyScores, zones, heatBreakdown, mvInterp, exhaust, regime, 0.75, 0.45, true, false, 0.3)
 
-// === STEP 8.6: SIGNAL QUALITY GATE (ATR + Volume) - Filter Entry V2 finals ===
+// === SIGNAL QUALITY GATE (ATR + Volume) - Filter Entry V2 finals ===
 MarketQuality marketQuality = analyzeMarketQuality(atr, atrSMA, volume, volumeSMA, qualityATRContractThresh, qualityATRExpandThresh, qualityVolLowThresh, qualityVolHighThresh)
 
 // Quality Gate: filter entryV2 finalLong/finalShort
@@ -5104,6 +5128,34 @@ bool heatOk = heatBreakdown.overall >= entryHeatMin
 bool finalLong  = qgAllowLong  and entryEvent.emitEntry and entryV2.finalLong  and trendOkLong  and heatOk
 bool finalShort = qgAllowShort and entryEvent.emitEntry and entryV2.finalShort and trendOkShort and heatOk
 
+// === EARLY REVERSAL CANDIDATES (informational, pre-entry) ===
+bool earlyLongEvidence = (earlyUseDivergence and divZones.nearBullZone) or
+     (earlyUseExhaustion and (exhaust.bullWatch or exhaust.bullConfirmed)) or
+     (earlyUseExtreme and (rsiOversold or wt1Oversold))
+bool earlyShortEvidence = (earlyUseDivergence and divZones.nearBearZone) or
+     (earlyUseExhaustion and (exhaust.bearWatch or exhaust.bearConfirmed)) or
+     (earlyUseExtreme and (rsiOverbought or wt1Overbought))
+
+bool closeCrossedAboveJma20 = ta.crossover(close, jma20)
+bool closeCrossedBelowJma20 = ta.crossunder(close, jma20)
+bool earlyLongReaction = not earlyRequirePriceReaction or closeCrossedAboveJma20 or (close > jma20 and close > close[1])
+bool earlyShortReaction = not earlyRequirePriceReaction or closeCrossedBelowJma20 or (close < jma20 and close < close[1])
+bool earlyLongBiasOk = not regime.isTrending or close < jma50 or regime.isTransitioning
+bool earlyShortBiasOk = not regime.isTrending or close > jma50 or regime.isTransitioning
+
+var int lastEarlyLongBar = na
+var int lastEarlyShortBar = na
+bool earlyLongCooldownOk = na(lastEarlyLongBar) or bar_index - lastEarlyLongBar >= earlyCooldown
+bool earlyShortCooldownOk = na(lastEarlyShortBar) or bar_index - lastEarlyShortBar >= earlyCooldown
+
+bool earlyLongCandidate = showEarlyReversal and not finalLong and earlyLongEvidence and earlyLongReaction and earlyLongBiasOk and heatBreakdown.overall >= earlyMinHeat and earlyLongCooldownOk
+bool earlyShortCandidate = showEarlyReversal and not finalShort and earlyShortEvidence and earlyShortReaction and earlyShortBiasOk and heatBreakdown.overall >= earlyMinHeat and earlyShortCooldownOk
+
+if earlyLongCandidate
+    lastEarlyLongBar := bar_index
+if earlyShortCandidate
+    lastEarlyShortBar := bar_index
+
 // === RISK MANAGEMENT (ATR-Based SL/TP for Strategy) ===
 // Stop Loss
 float SL_lvl = finalLong ? close - (atr * atrSLmult) : finalShort ? close + (atr * atrSLmult) : na
@@ -5117,8 +5169,8 @@ float TP3_lvl = finalLong ? close + (atr * tp3ATRMult) : finalShort ? close - (a
 // A-SETUP DETECTION (Premium Quality Signals - informational, NOT strategy)
 // ============================================================================
 // A-Setups are the highest quality signals - clear trend + high heat + momentum
-bool isASetupLong = entryV2.finalLong and heatBreakdown.overall >= 0.65 and strengthScore.longStrength >= 0.70 and regime.isTrending and close > jma50 and jma20 > jma50
-bool isASetupShort = entryV2.finalShort and heatBreakdown.overall >= 0.65 and strengthScore.shortStrength >= 0.70 and regime.isTrending and close < jma50 and jma20 < jma50
+bool isASetupLong = finalLong and heatBreakdown.overall >= 0.65 and strengthScore.longStrength >= 0.70 and regime.isTrending and close > jma50 and jma20 > jma50
+bool isASetupShort = finalShort and heatBreakdown.overall >= 0.65 and strengthScore.shortStrength >= 0.70 and regime.isTrending and close < jma50 and jma20 < jma50
 
 float flowScoreChart = mtfScores.chartTF.flowScore
 float momScoreChart = mtfScores.chartTF.momentumScore
@@ -5130,7 +5182,7 @@ string regimeLabel = regime.isTrending and flowScoreChart > 0 and momScoreChart 
 
 // === MATRIX TABLE ===
 if showMatrix
-    string matrixStatus = isASetupLong ? "★ A-SETUP LONG" : isASetupShort ? "★ A-SETUP SHORT" : regimeLabel
+    string matrixStatus = isASetupLong ? "★ A-SETUP LONG" : isASetupShort ? "★ A-SETUP SHORT" : finalLong ? "ENTRY LONG" : finalShort ? "ENTRY SHORT" : setupContext
     drawMatrixTable(mtfScores, signal, heatBreakdown, mvInterp, exhaust, matrixStatus, false, matrixPos)
 
 // === A-SETUP MARKERS (Premium Signals) ===
@@ -5156,20 +5208,31 @@ p2 = plot(jma20, display=display.none)
 p3 = plot(jma50, display=display.none)
 p4 = plot(jma100, display=display.none)
 p5 = plot(jma200, display=display.none)
-fill(p1, p2, color=showJMAGradient ? (close > jma20 ? color.new(#00E676, 95) : color.new(#FF1744, 95)) : na, title="Fill: Price/JMA20")
-fill(p2, p3, color=showJMAGradient ? (jma20 > jma50 ? color.new(#4CAF50, 93) : color.new(#F44336, 93)) : na, title="Fill: JMA20/50")
-fill(p3, p4, color=showJMAGradient ? (jma50 > jma100 ? color.new(#81C784, 91) : color.new(#E57373, 91)) : na, title="Fill: JMA50/100")
-fill(p4, p5, color=showJMAGradient ? (jma100 > jma200 ? color.new(#A5D6A7, 90) : color.new(#FFCDD2, 90)) : na, title="Fill: JMA100/200")
+float jmaNeutralBand = atr * jmaNeutralATRBand
+color neutralFill1 = color.new(color.gray, 96)
+color neutralFill2 = color.new(color.gray, 94)
+color neutralFill3 = color.new(color.gray, 93)
+color neutralFill4 = color.new(color.gray, 92)
+color fillPriceJma20 = math.abs(close - jma20) <= jmaNeutralBand ? neutralFill1 : close > jma20 ? color.new(#00E676, 95) : color.new(#FF1744, 95)
+color fillJma20Jma50 = math.abs(jma20 - jma50) <= jmaNeutralBand ? neutralFill2 : jma20 > jma50 ? color.new(#4CAF50, 93) : color.new(#F44336, 93)
+color fillJma50Jma100 = math.abs(jma50 - jma100) <= jmaNeutralBand ? neutralFill3 : jma50 > jma100 ? color.new(#81C784, 91) : color.new(#E57373, 91)
+color fillJma100Jma200 = math.abs(jma100 - jma200) <= jmaNeutralBand ? neutralFill4 : jma100 > jma200 ? color.new(#A5D6A7, 90) : color.new(#FFCDD2, 90)
+fill(p1, p2, color=showJMAGradient ? fillPriceJma20 : na, title="Fill: Price/JMA20")
+fill(p2, p3, color=showJMAGradient ? fillJma20Jma50 : na, title="Fill: JMA20/50")
+fill(p3, p4, color=showJMAGradient ? fillJma50Jma100 : na, title="Fill: JMA50/100")
+fill(p4, p5, color=showJMAGradient ? fillJma100Jma200 : na, title="Fill: JMA100/200")
 
 // === DIAMOND ZONES ===
 if showDiamondBoxes
     plotDiamondZones(zones, true)
 
 // === ENTRY ENGINE V2 SIGNAL SHAPES ===
+plotshape(earlyLongCandidate, "Early Reversal Long Candidate", shape.triangleup, location.belowbar, color.new(#00BFA5, 20), size=size.tiny, text="ER", textcolor=color.white)
+plotshape(earlyShortCandidate, "Early Reversal Short Candidate", shape.triangledown, location.abovebar, color.new(#FF6D00, 20), size=size.tiny, text="ER", textcolor=color.white)
 plotshape(finalLong, "Entry Long", shape.triangleup, location.belowbar, color.new(#00E676, 0), size=size.small, text="L", textcolor=color.white)
 plotshape(finalShort, "Entry Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size=size.small, text="S", textcolor=color.white)
 
-// === REVERSAL LAYER (confirmed pivots — exact swing markers) ===
+// === CONFIRMED SWING LAYER (visual context only) ===
 // Detects price pivots and marks the confirmed extreme. Lags by revPivRight bars.
 float revPL = ta.pivotlow(low,  revPivLeft, revPivRight)
 float revPH = ta.pivothigh(high, revPivLeft, revPivRight)
@@ -5192,8 +5255,8 @@ bool swingLowOk  = not revUseSwingFilter or swingMagLow  >= revMinSwingATR
 bool swingHighOk = not revUseSwingFilter or swingMagHigh >= revMinSwingATR
 bool revLong  = showReversal and foundPL and (not revRequireRegime or heatAtPivot >= revHeatMin) and strictLowOk  and swingLowOk
 bool revShort = showReversal and foundPH and (not revRequireRegime or heatAtPivot >= revHeatMin) and strictHighOk and swingHighOk
-plotshape(revLong  ? low[revPivRight]  : na, "Reversal Low",  shape.arrowup,   location.absolute, color.new(#00C853, 0), size=size.small, offset=-revPivRight)
-plotshape(revShort ? high[revPivRight] : na, "Reversal High", shape.arrowdown, location.absolute, color.new(#D50000, 0), size=size.small, offset=-revPivRight)
+plotshape(revLong  ? low[revPivRight]  : na, "Confirmed Swing Low",  shape.arrowup,   location.absolute, color.new(#00C853, 0), size=size.small, offset=-revPivRight)
+plotshape(revShort ? high[revPivRight] : na, "Confirmed Swing High", shape.arrowdown, location.absolute, color.new(#D50000, 0), size=size.small, offset=-revPivRight)
 
 // === DEBUG: validation dots and log ===
 float dbgActualLow  = ta.lowest(low,  dbgLookback)
@@ -5257,6 +5320,8 @@ if showStopLines and (finalLong or finalShort)
 
 alertcondition(finalLong, title="Entry V2 Long", message="CPM v4: ENTRY LONG signal")
 alertcondition(finalShort, title="Entry V2 Short", message="CPM v4: ENTRY SHORT signal")
+alertcondition(earlyLongCandidate, title="Early Reversal Long Candidate", message="CPM v4: EARLY REVERSAL LONG candidate (informational)")
+alertcondition(earlyShortCandidate, title="Early Reversal Short Candidate", message="CPM v4: EARLY REVERSAL SHORT candidate (informational)")
 alertcondition(isASetupLong, title="A-Setup Long", message="CPM v4: A-SETUP LONG (premium)")
 alertcondition(isASetupShort, title="A-Setup Short", message="CPM v4: A-SETUP SHORT (premium)")
 alertcondition(heatBreakdown.overall >= 0.7, title="High Quality Setup", message="CPM v4: HIGH HEAT SCORE - Quality setup detected")
