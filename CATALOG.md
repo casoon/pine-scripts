@@ -25,6 +25,7 @@ Quality columns (★ 1–5):
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
+| [adaptive_supertrend](indicators/adaptive_supertrend/) | 1.3 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Conviction-adaptive band width; ATR rank + trend force + chop; MTF confluence layer |
 | [chandelier_flip_radar](indicators/chandelier_flip_radar/) | 1.4 | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | Promising PF 1.22 |
 | [smooth_trend_radar](indicators/smooth_trend_radar/) | 3.3 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [auto_trendlines](indicators/auto_trendlines/) | 1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | |

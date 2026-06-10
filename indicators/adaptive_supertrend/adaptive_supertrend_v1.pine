@@ -1,0 +1,320 @@
+//@version=6
+// ============================================================================
+// Adaptive Supertrend [WavesUnchained]
+// Version: 1.5
+// Author: WavesUnchained
+// Build: 2026-06-10 00:00:00
+// ============================================================================
+// Supertrend with conviction-adaptive band width. Bands narrow in strong,
+// expanding-volatility trends and widen in chop or low-volatility regimes.
+//
+// Features:
+//   ✓ Adaptive band width driven by ATR rank, trend force, and chop detection
+//   ✓ Each conviction component individually enabled/disabled
+//   ✓ Body filter: blocks flip signals on weak candles (configurable ATR threshold)
+//   ✓ Trap markers: highlights wick-breaks that close back on the wrong side
+//   ✓ Overextension alert: candle color + background when price unusually far from stop
+//   ✓ Optional RSI alignment filter for flip signals
+//   ✓ Gradient trend cloud between stop line and price
+//   ✓ MTF confluence: higher-TF Supertrend direction, pullback zones, confluence signals
+//   ✓ Conviction table showing live component breakdown
+//
+// ============================================================================
+
+indicator("Adaptive Supertrend [WavesUnchained]", overlay=true, max_bars_back=500)
+
+// ~~ Inputs {
+stSrc      = input.source(close, "Source",           group="Supertrend")
+atrLen     = input.int(10,      "ATR Length",        minval=1, group="Supertrend")
+baseMult   = input.float(2.0,   "Base Multiplier",   minval=0.1, step=0.1, group="Supertrend")
+adaptivity  = input.float(0.7,  "Adaptivity",        minval=0.0, maxval=2.0, step=0.1, group="Supertrend",
+  tooltip="How much conviction modulates the band width. 0 = plain Supertrend. Higher = stronger adaptation.")
+smoothType  = input.string("EMA", "Smoothing",      options=["None", "EMA", "WMA", "SMA", "JMA"], group="Supertrend",
+  tooltip="MA applied to the source before computing bands. Reduces wick-driven false flips without affecting the conviction or ratchet logic.")
+smoothLen   = input.int(3,      "Smooth Length",     minval=1, maxval=50, group="Supertrend", active=smoothType != "None")
+
+useAtrRank    = input.bool(true,  "ATR Rank",       group="Conviction",
+  tooltip="High ATR percentile rank (expanding volatility) raises conviction.")
+useTrendForce = input.bool(true,  "Trend Force",    group="Conviction",
+  tooltip="Strong EMA separation relative to ATR raises conviction.")
+tfFast        = input.int(5,      "Fast EMA",       minval=2, group="Conviction")
+tfSlow        = input.int(50,     "Slow EMA",       minval=5, group="Conviction")
+useChop       = input.bool(true,  "Chop Penalty",   group="Conviction",
+  tooltip="Lowers conviction when trend force falls below the cutoff.")
+chopCut       = input.float(0.5,  "Chop Cutoff",    minval=0.05, step=0.05, group="Conviction",
+  tooltip="|emaFast − emaSlow| / ATR below this = choppy.")
+
+bodyMin      = input.float(0.0,  "Min Body (x ATR)", minval=0.0, step=0.1, group="Signal Filter",
+  tooltip="Flip signal ignored when the flip-bar candle body is smaller than this multiple of ATR. 0 = off.")
+useRsiFilter = input.bool(false, "RSI Overbought Filter", group="Signal Filter",
+  tooltip="Block flip signals when RSI is already overextended in the flip direction — avoids chasing into extremes.")
+rsiLen       = input.int(14,     "RSI Length",      minval=2, group="Signal Filter")
+rsiThreshold = input.float(70.0, "RSI Block Above", minval=50, maxval=99, step=1.0, group="Signal Filter",
+  tooltip="Long flips blocked when RSI > threshold. Short flips blocked when RSI < (100 − threshold). Typical: 65–75.")
+
+showMtf  = input.bool(true,   "MTF Confluence",     group="MTF Confluence",
+  tooltip="Show higher-TF Supertrend direction, pullback zones, and confluence entry signals.")
+htfTF    = input.timeframe("240", "Higher Timeframe", group="MTF Confluence",
+  tooltip="Timeframe of the reference Supertrend. Should be higher than the current chart TF. Uses the same ATR Length and Base Multiplier.")
+
+showFlips    = input.bool(true,  "Flip Markers",        group="Style")
+showTraps    = input.bool(true,  "Trap Markers",        group="Style",
+  tooltip="X marker when a wick crosses the stop but the close holds on the wrong side.")
+paintCandles = input.bool(false, "Candle Coloring",     group="Style")
+showCloud    = input.bool(true,  "Trend Cloud",         group="Style")
+showGlow     = input.bool(true,  "Stop Glow",           group="Style")
+showOvext    = input.bool(true,  "Overextension Alert", group="Style",
+  tooltip="Amber candles and background when price-to-stop distance is in the top percentile.")
+ovextPct     = input.int(85,     "Ovext Threshold",     minval=50, maxval=99, group="Style", active=showOvext,
+  tooltip="Percentile rank of stop-distance. 85 = top 15% of historical extension.")
+showTable    = input.bool(true,  "Conviction Table",    group="Style")
+tablePos     = input.string("Bottom Right", "Table Position",
+  options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group="Style")
+colUp        = input.color(#00c853, "Up",   inline="col", group="Style")
+colDn        = input.color(#d50000, "Down", inline="col", group="Style")
+// }
+
+// ~~ Helpers {
+scale01(float v, int len) =>
+    lo = ta.lowest(v, len)
+    hi = ta.highest(v, len)
+    hi == lo ? 0.5 : (v - lo) / (hi - lo)
+
+f_smooth(series float src, simple string mtype, simple int len) =>
+    switch mtype
+        "EMA" => ta.ema(src, len)
+        "WMA" => ta.wma(src, len)
+        "SMA" => ta.sma(src, len)
+        "JMA" =>
+            var float _e0  = na
+            var float _e1  = na
+            var float _e2  = na
+            var float _jma = na
+            _beta  = 0.45 * (len - 1) / (0.45 * (len - 1) + 2)
+            _alpha = math.pow(_beta, 2.0)
+            _e0   := (1.0 - _alpha) * src + _alpha * nz(_e0[1])
+            _e1   := (src - _e0) * (1.0 - _beta) + _beta * nz(_e1[1])
+            _e2   := (_e0 + 1.5 * _e1 - nz(_jma[1])) * math.pow(1.0 - _alpha, 2.0) + math.pow(_alpha, 2.0) * nz(_e2[1])
+            _jma  := _e2 + nz(_jma[1])
+            _jma
+        =>  src
+
+f_htfSupertrend(simple float mult, simple int aLen) =>
+    var float _stL = na
+    var float _stS = na
+    var int   _stD = 1
+    _atr  = ta.atr(aLen)
+    _up   = hl2 - mult * _atr
+    _dn   = hl2 + mult * _atr
+    _stL  := na(_stL[1]) ? _up : close[1] > _stL[1] ? math.max(_up, _stL[1]) : _up
+    _stS  := na(_stS[1]) ? _dn : close[1] < _stS[1] ? math.min(_dn, _stS[1]) : _dn
+    _stD  := na(_stD[1]) ? 1 : _stD[1] == -1 and close > _stS[1] ? 1 : _stD[1] == 1 and close < _stL[1] ? -1 : nz(_stD[1], 1)
+    _line = _stD == 1 ? _stL : _stS
+    _dist = math.abs(close - _line)
+    [_line, _stD, ta.percentrank(_dist, 100) >= 80.0]
+// }
+
+// ~~ Conviction {
+atrVal        = ta.atr(atrLen)
+atrRankPct    = ta.percentrank(atrVal, 100)
+fastEma       = ta.ema(stSrc, tfFast)
+slowEma       = ta.ema(stSrc, tfSlow)
+trendForceRaw  = atrVal > 0 ? math.abs(fastEma - slowEma) / atrVal : 0.0
+trendForceNorm = scale01(trendForceRaw, 100)
+chopNow        = trendForceRaw < chopCut
+
+float convSum = 0.0
+int   convN   = 0
+if useAtrRank
+    convSum += math.min(atrRankPct / 100.0, 0.85)
+    convN   += 1
+if useTrendForce
+    convSum += trendForceNorm
+    convN   += 1
+
+convBase   = convN > 0 ? convSum / convN : 0.5
+conviction = convN > 0 and useChop and chopNow ? convBase * 0.35 : convBase
+// }
+
+// ~~ Adaptive Multiplier {
+adaptMult = baseMult * (1.0 + adaptivity * (1.0 - conviction))
+// }
+
+// ~~ Supertrend {
+var float stLong  = na
+var float stShort = na
+var int   stDir   = 1
+
+bandSrc = f_smooth(stSrc, smoothType, smoothLen)
+upBand  = bandSrc - adaptMult * atrVal
+dnBand  = bandSrc + adaptMult * atrVal
+
+stLong  := na(stLong[1])  ? upBand : close[1] > stLong[1]  ? math.max(upBand, stLong[1])  : upBand
+stShort := na(stShort[1]) ? dnBand : close[1] < stShort[1] ? math.min(dnBand, stShort[1]) : dnBand
+stDir   := na(stDir[1]) ? 1 : stDir[1] == -1 and close > stShort[1] ? 1 : stDir[1] == 1 and close < stLong[1] ? -1 : nz(stDir[1], 1)
+
+stLine   = stDir == 1 ? stLong : stShort
+stFlipUp = stDir == 1  and stDir[1] == -1
+stFlipDn = stDir == -1 and stDir[1] == 1
+// }
+
+// ~~ Body Filter & Traps {
+candleBody = math.abs(close - open)
+bodyOk     = bodyMin <= 0.0 or candleBody >= bodyMin * atrVal
+trapLong   = stDir == -1 and stDir[1] == -1 and high > stShort[1] and close <= stShort[1]
+trapShort  = stDir == 1  and stDir[1] == 1  and low  < stLong[1]  and close >= stLong[1]
+// }
+
+// ~~ Overextension {
+distFromStop   = math.abs(close - stLine)
+distRank       = ta.percentrank(distFromStop, 100)
+isOverextended = distRank >= ovextPct
+// }
+
+// ~~ Signals {
+rsiVal      = ta.rsi(close, rsiLen)
+signalLong  = stFlipUp and bodyOk and (not useRsiFilter or rsiVal <= rsiThreshold)
+signalShort = stFlipDn and bodyOk and (not useRsiFilter or rsiVal >= 100.0 - rsiThreshold)
+// }
+
+// ~~ MTF Confluence {
+[htfLine, htfDir, htfOvext] = request.security(syminfo.tickerid, htfTF,
+    f_htfSupertrend(baseMult, atrLen), lookahead=barmerge.lookahead_off)
+pullbackBull = htfDir == 1  and stDir == -1
+pullbackBear = htfDir == -1 and stDir == 1
+confLong     = signalLong  and htfDir == 1
+confShort    = signalShort and htfDir == -1
+// }
+
+// ~~ Visualization {
+trendCol   = stDir == 1 ? colUp : colDn
+ovextAmber = color.new(#ff6f00, 0)
+trapCol    = color.new(#ff6f00, 30)
+neutralCol = color.new(color.gray, 100)
+
+stUpLine = stDir == 1  ? stLine : na
+stDnLine = stDir == -1 ? stLine : na
+
+// HTF stop: step line, secondary (drawn before LTF so it sits behind)
+htfUpLine = showMtf and htfDir == 1  ? htfLine : na
+htfDnLine = showMtf and htfDir == -1 ? htfLine : na
+plot(htfUpLine, "HTF Stop Up",   color=color.new(colUp, 55), linewidth=1, style=plot.style_stepline)
+plot(htfDnLine, "HTF Stop Down", color=color.new(colDn, 55), linewidth=1, style=plot.style_stepline)
+
+// Stop line: thin crisp line with wide soft glow
+plot(showGlow ? stUpLine : na, "Up Glow",         color=color.new(colUp, 87), linewidth=8, style=plot.style_linebr)
+plot(showGlow ? stDnLine : na, "Down Glow",       color=color.new(colDn, 87), linewidth=8, style=plot.style_linebr)
+plot(stUpLine,                 "Supertrend Up",   color=colUp,                linewidth=1, style=plot.style_linebr)
+plot(stDnLine,                 "Supertrend Down", color=colDn,                linewidth=1, style=plot.style_linebr)
+
+// Cloud: dense near stop, fades toward price
+cloudSt  = showCloud ? stLine : na
+cloudSrc = showCloud ? stSrc  : na
+cloudA   = not na(cloudSt) ? cloudSt + (cloudSrc - cloudSt) * 0.25 : na
+cloudB   = not na(cloudSt) ? cloudSt + (cloudSrc - cloudSt) * 0.50 : na
+cloudC   = not na(cloudSt) ? cloudSt + (cloudSrc - cloudSt) * 0.75 : na
+
+pSt  = plot(cloudSt,  "Cloud Stop", color=neutralCol, display=display.none)
+pCA  = plot(cloudA,   "Cloud A",    color=neutralCol, display=display.none)
+pCB  = plot(cloudB,   "Cloud B",    color=neutralCol, display=display.none)
+pCC  = plot(cloudC,   "Cloud C",    color=neutralCol, display=display.none)
+pSrc = plot(cloudSrc, "Cloud Src",  color=neutralCol, display=display.none)
+
+fill(pSt,  pCA,  color=showCloud ? color.new(trendCol, 74) : na, title="Cloud 1")
+fill(pCA,  pCB,  color=showCloud ? color.new(trendCol, 83) : na, title="Cloud 2")
+fill(pCB,  pCC,  color=showCloud ? color.new(trendCol, 90) : na, title="Cloud 3")
+fill(pCC,  pSrc, color=showCloud ? color.new(trendCol, 96) : na, title="Cloud 4")
+
+// Candle coloring
+activeCol = isOverextended ? ovextAmber : trendCol
+barcolor(paintCandles ? activeCol : na, title="Candle Color")
+
+// Unified zone background (priority: pullback+ovext > pullback > ovext alone)
+color zoneBg = na
+if showMtf and pullbackBull
+    zoneBg := showOvext and isOverextended ? color.new(#00c853, 88) : color.new(colUp, 93)
+else if showMtf and pullbackBear
+    zoneBg := showOvext and isOverextended ? color.new(#d50000, 88) : color.new(colDn, 93)
+else if showOvext and isOverextended
+    zoneBg := color.new(#ffd600, 93)
+bgcolor(zoneBg, title="Zone BG")
+
+// Signal markers: diamond for HTF confluence, triangle for regular flips
+buyY  = ta.lowest(low, 5)
+sellY = ta.highest(high, 5)
+plotshape(showFlips and signalLong  and not (showMtf and confLong)  ? buyY  : na, "Long",      shape.triangleup,   location.absolute, colUp,   size=size.tiny)
+plotshape(showFlips and signalShort and not (showMtf and confShort) ? sellY : na, "Short",     shape.triangledown, location.absolute, colDn,   size=size.tiny)
+plotshape(showMtf and confLong                                       ? buyY  : na, "HTF Long",  shape.diamond,      location.absolute, colUp,   size=size.small)
+plotshape(showMtf and confShort                                      ? sellY : na, "HTF Short", shape.diamond,      location.absolute, colDn,   size=size.small)
+plotshape(showTraps and trapLong                                      ? high  : na, "Bull Trap", shape.xcross,       location.absolute, trapCol, size=size.tiny)
+plotshape(showTraps and trapShort                                     ? low   : na, "Bear Trap", shape.xcross,       location.absolute, trapCol, size=size.tiny)
+// }
+
+// ~~ Conviction Table {
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+tblPosition = switch tablePos
+    "Top Right"   => position.top_right
+    "Top Left"    => position.top_left
+    "Bottom Left" => position.bottom_left
+    =>               position.bottom_right
+
+var table tbl = table.new(tblPosition, 2, 12,
+  bgcolor=color.new(color.white, 5),
+  border_color=color.new(color.gray, 60), border_width=1,
+  frame_color=color.new(color.gray, 40), frame_width=1)
+
+if barstate.islast and showTable
+    table.cell(tbl, 0, 0, "Conviction",  text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(tbl, 1, 0, str.tostring(math.round(conviction * 100)) + "%", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(tbl, 0, 1, "Multiplier",  text_color=tc, text_size=size.tiny)
+    table.cell(tbl, 1, 1, str.tostring(adaptMult, "0.0") + "x", text_color=tc, text_size=size.tiny)
+    table.cell(tbl, 0, 2, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(tbl, 1, 2, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(tbl, 0, 3, "ATR Rank",    text_color=tc, text_size=size.tiny)
+    table.cell(tbl, 1, 3, useAtrRank    ? str.tostring(math.round(atrRankPct)) + "%"           : "-", text_color=tc, text_size=size.tiny)
+    table.cell(tbl, 0, 4, "Trend Force", text_color=tc, text_size=size.tiny)
+    table.cell(tbl, 1, 4, useTrendForce ? str.tostring(math.round(trendForceNorm * 100)) + "%" : "-", text_color=tc, text_size=size.tiny)
+    chopTcol = useChop and chopNow ? color.new(#d50000, 0) : tc
+    chopStr  = not useChop ? "-" : chopNow ? "yes" : "no"
+    table.cell(tbl, 0, 5, "Chop",   text_color=tc,       text_size=size.tiny)
+    table.cell(tbl, 1, 5, chopStr,  text_color=chopTcol, text_size=size.tiny)
+    table.cell(tbl, 0, 6, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(tbl, 1, 6, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    bodyStr  = bodyMin <= 0.0 ? "-" : str.tostring(math.round(candleBody / atrVal * 100)) + "%"
+    table.cell(tbl, 0, 7, "Body",  text_color=tc, text_size=size.tiny)
+    table.cell(tbl, 1, 7, bodyStr, text_color=tc, text_size=size.tiny)
+    ovextTcol = isOverextended ? color.new(#ff6f00, 0) : tc
+    table.cell(tbl, 0, 8, "Ovext",  text_color=tc,        text_size=size.tiny)
+    table.cell(tbl, 1, 8, str.tostring(math.round(distRank)) + "%", text_color=ovextTcol, text_size=size.tiny)
+    table.cell(tbl, 0, 9, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(tbl, 1, 9, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    htfDirStr = htfDir == 1 ? "↑ Up" : "↓ Down"
+    htfDirCol = htfDir == 1 ? color.new(#00c853, 0) : color.new(#d50000, 0)
+    table.cell(tbl, 0, 10, "HTF",    text_color=tc, text_size=size.tiny)
+    table.cell(tbl, 1, 10, showMtf ? htfDirStr : "off", text_color=showMtf ? htfDirCol : tc, text_size=size.tiny)
+    string htfSetupStr = "—"
+    color  htfSetupCol = tc
+    if showMtf
+        if pullbackBull
+            htfSetupStr := isOverextended ? "↑ Ready" : "↑ Watch"
+            htfSetupCol := isOverextended ? color.new(#00c853, 0) : color.new(#00c853, 40)
+        else if pullbackBear
+            htfSetupStr := isOverextended ? "↓ Ready" : "↓ Watch"
+            htfSetupCol := isOverextended ? color.new(#d50000, 0) : color.new(#d50000, 40)
+    table.cell(tbl, 0, 11, "Setup",     text_color=tc,          text_size=size.tiny)
+    table.cell(tbl, 1, 11, htfSetupStr, text_color=htfSetupCol, text_size=size.tiny)
+// }
+
+// ~~ Alerts {
+alertcondition(signalLong,                "Long Signal",          "Adaptive Supertrend: Long flip")
+alertcondition(signalShort,               "Short Signal",         "Adaptive Supertrend: Short flip")
+alertcondition(signalLong or signalShort, "Any Signal",           "Adaptive Supertrend: Flip signal")
+alertcondition(stFlipUp,                  "Trend Up",             "Adaptive Supertrend: Trend turned up")
+alertcondition(stFlipDn,                  "Trend Down",           "Adaptive Supertrend: Trend turned down")
+alertcondition(trapLong,                  "Bull Trap",            "Adaptive Supertrend: Wick above stop, close held below")
+alertcondition(trapShort,                 "Bear Trap",            "Adaptive Supertrend: Wick below stop, close held above")
+alertcondition(confLong,                  "HTF Confluence Long",  "Adaptive Supertrend: HTF confluence long flip")
+alertcondition(confShort,                 "HTF Confluence Short", "Adaptive Supertrend: HTF confluence short flip")
+// }
