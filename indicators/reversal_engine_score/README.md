@@ -1,43 +1,54 @@
 # Reversal Engine Score v1
 
-Score-based liquidity sweep reversal detector. A signal fires only when a confirmed sweep of a prior swing high/low is accompanied by HTF trend alignment and enough evidence points to meet the configurable minimum score. The score aggregates up to 12 individual conditions, each weighted by importance.
+Score-based liquidity sweep reversal detector with HTF trend confluence. A signal fires only when all mandatory gates pass on a confirmed bar and the optional quality score meets the per-direction minimum. Designed and tested for the 15M timeframe (optional lockout on other TFs).
 
 ## Features
 
-- Score gate (0–12 pts) — signal requires sufficient evidence before firing
+- Mandatory gate model — sweep + close position + body size + ATR corridor + HTF trend + spike filter must all pass
+- Quality score (0–2 optional conditions) with per-direction thresholds (Long/Short configurable separately)
+- Short optionals use reversal-appropriate conditions (RSI still elevated, no higher-high structure)
 - Liquidity sweep detection: swing violation with recovery close on the same bar
-- HTF trend filter via dual EMA (fast / slow) on any configurable timeframe
-- ATR volatility filter and candle body size minimum
-- Scoring across EMA slope, RSI momentum, close position, candle direction, and prior bar break
+- ATR corridor filter — rejects both low-volatility noise and spike/news regimes
+- Spike filter — blocks sweeps deeper than N×ATR (real breakdowns, not reversals)
+- Structural SL: sweep low/high plus configurable ATR noise buffer; TP as R-multiple of actual risk
+- HTF trend filter via dual EMA on a configurable timeframe (`lookahead_off`, no repaint)
+- Configurable Reclaim MA (EMA / RMA / SMA / WMA / HMA / JMA)
+- Price structure labels (HH / HL / LH / LL) at confirmed pivots (optional)
+- Outcome tracking: signal label turns blue when no follow-through within N bars
+- Cooldown gate to suppress signal chasing
 - 15M-only lockout with orange background on other timeframes
-- Cooldown gate to suppress signal chasing after a recent entry
-- ATR-based SL/TP levels rendered as line-break plots
 - Hidden strategy-ready plots: direction, score, entry, stop, take
 - Alert conditions for BUY / SELL / either
 
-## Scoring
+## Signal model
 
-Each long or short signal earns points from ten conditions. Maximum possible score is 12.
+**Mandatory gates (all required):**
 
-| Condition | Points |
-|-----------|--------|
-| HTF trend aligned (bullTrend / bearTrend) | 2 |
-| Liquidity sweep with recovery close | 2 |
-| Momentum (EMA + RSI side) | 1 |
-| Close in upper / lower third of candle range | 1 |
-| ATR above baseline × factor | 1 |
-| Body above ATR × factor | 1 |
-| EMA slope in signal direction | 1 |
-| RSI rising / falling | 1 |
-| Close breaks prior bar high / low | 1 |
-| Bull / bear candle | 1 |
+| Gate | Long condition |
+|------|----------------|
+| Liquidity sweep | `low < prevSwingLow` and `close > prevSwingLow` |
+| Close position | Close in upper third of the bar range |
+| Body size | Body > ATR × minBodyAtr |
+| ATR corridor | `atrLowFactor × atrBase < ATR < atrHighFactor × atrBase` |
+| HTF trend | HTF fast EMA not below slow EMA (not bearish) |
+| Spike filter | Sweep depth ≤ ATR × spikeAtrMult |
 
-## Recommended starting parameters
+Shorts mirror all conditions, except the HTF gate (not bullish) and the optionals below.
 
-| Parameter | Default | Strict |
-|-----------|---------|--------|
-| Minimum Score | 7 | 8–9 |
-| Sweep Lookback | 10 | 10 |
-| Cooldown | 5 | 8–12 |
-| SL ATR Mult | 1.2 | 1.2 |
-| TP ATR Mult | 2.0 | 2.5 |
+**Optional quality points (0–2):**
+
+| Direction | +1 | +1 |
+|-----------|----|----|
+| Long | RSI > 50 | No lower-low structure |
+| Short | RSI > 50 (still elevated — reversal from overbought) | No higher-high structure |
+
+Quality tiers: A (2), B (1), C (0). Signals require `minQualityLong` (default 2) / `minQualityShort` (default 1).
+
+## SL / TP
+
+- **SL (long):** `min(low, prevSwingLow) − ATR × slAtrBuffer` — structure is the primary stop, the ATR buffer absorbs noise
+- **TP (long):** `entry + risk × tpRMult` where risk = distance entry → structural SL
+
+## Status
+
+Under active rework — see `strategies/reversal_engine_score/todo.md` for the test131 analysis and v1.2 strategy roadmap.

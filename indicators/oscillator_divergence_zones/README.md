@@ -7,7 +7,8 @@ Detects regular and hidden divergences by comparing consecutive price pivots wit
 - **Oscillator selector**: RSI, CCI, MFI — one dropdown, all settings adapt automatically including the pane midline (50 for RSI/MFI, 0 for CCI)
 - **Regular divergence**: price makes a lower low while the oscillator makes a higher low (bullish), or price makes a higher high while the oscillator makes a lower high (bearish) — reversal signal
 - **Hidden divergence**: price/oscillator diverge in trend direction rather than against it — continuation signal, toggled separately with distinct visual style (dashed edge, transparent fill, triangle markers)
-- **OB/OS filter**: optional level thresholds suppress signals in the neutral oscillator zone; defaults tuned for RSI/MFI, tooltips suggest values for CCI
+- **Level filter (three modes)**: Off / Fixed (percentage of the OB–OS range) / Dynamic Zones (adaptive percentile thresholds from recent oscillator history) — suppresses signals in the neutral oscillator zone
+- **StdDev filter**: optional statistical overextension gate — regular divergences only fire when the oscillator is outside its rolling mean ± N×StdDev band at the pivot
 - **ATR-based zone width**: half-width is locked at creation-time ATR × factor, so the band reflects the volatility at the time of the signal
 - **Break trigger**: full-candle through level (wick-resistant, default) or close-based — configurable
 - **Zone retest counter**: each active zone tracks how often price re-enters it without breaking; displayed as `×N` at the right edge with tooltip
@@ -22,7 +23,7 @@ Detects regular and hidden divergences by comparing consecutive price pivots wit
 | CCI | 100 | −100 | 0 | update filter thresholds to ~±25 |
 | MFI | 80 | 20 | 50 | requires volume data |
 
-OB/OS and filter thresholds must be set manually when switching oscillators — the script does not auto-update them.
+With **Auto OB/OS per Oscillator** enabled (default), the script applies these levels automatically when switching oscillators. Disable it to set custom OB/OS values; the fixed filter thresholds are defined as a percentage of the OB–OS range and adapt either way.
 
 ## Zone Behavior
 

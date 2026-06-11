@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.0 — 2026-06-11
+- Intrabar delta (optional, off by default): the bull/bear split per bar can now come from real lower-timeframe volume direction (`request.security_lower_tf`, chart TF ÷ granularity, clamped to 1 minute) instead of the close-location approximation — falls back automatically on 1-minute/seconds charts or missing LTF data
+- Absorption profile (optional): wick-volume per price row — flow at prices the bar visited but closed away from — drawn as a mirror profile left of the anchor line
+- Absorption peak zones (optional): rows whose absorption exceeds both neighbors and ≥ 50% of the absorption maximum are projected as S/R zones across the lookback window
+
+## v1.6 — 2026-06-11
+- LVN zones: new "Min Zone Rows" input (default 1 = off) — zones built from fewer adjacent LVN rows than the minimum are skipped
+- LVN zones: new "Extend Zones Right" input (default off) — projects zone boxes forward to the right edge of the chart
+- Internal: multi-line ternaries rewritten as if/else for Pine v6 compatibility
+
 ## v1.5 — 2026-05-15
 - HVN / LVN / AVN node classification: reference bars now colored by relative flow density (warm orange = HVN, faded gray = LVN, neutral gray = AVN) — immediately shows which price rows were densely vs thinly traded
 - Configurable HVN/LVN thresholds (default 80%/20% of row maximum)

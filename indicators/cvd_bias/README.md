@@ -9,6 +9,7 @@ Estimates Cumulative Volume Delta (CVD) over a rolling window — buying volume 
 - **CVD rate of change**: 1st derivative of normalized CVD — shows acceleration/deceleration of buying/selling pressure
 - **Price/CVD divergence**: fires when price prints a new N-bar high (or low) while CVD rate of change is falling (or rising) — suggesting the price extreme is not volume-confirmed
 - **Dashboard**: state (Strong Bull / Bull / Neutral / Bear / Strong Bear), CVD value, rate direction, active divergence
+- **Alerts**: bull/bear divergence, CVD zero cross up/down
 
 ## Settings
 

@@ -2,6 +2,8 @@
 
 ATR-based trailing stop with five-level trend state classification. Instead of a binary long/short flip, trend weakening becomes visible before the actual direction change through progressive bar coloring and configurable warning/danger zones.
 
+> **Relation to [adaptive_supertrend](../adaptive_supertrend/):** same family — ATR trailing-stop flip with ratchet, body filter and trap markers — but different anchor and focus. Chandelier anchors at HH/LL ± k×ATR and specializes in *early-warning state classification* (with a validated strategy); Adaptive Supertrend anchors at hl2 ± k×ATR and specializes in *conviction-adaptive bands + MTF confluence entries*.
+
 ## Features
 
 - **Ratchet trailing stop**: long stop ratchets up only, short stop ratchets down only
@@ -10,7 +12,9 @@ ATR-based trailing stop with five-level trend state classification. Instead of a
 - **Correct distance measurement**: warning/danger zones measure to `longStopPrev` / `shortStopPrev` — the actual flip trigger, not the current stop value
 - **Inactive stop**: opposing stop shown as gray line — see where the flip trigger sits
 - **Trap markers**: wick crossed the flip trigger intrabar but close held — often a stop hunt or liquidity grab
-- **Adaptive ATR multiplier**: optional scaling based on volatility regime (ATR vs. 100-bar average)
+- **Three adaptive modes**: Off (fixed multiplier) / Simple (scaling by volatility regime, ATR vs. 100-bar average) / AI (K-means clustering over a factor range self-selects the best-performing multiplier)
+- **AI cluster selector**: Best / Average / Worst performance cluster as multiplier source
+- **AI Performance AMA**: adaptive smoothed stop line weighted by cluster performance index, plus optional AI factor label on the last bar
 - **Alert conditions** and `alert()` calls for flips and traps
 
 ## State System

@@ -1,4 +1,4 @@
-# CoilForge Zones v1.1
+# CoilForge Zones v1.2
 
 Detects price compression zones using a weighted, multi-module scoring system built from ATR compression, ADX chop filter, volume dry-up, impulse context, and historical support/resistance reuse. When a valid zone ends, the indicator stays armed for a configurable watch window and fires a confirmed breakout signal only when price exits with volume and rising ADX.
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v4.5.0 — 2026-06-11
+- Fix: 4H lookback input was never used — every intraday timeframe above 30 minutes fell into the 1H branch; 2H/4H charts now use the 4H lookback
+- Fix: trend EMA, volume SMAs and range-score pivots are now computed at global scope — previously they ran inside conditionally-executed functions, which skews `ta.*` rolling state (e.g. on bars with `high == low` or outside active phases) and could distort Prior Trend and Range Score
+- Fix: phase box/label left edge clamped to ~9000 bars back — prevents a runtime error when a long Markup/Markdown phase starts further back than TradingView's drawing limit
+- New alerts: SOS, SOW, LPS and LPSY detected — the Phase D entry events are now alertable like Spring/UTAD/Test
+
 ## v4.4.0 — 2026-05-15
 - SC/BC spread check now ATR-based (`high - low > ATR × 1.5`) instead of `/ close > 2%` — correct for all instruments and timeframes
 - Spring/UTAD threshold hybrid: fires when depth > `ATR × 0.25` OR ≥ configured % — less misses on low-volatility instruments

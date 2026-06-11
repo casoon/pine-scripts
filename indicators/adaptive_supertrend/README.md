@@ -2,14 +2,16 @@
 
 A Supertrend indicator with conviction-adaptive band width. Instead of a fixed ATR multiplier, the band narrows when the market is trending strongly and widens when conditions are choppy or volatility is contracting. This means the stop trails price more tightly during high-conviction moves and gives more room during uncertain regimes — without requiring any manual parameter adjustment per timeframe.
 
+> **Relation to [chandelier_flip_radar](../chandelier_flip_radar/):** same family — ATR trailing-stop flip with ratchet, body filter and trap markers — but different anchor and focus. This indicator adds conviction-adaptive band width and an MTF confluence layer; Chandelier Flip Radar adds five-level early-warning states, AI factor selection and has a validated strategy behind it.
+
 ## Features
 
 - Adaptive band width driven by a transparent conviction score (ATR rank, trend force, chop detection)
 - Each conviction component can be individually enabled or disabled
 - Conviction table in the chart corner showing live component values and the resulting multiplier
-- Optional RSI alignment filter: flip signals only fire when RSI confirms the direction
+- Optional RSI overbought filter: blocks flip signals when RSI is already overextended in the flip direction
 - Gradient trend cloud between stop line and price
-- Glow effect and flip dot markers on the stop line
+- Glow effect on the stop line; triangle flip markers and trap (X) markers
 - MTF confluence: higher-TF Supertrend direction, pullback zone highlighting, and diamond confluence signals
 
 ## Conviction System
@@ -35,12 +37,12 @@ When both ATR Rank and Trend Force are enabled, conviction is their simple avera
 
 ## Signal Filter
 
-Flip signals (the triangle markers) fire on every Supertrend direction change by default. With the RSI Filter enabled:
+Flip signals (the triangle markers) fire on every Supertrend direction change by default. With the RSI Overbought Filter enabled, flips into already-overextended conditions are blocked:
 
-- **Long flip**: only signals when RSI ≥ threshold (default 50)
-- **Short flip**: only signals when RSI ≤ (100 − threshold)
+- **Long flip**: blocked when RSI > threshold (default 70)
+- **Short flip**: blocked when RSI < (100 − threshold)
 
-The flip dots on the stop line always appear on every direction change, regardless of the filter.
+A Min Body filter (off by default) additionally ignores flips whose flip-bar candle body is smaller than N × ATR.
 
 ## MTF Confluence
 

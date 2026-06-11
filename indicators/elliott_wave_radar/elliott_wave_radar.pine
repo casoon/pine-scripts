@@ -1,0 +1,682 @@
+//@version=6
+// ============================================================================
+// Elliott Wave Radar [WavesUnchained]
+// Version: 1.2
+// Author: WavesUnchained
+// Build: 2026-06-11 00:00:00
+// ============================================================================
+// Rule-validated Elliott Wave counting on ZigZag pivots. Labels impulses
+// (1-5) and zigzag corrections (A-B-C) only when the hard EW rules hold,
+// scores each count by Fibonacci guideline adherence, projects targets for
+// the developing wave and checks sub-wave structure on a finer pivot degree.
+// Shows "no valid count" instead of forcing a count onto the chart.
+//
+// Features:
+//   ✓ ZigZag pivot engine with ATR noise filter (two degrees)
+//   ✓ Hard rules: W2 < 100% of W1, W3 never shortest, W4/W1 overlap ban
+//   ✓ Fibonacci guideline scoring (0-100) incl. alternation bonus
+//   ✓ Honest "no valid count" state — never forces a count
+//   ✓ Corrections: zigzag A-B-C and flat (regular/expanded) detection
+//   ✓ Developing counts: W3 / W5 / C-wave setups with Fib target projections
+//   ✓ Post-impulse correction targets (38.2 / 50 / 61.8 %)
+//   ✓ Sub-wave labels (i)-(iv) / (a)-(b) from the finer pivot degree
+//   ✓ Invalidation level drawn and monitored while a count is active
+//   ✓ Alternate count shown in the dashboard
+//   ✓ Alerts: impulse/ABC/flat complete, W3/W5/C setup, count invalidated
+//
+// ============================================================================
+
+indicator("Elliott Wave Radar [WavesUnchained]", shorttitle="EW Radar", overlay=true,
+     max_labels_count=500, max_lines_count=500, max_bars_back=1000)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+grpZZ = "ZigZag Engine"
+pivLen      = input.int(8,   "Pivot Length (primary degree)",  minval=3,  group=grpZZ, tooltip="Bars left/right for a confirmed primary pivot. Larger = bigger waves.")
+subLen      = input.int(3,   "Pivot Length (sub degree)",      minval=2,  group=grpZZ, tooltip="Finer pivot degree used to verify internal sub-wave structure.")
+minSwingATR = input.float(0.5, "Min Swing Size (ATR ×)", step=0.1, minval=0.0, group=grpZZ, tooltip="A new primary pivot must be at least this many ATR away from the previous one. Filters noise swings.")
+maxPiv      = input.int(60,  "Max pivots stored", minval=12, maxval=200, group=grpZZ)
+showZZ      = input.bool(true, "Draw ZigZag (primary)", group=grpZZ)
+
+grpRules = "Wave Validation"
+allowDiag = input.bool(false, "Allow W4 into W1 territory (diagonal)", group=grpRules, tooltip="Leading/ending diagonals allow W4 to overlap W1. Off = strict impulse rules.")
+minScore  = input.int(55, "Min count score (0-100)", minval=0, maxval=100, group=grpRules, tooltip="Counts scoring below this are not shown — the dashboard reports 'no valid count' instead.")
+
+grpDisp = "Display"
+showProj = input.bool(true, "Show Fib target projections", group=grpDisp)
+showSub  = input.bool(true, "Show sub-wave labels", group=grpDisp)
+showDash = input.bool(true, "Show dashboard", group=grpDisp)
+dashPos  = input.string("Top Right", "Dashboard position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grpDisp)
+bullC    = input.color(#00c853, "Bullish count", group=grpDisp)
+bearC    = input.color(#d50000, "Bearish count", group=grpDisp)
+projC    = input.color(#ff6f00, "Projection lines", group=grpDisp)
+zzC      = input.color(color.new(color.gray, 55), "ZigZag color", group=grpDisp)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pivot storage — primary + sub degree
+// ─────────────────────────────────────────────────────────────────────────────
+// pivot type: +1 = high pivot, -1 = low pivot
+var float[] pPrc = array.new_float()
+var int[]   pBar = array.new_int()
+var int[]   pTyp = array.new_int()
+
+var float[] sPrc = array.new_float()
+var int[]   sBar = array.new_int()
+var int[]   sTyp = array.new_int()
+
+atrV = ta.atr(14)
+
+// True extreme of `typ` between refBar (exclusive) and the current bar.
+// Catches sharp counter-swings that never confirmed as ta.pivot* pivots —
+// without this, a wave point can land on a later, weaker extreme.
+f_extreme(int refBar, float price, int barIdx, int typ) =>
+    float best = price
+    int bestBar = barIdx
+    int span = math.min(bar_index - refBar, 900)
+    if span > 0
+        for i = 0 to span - 1
+            if typ == 1 and high[i] > best
+                best := high[i]
+                bestBar := bar_index - i
+            else if typ == -1 and low[i] < best
+                best := low[i]
+                bestBar := bar_index - i
+    [best, bestBar]
+
+// Push a pivot enforcing alternation. The stored point is always the TRUE
+// extreme since the previous pivot (not just the confirmed ta.pivot* value).
+// Same-type pivots replace the stored one when more extreme. Alternating
+// pivots must clear the min swing filter.
+f_push(float[] aP, int[] aB, int[] aT, int barIdx, float price, int typ, float minSw) =>
+    bool changed = false
+    int n = array.size(aT)
+    if n > 0 and array.get(aT, n - 1) == typ
+        // same type: anchor the extreme scan at the pivot BEFORE the stored one
+        int refBar = n > 1 ? array.get(aB, n - 2) : array.get(aB, n - 1)
+        [best, bestBar] = f_extreme(refBar, price, barIdx, typ)
+        float lastP = array.get(aP, n - 1)
+        bool more = typ == 1 ? best > lastP : best < lastP
+        if more
+            array.set(aP, n - 1, best)
+            array.set(aB, n - 1, bestBar)
+            changed := true
+    else
+        float bestP = price
+        int bestB = barIdx
+        if n > 0
+            [sP, sB] = f_extreme(array.get(aB, n - 1), price, barIdx, typ)
+            bestP := sP
+            bestB := sB
+        bool okSize = true
+        if n > 0 and minSw > 0
+            okSize := math.abs(bestP - array.get(aP, n - 1)) >= minSw
+        if okSize
+            array.push(aP, bestP)
+            array.push(aB, bestB)
+            array.push(aT, typ)
+            changed := true
+    while array.size(aT) > maxPiv
+        array.shift(aP)
+        array.shift(aB)
+        array.shift(aT)
+    changed
+
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low, pivLen, pivLen)
+float minSwAbs = minSwingATR * atrV
+
+bool newPiv = false
+if not na(ph)
+    if f_push(pPrc, pBar, pTyp, bar_index - pivLen, ph, 1, minSwAbs)
+        newPiv := true
+if not na(pl)
+    if f_push(pPrc, pBar, pTyp, bar_index - pivLen, pl, -1, minSwAbs)
+        newPiv := true
+
+sph = ta.pivothigh(high, subLen, subLen)
+spl = ta.pivotlow(low, subLen, subLen)
+if not na(sph)
+    f_push(sPrc, sBar, sTyp, bar_index - subLen, sph, 1, 0.0)
+if not na(spl)
+    f_push(sPrc, sBar, sTyp, bar_index - subLen, spl, -1, 0.0)
+
+// Accessors counted backwards from the most recent pivot (back = 0)
+f_p(int back) =>
+    array.get(pPrc, array.size(pPrc) - 1 - back)
+f_b(int back) =>
+    array.get(pBar, array.size(pBar) - 1 - back)
+f_t(int back) =>
+    array.get(pTyp, array.size(pTyp) - 1 - back)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scoring helpers
+// ─────────────────────────────────────────────────────────────────────────────
+// Linear closeness score: 1.0 at the ideal ratio, 0 beyond ideal ± width
+f_score(float x, float ideal, float width) =>
+    math.max(0.0, 1.0 - math.abs(x - ideal) / width)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Count evaluation — each returns [valid, score 0-100]
+// All windows END at the most recent confirmed pivot.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Complete impulse: 6 pivots P0..P5, direction = type of P5 (+1 up impulse)
+f_eval_impulse() =>
+    bool valid = false
+    float score = 0.0
+    if array.size(pTyp) >= 6
+        int dir = f_t(0)
+        float p0 = f_p(5)
+        float p1 = f_p(4)
+        float p2 = f_p(3)
+        float p3 = f_p(2)
+        float p4 = f_p(1)
+        float p5 = f_p(0)
+        float w1 = math.abs(p1 - p0)
+        float w2 = math.abs(p2 - p1)
+        float w3 = math.abs(p3 - p2)
+        float w4 = math.abs(p4 - p3)
+        float w5 = math.abs(p5 - p4)
+        // hard rules
+        bool r1 = dir == 1 ? p2 > p0 : p2 < p0                      // W2 never beyond W1 start
+        bool r2 = not (w3 < w1 and w3 < w5)                          // W3 never the shortest
+        bool r3 = allowDiag or (dir == 1 ? p4 > p1 : p4 < p1)        // W4 outside W1 territory
+        bool rP = dir == 1 ? p3 > p1 and p5 > p3 : p3 < p1 and p5 < p3 // progress: W3 beyond W1 end, W5 beyond W3 end
+        if r1 and r2 and r3 and rP and w1 > 0 and w3 > 0
+            valid := true
+            float rr2 = w2 / w1
+            float e3  = w3 / w1
+            float rr4 = w4 / w3
+            float e5  = w5 / w1
+            float s2  = f_score(rr2, 0.585, 0.40)
+            float s3  = math.max(f_score(e3, 1.618, 1.20), 0.85 * f_score(e3, 2.618, 1.20))
+            float s4  = f_score(rr4, 0.382, 0.35)
+            float s5  = math.max(f_score(e5, 0.618, 0.50), f_score(e5, 1.0, 0.50))
+            float sAlt = math.abs(rr2 - rr4) >= 0.10 ? 1.0 : math.abs(rr2 - rr4) / 0.10
+            score := 100.0 * (0.20 * s2 + 0.30 * s3 + 0.15 * s4 + 0.20 * s5 + 0.15 * sAlt)
+    [valid, score]
+
+// Complete zigzag correction: 4 pivots P0,A,B,C — direction = type of C
+f_eval_abc() =>
+    bool valid = false
+    float score = 0.0
+    if array.size(pTyp) >= 4
+        int dir = f_t(0)                                             // -1: downward correction
+        float p0 = f_p(3)
+        float pA = f_p(2)
+        float pB = f_p(1)
+        float pC = f_p(0)
+        float wA = math.abs(pA - p0)
+        float wB = math.abs(pB - pA)
+        float wC = math.abs(pC - pB)
+        if wA > 0
+            float rB = wB / wA
+            float rC = wC / wA
+            bool bOk = rB >= 0.236 and rB <= 0.886                   // B retrace inside zigzag norms
+            bool cOk = dir == 1 ? pC > pA : pC < pA                  // C travels beyond A end
+            bool cLen = rC >= 0.5 and rC <= 2.0
+            if bOk and cOk and cLen
+                valid := true
+                float sB = f_score(rB, 0.550, 0.35)
+                float sC = math.max(f_score(rC, 1.0, 0.60), 0.80 * f_score(rC, 1.618, 0.60))
+                score := 100.0 * (0.40 * sB + 0.60 * sC)
+    [valid, score]
+
+// Complete flat correction: 4 pivots P0,A,B,C — B retraces ≥ 90% of A
+// (regular flat ≈ 1.0, expanded flat ≈ 1.05-1.38), C travels beyond A end.
+// Disjoint from the zigzag eval, which caps B at 0.886.
+f_eval_flat() =>
+    bool valid = false
+    float score = 0.0
+    if array.size(pTyp) >= 4
+        int dir = f_t(0)                                             // direction of C
+        float p0 = f_p(3)
+        float pA = f_p(2)
+        float pB = f_p(1)
+        float pC = f_p(0)
+        float wA = math.abs(pA - p0)
+        float wB = math.abs(pB - pA)
+        float wC = math.abs(pC - pB)
+        if wA > 0
+            float rB = wB / wA
+            float rC = wC / wA
+            bool bOk = rB >= 0.90 and rB <= 1.38
+            bool cOk = dir == 1 ? pC > pA : pC < pA
+            bool cLen = rC >= 0.8 and rC <= 1.8
+            if bOk and cOk and cLen
+                valid := true
+                float sB = math.max(f_score(rB, 1.0, 0.20), 0.90 * f_score(rB, 1.27, 0.25))
+                float sC = math.max(f_score(rC, 1.0, 0.50), 0.85 * f_score(rC, 1.618, 0.50))
+                score := 100.0 * (0.45 * sB + 0.55 * sC)
+    [valid, score]
+
+// Memory of the last completed impulse — context for the C-wave setup
+var int   impDir      = 0
+var int   impEndBar   = na
+var float impEndPrice = na
+
+// Developing correction after a completed impulse: the pivot at the impulse
+// end is followed by A and B → C setup. Direction = against the impulse.
+f_eval_devc() =>
+    bool valid = false
+    float score = 0.0
+    if impDir != 0 and not na(impEndBar) and array.size(pTyp) >= 3
+        if f_b(2) == impEndBar and f_t(2) == impDir
+            float pA = f_p(1)
+            float pB = f_p(0)
+            float wA = math.abs(pA - f_p(2))
+            float wB = math.abs(pB - pA)
+            if wA > 0
+                float rB = wB / wA
+                // B stays below the impulse extreme — otherwise the trend resumed
+                bool bInside = impDir == 1 ? pB < impEndPrice : pB > impEndPrice
+                if bInside and rB >= 0.236 and rB <= 0.886
+                    valid := true
+                    score := 100.0 * f_score(rB, 0.550, 0.35)
+    [valid, score]
+
+// Developing: W1-W2 confirmed (3 pivots) → W3 setup. Direction = type of P1.
+f_eval_dev2() =>
+    bool valid = false
+    float score = 0.0
+    if array.size(pTyp) >= 3
+        int dir = f_t(1)                                             // P1 is the W1 extreme
+        float p0 = f_p(2)
+        float p1 = f_p(1)
+        float p2 = f_p(0)
+        float w1 = math.abs(p1 - p0)
+        float w2 = math.abs(p2 - p1)
+        if w1 > 0
+            float rr2 = w2 / w1
+            bool r1 = dir == 1 ? p2 > p0 : p2 < p0
+            if r1 and rr2 >= 0.236 and rr2 < 1.0
+                valid := true
+                score := 100.0 * f_score(rr2, 0.585, 0.45)
+    [valid, score]
+
+// Developing: W1-W4 confirmed (5 pivots) → W5 setup. Direction = type of P3.
+f_eval_dev4() =>
+    bool valid = false
+    float score = 0.0
+    if array.size(pTyp) >= 5
+        int dir = f_t(1)                                             // P3 type == P1 type == dir
+        float p0 = f_p(4)
+        float p1 = f_p(3)
+        float p2 = f_p(2)
+        float p3 = f_p(1)
+        float p4 = f_p(0)
+        float w1 = math.abs(p1 - p0)
+        float w2 = math.abs(p2 - p1)
+        float w3 = math.abs(p3 - p2)
+        float w4 = math.abs(p4 - p3)
+        if w1 > 0 and w3 > 0
+            bool r1 = dir == 1 ? p2 > p0 : p2 < p0
+            bool r3 = allowDiag or (dir == 1 ? p4 > p1 : p4 < p1)
+            bool rP = dir == 1 ? p3 > p1 : p3 < p1
+            bool w3ok = w3 / w1 >= 0.8                               // W3 plausibly not the shortest
+            if r1 and r3 and rP and w3ok
+                valid := true
+                float rr2 = w2 / w1
+                float e3  = w3 / w1
+                float rr4 = w4 / w3
+                float s2 = f_score(rr2, 0.585, 0.40)
+                float s3 = math.max(f_score(e3, 1.618, 1.20), 0.85 * f_score(e3, 2.618, 1.20))
+                float s4 = f_score(rr4, 0.382, 0.35)
+                score := 100.0 * (0.35 * s2 + 0.35 * s3 + 0.30 * s4)
+    [valid, score]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Count selection — pick the best interpretation ending at the latest pivot
+// ─────────────────────────────────────────────────────────────────────────────
+var string cType   = "NONE"      // NONE | IMP | ABC | DEV2 | DEV4
+var float  cScore  = 0.0
+var int    cDir    = 0           // +1 bullish structure, -1 bearish
+var float  invLvl  = na          // invalidation level for developing counts
+var string altText = "—"         // runner-up interpretation for the dashboard
+var float[] cP = array.new_float()   // chosen count points, chronological
+var int[]   cB = array.new_int()
+
+// completeness bonus keeps complete patterns ahead of developing prefixes
+f_bonus(string t) =>
+    switch t
+        "IMP"  => 15.0
+        "ABC"  => 10.0
+        "FLAT" => 10.0
+        "DEVC" => 8.0
+        "DEV4" => 5.0
+        => 0.0
+
+f_snap(int nPts) =>
+    array.clear(cP)
+    array.clear(cB)
+    for i = 0 to nPts - 1
+        array.push(cP, f_p(nPts - 1 - i))
+        array.push(cB, f_b(nPts - 1 - i))
+
+[vImp,  sImp]  = f_eval_impulse()
+[vAbc,  sAbc]  = f_eval_abc()
+[vFlat, sFlat] = f_eval_flat()
+[vDC,   sDC]   = f_eval_devc()
+[vD4,   sD4]   = f_eval_dev4()
+[vD2,   sD2]   = f_eval_dev2()
+
+bool countChanged = false
+string prevType = cType
+
+if newPiv
+    // gather candidates that clear the raw-score gate
+    string[] candT = array.new_string()
+    float[]  candS = array.new_float()
+    if vImp and sImp >= minScore
+        array.push(candT, "IMP")
+        array.push(candS, sImp)
+    if vAbc and sAbc >= minScore
+        array.push(candT, "ABC")
+        array.push(candS, sAbc)
+    if vFlat and sFlat >= minScore
+        array.push(candT, "FLAT")
+        array.push(candS, sFlat)
+    if vDC and sDC >= minScore
+        array.push(candT, "DEVC")
+        array.push(candS, sDC)
+    if vD4 and sD4 >= minScore
+        array.push(candT, "DEV4")
+        array.push(candS, sD4)
+    if vD2 and sD2 >= minScore
+        array.push(candT, "DEV2")
+        array.push(candS, sD2)
+
+    string bestT = "NONE"
+    float bestEff = -1.0
+    float bestRaw = 0.0
+    string secondT = "NONE"
+    float secondEff = -1.0
+    float secondRaw = 0.0
+    int nCand = array.size(candT)
+    if nCand > 0
+        for i = 0 to nCand - 1
+            string ct = array.get(candT, i)
+            float cs = array.get(candS, i)
+            float eff = cs + f_bonus(ct)
+            if eff > bestEff
+                secondT := bestT
+                secondEff := bestEff
+                secondRaw := bestRaw
+                bestT := ct
+                bestEff := eff
+                bestRaw := cs
+            else if eff > secondEff
+                secondT := ct
+                secondEff := eff
+                secondRaw := cs
+
+    cType := bestT
+    cScore := bestRaw
+    countChanged := true
+    altText := secondT == "NONE" ? "—" : secondT + " (" + str.tostring(secondRaw, "#") + ")"
+
+    if cType == "IMP"
+        f_snap(6)
+        cDir := f_t(0)
+        invLvl := na
+        impDir := cDir                                               // remember for the C-wave setup
+        impEndBar := f_b(0)
+        impEndPrice := f_p(0)
+    else if cType == "ABC" or cType == "FLAT"
+        f_snap(4)
+        cDir := f_t(0)
+        invLvl := na
+    else if cType == "DEVC"
+        f_snap(3)
+        cDir := -impDir                                              // correction runs against the impulse
+        invLvl := impEndPrice                                        // trend resumption kills the setup
+    else if cType == "DEV4"
+        f_snap(5)
+        cDir := f_t(1)
+        invLvl := array.get(cP, 1)                                   // W5 must not break W1 end (P1)
+    else if cType == "DEV2"
+        f_snap(3)
+        cDir := f_t(1)
+        invLvl := array.get(cP, 0)                                   // W2 must not break W1 start (P0)
+    else
+        array.clear(cP)
+        array.clear(cB)
+        cDir := 0
+        invLvl := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Invalidation watch for developing counts
+// ─────────────────────────────────────────────────────────────────────────────
+bool invalHit = false
+if (cType == "DEV2" or cType == "DEV4" or cType == "DEVC") and not na(invLvl)
+    if cDir == 1 and low < invLvl
+        invalHit := true
+    if cDir == -1 and high > invLvl
+        invalHit := true
+if invalHit
+    cType := "NONE"
+    cScore := 0.0
+    cDir := 0
+    invLvl := na
+    altText := "—"
+    array.clear(cP)
+    array.clear(cB)
+    countChanged := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drawing — context zigzag, count labels, sub-waves, projections
+// ─────────────────────────────────────────────────────────────────────────────
+var line[]  zzLin  = array.new_line()
+var line[]  wLin   = array.new_line()
+var label[] wLbl   = array.new_label()
+var line[]  prLin  = array.new_line()
+var label[] prLbl  = array.new_label()
+var label[] subLbl = array.new_label()
+var string  subTxt = "—"
+
+f_wipe_lines(line[] arr) =>
+    while array.size(arr) > 0
+        line.delete(array.shift(arr))
+
+f_wipe_labels(label[] arr) =>
+    while array.size(arr) > 0
+        label.delete(array.shift(arr))
+
+// count sub-degree pivots strictly inside a primary wave segment
+f_sub_count(int b1, int b2) =>
+    int cnt = 0
+    int n = array.size(sBar)
+    if n > 0
+        for i = 0 to n - 1
+            int sb = array.get(sBar, i)
+            if sb > b1 and sb < b2
+                cnt += 1
+    cnt
+
+// draw tiny sub-wave labels inside a segment; returns the internal pivot count
+f_sub_draw(int b1, int b2) =>
+    int cnt = f_sub_count(b1, b2)
+    if showSub and (cnt == 4 or cnt == 2)
+        int k = 0
+        int n = array.size(sBar)
+        for i = 0 to n - 1
+            int sb = array.get(sBar, i)
+            if sb > b1 and sb < b2
+                k += 1
+                string txt = ""
+                if cnt == 4
+                    txt := k == 1 ? "i" : k == 2 ? "ii" : k == 3 ? "iii" : "iv"
+                else
+                    txt := k == 1 ? "a" : "b"
+                bool isHigh = array.get(sTyp, i) == 1
+                label.new(sb, array.get(sPrc, i), txt,
+                     style=isHigh ? label.style_label_down : label.style_label_up,
+                     color=color.new(color.gray, 80), textcolor=color.new(color.gray, 30),
+                     size=size.tiny)
+    cnt
+
+// projection helper: one horizontal target line + label from the count end
+f_proj(int fromBar, float lvl, string txt) =>
+    array.push(prLin, line.new(fromBar, lvl, bar_index + 5, lvl,
+         extend=extend.right, color=projC, style=line.style_dotted, width=1))
+    array.push(prLbl, label.new(bar_index + 5, lvl, txt,
+         style=label.style_label_left, color=color.new(projC, 85),
+         textcolor=projC, size=size.small))
+
+// redraw context zigzag on every new pivot
+if newPiv and showZZ
+    f_wipe_lines(zzLin)
+    int n = array.size(pBar)
+    if n >= 2
+        for i = 1 to n - 1
+            array.push(zzLin, line.new(array.get(pBar, i - 1), array.get(pPrc, i - 1),
+                 array.get(pBar, i), array.get(pPrc, i), color=zzC, width=1))
+
+// redraw count whenever it changes
+if countChanged
+    f_wipe_lines(wLin)
+    f_wipe_labels(wLbl)
+    f_wipe_lines(prLin)
+    f_wipe_labels(prLbl)
+    f_wipe_labels(subLbl)
+    subTxt := "—"
+
+    int nPts = array.size(cP)
+    if cType != "NONE" and nPts >= 3
+        color cc = cDir == 1 ? bullC : bearC
+        // count outline
+        for i = 1 to nPts - 1
+            array.push(wLin, line.new(array.get(cB, i - 1), array.get(cP, i - 1),
+                 array.get(cB, i), array.get(cP, i), color=cc, width=2))
+        // wave labels at P1..Pn
+        for i = 1 to nPts - 1
+            string txt = ""
+            if cType == "ABC" or cType == "FLAT" or cType == "DEVC"
+                txt := i == 1 ? "A" : i == 2 ? "B" : "C"
+            else
+                txt := str.tostring(i)
+            // a point is a high pivot when the leg into it rises
+            bool isHigh = array.get(cP, i) > array.get(cP, i - 1)
+            array.push(wLbl, label.new(array.get(cB, i), array.get(cP, i), txt,
+                 style=isHigh ? label.style_label_down : label.style_label_up,
+                 color=color.new(cc, 20), textcolor=color.white, size=size.normal))
+        // sub-wave structure of motive waves (impulse counts only)
+        if cType == "IMP" or cType == "DEV4"
+            int subW1 = f_sub_draw(array.get(cB, 0), array.get(cB, 1))
+            int subW3 = f_sub_draw(array.get(cB, 2), array.get(cB, 3))
+            string s1 = subW1 == 4 ? "5✓" : str.tostring(subW1 + 1)
+            string s3 = subW3 == 4 ? "5✓" : str.tostring(subW3 + 1)
+            subTxt := "W1: " + s1 + " legs · W3: " + s3 + " legs"
+
+        // projections + invalidation
+        if showProj
+            int lastB = array.get(cB, nPts - 1)
+            float dirF = cDir == 1 ? 1.0 : -1.0
+            if cType == "DEV2"
+                float w1 = math.abs(array.get(cP, 1) - array.get(cP, 0))
+                float base = array.get(cP, 2)
+                f_proj(lastB, base + dirF * w1 * 1.0,   "W3 ×1.0")
+                f_proj(lastB, base + dirF * w1 * 1.618, "W3 ×1.618")
+                f_proj(lastB, base + dirF * w1 * 2.618, "W3 ×2.618")
+            if cType == "DEV4"
+                float w1 = math.abs(array.get(cP, 1) - array.get(cP, 0))
+                float base = array.get(cP, 4)
+                f_proj(lastB, base + dirF * w1 * 0.618, "W5 ×0.618")
+                f_proj(lastB, base + dirF * w1 * 1.0,   "W5 ×1.0")
+                f_proj(lastB, base + dirF * w1 * 1.618, "W5 ×1.618")
+            if cType == "DEVC"
+                // C targets measured from B in the correction direction (= cDir)
+                float wA = math.abs(array.get(cP, 1) - array.get(cP, 0))
+                float base = array.get(cP, 2)
+                f_proj(lastB, base + dirF * wA * 1.0,   "C ×1.0")
+                f_proj(lastB, base + dirF * wA * 1.618, "C ×1.618")
+            if cType == "IMP"
+                float rng = math.abs(array.get(cP, 5) - array.get(cP, 0))
+                float top = array.get(cP, 5)
+                f_proj(lastB, top - dirF * rng * 0.382, "Corr 38.2%")
+                f_proj(lastB, top - dirF * rng * 0.5,   "Corr 50%")
+                f_proj(lastB, top - dirF * rng * 0.618, "Corr 61.8%")
+            if not na(invLvl)
+                array.push(prLin, line.new(lastB, invLvl, bar_index + 5, invLvl,
+                     extend=extend.right, color=bearC, style=line.style_dashed, width=1))
+                array.push(prLbl, label.new(bar_index + 5, invLvl, "Invalidation",
+                     style=label.style_label_left, color=color.new(bearC, 85),
+                     textcolor=bearC, size=size.small))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dashboard (light theme)
+// ─────────────────────────────────────────────────────────────────────────────
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table t = table.new(
+     dashPos == "Top Right" ? position.top_right : dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left,
+     2, 7,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+if showDash and barstate.islast
+    string statTxt = "No valid count"
+    color statCol = color.new(color.gray, 80)
+    color statTcol = tc
+    if cType == "IMP"
+        statTxt := cDir == 1 ? "Impulse 1-5 ▲ complete" : "Impulse 1-5 ▼ complete"
+        statCol := cDir == 1 ? bullC : bearC
+        statTcol := color.white
+    if cType == "ABC"
+        statTxt := cDir == 1 ? "Zigzag A-B-C ▲ complete" : "Zigzag A-B-C ▼ complete"
+        statCol := cDir == 1 ? bullC : bearC
+        statTcol := color.white
+    if cType == "FLAT"
+        statTxt := cDir == 1 ? "Flat A-B-C ▲ complete" : "Flat A-B-C ▼ complete"
+        statCol := cDir == 1 ? bullC : bearC
+        statTcol := color.white
+    if cType == "DEVC"
+        statTxt := cDir == 1 ? "A-B done → C setup ▲" : "A-B done → C setup ▼"
+        statCol := #ff6f00
+        statTcol := color.white
+    if cType == "DEV2"
+        statTxt := cDir == 1 ? "W1-W2 done → W3 setup ▲" : "W1-W2 done → W3 setup ▼"
+        statCol := #ff6f00
+        statTcol := color.white
+    if cType == "DEV4"
+        statTxt := cDir == 1 ? "W1-W4 done → W5 setup ▲" : "W1-W4 done → W5 setup ▼"
+        statCol := #ff6f00
+        statTcol := color.white
+
+    table.cell(t, 0, 0, "EW RADAR", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, "", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 0, 1, "Count", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, statTxt, text_color=statTcol, bgcolor=statCol, text_size=size.small)
+    table.cell(t, 0, 2, "Score", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, cType == "NONE" ? "—" : str.tostring(cScore, "#") + " / 100", text_color=tc, text_size=size.small)
+    table.cell(t, 0, 3, "Invalidation", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 3, na(invLvl) ? "—" : str.tostring(invLvl, format.mintick), text_color=na(invLvl) ? tc : bearC, text_size=size.small)
+    table.cell(t, 0, 4, "Sub-structure", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 4, subTxt, text_color=tc, text_size=size.tiny)
+    table.cell(t, 0, 5, "Alt count", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 5, altText, text_color=tc, text_size=size.tiny)
+    table.cell(t, 0, 6, "Pivots", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(array.size(pTyp)) + " stored", text_color=tc, text_size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+bool evImp  = countChanged and cType == "IMP"  and prevType != "IMP"
+bool evAbc  = countChanged and cType == "ABC"  and prevType != "ABC"
+bool evFlat = countChanged and cType == "FLAT" and prevType != "FLAT"
+bool evC    = countChanged and cType == "DEVC" and prevType != "DEVC"
+bool evW3   = countChanged and cType == "DEV2" and prevType != "DEV2"
+bool evW5   = countChanged and cType == "DEV4" and prevType != "DEV4"
+
+alertcondition(evImp,    "EW: Impulse complete",   "Elliott Wave Radar: 5-wave impulse count completed")
+alertcondition(evAbc,    "EW: ABC complete",       "Elliott Wave Radar: A-B-C zigzag correction completed")
+alertcondition(evFlat,   "EW: Flat complete",      "Elliott Wave Radar: flat correction completed")
+alertcondition(evC,      "EW: C-wave setup",       "Elliott Wave Radar: post-impulse A-B confirmed — C-wave targets active")
+alertcondition(evW3,     "EW: Wave-3 setup",       "Elliott Wave Radar: W1-W2 confirmed — Wave 3 setup active")
+alertcondition(evW5,     "EW: Wave-5 setup",       "Elliott Wave Radar: W1-W4 confirmed — Wave 5 setup active")
+alertcondition(invalHit, "EW: Count invalidated",  "Elliott Wave Radar: developing count invalidated")

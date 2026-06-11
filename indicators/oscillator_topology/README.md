@@ -4,12 +4,13 @@ Analyzes the shape of WaveTrend movements rather than their magnitude or directi
 
 ## Features
 
-- Curvature at WT pivot extremes: 2nd derivative normalized by ATR to make it scale-free
+- Curvature at WT pivot extremes: 2nd derivative normalized by the recent WT range to make it scale-free
 - Width of the last WT peak/trough: bars spent within the extreme zone
 - Asymmetry index: rise speed versus fall speed measured at each pivot
 - Shape classification per pivot: V-Spike / Round / Flat / Asymmetric
 - Curvature plot and shape label drawn at each classified pivot
 - Dashboard with the current dominant shape and a topology summary
+- 2 alert conditions: V-Spike Peak, V-Spike Trough
 
 ## Settings
 

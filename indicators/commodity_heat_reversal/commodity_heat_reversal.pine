@@ -1,19 +1,21 @@
 //@version=6
 // ============================================================================
 // Commodity Heat Reversal [WavesUnchained]
-// Version: 1.1
+// Version: 1.4.3
 // Author: WavesUnchained
-// Build: 2026-05-06 00:00:00
+// Build: 2026-06-11 00:00:00
 // ============================================================================
-// Score-based mean-reversion reversal signals for commodity futures (4H).
+// Score-based mean-reversion reversal and pullback-continuation signals for commodity futures (4H).
 //
 // Features:
 //   ✓ Dual Heat Score (long / short, 0–7 points)
 //   ✓ ATR-distance, ATR-expansion, RSI extremes, wick pressure, BB breach
-//   ✓ Optional EMA-200 trend filter with extreme-score override
+//   ✓ Optional MA-200 trend filter with extreme-score override
+//   ✓ Optional HTF EMA bias and trend-following pullback continuation signals
 //   ✓ Swing-high / swing-low stops + MA20 mean-reversion TP
 //   ✓ Selectable MA smoothing (EMA / RMA / SMA / WMA / HMA / JMA)
 //   ✓ Score dashboard table
+//   ✓ Alert conditions for long / short signals
 //
 // ============================================================================
 
@@ -26,6 +28,8 @@ var string GRP_SMOOTH  = "Smoothing"
 var string GRP_FILTER  = "Trend Filter"
 var string GRP_LEN     = "Lengths"
 var string GRP_SCORE   = "Score"
+var string GRP_QUALITY = "Quality"
+var string GRP_CONT    = "Continuation"
 var string GRP_RISK    = "Risk"
 var string GRP_VIS     = "Display"
 
@@ -35,16 +39,28 @@ jmaPower = input.float(2.0,"  JMA Power", minval=1.0,  maxval=4.0, step=0.25, gr
 
 useTrendFilter           = input.bool(false, "Enable Trend Filter",            group=GRP_FILTER)
 allowCounterTrendExtreme = input.bool(true,  "Allow Counter-Trend at Extreme", group=GRP_FILTER)
+useHTFBias               = input.bool(true,  "Use HTF Bias",                   group=GRP_FILTER)
+htfTF                    = input.timeframe("D", "HTF Bias Timeframe",          group=GRP_FILTER)
 
 maFastLen   = input.int(20,  "MA Fast (TP)",  group=GRP_LEN)
 maMeanLen   = input.int(50,  "MA Mean",       group=GRP_LEN)
 maTrendLen  = input.int(200, "MA Trend",      group=GRP_LEN)
+htfTrendLen = input.int(50,  "HTF EMA Trend", group=GRP_LEN)
 atrFastLen  = input.int(14,  "ATR Fast",      group=GRP_LEN)
 atrSlowLen  = input.int(50,  "ATR Slow (SMA)",group=GRP_LEN)
 rsiLen      = input.int(14,  "RSI",           group=GRP_LEN)
 
 scoreThreshold        = input.int(4, "Score Threshold",         minval=1, maxval=7, group=GRP_SCORE)
 extremeScoreThreshold = input.int(6, "Extreme Score Threshold", minval=1, maxval=7, group=GRP_SCORE)
+
+confirmationMode  = input.string("Balanced", "Confirmation Mode", options=["Early","Balanced","Strict"], group=GRP_QUALITY)
+signalCooldownBars = input.int(3, "Same-Direction Cooldown Bars", minval=0, maxval=50, group=GRP_QUALITY)
+counterTrendDisplay = input.string("Hide", "Counter-Trend Reversals", options=["Show","Mark","Hide"], group=GRP_QUALITY)
+
+showContinuationSignals = input.bool(true, "Show Pullback Continuation Signals", group=GRP_CONT)
+continuationScore       = input.int(2, "Pullback Heat Score", minval=1, maxval=7, group=GRP_CONT)
+pullbackLookback        = input.int(12, "Pullback Lookback Bars", minval=1, maxval=50, group=GRP_CONT)
+continuationCooldownBars = input.int(8, "Pullback Signal Cooldown Bars", minval=0, maxval=50, group=GRP_CONT)
 
 atrDistanceMult  = input.float(2.5, "ATR Distance to MA50", step=0.1, group=GRP_RISK)
 atrExpansionMult = input.float(1.5, "ATR Expansion Mult",   step=0.1, group=GRP_RISK)
@@ -94,6 +110,14 @@ bbDev   = ta.stdev(close, 20)
 bbUpper = bbBasis + bbDev * 2
 bbLower = bbBasis - bbDev * 2
 
+// ── Higher timeframe bias ───────────────────────────────────────────────────
+htfClose    = request.security(syminfo.tickerid, htfTF, close,                                                  lookahead=barmerge.lookahead_off)
+htfEma      = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfTrendLen),                             lookahead=barmerge.lookahead_off)
+htfEmaSlope = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfTrendLen) - ta.ema(close, htfTrendLen)[1], lookahead=barmerge.lookahead_off)
+
+htfUpTrend   = not useHTFBias or htfClose > htfEma or htfEmaSlope > 0
+htfDownTrend = not useHTFBias or htfClose < htfEma or htfEmaSlope < 0
+
 // ── Candle anatomy ───────────────────────────────────────────────────────────
 candleRange  = high - low
 upperWick    = high - math.max(open, close)
@@ -116,20 +140,92 @@ longScore += rsi < 28                                 ? 1 : 0
 longScore += lowerWickPct > 0.35                      ? 1 : 0
 longScore += close < bbLower                          ? 1 : 0
 
-// ── Confirmation ─────────────────────────────────────────────────────────────
-shortConfirm = close < low[1] or close < ma9
-longConfirm  = close > high[1] or close > ma9
-
 // ── Trend filter ─────────────────────────────────────────────────────────────
 upTrend   = close > ma200
 downTrend = close < ma200
+ma50Slope = ma50 - ma50[3]
 
-shortAllowed = not useTrendFilter or downTrend or (allowCounterTrendExtreme and shortScore >= extremeScoreThreshold)
-longAllowed  = not useTrendFilter or upTrend   or (allowCounterTrendExtreme and longScore  >= extremeScoreThreshold)
+localUpContext   = close > ma50 and ma50Slope >= 0
+localDownContext = close < ma50 and ma50Slope <= 0
+
+longCounterTrend  = not localUpContext or close < ma200
+shortCounterTrend = not localDownContext or close > ma200
+
+// ── Confirmation ─────────────────────────────────────────────────────────────
+shortBaseConfirm = close < low[1] or close < ma9
+longBaseConfirm  = close > high[1] or close > ma9
+
+shortStrictConfirm = close < open and close < ma9 and close < low[1] and upperWickPct > 0.20
+longStrictConfirm  = close > open and close > ma9 and close > high[1] and lowerWickPct > 0.20
+
+shortBalancedConfirm = close < ma9 and (close < low[1] or upperWickPct > 0.30)
+longBalancedConfirm  = close > ma9 and (close > high[1] or lowerWickPct > 0.30)
+
+shortCounterConfirm = confirmationMode == "Strict" ? shortStrictConfirm : confirmationMode == "Balanced" ? shortBalancedConfirm : shortBaseConfirm
+longCounterConfirm  = confirmationMode == "Strict" ? longStrictConfirm  : confirmationMode == "Balanced" ? longBalancedConfirm  : longBaseConfirm
+
+shortConfirm = shortCounterTrend ? shortCounterConfirm : shortBaseConfirm
+longConfirm  = longCounterTrend  ? longCounterConfirm  : longBaseConfirm
+
+shortAllowed = not useTrendFilter or (downTrend and htfDownTrend) or (allowCounterTrendExtreme and shortScore >= extremeScoreThreshold)
+longAllowed  = not useTrendFilter or (upTrend and htfUpTrend)     or (allowCounterTrendExtreme and longScore  >= extremeScoreThreshold)
 
 // ── Signals ──────────────────────────────────────────────────────────────────
-shortSignal = shortScore >= scoreThreshold and shortConfirm and shortAllowed
-longSignal  = longScore  >= scoreThreshold and longConfirm  and longAllowed
+shortSignalRaw = shortScore >= scoreThreshold and shortConfirm and shortAllowed
+longSignalRaw  = longScore  >= scoreThreshold and longConfirm  and longAllowed
+
+barsSincePrevShortSignal = ta.barssince(shortSignalRaw[1])
+barsSincePrevLongSignal  = ta.barssince(longSignalRaw[1])
+
+recentShortSignal = signalCooldownBars > 0 and not na(barsSincePrevShortSignal) and barsSincePrevShortSignal <= signalCooldownBars
+recentLongSignal  = signalCooldownBars > 0 and not na(barsSincePrevLongSignal)  and barsSincePrevLongSignal  <= signalCooldownBars
+
+shortSignal = shortSignalRaw and not recentShortSignal
+longSignal  = longSignalRaw  and not recentLongSignal
+
+shortCounterTrendSignal = shortSignal and close < ma200 and htfUpTrend and shortScore < extremeScoreThreshold
+longCounterTrendSignal  = longSignal  and close < ma50 and ma50Slope <= 0 and longScore < extremeScoreThreshold
+
+showCounterTrend = counterTrendDisplay == "Show"
+markCounterTrend = counterTrendDisplay == "Mark"
+
+shortReversalSignal = shortSignal and (showCounterTrend or not shortCounterTrendSignal)
+longReversalSignal  = longSignal  and (showCounterTrend or not longCounterTrendSignal)
+shortCounterTrendMarker = markCounterTrend and shortCounterTrendSignal
+longCounterTrendMarker  = markCounterTrend and longCounterTrendSignal
+
+// ── Pullback continuation signals ────────────────────────────────────────────
+longPullbackTouched  = low <= ma20 or low <= ma50 or close <= ma20
+shortPullbackTouched = high >= ma20 or high >= ma50 or close >= ma20
+longPullbackHeat     = longScore >= continuationScore or rsi < 45
+shortPullbackHeat    = shortScore >= continuationScore or rsi > 55
+
+localContinuationUp   = close > ma50 and ma20 > ma50 and ma50Slope > 0
+localContinuationDown = close < ma50 and ma20 < ma50 and ma50Slope < 0
+
+longPullbackSetup  = localContinuationUp and htfUpTrend and longPullbackTouched and longPullbackHeat
+shortPullbackSetup = localContinuationDown and htfDownTrend and shortPullbackTouched and shortPullbackHeat
+
+barsSinceLongPullback  = ta.barssince(longPullbackSetup)
+barsSinceShortPullback = ta.barssince(shortPullbackSetup)
+
+recentLongPullback  = not na(barsSinceLongPullback)  and barsSinceLongPullback  <= pullbackLookback
+recentShortPullback = not na(barsSinceShortPullback) and barsSinceShortPullback <= pullbackLookback
+
+longContinuationConfirm  = barsSinceLongPullback > 0 and close > open and close > ma9 and close > high[1]
+shortContinuationConfirm = barsSinceShortPullback > 0 and close < open and close < ma9 and close < low[1]
+
+longContinuationRaw  = showContinuationSignals and recentLongPullback  and longContinuationConfirm  and not longSignal
+shortContinuationRaw = showContinuationSignals and recentShortPullback and shortContinuationConfirm and not shortSignal
+
+barsSincePrevLongContinuation  = ta.barssince(longContinuationRaw[1])
+barsSincePrevShortContinuation = ta.barssince(shortContinuationRaw[1])
+
+recentLongContinuation  = continuationCooldownBars > 0 and not na(barsSincePrevLongContinuation)  and barsSincePrevLongContinuation  <= continuationCooldownBars
+recentShortContinuation = continuationCooldownBars > 0 and not na(barsSincePrevShortContinuation) and barsSincePrevShortContinuation <= continuationCooldownBars
+
+longContinuationSignal  = longContinuationRaw  and not recentLongContinuation
+shortContinuationSignal = shortContinuationRaw and not recentShortContinuation
 
 // ── SL / TP levels ───────────────────────────────────────────────────────────
 swingHigh = ta.highest(high, 10)
@@ -143,15 +239,23 @@ plot(ma20,  "MA 20",  color=color.new(color.blue,   0), linewidth=1)
 plot(ma50,  "MA 50",  color=color.new(color.orange, 0), linewidth=1)
 plot(ma200, "MA 200", color=color.new(color.gray,   0), linewidth=1)
 
-plot(shortSignal ? shortSL : na, "Short SL", color=color.new(#d50000, 60), style=plot.style_linebr, linewidth=1)
-plot(longSignal  ? longSL  : na, "Long SL",  color=color.new(#00c853, 60), style=plot.style_linebr, linewidth=1)
-plot(shortSignal ? ma20    : na, "Short TP", color=color.new(#00c853, 60), style=plot.style_linebr, linewidth=1)
-plot(longSignal  ? ma20    : na, "Long TP",  color=color.new(#d50000, 60), style=plot.style_linebr, linewidth=1)
+plot(shortReversalSignal ? shortSL : na, "Short SL", color=color.new(#d50000, 60), style=plot.style_linebr, linewidth=1)
+plot(longReversalSignal  ? longSL  : na, "Long SL",  color=color.new(#d50000, 60), style=plot.style_linebr, linewidth=1)
+plot(shortReversalSignal ? ma20    : na, "Short TP", color=color.new(#00c853, 60), style=plot.style_linebr, linewidth=1)
+plot(longReversalSignal  ? ma20    : na, "Long TP",  color=color.new(#00c853, 60), style=plot.style_linebr, linewidth=1)
 
-plotshape(shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar,
+plotshape(shortReversalSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar,
          color=#d50000, size=size.small)
-plotshape(longSignal,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar,
+plotshape(longReversalSignal,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar,
          color=#00c853, size=size.small)
+plotshape(shortCounterTrendMarker, title="Short Counter-Trend Reversal", style=shape.xcross, location=location.abovebar,
+         color=color.new(#d50000, 20), size=size.tiny)
+plotshape(longCounterTrendMarker,  title="Long Counter-Trend Reversal",  style=shape.xcross, location=location.belowbar,
+         color=color.new(#00c853, 20), size=size.tiny)
+plotshape(shortContinuationSignal, title="Short Pullback Continuation", style=shape.diamond, location=location.abovebar,
+         color=#ff9800, size=size.tiny)
+plotshape(longContinuationSignal,  title="Long Pullback Continuation",  style=shape.diamond, location=location.belowbar,
+         color=#2962ff, size=size.tiny)
 
 // ── Score table ──────────────────────────────────────────────────────────────
 if showTable
@@ -164,7 +268,7 @@ if showTable
     color tc = color.new(color.gray, 20)
     color hd = color.new(color.gray, 90)
 
-    var table t = table.new(tpos, 3, 5,
+    var table t = table.new(tpos, 3, 6,
          bgcolor=color.new(color.white, 5),
          border_color=color.new(color.gray, 60),
          border_width=1,
@@ -175,24 +279,43 @@ if showTable
     table.cell(t, 1, 0, "Score",  text_color=tc, bgcolor=hd, text_size=size.small)
     table.cell(t, 2, 0, "Signal", text_color=tc, bgcolor=hd, text_size=size.small)
 
-    shortBg = shortSignal ? color.new(#d50000, 20) : color.new(color.gray, 80)
-    longBg  = longSignal  ? color.new(#00c853, 20) : color.new(color.gray, 80)
-    shortTc = shortSignal ? color.white : tc
-    longTc  = longSignal  ? color.white : tc
+    shortActive = shortReversalSignal or shortCounterTrendMarker or shortContinuationSignal
+    longActive  = longReversalSignal or longCounterTrendMarker or longContinuationSignal
+    shortBg = shortReversalSignal ? color.new(#d50000, 20) : shortCounterTrendMarker ? color.new(#d50000, 65) : shortContinuationSignal ? color.new(#ff9800, 20) : color.new(color.gray, 80)
+    longBg  = longReversalSignal  ? color.new(#00c853, 20) : longCounterTrendMarker  ? color.new(#00c853, 65) : longContinuationSignal  ? color.new(#2962ff, 20) : color.new(color.gray, 80)
+    shortTc = shortActive ? color.white : tc
+    longTc  = longActive  ? color.white : tc
+    shortLabel = shortReversalSignal ? "▼ SHORT" : shortCounterTrendMarker ? "CT SHORT" : shortContinuationSignal ? "◆ PB SHORT" : "–"
+    longLabel  = longReversalSignal  ? "▲ LONG"  : longCounterTrendMarker  ? "CT LONG"  : longContinuationSignal  ? "◆ PB LONG"  : "–"
 
     table.cell(t, 0, 1, "Short", text_color=tc, text_size=size.small)
     table.cell(t, 1, 1, str.tostring(shortScore) + " / 7", text_color=tc, text_size=size.small)
-    table.cell(t, 2, 1, shortSignal ? "▼ SHORT" : "–", bgcolor=shortBg, text_color=shortTc, text_size=size.small)
+    table.cell(t, 2, 1, shortLabel, bgcolor=shortBg, text_color=shortTc, text_size=size.small)
 
     table.cell(t, 0, 2, "Long", text_color=tc, text_size=size.small)
     table.cell(t, 1, 2, str.tostring(longScore) + " / 7", text_color=tc, text_size=size.small)
-    table.cell(t, 2, 2, longSignal ? "▲ LONG" : "–", bgcolor=longBg, text_color=longTc, text_size=size.small)
+    table.cell(t, 2, 2, longLabel, bgcolor=longBg, text_color=longTc, text_size=size.small)
 
     table.cell(t, 0, 3, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
     table.cell(t, 1, 3, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
     table.cell(t, 2, 3, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
 
     trendLabel = not useTrendFilter ? "Off" : upTrend ? "Up" : "Down"
+    htfLabel = not useHTFBias ? "Off" : htfUpTrend ? "Up" : htfDownTrend ? "Down" : "Neutral"
     table.cell(t, 0, 4, "Trend",    text_color=tc, text_size=size.tiny)
     table.cell(t, 1, 4, trendLabel, text_color=tc, text_size=size.tiny)
     table.cell(t, 2, 4, "RSI " + str.tostring(math.round(rsi, 1)), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 5, "HTF",      text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 5, htfTF,      text_color=tc, text_size=size.tiny)
+    table.cell(t, 2, 5, htfLabel,   text_color=tc, text_size=size.tiny)
+
+// ── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(longReversalSignal,         "CHR Long Signal",  "Commodity Heat Reversal long — {{ticker}} ({{interval}})")
+alertcondition(shortReversalSignal,        "CHR Short Signal", "Commodity Heat Reversal short — {{ticker}} ({{interval}})")
+alertcondition(longCounterTrendMarker,     "CHR Long Counter-Trend Reversal",  "Commodity Heat Reversal counter-trend long — {{ticker}} ({{interval}})")
+alertcondition(shortCounterTrendMarker,    "CHR Short Counter-Trend Reversal", "Commodity Heat Reversal counter-trend short — {{ticker}} ({{interval}})")
+alertcondition(longContinuationSignal,     "CHR Long Pullback Continuation",  "Commodity Heat Reversal pullback continuation long — {{ticker}} ({{interval}})")
+alertcondition(shortContinuationSignal,    "CHR Short Pullback Continuation", "Commodity Heat Reversal pullback continuation short — {{ticker}} ({{interval}})")
+alertcondition(longReversalSignal or shortReversalSignal, "CHR Any Reversal Signal", "Commodity Heat Reversal reversal signal — {{ticker}} ({{interval}})")
+alertcondition(longReversalSignal or shortReversalSignal or longContinuationSignal or shortContinuationSignal, "CHR Any Signal", "Commodity Heat Reversal signal — {{ticker}} ({{interval}})")

@@ -1,13 +1,15 @@
 # Auto Trendlines
 
-Detects trendlines through pivot points using a combinatorial pair scan with OLS refinement and a composite quality score. Greedy non-overlapping selection ensures clean, non-redundant output: each pivot contributes to at most one drawn line.
+Detects trendlines through pivot points using a Directional or Combinatorial pair scan with optional OLS/Outer refinement and a composite quality score. Greedy non-overlapping selection ensures clean, non-redundant output: each pivot contributes to at most one drawn line.
 
 ## Features
 
-- **Combinatorial pair scan + OLS refinement** — every pivot pair is evaluated; the line is then refit through all inliers via ordinary least squares for a tighter fit
+- **Directional or Combinatorial pair scan** — Directional only keeps falling resistance / rising support anchors; Combinatorial evaluates every pivot pair and refits the line through all inliers via OLS (optionally shifted outward to the outermost inlier in "Outer" fit mode)
 - **ATR-based tolerance** — adapts to market volatility, no fixed pip distance
-- **Composite quality score** — touches², span, recency, fit tightness combined into a single score
+- **Composite quality score** — touches, span, extreme-anchor bonus, recency, fit tightness and violation penalty combined into a single score
+- **Violation & relevance filters** — candidates with too many close/wick violations between anchors, or too far from current price, are dropped
 - **Greedy non-overlap** — top-scoring lines are selected first; each pivot contributes to one line at most
+- **Retest highlighting** — lines within a configurable ATR distance of price are emphasized, with optional distance label
 - **Touch-count labels** — small label at the right end of each line shows the number of pivots it connects
 - **Optional convex hull** — Andrew's monotone-chain envelope (strictest descending / ascending boundary), drawn dotted in a separate color
 
@@ -28,16 +30,18 @@ For each pair `(i, j)` of pivots:
    ```
 
 4. Re-evaluate inliers on the refined line — final touch count and residual sum
-5. Score the candidate:
+5. Filter: drop candidates with too many violations between anchors (unless anchored at an extreme), too far from current price, or outside the Sloped/Near-horizontal display mode
+6. Score the candidate:
 
    ```
-   score = touches² · log(span + 2) · recency_bonus · 1 / (1 + avg_residual / tolerance)
+   score = touches · span · extreme_bonus · recency_bonus · fit_factor · violation_penalty
    ```
 
-   - `touches²` rewards multi-touch lines strongly
-   - `log(span + 2)` rewards lines covering longer time ranges (logarithmic, not dominant)
+   - `touches · span` rewards multi-touch lines covering longer time ranges
+   - `extreme_bonus` rewards lines anchored at the most extreme pivots (0.5 if none, up to 3.0)
    - `recency_bonus` linear decay from 1.0 (newest pivot at current bar) to 0.2 (newest pivot at lookback edge)
-   - `1 / (1 + avg_residual / tol)` rewards tight fits
+   - `fit_factor = 1 / (1 + avg_residual / tol)` rewards tight fits
+   - `violation_penalty = 1 / (1 + violation% / 5)` punishes lines price crossed often
 
 ### 2. Sorting & greedy selection
 
@@ -66,11 +70,18 @@ Wrong-way turn for the upper hull = cross product ≥ 0 (the second-to-last poin
 | Input | Default | Description |
 |-------|---------|-------------|
 | Left Bars / Right Bars | 5 / 5 | Pivot confirmation window |
+| Line Fit | Outer | OLS or Outer (OLS shifted to outermost inlier) |
+| Detection Method | Directional | Directional or Combinatorial pair scan |
 | Min Touches | 3 | Minimum pivots a line must connect |
-| Tolerance (× ATR) | 0.3 | Vertical distance threshold for "on the line" |
-| Lookback (bars) | 300 | How far back pivots are considered |
+| Tolerance (× ATR) | 1.0 | Vertical distance threshold for "on the line" |
+| Lookback (bars) | 200 | How far back pivots are considered |
 | Max Lines per Direction | 3 | Cap on drawn resistance and support lines |
-| Extend lines right | on | Project the line into the future |
+| Min Line Span (bars) | 15 | Minimum distance between oldest and newest touch |
+| Max Violation % | 20 | Max share of bars crossing the line between anchors |
+| Bars past last touch | 30 | Projection length beyond the newest touch |
+| Show | Both | Sloped / Near-horizontal / Both |
+| Max current distance (× ATR) | 5.0 | Relevance filter vs. current price |
+| Highlight active retest | on | Emphasize lines within retest distance, optional label |
 | Show touch-count label | on | Label at the right end with the touch count |
 | Show convex-hull envelope | off | Draw the hull as a dotted reference |
 | Colors / width / style | red / green / 2 / Solid | Visual settings |

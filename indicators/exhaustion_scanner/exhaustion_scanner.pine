@@ -1,0 +1,442 @@
+//@version=6
+// ============================================================================
+// Exhaustion Scanner [WavesUnchained]
+// Version: 1.3
+// Author: WavesUnchained
+// Build: 2026-06-11 00:00:00
+// ============================================================================
+// Weighted top/bottom exhaustion score (0-100) from five components —
+// distance, momentum, money flow, volatility, structure — with per-market
+// weight presets (stocks, commodities, forex, crypto) and a component
+// breakdown dashboard. Generalizes the commodity_heat_reversal concept to
+// a continuous, market-adaptive score.
+//
+// Features:
+//   ✓ Five component scores: Distance (EMA/BB), Momentum (RSI/StochRSI/WT
+//     + WT divergence), Money Flow (MFI + volume spike), Volatility
+//     (ATR expansion + bar range), Structure (high/low proximity + wicks)
+//   ✓ Market presets with weight profiles: Stocks / Commodities /
+//     Forex-CFD / Crypto / Custom
+//   ✓ Signal modes: Early (30) / Normal (40) / Conservative (50)
+//   ✓ Signal confirmation modes for cleaner reversal labels
+//   ✓ Divergence-assisted setups for more actionable reversal signals
+//   ✓ Top/Bottom heatmap background + confirmed labels with score
+//   ✓ WT divergence markers with validity window
+//   ✓ Component breakdown dashboard (light theme)
+//   ✓ Alerts: Top Exhaustion, Bottom Exhaustion, Any
+//
+// ============================================================================
+
+indicator("Exhaustion Scanner [WavesUnchained]", shorttitle="Exhaustion Scanner", overlay=true, max_labels_count=100)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+
+preset     = input.string("Commodities", "Market Preset", options=["Stocks", "Commodities", "Forex/CFD", "Crypto", "Custom"])
+signalMode = input.string("Normal", "Signal Mode", options=["Early", "Normal", "Conservative"])
+showLabels = input.bool(true, "Show Labels")
+showBg     = input.bool(true, "Show Heatmap")
+showTable  = input.bool(true, "Show Dashboard")
+
+grpSignals = "Signals"
+confirmMode = input.string("Candle Reaction", "Confirmation", options=["Score Only", "Candle Reaction", "Pivot Confirmed"], group=grpSignals,
+     tooltip="Score Only marks the first extreme bar. Candle Reaction waits for rejection/close-through behavior. Pivot Confirmed is delayed but anchors the label on the confirmed swing.")
+minSignalGap = input.int(8, "Min Bars Between Same-Side Signals", minval=0, group=grpSignals)
+showCandidates = input.bool(true, "Show Extreme Candidates", group=grpSignals,
+     tooltip="Shows faint dots when a raw exhaustion threshold is first reached, even before confirmation.")
+useDivergenceAssist = input.bool(true, "Divergence-Assisted Signals", group=grpSignals,
+     tooltip="Allows WT divergences near stretched price areas to produce additional exhaustion labels, even when the full weighted score is not yet extreme.")
+
+grpBase = "Base"
+emaLen = input.int(50, "EMA Length", minval=10, group=grpBase)
+atrLen = input.int(14, "ATR Length", minval=5, group=grpBase)
+bbLen  = input.int(20, "Bollinger Length", minval=10, group=grpBase)
+bbMult = input.float(2.0, "Bollinger Multiplier", step=0.1, group=grpBase)
+
+grpMom = "Momentum"
+rsiLen   = input.int(14, "RSI Length", minval=5, group=grpMom)
+stochLen = input.int(14, "StochRSI Length", minval=5, group=grpMom)
+wtN1     = input.int(10, "WaveTrend Channel Length", minval=3, group=grpMom)
+wtN2     = input.int(21, "WaveTrend Average Length", minval=5, group=grpMom)
+
+grpDiv = "Divergences"
+pivotLen  = input.int(5, "Divergence Pivot Length", minval=2, group=grpDiv)
+divMemory = input.int(12, "Divergence Validity (bars)", minval=1, group=grpDiv)
+
+grpStruct = "Structure"
+structureLen = input.int(80, "Structure Lookback", minval=20, group=grpStruct)
+nearAtrMult  = input.float(0.75, "High/Low Proximity (ATR ×)", step=0.05, group=grpStruct)
+
+grpCustom = "Custom Weights (preset = Custom)"
+customDistance   = input.float(30, "Distance Weight", minval=0, group=grpCustom)
+customMomentum   = input.float(25, "Momentum Weight", minval=0, group=grpCustom)
+customFlow       = input.float(20, "Money Flow Weight", minval=0, group=grpCustom)
+customVolatility = input.float(15, "Volatility Weight", minval=0, group=grpCustom)
+customStructure  = input.float(10, "Structure Weight", minval=0, group=grpCustom)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+score01(x) =>
+    clamp(x, 0.0, 1.0) * 100.0
+
+safeDiv(a, b) =>
+    b == 0.0 ? 0.0 : a / b
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preset Weights
+// ─────────────────────────────────────────────────────────────────────────────
+
+float wDistance = na
+float wMomentum = na
+float wFlow = na
+float wVolatility = na
+float wStructure = na
+
+if preset == "Stocks"
+    wDistance := 25
+    wMomentum := 25
+    wFlow := 30
+    wVolatility := 10
+    wStructure := 10
+else if preset == "Commodities"
+    wDistance := 30
+    wMomentum := 25
+    wFlow := 10
+    wVolatility := 25
+    wStructure := 10
+else if preset == "Forex/CFD"
+    wDistance := 35
+    wMomentum := 35
+    wFlow := 0
+    wVolatility := 20
+    wStructure := 10
+else if preset == "Crypto"
+    wDistance := 25
+    wMomentum := 30
+    wFlow := 20
+    wVolatility := 20
+    wStructure := 5
+else
+    wDistance := customDistance
+    wMomentum := customMomentum
+    wFlow := customFlow
+    wVolatility := customVolatility
+    wStructure := customStructure
+
+weightSum = math.max(wDistance + wMomentum + wFlow + wVolatility + wStructure, 1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core Data
+// ─────────────────────────────────────────────────────────────────────────────
+
+atr = ta.atr(atrLen)
+ema = ta.ema(close, emaLen)
+
+basis = ta.sma(close, bbLen)
+dev   = ta.stdev(close, bbLen)
+upper = basis + dev * bbMult
+lower = basis - dev * bbMult
+
+distAtr = safeDiv(close - ema, atr)
+bbZ     = safeDiv(close - basis, dev)
+
+rsi = ta.rsi(close, rsiLen)
+stochRsiRaw = ta.stoch(rsi, rsi, rsi, stochLen)
+stochRsi = ta.sma(stochRsiRaw, 3)
+
+// WaveTrend
+ap  = hlc3
+esa = ta.ema(ap, wtN1)
+de  = ta.ema(math.abs(ap - esa), wtN1)
+ci  = safeDiv(ap - esa, 0.015 * de)
+wt1 = ta.ema(ci, wtN2)
+wt2 = ta.sma(wt1, 4)
+
+// Money Flow — guard against na-volume feeds poisoning the rolling averages
+vol = nz(volume)
+mfiRaw = ta.mfi(hlc3, 14)
+mfi = na(mfiRaw) ? 50.0 : mfiRaw
+volMa = ta.sma(vol, 30)
+volSpike = safeDiv(vol, volMa)
+
+// Volatility
+atrMa = ta.sma(atr, 50)
+atrExpansion = safeDiv(atr, atrMa)
+rangeAtr = safeDiv(high - low, atr)
+
+// Structure
+recentHigh = ta.highest(high, structureLen)
+recentLow  = ta.lowest(low, structureLen)
+
+nearHigh = recentHigh - close <= atr * nearAtrMult
+nearLow  = close - recentLow <= atr * nearAtrMult
+
+upperWick = safeDiv(high - math.max(open, close), high - low)
+lowerWick = safeDiv(math.min(open, close) - low, high - low)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Divergences (WT vs. price pivots)
+// ─────────────────────────────────────────────────────────────────────────────
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+prevPh = ta.valuewhen(not na(ph), ph, 1)
+prevPl = ta.valuewhen(not na(pl), pl, 1)
+
+prevWtAtPh = ta.valuewhen(not na(ph), wt1[pivotLen], 1)
+prevWtAtPl = ta.valuewhen(not na(pl), wt1[pivotLen], 1)
+
+bearDiv = not na(ph) and not na(prevPh) and ph > prevPh and wt1[pivotLen] < prevWtAtPh
+bullDiv = not na(pl) and not na(prevPl) and pl < prevPl and wt1[pivotLen] > prevWtAtPl
+
+bearDivActive = ta.barssince(bearDiv) <= divMemory
+bullDivActive = ta.barssince(bullDiv) <= divMemory
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Component Scores (0-100 each)
+// ─────────────────────────────────────────────────────────────────────────────
+
+distanceTop = score01(math.max(safeDiv(distAtr, 3.0), safeDiv(bbZ, 2.5)))
+distanceBot = score01(math.max(safeDiv(-distAtr, 3.0), safeDiv(-bbZ, 2.5)))
+
+momentumTop = score01(
+     0.35 * safeDiv(rsi - 60, 20) +
+     0.30 * safeDiv(stochRsi - 75, 25) +
+     0.20 * safeDiv(wt1 - 45, 25) +
+     0.15 * (bearDivActive ? 1 : 0))
+
+momentumBot = score01(
+     0.35 * safeDiv(40 - rsi, 20) +
+     0.30 * safeDiv(25 - stochRsi, 25) +
+     0.20 * safeDiv(-45 - wt1, 25) +
+     0.15 * (bullDivActive ? 1 : 0))
+
+flowTop = score01(
+     0.55 * safeDiv(mfi - 75, 20) +
+     0.45 * safeDiv(volSpike - 1.5, 1.5))
+
+// volume spike counts toward both sides — capitulation volume marks bottoms
+flowBot = score01(
+     0.55 * safeDiv(25 - mfi, 20) +
+     0.45 * safeDiv(volSpike - 1.5, 1.5))
+
+volScore = score01(
+     0.55 * safeDiv(atrExpansion - 1.1, 0.7) +
+     0.45 * safeDiv(rangeAtr - 1.2, 1.2))
+
+structureTop = score01(
+     0.45 * (nearHigh ? 1 : 0) +
+     0.30 * safeDiv(upperWick - 0.35, 0.35) +
+     0.25 * (close > upper ? 1 : 0))
+
+structureBot = score01(
+     0.45 * (nearLow ? 1 : 0) +
+     0.30 * safeDiv(lowerWick - 0.35, 0.35) +
+     0.25 * (close < lower ? 1 : 0))
+
+topScore = (
+     distanceTop * wDistance +
+     momentumTop * wMomentum +
+     flowTop * wFlow +
+     volScore * wVolatility +
+     structureTop * wStructure) / weightSum
+
+botScore = (
+     distanceBot * wDistance +
+     momentumBot * wMomentum +
+     flowBot * wFlow +
+     volScore * wVolatility +
+     structureBot * wStructure) / weightSum
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Signal Thresholds and Confirmation
+// ─────────────────────────────────────────────────────────────────────────────
+
+int threshold = signalMode == "Early" ? 30 : signalMode == "Normal" ? 40 : 50
+int setupThreshold = math.max(threshold - 10, 20)
+
+topComponentTrigger = score01(
+     0.55 * safeDiv(distanceTop, 100) +
+     0.25 * safeDiv(structureTop, 100) +
+     0.20 * safeDiv(momentumTop, 100))
+botComponentTrigger = score01(
+     0.55 * safeDiv(distanceBot, 100) +
+     0.25 * safeDiv(structureBot, 100) +
+     0.20 * safeDiv(momentumBot, 100))
+
+topDivBoost = useDivergenceAssist and bearDivActive ? math.min(math.max(distanceTop, structureTop) + 15, 100) : 0.0
+botDivBoost = useDivergenceAssist and bullDivActive ? math.min(math.max(distanceBot, structureBot) + 15, 100) : 0.0
+
+topTrigger = math.max(math.max(topScore, topComponentTrigger), topDivBoost)
+botTrigger = math.max(math.max(botScore, botComponentTrigger), botDivBoost)
+
+topPivotComponentTrigger = score01(
+     0.55 * safeDiv(distanceTop[pivotLen], 100) +
+     0.25 * safeDiv(structureTop[pivotLen], 100) +
+     0.20 * safeDiv(momentumTop[pivotLen], 100))
+botPivotComponentTrigger = score01(
+     0.55 * safeDiv(distanceBot[pivotLen], 100) +
+     0.25 * safeDiv(structureBot[pivotLen], 100) +
+     0.20 * safeDiv(momentumBot[pivotLen], 100))
+topPivotDivBoost = useDivergenceAssist and bearDiv ? math.min(math.max(distanceTop[pivotLen], structureTop[pivotLen]) + 15, 100) : 0.0
+botPivotDivBoost = useDivergenceAssist and bullDiv ? math.min(math.max(distanceBot[pivotLen], structureBot[pivotLen]) + 15, 100) : 0.0
+topPivotTrigger = math.max(math.max(topScore[pivotLen], topPivotComponentTrigger), topPivotDivBoost)
+botPivotTrigger = math.max(math.max(botScore[pivotLen], botPivotComponentTrigger), botPivotDivBoost)
+
+topExtreme = topTrigger >= threshold
+botExtreme = botTrigger >= threshold
+topSetup = topTrigger >= setupThreshold
+botSetup = botTrigger >= setupThreshold
+
+topDivNow = useDivergenceAssist and bearDiv and topPivotTrigger >= setupThreshold
+botDivNow = useDivergenceAssist and bullDiv and botPivotTrigger >= setupThreshold
+topDivSetup = topDivNow or (useDivergenceAssist and bearDivActive and topSetup)
+botDivSetup = botDivNow or (useDivergenceAssist and bullDivActive and botSetup)
+
+topCandidate = (topExtreme or topDivSetup) and not (topExtreme[1] or topDivSetup[1])
+botCandidate = (botExtreme or botDivSetup) and not (botExtreme[1] or botDivSetup[1])
+
+topCandleReject = close < low[1] or (close < open and upperWick >= 0.35 and close < hl2)
+botCandleReject = close > high[1] or (close > open and lowerWick >= 0.35 and close > hl2)
+
+topPivotConfirm = not na(ph) and topPivotTrigger >= threshold
+botPivotConfirm = not na(pl) and botPivotTrigger >= threshold
+
+topPivotDivConfirm = not na(ph) and topDivNow
+botPivotDivConfirm = not na(pl) and botDivNow
+
+topRawSignal = confirmMode == "Score Only" ? topCandidate : confirmMode == "Pivot Confirmed" ? (topPivotConfirm or topPivotDivConfirm) : (topExtreme or topDivSetup) and (topCandleReject or topDivNow)
+botRawSignal = confirmMode == "Score Only" ? botCandidate : confirmMode == "Pivot Confirmed" ? (botPivotConfirm or botPivotDivConfirm) : (botExtreme or botDivSetup) and (botCandleReject or botDivNow)
+
+var int lastTopSignalBar = na
+var int lastBotSignalBar = na
+
+topGapOk = minSignalGap == 0 or na(lastTopSignalBar) or bar_index - lastTopSignalBar > minSignalGap
+botGapOk = minSignalGap == 0 or na(lastBotSignalBar) or bar_index - lastBotSignalBar > minSignalGap
+
+topSignal = topRawSignal and topGapOk
+botSignal = botRawSignal and botGapOk
+
+if topSignal
+    lastTopSignalBar := bar_index
+
+if botSignal
+    lastBotSignalBar := bar_index
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Visuals
+// ─────────────────────────────────────────────────────────────────────────────
+
+plot(ema, "EMA", color=color.new(color.gray, 35))
+plot(upper, "BB Upper", color=color.new(color.gray, 80))
+plot(lower, "BB Lower", color=color.new(color.gray, 80))
+
+color bgColor = na
+if topExtreme
+    bgColor := color.new(color.red, 84)
+else if botExtreme
+    bgColor := color.new(color.green, 84)
+else if topDivSetup
+    bgColor := color.new(color.red, 90)
+else if botDivSetup
+    bgColor := color.new(color.green, 90)
+else if topSetup
+    bgColor := color.new(color.red, 92)
+else if botSetup
+    bgColor := color.new(color.green, 92)
+
+bgcolor(showBg ? bgColor : na)
+
+plotshape(showCandidates and topCandidate and not topSignal ? high : na, "Top Exhaustion Candidate", shape.circle, location.absolute, color.new(#d50000, 65), size=size.tiny)
+plotshape(showCandidates and botCandidate and not botSignal ? low : na, "Bottom Exhaustion Candidate", shape.circle, location.absolute, color.new(#00c853, 65), size=size.tiny)
+
+topLabelBar = confirmMode == "Pivot Confirmed" ? bar_index - pivotLen : bar_index
+botLabelBar = confirmMode == "Pivot Confirmed" ? bar_index - pivotLen : bar_index
+topLabelPrice = confirmMode == "Pivot Confirmed" ? high[pivotLen] : high
+botLabelPrice = confirmMode == "Pivot Confirmed" ? low[pivotLen] : low
+topLabelScore = confirmMode == "Pivot Confirmed" ? topPivotTrigger : topTrigger
+botLabelScore = confirmMode == "Pivot Confirmed" ? botPivotTrigger : botTrigger
+topLabelKind = topLabelScore >= threshold ? "TOP EXHAUSTION" : (topDivSetup or topPivotDivConfirm) ? "TOP DIV SETUP" : "TOP SETUP"
+botLabelKind = botLabelScore >= threshold ? "BOTTOM EXHAUSTION" : (botDivSetup or botPivotDivConfirm) ? "BOTTOM DIV SETUP" : "BOTTOM SETUP"
+
+if showLabels and topSignal
+    label.new(topLabelBar, topLabelPrice, topLabelKind + "\n" + str.tostring(math.round(topLabelScore)) + "/100",
+         style=label.style_label_down, textcolor=color.white, color=color.new(#d50000, 0))
+
+if showLabels and botSignal
+    label.new(botLabelBar, botLabelPrice, botLabelKind + "\n" + str.tostring(math.round(botLabelScore)) + "/100",
+         style=label.style_label_up, textcolor=color.white, color=color.new(#00c853, 0))
+
+plotshape(bearDiv, "Bearish WT Divergence", shape.triangledown, location.abovebar, color=color.new(#d50000, 0), size=size.tiny, text="Div")
+plotshape(bullDiv, "Bullish WT Divergence", shape.triangleup, location.belowbar, color=color.new(#00c853, 0), size=size.tiny, text="Div")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dashboard (light theme)
+// ─────────────────────────────────────────────────────────────────────────────
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+confirmLabel = confirmMode == "Candle Reaction" ? "Candle" : confirmMode == "Pivot Confirmed" ? "Pivot" : "Score"
+stateLabel = topExtreme or botExtreme ? "Extreme" : topDivSetup or botDivSetup ? "Div Setup" : topSetup or botSetup ? "Setup" : "Neutral"
+stateColor = topExtreme or topDivSetup or topSetup ? #d50000 : botExtreme or botDivSetup or botSetup ? #00c853 : tc
+
+var table dash = table.new(position.top_right, 3, 9,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+if barstate.islast and showTable
+    table.cell(dash, 0, 0, "Exhaustion", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 0, "Top",    text_color=color.white, bgcolor=#d50000, text_size=size.small)
+    table.cell(dash, 2, 0, "Bottom", text_color=color.white, bgcolor=#00c853, text_size=size.small)
+
+    color topC = topSignal ? #d50000 : tc
+    color botC = botSignal ? #00c853 : tc
+    table.cell(dash, 0, 1, "Total", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(math.round(topScore)), text_color=topC, text_size=size.small)
+    table.cell(dash, 2, 1, str.tostring(math.round(botScore)), text_color=botC, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Distance", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 2, str.tostring(math.round(distanceTop)), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 2, str.tostring(math.round(distanceBot)), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Momentum", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 3, str.tostring(math.round(momentumTop)), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 3, str.tostring(math.round(momentumBot)), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "Flow", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(math.round(flowTop)), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 4, str.tostring(math.round(flowBot)), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Volatility", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(math.round(volScore)), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 5, str.tostring(math.round(volScore)), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Structure", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 6, str.tostring(math.round(structureTop)), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 6, str.tostring(math.round(structureBot)), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "Confirm", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 7, confirmLabel, text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 7, stateLabel, text_color=stateColor, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "Preset", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 8, preset, text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 8, signalMode, text_color=tc, text_size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+
+alertcondition(topSignal, "Top Exhaustion", "Exhaustion Scanner: top exhaustion — market potentially overheated ({{ticker}}, {{interval}})")
+alertcondition(botSignal, "Bottom Exhaustion", "Exhaustion Scanner: bottom exhaustion — market potentially oversold ({{ticker}}, {{interval}})")
+alertcondition(topSignal or botSignal, "Any Exhaustion", "Exhaustion Scanner: exhaustion detected ({{ticker}}, {{interval}})")

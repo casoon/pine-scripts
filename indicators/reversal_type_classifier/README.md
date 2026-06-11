@@ -1,6 +1,6 @@
 # Reversal Type Classifier
 
-Ex-post diagnostic indicator that classifies every confirmed pivot reversal into one of four outcome types. Intended for research and gate-design work, not real-time trading entries — all labels are painted rückwirkend at the pivot bar once the evaluation window has closed.
+Ex-post diagnostic indicator that classifies every confirmed pivot reversal into one of four outcome types. Intended for research and gate-design work, not real-time trading entries — all labels are painted retroactively at the pivot bar once the evaluation window has closed.
 
 ## Features
 

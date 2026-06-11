@@ -12,6 +12,7 @@ Scores each price swing (pivot-to-pivot leg) by three conviction factors: how fa
 - **Bullish divergence**: price lower low + conviction lower → exhausted sellers, plotted at pivot bar
 - **Step-line history**: running conviction line for bull and bear legs
 - **Dashboard**: last and previous conviction scores for each direction, active divergence state
+- **Alerts**: alert conditions for bearish and bullish conviction divergences
 
 ## Settings
 

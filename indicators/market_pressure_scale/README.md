@@ -17,6 +17,7 @@ Classic volatility indicators (ATR, Bollinger Width) measure compression but go 
 | StochRSI K | Blue (thin, optional) | Standard StochRSI K line |
 | StochRSI D | Orange-red (thin, optional) | Standard StochRSI D line |
 | MFI | Lavender (thin, optional) | Money Flow Index — RSI applied to Typical Price × Volume |
+| WT Osc / Signal | Sky blue / orange (thin, optional, default off) | WaveTrend oscillator + signal line with own divergences and zone crosses |
 
 ## Phases
 
@@ -65,17 +66,34 @@ Markers drawn directly on the candlestick chart, decoupled from oscillator curve
 
 StochRSI cross dot size scales with Setup Pressure — larger dot = more structural backing.
 
+## Momentum Regime Map
+
+Optional background overlay (default off) classifying the combined WT + StochRSI + MFI state. Replaces the phase background when active; also shown as a colored dashboard row.
+
+| Regime | Condition | Reading |
+|---|---|---|
+| Euphoric ↑ / ↓ | All three oscillators at extremes | Reversal risk |
+| Distribution | WT bullish but MFI fading | Buying volume drying up |
+| Accumulation | WT bearish but MFI recovering | Selling volume drying up |
+| Energy Build | All three near midpoint | Potential pressure buildup |
+
+## Market Character Score
+
+Inter-indicator divergence diagnosis in the dashboard (toggleable): **Conviction ↑/↓** (all three oscillators aligned), **Art. Push ↑/↓** (WT moves without MFI confirmation), **Div. Bull/Bear** (StochRSI leads opposite to WT), **Mixed** otherwise.
+
 ## Dashboard table
 
-Top-right panel, 5 rows:
+Top-right panel:
 
 | Row | Content |
 |---|---|
 | Phase | Current phase, color-coded |
 | Setup | Value / 100 + direction arrow (orange) |
 | Impulse | Value / 100 + direction arrow (green) |
-| Bias | Bullish / Bearish from configurable MA cross |
+| Bias | Bullish / Bearish / Flat from configurable MA cross |
 | Range Pos. | Where close sits within the N-bar high/low range (0–100 %) |
+| Regime | Momentum Regime Map state, color-coded |
+| Character | Market Character Score, color-coded |
 
 ## Inputs
 
@@ -89,6 +107,12 @@ Top-right panel, 5 rows:
 
 **StochRSI** — show toggle; Divergences sub-toggle; Crosses sub-toggle with Zone Low / Zone High thresholds (cross dots only in overbought / oversold zone, sized by Setup Pressure); K smoothing, D smoothing, RSI length, Stoch length
 
+**WaveTrend** — show toggle (default off); Divergences sub-toggle; Crosses sub-toggle with Zone Low / Zone High thresholds; Channel / Average / Signal lengths
+
 **MFI** — show toggle; Divergences sub-toggle (oscillator, active only when MFI on); Chart Markers sub-toggle (price chart, independent of MFI curve); Length
+
+**Momentum Regime Map** — Show Regime Background toggle (default off)
+
+**Market Character** — Show Character in Table toggle
 
 **Divergence** — master Show Divergences toggle; Bull / Bear sub-toggles; pivot left / right lookback, min / max bar range

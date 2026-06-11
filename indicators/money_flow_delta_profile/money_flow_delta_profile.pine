@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Money Flow Delta Profile [WavesUnchained]
-// Version: 1.5
+// Version: 2.0
 // Author: WavesUnchained
-// Build: 2026-05-15 00:00:00
+// Build: 2026-06-11 00:00:00
 // ============================================================================
 // Center-out diverging profile: green bars (right of center) = net buying
 // pressure, red bars (left) = net selling pressure at each price level.
@@ -20,6 +20,10 @@
 //   ✓ Dashboard with bias summary
 //   ✓ HVN / LVN / AVN node classification — reference bars colored by relative flow density
 //   ✓ LVN Supply/Demand zone overlay — adjacent thin-area rows projected as S/D boxes on chart
+//   ✓ LVN zone min-width filter + optional forward projection (extend right)
+//   ✓ Optional intrabar delta — bull/bear split from lower-TF volume direction
+//   ✓ Absorption profile — wick volume (visited but rejected) per price row
+//   ✓ Absorption peak zones — local rejection maxima projected as S/R
 //
 // ============================================================================
 
@@ -82,6 +86,24 @@ showLVNZones = input.bool(true, "LVN Zone Overlay", group = grN,
      tooltip = "Project LVN rows as Supply/Demand zone boxes across the lookback window. Adjacent LVN rows are merged into a single zone.")
 lvnSupC      = input.color(color.new(#ef5350, 88), "  Supply (above POC)", group = grN)
 lvnDemC      = input.color(color.new(#26a69a, 88), "  Demand (below POC)", group = grN)
+lvnMinRows   = input.int(1, "  Min Zone Rows", minval = 1, maxval = 20, group = grN,
+     tooltip = "Minimum number of adjacent LVN rows required to draw a zone. 1 = no filter (every LVN row qualifies).")
+lvnExtendR   = input.bool(false, "  Extend Zones Right", group = grN,
+     tooltip = "Project LVN zones forward to the right edge of the chart instead of ending them at the current bar.")
+
+grI = "Intrabar Delta"
+useIntrabar = input.bool(false, "Intrabar Delta (LTF)", group = grI,
+     tooltip = "Compute the bull/bear split per bar from lower-timeframe volume direction instead of the close-location approximation. The lower timeframe is the chart timeframe divided by Granularity, clamped to 1 minute — on 1-minute or seconds charts this falls back to the approximation automatically.")
+intraGran   = input.int(10, "  Granularity", minval = 2, maxval = 60, group = grI,
+     tooltip = "Chart timeframe ÷ this value = requested lower timeframe. Higher = finer sampling, more data load.")
+
+grA = "Absorption"
+showAbsorption = input.bool(false, "Absorption Profile", group = grA,
+     tooltip = "Wick-volume profile drawn left of the anchor line: flow at prices the bar visited but closed away from (rejection). Tall rows mark absorption levels where resting liquidity soaked up the move.")
+absC           = input.color(color.new(#7e57c2, 45), "  Color", group = grA)
+showAbsZones   = input.bool(false, "Absorption Peak Zones", group = grA,
+     tooltip = "Rows whose absorption exceeds both neighbors and at least half of the absorption maximum are projected as S/R zones across the lookback window.")
+absZoneC       = input.color(color.new(#7e57c2, 90), "  Zone Color", group = grA)
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -89,6 +111,41 @@ var array<box>   drwBoxes  = array.new<box>()
 var array<line>  drwLines  = array.new<line>()
 var array<label> drwLabels = array.new<label>()
 var table        dash      = na
+
+// ─── Intrabar delta collection (per chart bar, from lower-TF volume) ─────────
+// Signed LTF volume: positive = up-bar volume, negative = down-bar volume.
+// Per confirmed chart bar the bull/bear sums are stored so the profile loop
+// can replace the close-location approximation with the real split.
+
+int    chartSec = timeframe.in_seconds()
+int    ltfSec   = math.max(60, int(chartSec / intraGran))
+bool   ibActive = useIntrabar and ltfSec < chartSec
+
+var array<float> ibBull = array.new_float()
+var array<float> ibBear = array.new_float()
+float ibBullCur = na
+float ibBearCur = na
+
+if ibActive
+    string ltfTf = timeframe.from_seconds(ltfSec)
+    float sgnVol = close > open ? nz(volume) : close < open ? -nz(volume) : 0.0
+    arr = request.security_lower_tf(syminfo.tickerid, ltfTf, sgnVol)
+    float bSum = 0.0
+    float sSum = 0.0
+    if arr.size() > 0
+        for v in arr
+            if v > 0
+                bSum += v
+            else
+                sSum -= v
+    ibBullCur := bSum
+    ibBearCur := sSum
+    if barstate.isconfirmed
+        ibBull.push(bSum)
+        ibBear.push(sSum)
+        while ibBull.size() > 1500
+            ibBull.shift()
+            ibBear.shift()
 
 // ─── Price range — computed on every bar so Pine maintains proper series history
 float pLo = ta.lowest(low,   rpLN)
@@ -118,6 +175,7 @@ if barstate.islast
         // Accumulate flow per price row
         totFlow  = array.new_float(rpNR, 0.)
         bullFlow = array.new_float(rpNR, 0.)
+        absFlow  = array.new_float(rpNR, 0.)
 
         for bI = rpLN_adj to 0
             h_ = high[bI]
@@ -133,18 +191,43 @@ if barstate.islast
                 // Binary Close Location: continuous (c-l)/(h-l) ratio, but applied as a binary
                 //   threshold in the original sense — now made proportional for less noise
                 clRatio  = math.max(0.0, math.min(1.0, (c_ - l_) / (h_ - l_)))
-                buyRatio = rpDM == "Proportional"
-                         ? clRatio
-                         : rpPTY == "Bar Polarity"
-                           ? (c_ > o_ ? 1.0 : c_ < o_ ? 0.0 : 0.5)
-                           : clRatio
+                float buyRatio = clRatio
+                if rpDM != "Proportional" and rpPTY == "Bar Polarity"
+                    buyRatio := c_ > o_ ? 1.0 : c_ < o_ ? 0.0 : 0.5
+
+                // Intrabar delta: replace the approximation with the real
+                // bull/bear volume split from the lower timeframe when stored
+                if ibActive
+                    float ibB = na
+                    float ibS = na
+                    if bI == 0
+                        ibB := ibBullCur
+                        ibS := ibBearCur
+                    else
+                        // if the last bar is already confirmed it has been
+                        // pushed too — shift the offset base accordingly
+                        int ibBase = barstate.isconfirmed ? ibBull.size() - 1 : ibBull.size()
+                        int ibIdx  = ibBase - bI
+                        if ibIdx >= 0 and ibIdx < ibBull.size()
+                            ibB := ibBull.get(ibIdx)
+                            ibS := ibBear.get(ibIdx)
+                    if not na(ibB) and ibB + ibS > 0
+                        buyRatio := ibB / (ibB + ibS)
+
+                // Wick segments of this bar (for the absorption profile)
+                float bodyHi = math.max(o_, c_)
+                float bodyLo = math.min(o_, c_)
 
                 wt = useDecay ? math.exp(-decayFactor * bI) : 1.0
 
                 // MF price per bar (used for all rows of this bar when not Row Mid)
-                barMFPrice = rpMFP == "Close"   ? c_ :
-                             rpMFP == "HL2"     ? (h_ + l_) / 2.0 :
-                             rpMFP == "Typical" ? (h_ + l_ + c_) / 3.0 : 0.0
+                float barMFPrice = 0.0
+                if rpMFP == "Close"
+                    barMFPrice := c_
+                else if rpMFP == "HL2"
+                    barMFPrice := (h_ + l_) / 2.0
+                else if rpMFP == "Typical"
+                    barMFPrice := (h_ + l_ + c_) / 3.0
 
                 for r = 0 to rpNR - 1
                     pLL = pLo + r * pSTP
@@ -159,12 +242,20 @@ if barstate.islast
                             pSTP / (h_ - l_)
 
                         mfPrice = rpMFP == "Row Mid" ? pLo + (r + 0.5) * pSTP : barMFPrice
-                        flow = rpSRC == "Money Flow"
-                             ? v_ * vPOR * mfPrice * wt
-                             : v_ * vPOR * wt
+                        flow = rpSRC == "Money Flow" ? v_ * vPOR * mfPrice * wt : v_ * vPOR * wt
 
                         totFlow.set(r,  totFlow.get(r)  + flow)
                         bullFlow.set(r, bullFlow.get(r) + flow * buyRatio)
+
+                        // Absorption: the share of this row covered by the
+                        // bar's wicks — price traded there but closed away
+                        if showAbsorption or showAbsZones
+                            upWickOv = math.max(0.0, math.min(h_, pLL + pSTP) - math.max(bodyHi, pLL))
+                            loWickOv = math.max(0.0, math.min(bodyLo, pLL + pSTP) - math.max(l_, pLL))
+                            wickPOR  = (upWickOv + loWickOv) / (h_ - l_)
+                            if wickPOR > 0
+                                absRow = rpSRC == "Money Flow" ? v_ * wickPOR * mfPrice * wt : v_ * wickPOR * wt
+                                absFlow.set(r, absFlow.get(r) + absRow)
 
         totMax = totFlow.max()
 
@@ -183,6 +274,8 @@ if barstate.islast
                     deltaMax := math.abs(d)
             if deltaMax == 0.0
                 deltaMax := 1.0
+
+            absMax = absFlow.max()
 
             // Value Area: expand from POC toward highest adjacent row
             vaLo  = pocIdx
@@ -273,6 +366,13 @@ if barstate.islast
                     if split < tip
                         drwBoxes.push(box.new(split, yHi, tip, yLo, color(na), bgcolor = color.new(barColor, 55)))
 
+                // Absorption bar — extends LEFT of the anchor (mirror side)
+                if showAbsorption and absMax > 0
+                    aW = int(absFlow.get(r) / absMax * maxOH)
+                    if aW > 0
+                        drwBoxes.push(box.new(anchorBI - aW, yHi, anchorBI, yLo,
+                             border_color = color(na), bgcolor = absC))
+
                 // Bull% label: buying share at this price level (independent of bar width)
                 if rowShare > 0.04
                     bullPct_r = rowTot > 0 ? bullFlow.get(r) / rowTot * 100 : 50.0
@@ -298,13 +398,26 @@ if barstate.islast
                     if isLVN and zStart < 0
                         zStart := r
                     if not isLVN and zStart >= 0
-                        zLo    = pLo + zStart * pSTP
-                        zHi    = pLo + r * pSTP
-                        midRow = (zStart + r - 1) / 2.0
-                        drwBoxes.push(box.new(bar_index - rpLN_adj, zHi, bar_index, zLo,
-                             border_color = color.new(color.gray, 70),
-                             bgcolor      = midRow > pocIdx ? lvnSupC : lvnDemC))
+                        if r - zStart >= lvnMinRows
+                            zLo    = pLo + zStart * pSTP
+                            zHi    = pLo + r * pSTP
+                            midRow = (zStart + r - 1) / 2.0
+                            drwBoxes.push(box.new(bar_index - rpLN_adj, zHi, bar_index, zLo,
+                                 border_color = color.new(color.gray, 70),
+                                 bgcolor      = midRow > pocIdx ? lvnSupC : lvnDemC,
+                                 extend       = lvnExtendR ? extend.right : extend.none))
                         zStart := -1
+
+            // ── Absorption Peak Zones — local rejection maxima as S/R ────
+            if showAbsZones and absMax > 0
+                for r = 1 to rpNR - 2
+                    aV = absFlow.get(r)
+                    if aV > absFlow.get(r - 1) and aV > absFlow.get(r + 1) and aV >= absMax * 0.5
+                        drwBoxes.push(box.new(bar_index - rpLN_adj, pLo + (r + 1) * pSTP,
+                             bar_index, pLo + r * pSTP,
+                             border_color = color.new(color.gray, 70),
+                             bgcolor      = absZoneC,
+                             extend       = lvnExtendR ? extend.right : extend.none))
 
             // Anchor (zero) line
             drwLines.push(line.new(anchorBI, pHi, anchorBI, pLo,

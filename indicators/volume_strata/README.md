@@ -6,6 +6,7 @@ Fixed-range volume profile anchored to the right edge of the lookback window, sh
 
 - **Right-anchored profile** — bars grow leftward into the candle range; up-volume occupies the right (inner) side, down-volume extends further left
 - **Blue / yellow split** — buy volume in blue, sell volume in yellow (volume profile convention)
+- **Profile source** — raw Volume or Money Flow (volume × row mid-price) for a notional-value perspective
 - **Value area** — configurable percentage (default 70%) highlighted in distinct colors; rows outside the area are shown in lighter tones
 - **Point of Control (POC)** — dashed horizontal line at the highest-volume price row, with a right-side price label
 - **VAH / VAL** — dotted lines at the top and bottom of the value area with price labels
@@ -24,6 +25,7 @@ Fixed-range volume profile anchored to the right edge of the lookback window, sh
 | Rows | 24 | Number of price buckets |
 | Value Area % | 70 | Volume percentage defining the value area |
 | Profile Offset | 150 | Bars to the right where the profile is drawn |
+| Profile Source | Volume | Volume or Money Flow (volume × row mid-price) |
 | POC color / width | red, 2 | Style of the POC line |
 | VAH / VAL color | gray | Style of the value area boundary lines |
 | HVN color | gold | Color of high-volume node markers |

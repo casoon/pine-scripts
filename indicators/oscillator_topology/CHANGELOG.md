@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1 — 2026-06-11
+- 2 alert conditions added: V-Spike Peak, V-Spike Trough
+- Docs corrected: curvature is normalized by the recent WT range, not ATR
+- Internal: shape-color and dashboard ternaries rewritten as if/else for Pine v6 compatibility; dead pivBar variable removed
+
 ## v1.0 — 2026-05-15
 - Initial release
 - Curvature measurement at WT pivot extremes (2nd derivative normalized by ATR)

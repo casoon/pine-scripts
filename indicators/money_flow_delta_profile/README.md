@@ -9,7 +9,7 @@ A directional volume/money flow profile. Every price row shows two bars anchored
 - **Delta bars** — all extend rightward from the anchor, sized by net flow, colored by direction (green = bull, red = bear)
 - **Total Flow Reference** — gray bars behind the delta bars showing raw activity at each level; colored by node type (HVN/LVN/AVN)
 - **HVN / LVN / AVN classification** — reference bars colored by relative flow density (HVN = warm orange, LVN = faded gray, AVN = neutral gray)
-- **LVN Supply/Demand Zones** — adjacent Low Volume Node rows merged into zone boxes: red above POC (supply), green below POC (demand)
+- **LVN Supply/Demand Zones** — adjacent Low Volume Node rows merged into zone boxes: red above POC (supply), green below POC (demand); optional minimum zone width and forward projection to the right chart edge
 - **Point of Control (POC)** — dashed yellow line at the price row with highest total flow
 - **Value Area** — configurable percentage (default 70%) of total flow; shows VAH/VAL boundaries
 - **Delta POC** — optional dotted line marking the most decisively directional row
@@ -17,6 +17,9 @@ A directional volume/money flow profile. Every price row shows two bars anchored
 - **Bull% label** — buying share shown inside each significant row
 - **Source** — Money Flow (volume × mid-price) or raw Volume
 - **Polarity method** — Bar Polarity (close > open) or Close Location (proportional)
+- **Intrabar Delta (optional)** — bull/bear split per bar from real lower-timeframe volume direction instead of the close-location approximation (chart TF ÷ granularity, clamped to 1 minute; automatic fallback when no LTF data is available)
+- **Absorption Profile (optional)** — wick-volume per price row drawn as a mirror profile left of the anchor: flow at prices the bar visited but closed away from (rejection)
+- **Absorption Peak Zones (optional)** — local absorption maxima (≥ both neighbors and ≥ 50% of the absorption max) projected as S/R zones across the lookback window
 
 ## How to read it
 
@@ -26,6 +29,7 @@ A directional volume/money flow profile. Every price row shows two bars anchored
 - **LVN zone above price** → air pocket / supply — potential fast move if price re-enters
 - **LVN zone below price** → air pocket / demand — potential fast move downward if lost
 - **POC** → the most-traded level overall, common reversion target
+- **Tall absorption row** → price was pushed there repeatedly and rejected — resting liquidity; expect a reaction on revisit
 
 ## Visualization layout
 
@@ -60,6 +64,8 @@ Both bars start at the anchor line on the left. The gray bar sets the maximum wi
 | Weighting | Decay Factor | 0.015 | Higher = faster fade |
 | Node Classification | HVN Threshold | 80% | Rows above this share colored as HVN |
 | Node Classification | LVN Threshold | 20% | Rows below this share colored as LVN |
-| Visualization | Show LVN Zones | on | Supply/demand zone boxes from LVN rows |
+| Node Classification | LVN Zone Overlay | on | Supply/demand zone boxes from LVN rows |
+| Node Classification | Min Zone Rows | 1 | Skip zones with fewer adjacent LVN rows (1 = off) |
+| Node Classification | Extend Zones Right | off | Project zone boxes to the right chart edge |
 | Visualization | Value Area % | 70 | Fraction of total flow in VA |
 | Visualization | Bar Offset | 3 | Gap between last candle and profile |

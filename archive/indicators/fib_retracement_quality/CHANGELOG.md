@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1 — 2026-06-11
+- Fixed compile error: multi-line ternaries with series operands in the nearest-level lookup rewritten as if/else chains
+- Added alert conditions for high-quality bull and bear retracement signals
+
 ## v1.0 — 2026-05-16
 - Initial release
 - Bullish retracement quality: prior low → swing high → retracement low, scored vs Fibonacci levels

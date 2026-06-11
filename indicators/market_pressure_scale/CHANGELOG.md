@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.1 — 2026-06-11
+- Fix: all multi-line ternaries with series types (regime/character/phase colors and texts) rewritten to if/else (Pine v6 compile error CE10156)
+- Bias row now shows "Flat" when fast and slow MA are exactly equal (previously fell back to "Bearish")
+
 ## v1.2 — 2026-05-15
 - Momentum Regime Map: optional background overlay classifying the combined WT + StochRSI + MFI state into Euphoric (extreme overbought/oversold, reversal risk), Distribution (WT bullish but MFI fading), Accumulation (WT bearish but MFI recovering), Energy Build-up (all three near midpoint); replaces phase background when enabled; also shown as colored dashboard row
 - Market Character Score: inter-indicator divergence diagnosis in dashboard — Conviction (all three aligned), Artificial Push (WT moves without MFI confirmation), Div. Bull/Bear (StochRSI leads opposite to WT), Mixed

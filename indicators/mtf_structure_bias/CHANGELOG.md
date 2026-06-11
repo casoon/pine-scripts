@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1 — 2026-06-11
+- Alert conditions added: Bull Zone Entry (score crosses above +60) and Bear Zone Entry (score crosses below −60)
+- Header description corrected: structure detection compares rolling highest-high/lowest-low against N bars ago (not pivot-based)
+
 ## v1.0 — 2026-05-16
 - Initial release
 - Structural state per TF via highest-high / lowest-low comparison (no oscillators)

@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Wyckoff Schematics [WavesUnchained]
-// Version: 4.4.0
+// Version: 4.5.0
 // Author: WavesUnchained
-// Build: 2026-05-09 00:00:00
+// Build: 2026-06-11 00:00:00
 // ============================================================================
 // Volume/spread-based Wyckoff schematic detector with A–E phase heuristics,
 // event labeling (PS/PSY, SC, BC, AR, ST, Spring, Test, SOS, LPS, UTAD, SOW,
@@ -59,7 +59,7 @@ int eventLookback_W   = input.int(30,  "Lookback: Weekly", minval=10, maxval=100
 int eventLookback = switch
     timeframe.isintraday and timeframe.multiplier <= 5  => eventLookback_5M
     timeframe.isintraday and timeframe.multiplier <= 30 => eventLookback_15M
-    timeframe.isintraday                                 => eventLookback_1H
+    timeframe.isintraday and timeframe.multiplier <= 60 => eventLookback_1H
     timeframe.isdaily                                    => eventLookback_D
     timeframe.isweekly or timeframe.ismonthly           => eventLookback_W
     =>                                                      eventLookback_4H
@@ -304,7 +304,9 @@ phaseHasEvent(array<WyckoffEvent> events, string eventType, int startBar) =>
             break
     result
 
-calcRangeScore(WyckoffPhase phase, float atrVal, float volumeAvg, int rangeDuration) =>
+// recentVolDecline / pivLow3 / pivHigh3 are computed at global scope and passed in —
+// ta.* calls inside this conditionally-executed function would build inconsistent series.
+calcRangeScore(WyckoffPhase phase, float atrVal, int rangeDuration, bool recentVolDecline, float pivLow3, float pivHigh3) =>
     score = 0
     rangeWidth = phase.rangeHigh - phase.rangeLow
 
@@ -324,13 +326,12 @@ calcRangeScore(WyckoffPhase phase, float atrVal, float volumeAvg, int rangeDurat
         score += 12
 
     // Volume: short-term SMA below long-term SMA (contraction)
-    recentVolDecline = ta.sma(volume, 10) < ta.sma(volume, 30)
     if recentVolDecline
         score += 20
 
     // Multiple pivot tests within range
-    pivLowInRange  = not na(ta.pivotlow(low, 3, 3))  and low[3]  > phase.rangeLow  * 0.98 and low[3]  < phase.rangeLow  + rangeWidth * 0.4
-    pivHighInRange = not na(ta.pivothigh(high, 3, 3)) and high[3] < phase.rangeHigh * 1.02 and high[3] > phase.rangeHigh - rangeWidth * 0.4
+    pivLowInRange  = not na(pivLow3)  and low[3]  > phase.rangeLow  * 0.98 and low[3]  < phase.rangeLow  + rangeWidth * 0.4
+    pivHighInRange = not na(pivHigh3) and high[3] < phase.rangeHigh * 1.02 and high[3] > phase.rangeHigh - rangeWidth * 0.4
     if pivLowInRange or pivHighInRange
         score += 15
 
@@ -409,11 +410,6 @@ scoreLabel(int score) =>
 // HELPERS
 // ============================================================================
 
-priorTrendDirection() =>
-    ema = ta.ema(close, 50)
-    slope = ema - ema[25]
-    slope > ema * 0.001 ? "UP" : slope < ema * -0.001 ? "DOWN" : "SIDEWAYS"
-
 pfApproxTarget(float rangeLow, float rangeHigh, int rangeDuration, float atrVal, bool isAccum) =>
     boxSize = math.max(atrVal * 0.25, (rangeHigh - rangeLow) * 0.05)
     estimatedColumns = math.max(1.0, rangeDuration / 3.0)
@@ -424,14 +420,13 @@ pfApproxTarget(float rangeLow, float rangeHigh, int rangeDuration, float atrVal,
 // PHASE IDENTIFICATION
 // ============================================================================
 
-identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float atrVal, float pivLow, float pivHigh, WyckoffConfig config) =>
+identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float atrVal, float pivLow, float pivHigh, WyckoffConfig config, string priorTrend) =>
     volumeRatio = volume / volumeAvg
     spread = high - low
     state.effortResult := analyzeEffortResult(volume, volumeAvg, spread, spreadAvg)
 
     isSellingClimax = detectSellingClimax(volumeRatio, config, atrVal)
     isBuyingClimax  = detectBuyingClimax(volumeRatio, config, atrVal)
-    priorTrend = priorTrendDirection()
 
     if na(state.currentPhase)
         state.currentPhase := newWyckoffPhase("RANGING", "", "", priorTrend)
@@ -741,12 +736,12 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
         state.pfTarget      := pfApproxTarget(finalPhase.rangeLow, finalPhase.rangeHigh, rangeDuration, atrVal, finalPhase.name == "ACCUMULATION")
         state.effectExpected := math.abs(state.pfTarget - (finalPhase.name == "ACCUMULATION" ? finalPhase.rangeLow : finalPhase.rangeHigh))
 
-updateWyckoffAnalysis(WyckoffState state, float volumeAvg, float spreadAvg, float atrVal, float rsNorm, float pivLow, float pivHigh, WyckoffConfig config) =>
-    identifyWyckoffPhase(state, volumeAvg, spreadAvg, atrVal, pivLow, pivHigh, config)
+updateWyckoffAnalysis(WyckoffState state, float volumeAvg, float spreadAvg, float atrVal, float rsNorm, float pivLow, float pivHigh, WyckoffConfig config, string priorTrend, bool recentVolDecline, float pivLow3, float pivHigh3) =>
+    identifyWyckoffPhase(state, volumeAvg, spreadAvg, atrVal, pivLow, pivHigh, config, priorTrend)
     // Scoring (computed after phase update)
     if not na(state.currentPhase) and (state.currentPhase.name == "ACCUMULATION" or state.currentPhase.name == "DISTRIBUTION")
         rangeDuration = bar_index - state.currentPhase.startBar
-        state.rangeScore   := calcRangeScore(state.currentPhase, atrVal, volumeAvg, rangeDuration)
+        state.rangeScore   := calcRangeScore(state.currentPhase, atrVal, rangeDuration, recentVolDecline, pivLow3, pivHigh3)
         state.rangeQuality := scoreLabel(state.rangeScore)
         state.setupScore   := calcSetupScore(state, rsNorm, rangeDuration)
         state.setupQuality := scoreLabel(state.setupScore)
@@ -797,6 +792,15 @@ float atrVal    = ta.atr(14)
 float pivLow    = ta.pivotlow(low, pivotLen, pivotLen)
 float pivHigh   = ta.pivothigh(high, pivotLen, pivotLen)
 
+// Series consumed inside conditionally-executed functions — computed here at global
+// scope so the ta.* state updates on every bar.
+float  trendEma         = ta.ema(close, 50)
+float  trendEmaSlope    = trendEma - trendEma[25]
+string priorTrend       = trendEmaSlope > trendEma * 0.001 ? "UP" : trendEmaSlope < trendEma * -0.001 ? "DOWN" : "SIDEWAYS"
+bool   recentVolDecline = ta.sma(volume, 10) < ta.sma(volume, 30)
+float  pivLow3          = ta.pivotlow(low, 3, 3)
+float  pivHigh3         = ta.pivothigh(high, 3, 3)
+
 // === RELATIVE STRENGTH ===
 float benchClose = showRS ? request.security(rsSymbol, timeframe.period, close, lookahead=barmerge.lookahead_off) : na
 float rsRatio    = showRS and not na(benchClose) and benchClose > 0 ? close / benchClose : na
@@ -817,7 +821,7 @@ wyckoffState.htfBias := htfBias
 
 bool dataReady = not na(volumeAvg) and not na(spreadAvg) and not na(atrVal) and volumeAvg > 0 and spreadAvg > 0 and high > low and close > 0
 if dataReady
-    updateWyckoffAnalysis(wyckoffState, volumeAvg, spreadAvg, atrVal, rsNorm, pivLow, pivHigh, wyckoffConfig)
+    updateWyckoffAnalysis(wyckoffState, volumeAvg, spreadAvg, atrVal, rsNorm, pivLow, pivHigh, wyckoffConfig, priorTrend, recentVolDecline, pivLow3, pivHigh3)
 
 // ============================================================================
 // VISUALIZATION
@@ -845,16 +849,19 @@ if showPhaseRanges and drawPhaseBox
                  cp.name == "MARKDOWN"      ? markdownColor :
                  color.new(color.gray, 85)
 
+    // Clamp left edge: drawings further than ~10000 bars back raise a runtime error
+    int phaseLeft = math.max(cp.startBar, bar_index - 9000)
+
     if bar_index == cp.startBar or na(phaseBox)
         if not na(phaseBox)
             box.delete(phaseBox)
         if not na(phaseLabel)
             label.delete(phaseLabel)
-        phaseBox := box.new(cp.startBar, cp.rangeHigh, bar_index, cp.rangeLow,
+        phaseBox := box.new(phaseLeft, cp.rangeHigh, bar_index, cp.rangeLow,
              border_color=phaseColor, bgcolor=phaseColor, border_width=2)
         labelText = cp.phaseAE != "" ?
              str.format("{0} {1}\n{2}", cp.name, cp.phaseAE, cp.subphase) : cp.name
-        phaseLabel := label.new(cp.startBar, cp.rangeHigh, labelText,
+        phaseLabel := label.new(phaseLeft, cp.rangeHigh, labelText,
              color=color.new(color.black, 20), textcolor=color.white,
              style=label.style_label_down, size=size.normal)
     else
@@ -1092,6 +1099,19 @@ alertcondition(utadDetected, "UTAD Detected", "Wyckoff: UTAD — potential distr
 
 bool testDetected = currentSubphase == "TEST" and currentSubphase[1] != "TEST"
 alertcondition(testDetected, "Test Detected", "Wyckoff: Test confirmed on lower volume")
+
+// Phase D entry events
+bool sosDetected = currentSubphase == "SOS" and currentSubphase[1] != "SOS"
+alertcondition(sosDetected, "SOS Detected", "Wyckoff: Sign of Strength — rally on volume (Phase D)")
+
+bool sowDetected = currentSubphase == "SOW" and currentSubphase[1] != "SOW"
+alertcondition(sowDetected, "SOW Detected", "Wyckoff: Sign of Weakness — decline on volume (Phase D)")
+
+bool lpsDetected = currentSubphase == "LPS" and currentSubphase[1] != "LPS"
+alertcondition(lpsDetected, "LPS Detected", "Wyckoff: Last Point of Support — pivot low on low volume (Phase D)")
+
+bool lpsyDetected = currentSubphase == "LPSY" and currentSubphase[1] != "LPSY"
+alertcondition(lpsyDetected, "LPSY Detected", "Wyckoff: Last Point of Supply — pivot high on low volume (Phase D)")
 
 bool climaxDetected = _erRelationship == "CLIMAX" and _erStrength >= 80 and _erRelationship[1] != "CLIMAX"
 alertcondition(climaxDetected, "Climax Detected", "Wyckoff: Climax action — high effort, low result")

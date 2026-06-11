@@ -12,9 +12,12 @@ Ranks equal highs and equal lows by quality, detects sweep-and-reclaim events wi
 - **Composite event scoring** — `f_event_score`: wick depth, close-back depth, volume ratio, session boost; capped at 100
 - **Bias output** — combines reclaim direction and level proximity into a Bullish / Neutral / Bearish bias with numeric value
 - **Armed level highlight** — background color when price is within the alert distance ATR of a primary level
+- **Unfilled gaps** — price gaps between consecutive bars drawn as magnet-zone boxes until filled
+- **Stop hunt detection** — same-bar sweep through a known level + volume spike + reversal close, labeled HUNT
+- **Exhaustion Events (Momentum Hybrid)** — sweeps/hunts qualified by built-in WaveTrend extreme (+MFI context); marked with large "EX" triangles
 - **Session filter** — optionally restricts reclaim scoring and bias boost to a defined session window
-- **Dashboard** — top-right table: bias, primary BSL/SSL price + score + ATR distance, armed state, last event, recent bull/bear premium scores
-- **8 alert conditions** — BSL/SSL near, sweep, reclaim, premium reclaim (score ≥ 65)
+- **Dashboard** — top-right table: bias, primary BSL/SSL price + score + ATR distance, armed state, last event, premium scores, gap/hunt counts, WT/MFI state, exhaustion state
+- **12 alert conditions** — BSL/SSL near, sweep, stop hunt, reclaim, premium reclaim (score ≥ 65), exhaustion bear/bull
 
 ## Scoring
 
@@ -52,6 +55,13 @@ Capped at 100. Events with score ≥ 65 trigger the "Premium" alert.
 | | Min Close-Back Distance (ATR) | 0.10 |
 | | Min Volume Ratio | 1.2 |
 | | Max Premium Events | 6 |
+| Stop Hunts | Volume Spike Multiplier | 1.5 |
+| | Max Hunts to Show | 8 |
+| Gaps | Max Gaps to Display | 5 |
+| | Min Gap Size % | 0.05 |
 | Context | Active Session Filter | off |
 | | Alert Distance (ATR) | 1.0 |
 | | Recent Event Memory (bars) | 30 |
+| Momentum Hybrid | Exhaustion Event Detection | on |
+| | WT Extreme Threshold | 53 |
+| | MFI Length | 14 |

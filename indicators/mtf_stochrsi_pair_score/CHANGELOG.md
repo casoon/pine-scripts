@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.7.1 — 2026-06-11
+- Fix: multi-line ternaries with series types (cell background, QQE trailing stop, QQE score weighting, squeeze momentum color) rewritten to if/else (Pine v6 compile error CE10156)
+- Removed unused f_state() helper
+- Squeeze state dot tooltip corrected to actual colors (orange = ON, teal = OFF, gray = no squeeze)
+
 ## v1.7.0 — 2026-05-15
 - Fractal Momentum Alignment: gradient consistency score (0–100) across the TF chain — 100 = all adjacent TF pairs agree in direction (ordered), 0 = every adjacent pair disagrees (chaotic); optional plot + dashboard row
 - Oscillator Compression Detector: fires when the sum of absolute TF scores falls below threshold (avg |score| < 20 per TF by default), indicating all TFs near zero — potential pressure buildup; purple background + dashboard row

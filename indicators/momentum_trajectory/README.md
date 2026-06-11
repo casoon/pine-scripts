@@ -11,6 +11,7 @@ Treats WaveTrend, StochRSI, and MFI as movement vectors and decomposes each into
 - State classification per oscillator: Building / Peaking / Collapsing / Recovering
 - Background highlight on critical transitions where WT acceleration crosses zero
 - Dashboard showing the current state for each oscillator
+- 2 alert conditions: WT Momentum Peaking, WT Momentum Recovering
 
 ## Settings
 

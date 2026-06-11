@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.2.1 — 2026-06-11
+- Internal: multi-line ternaries (armed-level background, dashboard WT state) rewritten as if/else for Pine v6 compatibility — no behavior change
+- Header brought in line with repo convention
+
 ## v3.2.0 — 2026-05-15
 - Momentum Hybrid: built-in WaveTrend + MFI calculation to qualify sweep/hunt events; Exhaustion Events fire when a BSL sweep/hunt coincides with WT above +threshold (bearish exhaustion) or an SSL sweep/hunt with WT below -threshold (bullish exhaustion)
 - Exhaustion markers on chart: large triangles labeled "EX" above/below the triggering bar

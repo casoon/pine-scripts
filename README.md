@@ -2,7 +2,7 @@
 
 **Pine Version:** v6 &nbsp;·&nbsp; **License:** [MIT](LICENSE) &nbsp;·&nbsp; **Author:** [WavesUnchained](https://www.tradingview.com/u/WavesUnchained/)
 
-> A collection of custom TradingView indicators built around composable analysis — market structure, trend, momentum, and confluence scoring. See [about.md](about.md) for background.
+> A collection of custom TradingView indicators built around composable analysis — market structure, trend, momentum, and confluence scoring.
 
 ---
 
@@ -64,6 +64,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`reversal_engine_score_v1.pine`](indicators/reversal_engine_score/reversal_engine_score_v1.pine) | Score-based liquidity sweep reversal signals with HTF trend filter and configurable evidence threshold |
 | [`reversal_type_classifier_v1.pine`](indicators/reversal_type_classifier/reversal_type_classifier_v1.pine) | Ex-post diagnostic: classifies confirmed pivot reversals as Snapback / Grind / Fake / Chop with WT context and R-outcome scoring |
 | [`commodity_heat_reversal.pine`](indicators/commodity_heat_reversal/commodity_heat_reversal.pine) | Score-based mean-reversion reversal signals for commodity futures — ATR distance, expansion, RSI extreme, wick pressure, BB breach |
+| [`exhaustion_scanner.pine`](indicators/exhaustion_scanner/exhaustion_scanner.pine) | Weighted top/bottom exhaustion score (0–100) from distance/momentum/flow/volatility/structure with per-market presets (stocks, commodities, forex, crypto) |
 
 ### Trend & Regime
 
@@ -104,12 +105,13 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 |--------|--------------|
 | [`zigzag_patterns_framework.pine`](indicators/zigzag_patterns_framework/zigzag_patterns_framework.pine) | ZigZag-based pattern detection — ABC, triangles, Wolfe waves |
 | [`zigzag_fibo_pullback_map.pine`](indicators/zigzag_fibo_pullback_map/zigzag_fibo_pullback_map.pine) | Confirmed ZigZag pivots with pullback-to-Fibonacci labeling and active fib fan |
+| [`elliott_wave_radar.pine`](indicators/elliott_wave_radar/elliott_wave_radar.pine) | Rule-validated Elliott Wave counting — labels impulses/ABC only when hard EW rules hold, Fib-scored, with target projections and invalidation watch |
 
 ---
 
 ## Strategies
 
-Strategy files are **auto-generated** from indicator source files via `scripts/build_strategies.py`. Never edit them directly. Each strategy adds a trade direction filter, confirmed-bar gate, cooldown, and optional break-even stop on top of the indicator logic.
+Most strategy files are **auto-generated** from indicator source files via `scripts/build_strategies.py` — do not edit those directly. The WaveTrend v4 strategy is standalone and maintained by hand. Each strategy adds a trade direction filter, confirmed-bar gate, cooldown, and optional break-even stop on top of the indicator logic.
 
 ```bash
 python3 scripts/build_strategies.py          # rebuild all
@@ -118,12 +120,12 @@ python3 scripts/build_strategies.py indicators/chandelier_flip_radar/
 
 | Strategy | Based on | SL type | Backtest rating |
 |----------|----------|---------|-----------------|
-| [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising (PF 1.22, NatGas 4H) |
-| [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising (PF 1.14, NatGas 4H) |
-| [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (PF 1.13, NatGas 4H) |
-| [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Promising (PF 3.07, +69.7%, NatGas 1D — best in repo) |
+| [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising (PF 1.60, NatGas 4H) |
+| [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising (PF 1.14, NatGas 4H) |
+| [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (PF 1.71 Long, NatGas 4H) |
+| [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Promising (PF 3.07, NatGas 1D — best in repo) |
 
-Full backtest results and parameter notes: `strategies/*_assessment.md`. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
+Full backtest results and parameter notes: `strategies/<name>/<name>_strategy_assessment.md`. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
 
 ---
 

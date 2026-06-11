@@ -8,7 +8,7 @@ Scores how precisely each confirmed retracement aligns with a Fibonacci level. A
 - **Bearish retracement scoring**: prior high (A) → swing low (B) → retracement high (C); ratio = (C−B)/(A−B)
 - **Fibonacci levels**: 0.236, 0.382, 0.5, 0.618, 0.786 — nearest level identified automatically
 - **Quality score 0–100**: proximity to nearest level × level multiplier (0.618→1.0, 0.5→0.9, 0.382→0.8, 0.786→0.7, 0.236→0.5)
-- **Signal**: long/short plotshape when quality ≥ threshold (default 65)
+- **Signal**: long/short plotshape when quality ≥ threshold (default 65), with matching alert conditions
 - **Labels**: score + level hit at the exact retracement pivot bar
 - **Step-line history**: running quality trace for both directions
 - **Dashboard**: last quality score and level for bull and bear retracements + active signal

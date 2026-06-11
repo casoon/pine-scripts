@@ -10,6 +10,7 @@ Measures buying vs. selling pressure purely from candle microstructure — no de
 - **Spike markers**: circles on bars where raw pressure exceeds the spike threshold — initiation candles (strong bull close) or absorption candles (strong bear close)
 - **Zero-cross signals**: long/short signals when CPI crosses zero with momentum confirmation (cpiAcc in cross direction)
 - **Dashboard**: state (Strong Bull / Bull / Neutral / Bear / Strong Bear), CPI value, momentum direction, raw bar pressure
+- **Alerts**: long/short zero-cross, initiation/absorption spike
 
 ## Settings
 

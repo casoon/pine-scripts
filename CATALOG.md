@@ -25,7 +25,7 @@ Quality columns (★ 1–5):
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [adaptive_supertrend](indicators/adaptive_supertrend/) | 1.3 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Conviction-adaptive band width; ATR rank + trend force + chop; MTF confluence layer |
+| [adaptive_supertrend](indicators/adaptive_supertrend/) | 1.5 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Conviction-adaptive band width; MTF confluence layer; Familie wie chandelier_flip_radar (Abgrenzung siehe READMEs) — Archiv-Kandidat falls Tests nicht überzeugen |
 | [chandelier_flip_radar](indicators/chandelier_flip_radar/) | 1.4 | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | Promising PF 1.22 |
 | [smooth_trend_radar](indicators/smooth_trend_radar/) | 3.3 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [auto_trendlines](indicators/auto_trendlines/) | 1.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | |
@@ -50,14 +50,15 @@ Quality columns (★ 1–5):
 |---|---|---|---|---|---|---|
 | [reversal_engine_score](indicators/reversal_engine_score/) | 1.5 | Aktiv | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Score logic needs rework (test131) |
 | [reversal_type_classifier](indicators/reversal_type_classifier/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [commodity_heat_reversal](indicators/commodity_heat_reversal/) | 1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [commodity_heat_reversal](indicators/commodity_heat_reversal/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [exhaustion_scanner](indicators/exhaustion_scanner/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Gewichteter 0–100-Score mit Markt-Presets; Verallgemeinerung von commodity_heat_reversal; ungetestet |
 
 ## Liquidity & Volume
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [volume_strata](indicators/volume_strata/) | 1.9 | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
-| [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 1.5 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | HVN/LVN/AVN classification + LVN zone overlay |
+| [money_flow_delta_profile](indicators/money_flow_delta_profile/) | 2.0 | Aktiv | ★★★★★ | ★★★★☆ | ★★★☆☆ | HVN/LVN/AVN + LVN-Zonen; v2.0: Intrabar-Delta (LTF) + Absorption-Profil/-Zonen — neue Features ungetestet |
 | [vwap_cross_visuals](indicators/vwap_cross_visuals/) | 2.0.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [liquidity_hunter](indicators/liquidity_hunter/) | 3.2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | BSL/SSL scoring + Gaps + Stop Hunts + Exhaustion Events |
 
@@ -67,6 +68,7 @@ Quality columns (★ 1–5):
 |---|---|---|---|---|---|---|
 | [zigzag_patterns_framework](indicators/zigzag_patterns_framework/) | 1.0.0 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [zigzag_fibo_pullback_map](indicators/zigzag_fibo_pullback_map/) | 1.2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [elliott_wave_radar](indicators/elliott_wave_radar/) | 1.2 | Draft | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | Regelvalidierte EW-Zählung inkl. Zigzag/Flat-Korrekturen + C-Setup; v1.2: Wellenpunkte auf echte Extreme verankert (Praxistest-Feedback) |
 
 ## Commodity / Multi-TF Matrix
 
@@ -92,7 +94,6 @@ Quality columns (★ 1–5):
 | [mtf_structure_bias](indicators/mtf_structure_bias/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | HH/HL/LH/LL alignment across 4 TFs |
 | [swing_conviction_radar](indicators/swing_conviction_radar/) | 1.0 | Draft | ★★★★★ | ★★★★☆ | ★☆☆☆☆ | Per-leg speed + cleanliness + vol gradient → divergence signals |
 | [cvd_bias](indicators/cvd_bias/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Rolling cumulative volume delta, normalized; price/CVD divergence |
-| [fib_retracement_quality](indicators/fib_retracement_quality/) | 1.0 | Draft | ★★★★★ | ★★★★☆ | ★☆☆☆☆ | Scores Fibonacci level adherence per retracement pivot |
 
 ## Vein Suite
 
@@ -137,7 +138,8 @@ Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederher
 | [mtf_trend_alignment](archive/indicators/mtf_trend_alignment/) | Erfordert nicht gepflegte RTA-Libraries → reimpl. als mtf_structure_bias |
 | [pattern_recognition](archive/indicators/pattern_recognition/) | Overengineered, kaum getestet |
 | [wave_navigator](archive/indicators/wave_navigator/) | Elliott-Wave-Autoerkennung konzeptionell schwach |
-| [rj_wave](archive/indicators/rj_wave/) | Zu nische, State-Machine fragil → Fib-Konzept reimpl. als fib_retracement_quality |
+| [rj_wave](archive/indicators/rj_wave/) | Zu nische, State-Machine fragil |
+| [fib_retracement_quality](archive/indicators/fib_retracement_quality/) | Nur sinnvoll im Elliott-Wellen-Kontext — standalone kein Mehrwert |
 | [relative_leg_efficiency_panel_chart](archive/indicators/relative_leg_efficiency_panel_chart/) | Visualisierungs-Experiment → reimpl. als swing_conviction_radar |
 | [flow_bias](archive/indicators/flow_bias/) | Überschneidung mit market_pressure_scale → reimpl. als candle_pressure_index |
 | [candle_pressure_response_jma](archive/indicators/candle_pressure_response_jma/) | Candle-Metriken bereits in Vein suite (vein_exhaustion, vein_feature_exporter) |
