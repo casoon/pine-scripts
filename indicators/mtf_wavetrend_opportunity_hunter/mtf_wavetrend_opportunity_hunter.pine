@@ -1,27 +1,36 @@
 //@version=6
 // ============================================================================
 // MTF WaveTrend Opportunity Hunter [WavesUnchained]
-// Version: 1.0
+// Version: 2.1.1
 // Author: WavesUnchained
 // Build: 2026-06-12 00:00:00
 // ============================================================================
-// MTF scoring system that combines Regime, Opportunity, Timing, and Quality
-// into a weighted final score — fires signals only when all four layers align.
+// MTF confluence pane around WaveTrend — shows WHY a signal fires (or
+// doesn't) over time via a net confluence histogram plus per-layer heat
+// ribbons, and fires on a slim three-condition gate instead of stacked
+// score thresholds.
 //
 // Features:
+//   ✓ Confluence pane: net score histogram + heat ribbons for Regime /
+//     Opportunity / Timing / Quality — the "why (no) signal" view over time
+//   ✓ Confluence Rotation Map — RRG-style quadrant inset (Leading /
+//     Improving / Weakening / Lagging) with polyline trail of the net score
+//   ✓ Ultimate Smoother core (Ehlers, TASC 04/2024) — optional zero-lag
+//     replacement for the EMA core of WaveTrend
+//   ✓ Entropy noise floor — Shannon sign-entropy percentile rank as fifth
+//     ribbon and Quality component (self-calibrating per instrument)
+//   ✓ Slim gate: Regime bias + Setup pullback + Trigger WT event — Quality
+//     grades signals (A/B) instead of blocking them
+//   ✓ Persistent TP/SL zones on the price chart — risk box (entry→SL),
+//     target box (entry→TP1), TP2/TP3 lines; extended while the trade is
+//     active, frozen on exit warning
 //   ✓ Three-tier MTF framework: Regime (D) → Setup (4H) → Trigger (1H)
-//   ✓ Regime score: WT trend + EMA alignment + ADX filter
-//   ✓ Opportunity score: JMA pullback depth + WT extreme proximity
-//   ✓ Timing score: WT cross + momentum + JMA structure on trigger TF
-//   ✓ Quality score: Efficiency Ratio + ATR volatility + optional RS filter
-//   ✓ Configurable minimum score thresholds per layer and for final score
-//   ✓ TP1/TP2/TP3 and invalidation levels at signal bars
-//   ✓ Exit warning when trend health drops below threshold or WT crosses back
-//   ✓ Dashboard with live component scores and status label
+//   ✓ Exit warnings gated to active trades — no noise outside of signals
+//   ✓ Per-side dashboard with ARMED state and rotation quadrant
 //
 // ============================================================================
 
-indicator("MTF WaveTrend Opportunity Hunter [WavesUnchained]", overlay=true, max_labels_count=500, max_lines_count=100, max_bars_back=1500)
+indicator("MTF WaveTrend Opportunity Hunter [WavesUnchained]", overlay=false, max_labels_count=100, max_lines_count=100, max_boxes_count=100, max_polylines_count=10)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Inputs
@@ -37,6 +46,12 @@ wtChLen  = input.int(10, "WT Channel Length", minval=1, group=g_wt)
 wtAvgLen = input.int(21, "WT Average Length", minval=1, group=g_wt)
 wtSigLen = input.int(4,  "WT Signal Length", minval=1, group=g_wt)
 wtExtreme = input.float(55.0, "WT Extreme Level", minval=10, group=g_wt)
+useJmaCore = input.bool(true, "EMA + JMA Hybrid Core", group=g_wt,
+     tooltip="Keeps EMA as the WaveTrend base and blends in JMA smoothing. More stable than replacing the core with a zero-lag filter.")
+jmaCoreBlend = input.float(0.35, "JMA Blend", minval=0.0, maxval=1.0, step=0.05, group=g_wt,
+     tooltip="0 = pure EMA, 1 = JMA-smoothed EMA. 0.25-0.45 is usually the useful range for volatile markets.")
+useUltimate = input.bool(false, "Ultimate Smoother Core (Ehlers 2024)", group=g_wt,
+     tooltip="Replaces the EMA core of WaveTrend with John Ehlers' Ultimate Smoother (TASC 04/2024) — zero lag in the passband, earlier crosses at the same length.")
 
 g_trend = "Trend / Regime"
 emaFastLen = input.int(50,  "EMA Fast", minval=1, group=g_trend)
@@ -44,31 +59,55 @@ emaSlowLen = input.int(200, "EMA Slow", minval=1, group=g_trend)
 adxLen     = input.int(14,  "ADX Length", minval=1, group=g_trend)
 adxMin     = input.float(18.0, "Min ADX", minval=1, group=g_trend)
 
-g_jma = "JMA-like Pullback Smoothing"
-jmaLen   = input.int(34, "JMA Length", minval=1, group=g_jma)
-jmaPhase = input.float(0.5, "JMA Phase", minval=-1.0, maxval=1.0, step=0.1, group=g_jma)
+g_jma = "JMA Pullback Smoothing"
+jmaLen   = input.int(34,  "JMA Length", minval=1, group=g_jma)
+jmaPhase = input.int(50,  "JMA Phase",  minval=-100, maxval=100, group=g_jma)
+jmaPower = input.float(2.0, "JMA Power", minval=1.0, maxval=4.0, step=0.25, group=g_jma)
 
 g_quality = "Quality"
 erLen      = input.int(20, "Efficiency Ratio Length", minval=2, group=g_quality)
 atrLen     = input.int(14, "ATR Length", minval=1, group=g_quality)
+entropyLen = input.int(40, "Entropy Window (Trigger TF)", minval=10, group=g_quality,
+     tooltip="Shannon sign-entropy over this many Trigger-TF bars. Low entropy = directional tape, high entropy = noise.")
+entropyRankLen = input.int(200, "Entropy Rank Lookback", minval=50, group=g_quality,
+     tooltip="Percentile-rank window — makes the noise floor self-calibrating per instrument.")
 useRS      = input.bool(false, "Use Relative Strength Filter", group=g_quality)
 benchmark  = input.symbol("SPY", "Benchmark Symbol", group=g_quality)
 
-g_signal = "Signal Thresholds"
+g_signal = "Signal Gate"
 minRegime      = input.float(65, "Min Regime Score", minval=0, maxval=100, group=g_signal)
 minOpportunity = input.float(65, "Min Opportunity Score", minval=0, maxval=100, group=g_signal)
-minQuality     = input.float(55, "Min Quality Score", minval=0, maxval=100, group=g_signal)
-minTiming      = input.float(70, "Min Timing Score", minval=0, maxval=100, group=g_signal)
-minFinal       = input.float(70, "Min Final Score", minval=0, maxval=100, group=g_signal)
+gateBuffer     = input.float(10, "Gate Buffer", minval=0, maxval=30, group=g_signal,
+     tooltip="Softens Regime/Opportunity gates. A value of 10 means a 65 threshold arms from 55 upward; the dashboard still shows the raw score.")
+gradeAQuality  = input.float(55, "Grade A Quality ≥", minval=0, maxval=100, group=g_signal,
+     tooltip="Quality does not block signals — it grades them. Signals at or above this score are labeled A, below it B.")
+triggerMode = input.string("Cross or Turn", "Trigger Mode", options=["Cross Only", "Cross or Turn"], group=g_signal,
+     tooltip="Cross Only waits for WT1/WT2 crosses. Cross or Turn also accepts an earlier WT turn from an extended zone.")
+triggerTurnLevel = input.float(35.0, "WT Turn Level", minval=5, maxval=100, group=g_signal,
+     tooltip="Used by Cross or Turn mode. Long turns need WT below -level and rising; short turns need WT above +level and falling.")
 
 g_mode = "Mode"
 allowLong  = input.bool(true, "Allow Long Signals", group=g_mode)
 allowShort = input.bool(true, "Allow Short Signals", group=g_mode)
 
+g_rot = "Confluence Rotation Map"
+showRotation = input.bool(false, "Show Rotation Map", group=g_rot,
+     tooltip="RRG-style quadrant inset right of the last bar: x = net confluence, y = confluence momentum. Leading / Improving / Weakening / Lagging.")
+rotMomLen = input.int(8, "Momentum Lookback", minval=1, maxval=30, group=g_rot)
+rotSmooth = input.int(5, "Rotation Smoothing", minval=1, maxval=20, group=g_rot,
+     tooltip="EMA smoothing of both rotation axes — like real RRGs, the path is meaningless without it.")
+rotStep   = input.int(2, "Trail Sampling (bars)", minval=1, maxval=10, group=g_rot)
+rotTrail  = input.int(24, "Trail Points", minval=5, maxval=100, group=g_rot)
+
 g_vis = "Visuals"
+histSmooth    = input.int(3, "Histogram Smoothing", minval=1, maxval=10, group=g_vis,
+     tooltip="EMA on the displayed net confluence — the raw score is built from binary components and jumps in 10–35 point steps. 1 = raw.")
+showRibbons   = input.bool(true, "Show Layer Heat Ribbons", group=g_vis)
 showBg        = input.bool(true, "Show Regime Background", group=g_vis)
 showDashboard = input.bool(true, "Show Dashboard", group=g_vis)
-showLevels    = input.bool(true, "Show TP / Invalidation Levels", group=g_vis)
+showTfWarning = input.bool(false, "Show Lower-TF Sampling Warning", group=g_vis,
+     tooltip="Warns when Setup or Trigger TF is below the chart TF. request.security then samples lower-TF values only once per chart bar, so intrabar crosses can be missed.")
+showLevels    = input.bool(true, "Show TP / SL Zones on Chart", group=g_vis)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Helpers
@@ -80,73 +119,130 @@ clamp(x, lo, hi) =>
 scoreBool(cond, pts) =>
     cond ? pts : 0.0
 
-normalizeSigned(x, scale) =>
-    clamp(50.0 + x / scale * 50.0, 0.0, 100.0)
+f_jma(src, length, phase, power) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+    _pr    = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    _beta  = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    _alpha = math.pow(_beta, power)
+    e0    := (1 - _alpha) * src + _alpha * nz(e0[1], src)
+    e1    := (src - e0) * (1 - _beta) + _beta * nz(e1[1], 0)
+    e2    := (e0 + _pr * e1 - nz(jma[1], src)) * math.pow(1 - _alpha, 2) + math.pow(_alpha, 2) * nz(e2[1], 0)
+    jma   := nz(jma[1], src) + e2
+    jma
 
-normalizePositive(x, scale) =>
-    clamp(x / scale * 100.0, 0.0, 100.0)
+// Ehlers Ultimate Smoother (TASC 04/2024) — zero lag in the passband
+f_ultimateSmoother(src, period) =>
+    f  = 1.414 * math.pi / period
+    a1 = math.exp(-f)
+    c2 = 2 * a1 * math.cos(f)
+    c3 = -a1 * a1
+    c1 = (1 + c2 - c3) / 4
+    var float us = na
+    us := (1 - c1) * src + (2 * c1 - c2) * nz(src[1], src) - (c1 + c3) * nz(src[2], src) + c2 * nz(us[1], src) + c3 * nz(us[2], src)
+    us
 
-jmaLike(src, len, phase) =>
-    e1 = ta.ema(src, len)
-    e2 = ta.ema(e1, len)
-    e3 = ta.ema(e2, len)
-    smooth = e1 + (e1 - e2) * phase
-    final = smooth + (smooth - e3) * phase * 0.5
-    final
+// EMA remains the stable base. JMA is blended on top; Ultimate can still
+// replace the core when explicitly enabled.
+f_smoothCore(src, len, useUS, useJma, blend, phase, power) =>
+    e = ta.ema(src, len)
+    j = f_jma(e, len, phase, power)
+    u = f_ultimateSmoother(src, len)
+    h = e * (1.0 - blend) + j * blend
+    useUS ? u : useJma ? h : e
 
-waveTrend(src, chLen, avgLen, sigLen) =>
-    esa = ta.ema(src, chLen)
-    de = ta.ema(math.abs(src - esa), chLen)
-    ci = de != 0 ? (src - esa) / (0.015 * de) : 0.0
-    wt1 = ta.ema(ci, avgLen)
+waveTrend(src, chLen, avgLen, sigLen, useUS, useJma, blend, phase, power) =>
+    esa = f_smoothCore(src, chLen, useUS, useJma, blend, phase, power)
+    deRaw = f_smoothCore(math.abs(src - esa), chLen, useUS, useJma, blend, phase, power)
+    de = math.max(deRaw, 0.0)
+    ci = de > 0 ? (src - esa) / (0.015 * de) : 0.0
+    wt1 = f_smoothCore(ci, avgLen, useUS, useJma, blend, phase, power)
     wt2 = ta.sma(wt1, sigLen)
     [wt1, wt2, wt1 - wt2]
 
 efficiencyRatio(src, len) =>
     change = math.abs(src - src[len])
-    volatility = ta.sum(math.abs(src - src[1]), len)
+    volatility = ta.sma(math.abs(src - src[1]), len) * len
     volatility != 0 ? change / volatility : 0.0
 
 adxValue(len) =>
     [_, _, adx] = ta.dmi(len, len)
     adx
 
+// Shannon sign-entropy: 1.0 = coin flip (noise), → 0 = one-sided tape
+f_signEntropy(len) =>
+    int ups = 0
+    for i = 0 to len - 1
+        if close[i] > close[i + 1]
+            ups += 1
+    p = ups / float(len)
+    float h = 1.0
+    if p <= 0.0 or p >= 1.0
+        h := 0.0
+    else
+        h := -(p * math.log(p) + (1 - p) * math.log(1 - p)) / math.log(2)
+    h
+
+// Heat color for a net layer score (-100..+100): green bull, red bear, gray neutral
+f_heatColor(net) =>
+    color c = color.new(color.gray, 72)
+    if not na(net)
+        if net >= 15
+            c := color.from_gradient(net, 15, 70, color.new(#00c853, 65), color.new(#00c853, 0))
+        else if net <= -15
+            c := color.from_gradient(net, -70, -15, color.new(#d50000, 0), color.new(#d50000, 65))
+    c
+
+// Noise color: green = unusually clean tape, orange = unusually noisy
+f_noiseColor(rank) =>
+    color c = color.new(color.gray, 72)
+    if not na(rank)
+        if rank <= 30
+            c := color.from_gradient(rank, 0, 30, color.new(#00c853, 0), color.new(#00c853, 65))
+        else if rank >= 70
+            c := color.from_gradient(rank, 70, 100, color.new(#ff6f00, 65), color.new(#ff6f00, 0))
+    c
+
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MTF Data
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[dWT1, dWT2, dHist] = request.security(syminfo.tickerid, tfRegime, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen), barmerge.gaps_off, barmerge.lookahead_off)
+[dWT1, dWT2, dHist] = request.security(syminfo.tickerid, tfRegime, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen, useUltimate, useJmaCore, jmaCoreBlend, jmaPhase, jmaPower), barmerge.gaps_off, barmerge.lookahead_off)
 dClose   = request.security(syminfo.tickerid, tfRegime, close, barmerge.gaps_off, barmerge.lookahead_off)
 dEMA50   = request.security(syminfo.tickerid, tfRegime, ta.ema(close, emaFastLen), barmerge.gaps_off, barmerge.lookahead_off)
 dEMA200  = request.security(syminfo.tickerid, tfRegime, ta.ema(close, emaSlowLen), barmerge.gaps_off, barmerge.lookahead_off)
 dADX     = request.security(syminfo.tickerid, tfRegime, adxValue(adxLen), barmerge.gaps_off, barmerge.lookahead_off)
 
-[h4WT1, h4WT2, h4Hist] = request.security(syminfo.tickerid, tfSetup, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen), barmerge.gaps_off, barmerge.lookahead_off)
+[h4WT1, h4WT2, h4Hist] = request.security(syminfo.tickerid, tfSetup, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen, useUltimate, useJmaCore, jmaCoreBlend, jmaPhase, jmaPower), barmerge.gaps_off, barmerge.lookahead_off)
 h4Close = request.security(syminfo.tickerid, tfSetup, close, barmerge.gaps_off, barmerge.lookahead_off)
 h4ATR   = request.security(syminfo.tickerid, tfSetup, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off)
-h4JMA   = request.security(syminfo.tickerid, tfSetup, jmaLike(close, jmaLen, jmaPhase), barmerge.gaps_off, barmerge.lookahead_off)
+h4JMA   = request.security(syminfo.tickerid, tfSetup, f_jma(close, jmaLen, jmaPhase, jmaPower), barmerge.gaps_off, barmerge.lookahead_off)
 
-[h1WT1, h1WT2, h1Hist] = request.security(syminfo.tickerid, tfTrigger, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen), barmerge.gaps_off, barmerge.lookahead_off)
+[h1WT1, h1WT2, h1Hist] = request.security(syminfo.tickerid, tfTrigger, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen, useUltimate, useJmaCore, jmaCoreBlend, jmaPhase, jmaPower), barmerge.gaps_off, barmerge.lookahead_off)
 h1Close = request.security(syminfo.tickerid, tfTrigger, close, barmerge.gaps_off, barmerge.lookahead_off)
-h1JMA   = request.security(syminfo.tickerid, tfTrigger, jmaLike(close, jmaLen, jmaPhase), barmerge.gaps_off, barmerge.lookahead_off)
+h1JMA   = request.security(syminfo.tickerid, tfTrigger, f_jma(close, jmaLen, jmaPhase, jmaPower), barmerge.gaps_off, barmerge.lookahead_off)
 h1ER    = request.security(syminfo.tickerid, tfTrigger, efficiencyRatio(close, erLen), barmerge.gaps_off, barmerge.lookahead_off)
 h1ATR   = request.security(syminfo.tickerid, tfTrigger, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off)
+h1Entropy = request.security(syminfo.tickerid, tfTrigger, f_signEntropy(entropyLen), barmerge.gaps_off, barmerge.lookahead_off)
 
 benchClose = request.security(benchmark, tfRegime, close, barmerge.gaps_off, barmerge.lookahead_off)
 rsLine = useRS and benchClose != 0 ? dClose / benchClose : na
-rsSlope = useRS ? ta.slope(rsLine, 10) : 0.0
+rsSlope = useRS ? ta.linreg(rsLine, 10, 0) - ta.linreg(rsLine, 10, 1) : 0.0
+
+chartTfSec = timeframe.in_seconds(timeframe.period)
+setupTfSec = timeframe.in_seconds(tfSetup)
+triggerTfSec = timeframe.in_seconds(tfTrigger)
+setupTfBelowChart = not na(chartTfSec) and not na(setupTfSec) and setupTfSec < chartTfSec
+triggerTfBelowChart = not na(chartTfSec) and not na(triggerTfSec) and triggerTfSec < chartTfSec
+tfSamplingWarning = setupTfBelowChart or triggerTfBelowChart
+tfSamplingScope = setupTfBelowChart and triggerTfBelowChart ? "Setup + Trigger TF" : setupTfBelowChart ? "Setup TF" : "Trigger TF"
+tfSamplingText = "Chart " + timeframe.period + " > " + tfSamplingScope + ": lower-TF data is sampled once per chart bar; intrabar WT crosses/signals can be missed."
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Regime Score
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-dailyBull =
-     dWT1 > dWT2 and
-     dWT1 > dWT1[1]
-
-dailyBear =
-     dWT1 < dWT2 and
-     dWT1 < dWT1[1]
 
 trendBull = dClose > dEMA50 and dEMA50 > dEMA200
 trendBear = dClose < dEMA50 and dEMA50 < dEMA200
@@ -196,11 +292,17 @@ shortOpportunity =
      scoreBool(h4WT1 < h4WT1[1], 20)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Timing Score
+// Timing Score (display context — the gate itself is the WT trigger)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 h1BullCross = ta.crossover(h1WT1, h1WT2)
 h1BearCross = ta.crossunder(h1WT1, h1WT2)
+h1BullTurnRaw = h1WT1 < -triggerTurnLevel and h1WT1 > h1WT1[1] and h1Hist > h1Hist[1]
+h1BearTurnRaw = h1WT1 > triggerTurnLevel and h1WT1 < h1WT1[1] and h1Hist < h1Hist[1]
+h1BullTurn = h1BullTurnRaw and not h1BullTurnRaw[1]
+h1BearTurn = h1BearTurnRaw and not h1BearTurnRaw[1]
+h1BullTrigger = h1BullCross or (triggerMode == "Cross or Turn" and h1BullTurn)
+h1BearTrigger = h1BearCross or (triggerMode == "Cross or Turn" and h1BearTurn)
 
 h1BullMomentum = h1WT1 > h1WT1[1] and h1Hist > h1Hist[1]
 h1BearMomentum = h1WT1 < h1WT1[1] and h1Hist < h1Hist[1]
@@ -209,19 +311,19 @@ h1BullStructure = h1Close > h1JMA and h1JMA > h1JMA[1]
 h1BearStructure = h1Close < h1JMA and h1JMA < h1JMA[1]
 
 longTiming =
-     scoreBool(h1BullCross, 35) +
+     scoreBool(h1BullTrigger, 35) +
      scoreBool(h1BullMomentum, 30) +
      scoreBool(h1BullStructure, 25) +
      scoreBool(h4WT1 > h4WT1[1], 10)
 
 shortTiming =
-     scoreBool(h1BearCross, 35) +
+     scoreBool(h1BearTrigger, 35) +
      scoreBool(h1BearMomentum, 30) +
      scoreBool(h1BearStructure, 25) +
      scoreBool(h4WT1 < h4WT1[1], 10)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Quality Score
+// Quality Score (grades signals A/B — does not block)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 erScore = clamp(h1ER * 100.0, 0, 100)
@@ -232,23 +334,31 @@ volScore = volOk ? 75.0 : 35.0
 rsBullScore = useRS ? scoreBool(rsSlope > 0, 100) : 70
 rsBearScore = useRS ? scoreBool(rsSlope < 0, 100) : 70
 
-accelBull = ta.slope(h1JMA, 5) > ta.slope(h1JMA, 10)
-accelBear = ta.slope(h1JMA, 5) < ta.slope(h1JMA, 10)
+jmaSlope5  = ta.linreg(h1JMA, 5,  0) - ta.linreg(h1JMA, 5,  1)
+jmaSlope10 = ta.linreg(h1JMA, 10, 0) - ta.linreg(h1JMA, 10, 1)
+accelBull = jmaSlope5 > jmaSlope10
+accelBear = jmaSlope5 < jmaSlope10
+
+// Entropy noise floor — percentile rank makes it self-calibrating
+entropyRank  = ta.percentrank(h1Entropy, entropyRankLen)
+entropyScore = 100.0 - entropyRank
 
 longQuality =
-     erScore * 0.35 +
-     volScore * 0.25 +
-     rsBullScore * 0.20 +
-     scoreBool(accelBull, 20)
+     erScore * 0.30 +
+     volScore * 0.20 +
+     rsBullScore * 0.15 +
+     scoreBool(accelBull, 15) +
+     entropyScore * 0.20
 
 shortQuality =
-     erScore * 0.35 +
-     volScore * 0.25 +
-     rsBearScore * 0.20 +
-     scoreBool(accelBear, 20)
+     erScore * 0.30 +
+     volScore * 0.20 +
+     rsBearScore * 0.15 +
+     scoreBool(accelBear, 15) +
+     entropyScore * 0.20
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Final Score
+// Final / Net Scores
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 longFinal =
@@ -263,38 +373,72 @@ shortFinal =
      shortTiming * 0.25 +
      shortQuality * 0.10
 
-longSignal =
-     allowLong and
-     bullRegime >= minRegime and
-     longOpportunity >= minOpportunity and
-     longQuality >= minQuality and
-     longTiming >= minTiming and
-     longFinal >= minFinal
-
-shortSignal =
-     allowShort and
-     bearRegime >= minRegime and
-     shortOpportunity >= minOpportunity and
-     shortQuality >= minQuality and
-     shortTiming >= minTiming and
-     shortFinal >= minFinal
+netRegime  = bullRegime - bearRegime
+netOpp     = longOpportunity - shortOpportunity
+netTiming  = longTiming - shortTiming
+netQuality = longQuality - shortQuality
+netFinal   = longFinal - shortFinal
+plotWT1 = clamp(h1WT1, -80, 80)
+plotWT2 = clamp(h1WT2, -80, 80)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Risk / TP / Invalidation
+// Signals — slim gate: Regime bias + Setup pullback + Trigger WT event
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+minRegimeEff = clamp(minRegime - gateBuffer, 0, 100)
+minOpportunityEff = clamp(minOpportunity - gateBuffer, 0, 100)
+
+longArmed  = allowLong  and bullRegime >= minRegimeEff and longOpportunity >= minOpportunityEff
+shortArmed = allowShort and bearRegime >= minRegimeEff and shortOpportunity >= minOpportunityEff
+
+longSignalRaw  = longArmed  and h1BullTrigger
+shortSignalRaw = shortArmed and h1BearTrigger
+signalTfOk = not triggerTfBelowChart
+longSignal  = longSignalRaw  and signalTfOk
+shortSignal = shortSignalRaw and signalTfOk
+sampledLongSignal = longSignalRaw and not signalTfOk
+sampledShortSignal = shortSignalRaw and not signalTfOk
+
+longGradeA  = longQuality  >= gradeAQuality
+shortGradeA = shortQuality >= gradeAQuality
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Confluence Rotation (RRG-inspired): x = net confluence, y = its momentum
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Both axes EMA-smoothed — like real RRGs, the raw path is unreadable noise
+rotXSm = ta.ema(netFinal, rotSmooth)
+rotMomRaw = rotXSm - nz(rotXSm[rotMomLen], rotXSm)
+rotYSm = ta.ema(rotMomRaw, rotSmooth)
+rotX = clamp(rotXSm, -100, 100)
+rotY = clamp(rotYSm * 2.5, -100, 100)
+
+string rotQuad = "LAGGING"
+color rotQuadColor = color.new(#d50000, 0)
+if rotX >= 0 and rotY >= 0
+    rotQuad := "LEADING"
+    rotQuadColor := color.new(#00c853, 0)
+else if rotX >= 0
+    rotQuad := "WEAKENING"
+    rotQuadColor := color.new(#ff6f00, 0)
+else if rotY >= 0
+    rotQuad := "IMPROVING"
+    rotQuadColor := color.new(#ffd600, 0)
+
+var array<float> rotXs = array.new_float()
+var array<float> rotYs = array.new_float()
+if barstate.isconfirmed and bar_index % rotStep == 0
+    array.push(rotXs, rotX)
+    array.push(rotYs, rotY)
+    if array.size(rotXs) > rotTrail
+        array.shift(rotXs)
+        array.shift(rotYs)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Trend Health / Exit Warnings (gated to active trades)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 riskAtr = ta.atr(atrLen)
-
-longInvalidation  = low - riskAtr * 1.2
-shortInvalidation = high + riskAtr * 1.2
-
-longTP1 = close + riskAtr * 1.5
-longTP2 = close + riskAtr * 2.5
-longTP3 = close + riskAtr * 4.0
-
-shortTP1 = close - riskAtr * 1.5
-shortTP2 = close - riskAtr * 2.5
-shortTP3 = close - riskAtr * 4.0
 
 trendHealthLong =
      bullRegime * 0.40 +
@@ -308,96 +452,327 @@ trendHealthShort =
      scoreBool(h4WT1 < h4WT2, 15) +
      scoreBool(h1WT1 < h1WT2, 15)
 
-exitLongWarning =
-     trendHealthLong < 45 or ta.crossunder(h1WT1, h1WT2)
+exitLongCond  = trendHealthLong  < 45 or h1BearCross
+exitShortCond = trendHealthShort < 45 or h1BullCross
 
-exitShortWarning =
-     trendHealthShort < 45 or ta.crossover(h1WT1, h1WT2)
+var bool inLong  = false
+var bool inShort = false
+inLong  := longSignal  ? true : exitLongCond  ? false : inLong
+inShort := shortSignal ? true : exitShortCond ? false : inShort
+
+exitLongWarning  = inLong[1]  and not longSignal  and exitLongCond
+exitShortWarning = inShort[1] and not shortSignal and exitShortCond
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Plots
+// TP / SL Zones on the price chart (persistent, extended while active)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-bgcolor(showBg and bullRegime >= minRegime ? color.new(color.green, 90) : na)
-bgcolor(showBg and bearRegime >= minRegime ? color.new(color.red, 90) : na)
+var box  longRiskBox = na
+var box  longTpBox   = na
+var line longTp2Ln   = na
+var line longTp3Ln   = na
 
-plotshape(longSignal, title="Long Signal", style=shape.labelup, text="LONG", location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
-plotshape(shortSignal, title="Short Signal", style=shape.labeldown, text="SHORT", location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+var box  shortRiskBox = na
+var box  shortTpBox   = na
+var line shortTp2Ln   = na
+var line shortTp3Ln   = na
 
-plotshape(exitLongWarning, title="Long Exit Warning", style=shape.xcross, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny)
-plotshape(exitShortWarning, title="Short Exit Warning", style=shape.xcross, location=location.belowbar, color=color.new(color.orange, 0), size=size.tiny)
+if showLevels and longSignal
+    float sl  = low - riskAtr * 1.2
+    float tp1 = close + riskAtr * 1.5
+    float tp2 = close + riskAtr * 2.5
+    float tp3 = close + riskAtr * 4.0
+    longRiskBox := box.new(bar_index, close, bar_index + 1, sl, border_color=color.new(#d50000, 50), bgcolor=color.new(#d50000, 88), force_overlay=true)
+    longTpBox   := box.new(bar_index, tp1, bar_index + 1, close, border_color=color.new(#00c853, 50), bgcolor=color.new(#00c853, 88), force_overlay=true)
+    longTp2Ln   := line.new(bar_index, tp2, bar_index + 1, tp2, color=color.new(#00c853, 25), style=line.style_dashed, force_overlay=true)
+    longTp3Ln   := line.new(bar_index, tp3, bar_index + 1, tp3, color=color.new(#00c853, 0), style=line.style_dotted, force_overlay=true)
+    label.new(bar_index, close, (longGradeA ? "LONG A" : "LONG B") + "\nENTRY", style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=size.small, force_overlay=true)
+else if inLong and not na(longRiskBox)
+    box.set_right(longRiskBox, bar_index)
+    box.set_right(longTpBox, bar_index)
+    line.set_x2(longTp2Ln, bar_index)
+    line.set_x2(longTp3Ln, bar_index)
 
-plot(showLevels and longSignal ? longTP1 : na, "Long TP1", color=color.new(color.green, 40), style=plot.style_linebr)
-plot(showLevels and longSignal ? longTP2 : na, "Long TP2", color=color.new(color.green, 20), style=plot.style_linebr)
-plot(showLevels and longSignal ? longTP3 : na, "Long TP3", color=color.new(color.green, 0), style=plot.style_linebr)
-plot(showLevels and longSignal ? longInvalidation : na, "Long Invalidation", color=color.new(color.red, 0), style=plot.style_linebr)
+if showLevels and shortSignal
+    float sl  = high + riskAtr * 1.2
+    float tp1 = close - riskAtr * 1.5
+    float tp2 = close - riskAtr * 2.5
+    float tp3 = close - riskAtr * 4.0
+    shortRiskBox := box.new(bar_index, sl, bar_index + 1, close, border_color=color.new(#d50000, 50), bgcolor=color.new(#d50000, 88), force_overlay=true)
+    shortTpBox   := box.new(bar_index, close, bar_index + 1, tp1, border_color=color.new(#00c853, 50), bgcolor=color.new(#00c853, 88), force_overlay=true)
+    shortTp2Ln   := line.new(bar_index, tp2, bar_index + 1, tp2, color=color.new(#00c853, 25), style=line.style_dashed, force_overlay=true)
+    shortTp3Ln   := line.new(bar_index, tp3, bar_index + 1, tp3, color=color.new(#00c853, 0), style=line.style_dotted, force_overlay=true)
+    label.new(bar_index, close, (shortGradeA ? "SHORT A" : "SHORT B") + "\nENTRY", style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=size.small, force_overlay=true)
+else if inShort and not na(shortRiskBox)
+    box.set_right(shortRiskBox, bar_index)
+    box.set_right(shortTpBox, bar_index)
+    line.set_x2(shortTp2Ln, bar_index)
+    line.set_x2(shortTp3Ln, bar_index)
 
-plot(showLevels and shortSignal ? shortTP1 : na, "Short TP1", color=color.new(color.red, 40), style=plot.style_linebr)
-plot(showLevels and shortSignal ? shortTP2 : na, "Short TP2", color=color.new(color.red, 20), style=plot.style_linebr)
-plot(showLevels and shortSignal ? shortTP3 : na, "Short TP3", color=color.new(color.red, 0), style=plot.style_linebr)
-plot(showLevels and shortSignal ? shortInvalidation : na, "Short Invalidation", color=color.new(color.green, 0), style=plot.style_linebr)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Pane Plots — net confluence + layer heat ribbons
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Require 3 consecutive bars — a regime hovering around the threshold
+// otherwise paints flickering single-bar stripes
+bullBgOk = bullRegime >= minRegimeEff and bullRegime >= bearRegime
+bearBgOk = bearRegime >= minRegimeEff and bearRegime > bullRegime
+color bgColor = na
+if showBg and bullBgOk and bullBgOk[1] and bullBgOk[2]
+    bgColor := color.new(color.green, 92)
+else if showBg and bearBgOk and bearBgOk[1] and bearBgOk[2]
+    bgColor := color.new(color.red, 92)
+bgcolor(bgColor)
+
+netFinalSm = ta.ema(netFinal, histSmooth)
+plot(netFinalSm, "Net Confluence", color=netFinalSm >= 0 ? color.new(#00c853, 60) : color.new(#d50000, 60), style=plot.style_area)
+plot(netFinalSm, "Net Confluence Line", color=netFinalSm >= 0 ? color.new(#00c853, 0) : color.new(#d50000, 0), linewidth=2)
+
+hline(0, "Zero", color=color.new(color.gray, 50))
+hline(60, "Strong Long Confluence", color=color.new(#00c853, 70), linestyle=hline.style_dotted)
+hline(-60, "Strong Short Confluence", color=color.new(#d50000, 70), linestyle=hline.style_dotted)
+
+plot(plotWT1, "Trigger WT1", color=color.new(#00bcd4, 0), linewidth=1)
+plot(plotWT2, "Trigger WT2", color=color.new(color.gray, 25), linewidth=1)
+plot(triggerTurnLevel, "WT Turn Level +", color=color.new(#ff6f00, 75), linewidth=1, style=plot.style_linebr)
+plot(-triggerTurnLevel, "WT Turn Level -", color=color.new(#00c853, 75), linewidth=1, style=plot.style_linebr)
+
+plot(showRibbons ? 92.0 : na, "Regime Ribbon",      color=f_heatColor(netRegime),  linewidth=6, style=plot.style_line)
+plot(showRibbons ? 102.0 : na, "Opportunity Ribbon", color=f_heatColor(netOpp),     linewidth=6, style=plot.style_line)
+plot(showRibbons ? 112.0 : na, "Timing Ribbon",      color=f_heatColor(netTiming),  linewidth=6, style=plot.style_line)
+plot(showRibbons ? 122.0 : na, "Quality Ribbon",     color=f_heatColor(netQuality), linewidth=6, style=plot.style_line)
+plot(showRibbons ? 132.0 : na, "Noise Ribbon",       color=f_noiseColor(entropyRank), linewidth=6, style=plot.style_line)
+
+var label ribR = na
+var label ribO = na
+var label ribT = na
+var label ribQ = na
+var label ribN = na
+if showRibbons and barstate.islast
+    if na(ribR)
+        ribR := label.new(bar_index, 92, "Regime",      style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
+        ribO := label.new(bar_index, 102, "Opportunity", style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
+        ribT := label.new(bar_index, 112, "Timing",      style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
+        ribQ := label.new(bar_index, 122, "Quality",     style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
+        ribN := label.new(bar_index, 132, "Noise",       style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
+    label.set_x(ribR, bar_index + 2)
+    label.set_x(ribO, bar_index + 2)
+    label.set_x(ribT, bar_index + 2)
+    label.set_x(ribQ, bar_index + 2)
+    label.set_x(ribN, bar_index + 2)
+
+// Signal markers — pane and price chart
+plotshape(longSignal ? -82 : na, title="Long Signal (Pane)", style=shape.triangleup, location=location.absolute, color=color.new(#00c853, 0), size=size.tiny)
+plotshape(shortSignal ? 82 : na, title="Short Signal (Pane)", style=shape.triangledown, location=location.absolute, color=color.new(#d50000, 0), size=size.tiny)
+
+plotshape(exitLongWarning, title="Long Exit Warning", style=shape.xcross, location=location.abovebar, color=color.new(#ff6f00, 0), size=size.tiny, force_overlay=true)
+plotshape(exitShortWarning, title="Short Exit Warning", style=shape.xcross, location=location.belowbar, color=color.new(#ff6f00, 0), size=size.tiny, force_overlay=true)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Rotation Map inset (right of the last bar, lower pane area)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var polyline rotPl = na
+var box rotFrame = na
+var box rotQLead = na
+var box rotQImp  = na
+var box rotQWeak = na
+var box rotQLag  = na
+var line rotVLn = na
+var line rotHLn = na
+var label rotDot = na
+var label rotTitle = na
+var label rotLbLead = na
+var label rotLbImp = na
+var label rotLbWeak = na
+var label rotLbLag = na
+
+if showRotation and barstate.islast and array.size(rotXs) >= 2
+    polyline.delete(rotPl)
+    box.delete(rotFrame)
+    box.delete(rotQLead)
+    box.delete(rotQImp)
+    box.delete(rotQWeak)
+    box.delete(rotQLag)
+    line.delete(rotVLn)
+    line.delete(rotHLn)
+    label.delete(rotDot)
+    label.delete(rotTitle)
+    label.delete(rotLbLead)
+    label.delete(rotLbImp)
+    label.delete(rotLbWeak)
+    label.delete(rotLbLag)
+
+    int xL = bar_index + 6
+    int rotW = 34
+    float yB = -95.0
+    float rotHt = 78.0
+    int cx = xL + rotW / 2
+    float cy = yB + rotHt / 2
+    float yT = yB + rotHt
+
+    // Quadrant tints make the map self-explanatory
+    rotQImp  := box.new(xL, yT, cx, cy, border_color=color.new(color.white, 100), bgcolor=color.new(#ffd600, 94))
+    rotQLead := box.new(cx, yT, xL + rotW, cy, border_color=color.new(color.white, 100), bgcolor=color.new(#00c853, 94))
+    rotQLag  := box.new(xL, cy, cx, yB, border_color=color.new(color.white, 100), bgcolor=color.new(#d50000, 95))
+    rotQWeak := box.new(cx, cy, xL + rotW, yB, border_color=color.new(color.white, 100), bgcolor=color.new(#ff6f00, 95))
+
+    rotFrame := box.new(xL, yT, xL + rotW, yB, border_color=color.new(color.gray, 50), bgcolor=color.new(color.white, 100))
+    rotVLn := line.new(cx, yB, cx, yT, color=color.new(color.gray, 60), style=line.style_dotted)
+    rotHLn := line.new(xL, cy, xL + rotW, cy, color=color.new(color.gray, 60), style=line.style_dotted)
+
+    rotTitle := label.new(cx, yT, "Confluence Rotation", style=label.style_label_down, color=color.new(color.white, 100), textcolor=color.new(color.gray, 35), size=size.tiny)
+
+    rotLbLead := label.new(xL + rotW, yT, "LEAD", style=label.style_label_lower_left,  color=color.new(color.white, 100), textcolor=color.new(#00c853, 30), size=size.tiny)
+    rotLbImp  := label.new(xL,        yT, "IMPR", style=label.style_label_lower_right, color=color.new(color.white, 100), textcolor=color.new(#c8a800, 20), size=size.tiny)
+    rotLbWeak := label.new(xL + rotW, yB, "WEAK", style=label.style_label_upper_left,  color=color.new(color.white, 100), textcolor=color.new(#ff6f00, 30), size=size.tiny)
+    rotLbLag  := label.new(xL,        yB, "LAG",  style=label.style_label_upper_right, color=color.new(color.white, 100), textcolor=color.new(#d50000, 30), size=size.tiny)
+
+    pts = array.new<chart.point>()
+    int n = array.size(rotXs)
+    for i = 0 to n - 1
+        float vx = array.get(rotXs, i)
+        float vy = array.get(rotYs, i)
+        int px = xL + int(math.round((vx + 100.0) / 200.0 * rotW))
+        float py = yB + (vy + 100.0) / 200.0 * rotHt
+        array.push(pts, chart.point.from_index(px, py))
+    rotPl := polyline.new(pts, curved=true, closed=false, line_color=color.new(color.gray, 45), line_width=1)
+
+    int pxN = xL + int(math.round((rotX + 100.0) / 200.0 * rotW))
+    float pyN = yB + (rotY + 100.0) / 200.0 * rotHt
+    rotDot := label.new(pxN, pyN, "", style=label.style_circle, color=rotQuadColor, size=size.small)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Dashboard
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-var table dash = table.new(position.top_right, 2, 8,
+var table dash = table.new(position.top_right, 3, 11,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
      frame_color=color.new(color.gray, 40),
-     frame_width=1)
+     frame_width=1,
+     force_overlay=true)
 
 color tc = color.new(color.gray, 20)
 color hd = color.new(color.gray, 90)
+color cGood = #00c853
+color cBad  = #d50000
+
+var table tfWarn = table.new(position.top_center, 1, 2,
+     bgcolor=color.new(#fff3e0, 0),
+     border_color=color.new(#ff6f00, 15),
+     border_width=1,
+     frame_color=color.new(#ff6f00, 0),
+     frame_width=1,
+     force_overlay=true)
+
+if barstate.islast
+    table.clear(tfWarn, 0, 0, 0, 1)
+    if showTfWarning and tfSamplingWarning
+        table.cell(tfWarn, 0, 0, "⚠ Lower-TF sampling", text_color=color.new(#e65100, 0), bgcolor=color.new(#ffe0b2, 0), text_size=size.small,
+             tooltip=tfSamplingText)
+        table.cell(tfWarn, 0, 1, tfSamplingText, text_color=color.new(#5d4037, 0), bgcolor=color.new(#fff8e1, 0), text_size=size.tiny,
+             tooltip="Use the Trigger TF chart for exact trigger crosses, or set Trigger/Setup TF at or above the chart TF.")
 
 if showDashboard and barstate.islast
-    activeSide = longFinal > shortFinal ? "LONG" : "SHORT"
-    activeFinal = math.max(longFinal, shortFinal)
-    activeRegime = longFinal > shortFinal ? bullRegime : bearRegime
-    activeOpp = longFinal > shortFinal ? longOpportunity : shortOpportunity
-    activeTiming = longFinal > shortFinal ? longTiming : shortTiming
-    activeQuality = longFinal > shortFinal ? longQuality : shortQuality
-    activeHealth = longFinal > shortFinal ? trendHealthLong : trendHealthShort
+    table.cell(dash, 0, 0, tfSamplingWarning ? "MTF WT Hunter ⚠" : "MTF WT Hunter", text_color=tfSamplingWarning ? color.new(#ff6f00, 0) : tc, bgcolor=hd, text_size=size.small,
+         tooltip=tfSamplingWarning ? tfSamplingText : "")
+    table.cell(dash, 1, 0, "Long",  text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 2, 0, "Short", text_color=tc, bgcolor=hd, text_size=size.small)
 
-    table.cell(dash, 0, 0, "MTF WT Hunter", text_color=color.white, bgcolor=color.new(color.black, 0), text_size=size.small)
-    table.cell(dash, 1, 0, activeSide, text_color=color.white, bgcolor=activeSide == "LONG" ? color.new(color.green, 0) : color.new(color.red, 0), text_size=size.small)
+    table.cell(dash, 0, 1, "Regime", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 1, str.tostring(bullRegime, "#.0"), text_color=bullRegime >= minRegimeEff ? cGood : tc, text_size=size.tiny)
+    table.cell(dash, 2, 1, str.tostring(bearRegime, "#.0"), text_color=bearRegime >= minRegimeEff ? cBad : tc, text_size=size.tiny)
 
-    table.cell(dash, 0, 1, "Final",       text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 1, str.tostring(activeFinal, "#.0"), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 2, "Opportunity", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 2, str.tostring(longOpportunity, "#.0"), text_color=longOpportunity >= minOpportunityEff ? cGood : tc, text_size=size.tiny)
+    table.cell(dash, 2, 2, str.tostring(shortOpportunity, "#.0"), text_color=shortOpportunity >= minOpportunityEff ? cBad : tc, text_size=size.tiny)
 
-    table.cell(dash, 0, 2, "Regime",      text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 2, str.tostring(activeRegime, "#.0"), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 3, "Timing", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 3, str.tostring(longTiming, "#.0"), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 3, str.tostring(shortTiming, "#.0"), text_color=tc, text_size=size.tiny)
 
-    table.cell(dash, 0, 3, "Opportunity", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 3, str.tostring(activeOpp, "#.0"), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 4, "Quality", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(longQuality, "#.0") + (longGradeA ? " A" : " B"), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 4, str.tostring(shortQuality, "#.0") + (shortGradeA ? " A" : " B"), text_color=tc, text_size=size.tiny)
 
-    table.cell(dash, 0, 4, "Timing",      text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 4, str.tostring(activeTiming, "#.0"), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 5, "Final", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(longFinal, "#.0"), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 2, 5, str.tostring(shortFinal, "#.0"), text_color=tc, text_size=size.tiny)
 
-    table.cell(dash, 0, 5, "Quality",     text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 5, str.tostring(activeQuality, "#.0"), text_color=tc, text_size=size.small)
+    color noiseCol = tc
+    if entropyRank >= 70
+        noiseCol := #ff6f00
+    else if entropyRank <= 30
+        noiseCol := cGood
+    table.cell(dash, 0, 6, "Noise", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 6, str.tostring(entropyRank, "#") + "%", text_color=noiseCol, text_size=size.tiny)
+    table.cell(dash, 2, 6, "", text_size=size.tiny)
 
-    table.cell(dash, 0, 6, "Health",      text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 6, str.tostring(activeHealth, "#.0"), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 7, "Rotation", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 7, rotQuad, text_color=rotQuadColor, text_size=size.tiny)
+    table.cell(dash, 2, 7, "", text_size=size.tiny)
 
-    status =
-         longSignal ? "LONG SIGNAL" :
-         shortSignal ? "SHORT SIGNAL" :
-         activeRegime < minRegime ? "WAIT: REGIME" :
-         activeOpp < minOpportunity ? "WAIT: PULLBACK" :
-         activeTiming < minTiming ? "WAIT: TRIGGER" :
-         activeQuality < minQuality ? "WAIT: QUALITY" :
-         "WATCH"
+    table.cell(dash, 0, 8, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(dash, 1, 8, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(dash, 2, 8, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
 
-    table.cell(dash, 0, 7, "Status", text_color=tc, bgcolor=hd, text_size=size.small)
-    table.cell(dash, 1, 7, status, text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 0, 9, "WT Trigger", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 9, longSignal ? "✓" : sampledLongSignal ? "⚠" : "–", text_color=longSignal ? cGood : sampledLongSignal ? color.new(#ff6f00, 0) : tc, text_size=size.tiny,
+         tooltip=sampledLongSignal ? "Sampled lower-TF trigger. Switch chart to Trigger TF for actionable entry." : h1BullCross ? "WT bull cross" : h1BullTurn ? "WT bull turn from extended zone" : "")
+    table.cell(dash, 2, 9, shortSignal ? "✓" : sampledShortSignal ? "⚠" : "–", text_color=shortSignal ? cBad : sampledShortSignal ? color.new(#ff6f00, 0) : tc, text_size=size.tiny,
+         tooltip=sampledShortSignal ? "Sampled lower-TF trigger. Switch chart to Trigger TF for actionable entry." : h1BearCross ? "WT bear cross" : h1BearTurn ? "WT bear turn from extended zone" : "")
+
+    string stL = "ARMED"
+    color stLBg = color.new(#ff6f00, 0)
+    color stLTx = color.white
+    if not allowLong
+        stL := "OFF"
+        stLBg := color.new(color.gray, 80)
+        stLTx := tc
+    else if longSignal
+        stL := "SIGNAL"
+        stLBg := color.new(#00c853, 0)
+    else if bullRegime < minRegimeEff
+        stL := "REGIME"
+        stLBg := color.new(color.gray, 80)
+        stLTx := tc
+    else if longOpportunity < minOpportunityEff
+        stL := "PULLBACK"
+        stLBg := color.new(color.gray, 80)
+        stLTx := tc
+
+    string stS = "ARMED"
+    color stSBg = color.new(#ff6f00, 0)
+    color stSTx = color.white
+    if not allowShort
+        stS := "OFF"
+        stSBg := color.new(color.gray, 80)
+        stSTx := tc
+    else if shortSignal
+        stS := "SIGNAL"
+        stSBg := color.new(#d50000, 0)
+    else if bearRegime < minRegimeEff
+        stS := "REGIME"
+        stSBg := color.new(color.gray, 80)
+        stSTx := tc
+    else if shortOpportunity < minOpportunityEff
+        stS := "PULLBACK"
+        stSBg := color.new(color.gray, 80)
+        stSTx := tc
+
+    table.cell(dash, 0, 10, "Status", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 10, stL, text_color=stLTx, bgcolor=stLBg, text_size=size.tiny)
+    table.cell(dash, 2, 10, stS, text_color=stSTx, bgcolor=stSBg, text_size=size.tiny)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Alerts
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-alertcondition(longSignal, title="MTF WT Hunter Long", message="LONG setup on {{ticker}} | Final Score confirmed")
-alertcondition(shortSignal, title="MTF WT Hunter Short", message="SHORT setup on {{ticker}} | Final Score confirmed")
+alertcondition(longSignal, title="MTF WT Hunter Long", message="LONG setup on {{ticker}} | Regime + Pullback + WT trigger")
+alertcondition(shortSignal, title="MTF WT Hunter Short", message="SHORT setup on {{ticker}} | Regime + Pullback + WT trigger")
+alertcondition(longSignal and longGradeA, title="MTF WT Hunter Long (Grade A)", message="LONG Grade A setup on {{ticker}}")
+alertcondition(shortSignal and shortGradeA, title="MTF WT Hunter Short (Grade A)", message="SHORT Grade A setup on {{ticker}}")
 alertcondition(exitLongWarning, title="MTF WT Hunter Long Exit Warning", message="Long trend health weakening on {{ticker}}")
 alertcondition(exitShortWarning, title="MTF WT Hunter Short Exit Warning", message="Short trend health weakening on {{ticker}}")
