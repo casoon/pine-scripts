@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // VWAP Cross Visuals [WavesUnchained]
-// Version: 2.0.0
+// Version: 2.1.0
 // Author: WavesUnchained
-// Build: 2025-12-22 01:22:26
+// Build: 2026-06-11 00:00:00
 // ============================================================================
 // Advanced VWAP cross detection with multi-timeframe zone management, bias context, and ranked confluence zones.
 //
@@ -179,20 +179,27 @@ updateVwapAnchors(VwapAnchors anchors, VwapConfig config) =>
     anchors.cumulativePV += close * volume
     anchors.cumulativeV += volume
 
+    // Cumulative values as of the pivot bar (pivotRightBars ago).
+    // NOTE: history-referencing the anchors object (anchors[n]) would return the
+    // CURRENT field values because the same object is mutated in place — so the
+    // window sums are subtracted instead. Computed unconditionally (ta consistency).
+    float pvAtPivot = anchors.cumulativePV - math.sum(close * volume, config.pivotRightBars)
+    float vAtPivot  = anchors.cumulativeV - math.sum(volume, config.pivotRightBars)
+
     // Detect new pivot points
     float pivotHigh = ta.pivothigh(high, config.pivotLeftBars, config.pivotRightBars)
     float pivotLow = ta.pivotlow(low, config.pivotLeftBars, config.pivotRightBars)
 
     // Update high anchor when new pivot high found
     if not na(pivotHigh)
-        anchors.anchorPV_High := (anchors[config.pivotRightBars]).cumulativePV
-        anchors.anchorV_High := (anchors[config.pivotRightBars]).cumulativeV
+        anchors.anchorPV_High := pvAtPivot
+        anchors.anchorV_High := vAtPivot
         anchors.hasHighAnchor := true
 
     // Update low anchor when new pivot low found
     if not na(pivotLow)
-        anchors.anchorPV_Low := (anchors[config.pivotRightBars]).cumulativePV
-        anchors.anchorV_Low := (anchors[config.pivotRightBars]).cumulativeV
+        anchors.anchorPV_Low := pvAtPivot
+        anchors.anchorV_Low := vAtPivot
         anchors.hasLowAnchor := true
 
     anchors
@@ -370,7 +377,8 @@ processVwapDetection(VwapAnchors anchors, VwapConfig config) =>
 // === SIGNAL GENERATION ===
 
 generateVwapSignals(VwapState state) =>
-    var array<VwapSignal> signals = array.new<VwapSignal>()
+    // fresh array per bar — a var array would grow without bound
+    array<VwapSignal> signals = array.new<VwapSignal>()
 
     // Price cross signals
     if state.priceCrossUp and state.canShowPriceCross
@@ -578,10 +586,11 @@ newZoneState() =>
 stringToFloats(string s) =>
     parts = str.split(s, ",")
     floats = array.new<float>()
-    for i = 0 to array.size(parts) - 1
-        v = str.tonumber(str.trim(array.get(parts, i)))
-        if not na(v)
-            array.push(floats, v)
+    if array.size(parts) > 0
+        for i = 0 to array.size(parts) - 1
+            v = str.tonumber(str.trim(array.get(parts, i)))
+            if not na(v)
+                array.push(floats, v)
     floats
 
 // === BIAS DETECTION ===
@@ -693,83 +702,95 @@ scoreZone(Zone zone, ZoneConfig config) =>
 
 sortAndTrimZones(array<Zone> zones, ZoneConfig config) =>
     size = array.size(zones)
-    if size <= 1
-        // Early exit - nothing to sort
-        true
+    // Guarded: Pine for-loops run DESCENDING when "0 to -1", so empty arrays
+    // would cause out-of-bounds errors without the size checks
+    if size > 1
+        // Simple selection sort by score (descending).
+        // Outer loop stops at size-2: at i=size-1 the inner range "i+1 to size-1"
+        // becomes "size to size-1", which Pine runs DESCENDING starting at j=size
+        // → array.get(zones, size) is out of bounds. The last element is already
+        // in place after the preceding passes.
+        for i = 0 to size - 2
+            maxIdx = i
+            maxScore = array.get(zones, i).score
 
-    // Simple selection sort by score (descending)
-    for i = 0 to size - 1
-        maxIdx = i
-        maxScore = array.get(zones, i).score
+            for j = i + 1 to size - 1
+                currentScore = array.get(zones, j).score
+                if currentScore > maxScore
+                    maxIdx := j
+                    maxScore := currentScore
 
-        for j = i + 1 to size - 1
-            currentScore = array.get(zones, j).score
-            if currentScore > maxScore
-                maxIdx := j
-                maxScore := currentScore
+            if maxIdx != i
+                temp = array.get(zones, i)
+                array.set(zones, i, array.get(zones, maxIdx))
+                array.set(zones, maxIdx, temp)
 
-        if maxIdx != i
-            temp = array.get(zones, i)
-            array.set(zones, i, array.get(zones, maxIdx))
-            array.set(zones, maxIdx, temp)
+    if size > 0
+        // Separate bull and bear zones
+        bullZones = array.new<Zone>()
+        bearZones = array.new<Zone>()
 
-    // Separate bull and bear zones
-    bullZones = array.new<Zone>()
-    bearZones = array.new<Zone>()
+        for i = 0 to array.size(zones) - 1
+            zone = array.get(zones, i)
+            if zone.isBull
+                array.push(bullZones, zone)
+            else
+                array.push(bearZones, zone)
 
-    for i = 0 to array.size(zones) - 1
-        zone = array.get(zones, i)
-        if zone.isBull
-            array.push(bullZones, zone)
-        else
-            array.push(bearZones, zone)
+        // Trim excess zones
+        while array.size(bullZones) > config.maxZonesPerSide
+            excessZone = array.pop(bullZones)
+            box.delete(excessZone.zoneBox)
+            if not na(excessZone.midLine)
+                line.delete(excessZone.midLine)
 
-    // Trim excess zones
-    while array.size(bullZones) > config.maxZonesPerSide
-        excessZone = array.pop(bullZones)
-        box.delete(excessZone.zoneBox)
-        if not na(excessZone.midLine)
-            line.delete(excessZone.midLine)
+        while array.size(bearZones) > config.maxZonesPerSide
+            excessZone = array.pop(bearZones)
+            box.delete(excessZone.zoneBox)
+            if not na(excessZone.midLine)
+                line.delete(excessZone.midLine)
 
-    while array.size(bearZones) > config.maxZonesPerSide
-        excessZone = array.pop(bearZones)
-        box.delete(excessZone.zoneBox)
-        if not na(excessZone.midLine)
-            line.delete(excessZone.midLine)
-
-    // Rebuild main array with trimmed zones
-    array.clear(zones)
-    for i = 0 to array.size(bullZones) - 1
-        array.push(zones, array.get(bullZones, i))
-    for i = 0 to array.size(bearZones) - 1
-        array.push(zones, array.get(bearZones, i))
+        // Rebuild main array with trimmed zones
+        array.clear(zones)
+        if array.size(bullZones) > 0
+            for i = 0 to array.size(bullZones) - 1
+                array.push(zones, array.get(bullZones, i))
+        if array.size(bearZones) > 0
+            for i = 0 to array.size(bearZones) - 1
+                array.push(zones, array.get(bearZones, i))
 
 // === VISUAL ALPHA ADJUSTMENT ===
 
 adjustZoneVisibility(array<Zone> zones, ZoneConfig config) =>
-    if not config.showOnlyTopRank
-        // Early exit - no visibility adjustment needed
-        true
+    // Guarded: empty array would make the loop run 0 → -1 (runtime error);
+    // "true" alone is no early exit in Pine
+    if config.showOnlyTopRank and array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            zone = array.get(zones, i)
+            alpha = i == 0 ? config.alphaTop : config.alphaRest
+            baseColor = zone.isBull ? color.green : color.maroon
 
-    for i = 0 to array.size(zones) - 1
-        zone = array.get(zones, i)
-        alpha = i == 0 ? config.alphaTop : config.alphaRest
-        baseColor = zone.isBull ? color.green : color.maroon
-
-        box.set_bgcolor(zone.zoneBox, color.new(baseColor, alpha))
+            box.set_bgcolor(zone.zoneBox, color.new(baseColor, alpha))
 
 // === TARGET CALCULATION ===
+
+// Computed unconditionally at global scope: the target functions below only run
+// when a zone is active (series condition) — in-function ta.* calls would have
+// inconsistent history
+float targetAtr14 = ta.atr(14)
+float targetVwap = ta.vwap(close)
 
 calculateTargetsATR(float base, string stepsString, int atrLength) =>
     steps = stringToFloats(stepsString)
     targets = array.new<float>()
-    // Use the atrLength parameter for ATR calculation
-    atr = ta.atr(atrLength)
+    // all call sites use length 14 — global series keeps ta history consistent
+    atr = targetAtr14
 
-    for i = 0 to array.size(steps) - 1
-        multiplier = array.get(steps, i)
-        target = base + (atr * multiplier)
-        array.push(targets, target)
+    if array.size(steps) > 0
+        for i = 0 to array.size(steps) - 1
+            multiplier = array.get(steps, i)
+            target = base + (atr * multiplier)
+            array.push(targets, target)
 
     targets
 
@@ -777,8 +798,8 @@ calculateTargetsSigma(float base, string stepsString, int sigmaLength) =>
     steps = stringToFloats(stepsString)
     targets = array.new<float>()
 
-    // Calculate VWAP standard deviation
-    vwap = ta.vwap(close)
+    // Calculate VWAP standard deviation (global series — see targetVwap note)
+    vwap = targetVwap
     sum = 0.0
     count = math.min(sigmaLength, bar_index + 1)
 
@@ -788,10 +809,11 @@ calculateTargetsSigma(float base, string stepsString, int sigmaLength) =>
 
     sigma = math.sqrt(sum / math.max(count, 1))
 
-    for i = 0 to array.size(steps) - 1
-        multiplier = array.get(steps, i)
-        target = base + (sigma * multiplier)
-        array.push(targets, target)
+    if array.size(steps) > 0
+        for i = 0 to array.size(steps) - 1
+            multiplier = array.get(steps, i)
+            target = base + (sigma * multiplier)
+            array.push(targets, target)
 
     targets
 
@@ -822,20 +844,21 @@ calculateTargetsLiquidity(bool isLong, ZoneConfig config) =>
 detectZoneSignals(array<Zone> zones, int bias, ZoneConfig config) =>
     signals = array.new<ZoneSignal>()
 
-    for i = 0 to array.size(zones) - 1
-        zone = array.get(zones, i)
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            zone = array.get(zones, i)
 
-        if zone.touched and not zone.violated
-            // Check confirmations
-            midlineCross = config.confirmMidline ? ((zone.isBull and close > zone.mid) or (not zone.isBull and close < zone.mid)) : true
+            if zone.touched and not zone.violated
+                // Check confirmations
+                midlineCross = config.confirmMidline ? ((zone.isBull and close > zone.mid) or (not zone.isBull and close < zone.mid)) : true
 
-            edgeBreak = config.confirmBreak ? ((zone.isBull and close > zone.top) or (not zone.isBull and close < zone.bottom)) : true
+                edgeBreak = config.confirmBreak ? ((zone.isBull and close > zone.top) or (not zone.isBull and close < zone.bottom)) : true
 
-            biasAlign = config.requireBias ? ((zone.isBull and bias == 1) or (not zone.isBull and bias == -1)) : true
+                biasAlign = config.requireBias ? ((zone.isBull and bias == 1) or (not zone.isBull and bias == -1)) : true
 
-            if midlineCross and edgeBreak and biasAlign
-                signal = ZoneSignal.new(zone.isBull ? "ZONE_LONG" : "ZONE_SHORT", zone, zone.score * 10.0, "Zone " + (zone.isBull ? "Long" : "Short") + " Signal", true, bar_index)
-                array.push(signals, signal)
+                if midlineCross and edgeBreak and biasAlign
+                    signal = ZoneSignal.new(zone.isBull ? "ZONE_LONG" : "ZONE_SHORT", zone, zone.score * 10.0, "Zone " + (zone.isBull ? "Long" : "Short") + " Signal", true, bar_index)
+                    array.push(signals, signal)
 
     signals
 
@@ -852,20 +875,22 @@ processZoneManagement(ZoneState state, ZoneConfig config) =>
     state.bandUpper := bandUpper
     state.bandLower := bandLower
 
-    // Update existing zones
-    for i = 0 to array.size(state.zonesTF) - 1
-        zone = array.get(state.zonesTF, i)
-        zone := updateZoneStatus(zone)
-        zone := detectFVGOverlap(zone)
-        zone := scoreZone(zone, config)
-        array.set(state.zonesTF, i, zone)
+    // Update existing zones (guarded — empty arrays would loop 0 → -1)
+    if array.size(state.zonesTF) > 0
+        for i = 0 to array.size(state.zonesTF) - 1
+            zone = array.get(state.zonesTF, i)
+            zone := updateZoneStatus(zone)
+            zone := detectFVGOverlap(zone)
+            zone := scoreZone(zone, config)
+            array.set(state.zonesTF, i, zone)
 
-    for i = 0 to array.size(state.zonesHTF) - 1
-        zone = array.get(state.zonesHTF, i)
-        zone := updateZoneStatus(zone)
-        zone := detectFVGOverlap(zone)
-        zone := scoreZone(zone, config)
-        array.set(state.zonesHTF, i, zone)
+    if array.size(state.zonesHTF) > 0
+        for i = 0 to array.size(state.zonesHTF) - 1
+            zone = array.get(state.zonesHTF, i)
+            zone := updateZoneStatus(zone)
+            zone := detectFVGOverlap(zone)
+            zone := scoreZone(zone, config)
+            array.set(state.zonesHTF, i, zone)
 
     // Sort and trim zones
     sortAndTrimZones(state.zonesTF, config)
@@ -883,17 +908,19 @@ processZoneManagement(ZoneState state, ZoneConfig config) =>
 
     // Count active zones and calculate average score
     allZones = array.copy(state.zonesTF)
-    for i = 0 to array.size(state.zonesHTF) - 1
-        array.push(allZones, array.get(state.zonesHTF, i))
+    if array.size(state.zonesHTF) > 0
+        for i = 0 to array.size(state.zonesHTF) - 1
+            array.push(allZones, array.get(state.zonesHTF, i))
 
-    for i = 0 to array.size(allZones) - 1
-        zone = array.get(allZones, i)
-        if zone.isActive
-            if zone.isBull
-                state.activeBullZones += 1
-            else
-                state.activeBearZones += 1
-            totalScore += zone.score
+    if array.size(allZones) > 0
+        for i = 0 to array.size(allZones) - 1
+            zone = array.get(allZones, i)
+            if zone.isActive
+                if zone.isBull
+                    state.activeBullZones += 1
+                else
+                    state.activeBearZones += 1
+                totalScore += zone.score
 
     state.avgZoneScore := state.totalZones > 0 ? totalScore / state.totalZones : 0.0
 
@@ -905,19 +932,21 @@ processZoneManagement(ZoneState state, ZoneConfig config) =>
     state.longSignal := false
     state.shortSignal := false
 
-    for i = 0 to array.size(tfSignals) - 1
-        signal = array.get(tfSignals, i)
-        if signal.signalType == "ZONE_LONG"
-            state.longSignal := true
-        else if signal.signalType == "ZONE_SHORT"
-            state.shortSignal := true
+    if array.size(tfSignals) > 0
+        for i = 0 to array.size(tfSignals) - 1
+            signal = array.get(tfSignals, i)
+            if signal.signalType == "ZONE_LONG"
+                state.longSignal := true
+            else if signal.signalType == "ZONE_SHORT"
+                state.shortSignal := true
 
-    for i = 0 to array.size(htfSignals) - 1
-        signal = array.get(htfSignals, i)
-        if signal.signalType == "ZONE_LONG"
-            state.longSignal := true
-        else if signal.signalType == "ZONE_SHORT"
-            state.shortSignal := true
+    if array.size(htfSignals) > 0
+        for i = 0 to array.size(htfSignals) - 1
+            signal = array.get(htfSignals, i)
+            if signal.signalType == "ZONE_LONG"
+                state.longSignal := true
+            else if signal.signalType == "ZONE_SHORT"
+                state.shortSignal := true
 
     state
 
@@ -930,22 +959,24 @@ findNearestZones(ZoneState state) =>
     minBearDist = 999999.0
 
     allZones = array.copy(state.zonesTF)
-    for i = 0 to array.size(state.zonesHTF) - 1
-        array.push(allZones, array.get(state.zonesHTF, i))
+    if array.size(state.zonesHTF) > 0
+        for i = 0 to array.size(state.zonesHTF) - 1
+            array.push(allZones, array.get(state.zonesHTF, i))
 
-    for i = 0 to array.size(allZones) - 1
-        zone = array.get(allZones, i)
-        if zone.isActive and not zone.violated
-            distToTop = math.abs(close - zone.top)
-            distToBottom = math.abs(close - zone.bottom)
-            minDist = math.min(distToTop, distToBottom)
+    if array.size(allZones) > 0
+        for i = 0 to array.size(allZones) - 1
+            zone = array.get(allZones, i)
+            if zone.isActive and not zone.violated
+                distToTop = math.abs(close - zone.top)
+                distToBottom = math.abs(close - zone.bottom)
+                minDist = math.min(distToTop, distToBottom)
 
-            if zone.isBull and minDist < minBullDist
-                minBullDist := minDist
-                nearestBull := zone
-            else if not zone.isBull and minDist < minBearDist
-                minBearDist := minDist
-                nearestBear := zone
+                if zone.isBull and minDist < minBullDist
+                    minBullDist := minDist
+                    nearestBull := zone
+                else if not zone.isBull and minDist < minBearDist
+                    minBearDist := minDist
+                    nearestBear := zone
 
     state.nearestBullZone := nearestBull
     state.nearestBearZone := nearestBear
@@ -1333,7 +1364,8 @@ detectMarketRegime(VolumeState state, VolumeConfig config) =>
         trendConfirms += 1
     totalFilters += 1
 
-    trendStrength = totalFilters > 0 ? trendConfirms / totalFilters : 0.0
+    // 1.0 * forces float division — int/int truncates in Pine
+    trendStrength = totalFilters > 0 ? 1.0 * trendConfirms / totalFilters : 0.0
 
     // Determine regime
     regime = "TRANSITION"  // default
@@ -1492,9 +1524,10 @@ calculateTrendFilters(VolumeConfig config) =>
     emaOK = not config.useEMAFilter or ema50 > ema200
     emaConfluence = ema50 > ema200 ? 1.0 : ema50 < ema200 ? -1.0 : 0.0
 
-    // Supertrend Filter
-    [stUp, stDown] = ta.supertrend(3.0, 10)
-    stBull = not config.useSupertrendFilter or (not na(stDown) and close > stDown)
+    // Supertrend Filter — second tuple element is the DIRECTION (-1 = uptrend),
+    // not a price level; comparing close against it was always true
+    [stLine, stDir] = ta.supertrend(3.0, 10)
+    stBull = not config.useSupertrendFilter or (not na(stDir) and stDir < 0)
 
     // MOST Filter (ATR Trailing Stop)
     [mostStop, mostBull] = calculateMOST()
@@ -1511,21 +1544,23 @@ findNearestNodes(array<VolumeNode> hvnNodes, array<VolumeNode> lvnNodes) =>
     float minLVNDistance = 999999.0
     float minHVNDistance = 999999.0
 
-    // Find nearest LVN
-    for i = 0 to array.size(lvnNodes) - 1
-        node = array.get(lvnNodes, i)
-        distance = math.abs(close - node.price)
-        if distance < minLVNDistance
-            minLVNDistance := distance
-            nearestLVN := node.price
+    // Find nearest LVN (guarded — node arrays can be empty)
+    if array.size(lvnNodes) > 0
+        for i = 0 to array.size(lvnNodes) - 1
+            node = array.get(lvnNodes, i)
+            distance = math.abs(close - node.price)
+            if distance < minLVNDistance
+                minLVNDistance := distance
+                nearestLVN := node.price
 
     // Find nearest HVN
-    for i = 0 to array.size(hvnNodes) - 1
-        node = array.get(hvnNodes, i)
-        distance = math.abs(close - node.price)
-        if distance < minHVNDistance
-            minHVNDistance := distance
-            nearestHVN := node.price
+    if array.size(hvnNodes) > 0
+        for i = 0 to array.size(hvnNodes) - 1
+            node = array.get(hvnNodes, i)
+            distance = math.abs(close - node.price)
+            if distance < minHVNDistance
+                minHVNDistance := distance
+                nearestHVN := node.price
 
     [nearestLVN, nearestHVN]
 
@@ -1533,18 +1568,23 @@ detectVolumeSignals(VolumeConfig config, VolumeProfile profile, bool trendBullis
     signals = array.new<VolumeSignal>()
     atr = ta.atr(14)
 
-    // LVN Break & Retest Signals - extract ta.cross* calls for consistency
+    // LVN Break & Retest Signals — ta.cross* called UNCONDITIONALLY: the previous
+    // guard depended on na(profile.nearestLVN), a series condition, which made the
+    // crossover history inconsistent
+    bool lvnCrossUp = ta.crossover(close, profile.nearestLVN)
+    bool lvnCrossDown = ta.crossunder(close, profile.nearestLVN)
+
     bool brokeUp = false
     bool brokeDown = false
     bool retestUp = false
     bool retestDown = false
 
     if config.enableLVNSignals and not na(profile.nearestLVN)
-        brokeUp := ta.crossover(close, profile.nearestLVN)
-        brokeDown := ta.crossunder(close, profile.nearestLVN)
+        brokeUp := lvnCrossUp
+        brokeDown := lvnCrossDown
 
-        retestUp := brokeUp[1] and low <= (profile.nearestLVN + atr * config.maxRetestDistanceATR) and close > profile.nearestLVN
-        retestDown := brokeDown[1] and high >= (profile.nearestLVN - atr * config.maxRetestDistanceATR) and close < profile.nearestLVN
+        retestUp := lvnCrossUp[1] and low <= (profile.nearestLVN + atr * config.maxRetestDistanceATR) and close > profile.nearestLVN
+        retestDown := lvnCrossDown[1] and high >= (profile.nearestLVN - atr * config.maxRetestDistanceATR) and close < profile.nearestLVN
 
         confluenceOK = not (config.useHTF1 or config.useHTF2) or htfConfluence
 
@@ -1667,16 +1707,17 @@ processVolumeProfile(VolumeState state, VolumeConfig config) =>
     updatedState.longVASignal := false
     updatedState.shortVASignal := false
 
-    for i = 0 to array.size(signals) - 1
-        signal = array.get(signals, i)
-        if signal.signalType == "LVN_BREAK" and signal.direction == 1
-            updatedState.longLVNSignal := true
-        else if signal.signalType == "LVN_BREAK" and signal.direction == -1
-            updatedState.shortLVNSignal := true
-        else if signal.signalType == "VA_REENTRY" and signal.direction == 1
-            updatedState.longVASignal := true
-        else if signal.signalType == "VA_REENTRY" and signal.direction == -1
-            updatedState.shortVASignal := true
+    if array.size(signals) > 0
+        for i = 0 to array.size(signals) - 1
+            signal = array.get(signals, i)
+            if signal.signalType == "LVN_BREAK" and signal.direction == 1
+                updatedState.longLVNSignal := true
+            else if signal.signalType == "LVN_BREAK" and signal.direction == -1
+                updatedState.shortLVNSignal := true
+            else if signal.signalType == "VA_REENTRY" and signal.direction == 1
+                updatedState.longVASignal := true
+            else if signal.signalType == "VA_REENTRY" and signal.direction == -1
+                updatedState.shortVASignal := true
 
     // Calculate scoring
     [volumeScore, passFilter, inValueArea, abovePOC, nearLVN, pocRising] = calculateVolumeScore(updatedState.currentProfile, trendBullish)
@@ -1885,19 +1926,20 @@ calculateStackConfluence(array<HTFTrendData> tfData, HTFConfig config) =>
     totalBearWeight = 0.0
     totalWeight = 0.0
 
-    for i = 0 to array.size(tfData) - 1
-        data = array.get(tfData, i)
-        if data.isValid
-            weight = i < array.size(config.tfWeights) ? array.get(config.tfWeights, i) : 0.25
-            data.weight := weight
-            array.set(tfData, i, data)
+    if array.size(tfData) > 0
+        for i = 0 to array.size(tfData) - 1
+            data = array.get(tfData, i)
+            if data.isValid
+                weight = i < array.size(config.tfWeights) ? array.get(config.tfWeights, i) : 0.25
+                data.weight := weight
+                array.set(tfData, i, data)
 
-            if data.trendStrength > 0
-                totalBullWeight += data.trendStrength * weight
-            else if data.trendStrength < 0
-                totalBearWeight += math.abs(data.trendStrength) * weight
+                if data.trendStrength > 0
+                    totalBullWeight += data.trendStrength * weight
+                else if data.trendStrength < 0
+                    totalBearWeight += math.abs(data.trendStrength) * weight
 
-            totalWeight += weight
+                totalWeight += weight
 
     bullConfluence = totalWeight > 0 ? (totalBullWeight / totalWeight) * 100.0 : 0.0
     bearConfluence = totalWeight > 0 ? (totalBearWeight / totalWeight) * 100.0 : 0.0
@@ -1964,37 +2006,43 @@ createStackPanel(HTFStackState state, HTFConfig config) =>
         position = config.panelPosition == "top_left" ? position.top_left : config.panelPosition == "top_right" ? position.top_right : config.panelPosition == "bottom_left" ? position.bottom_left : position.bottom_right
 
         stackTable = table.new(position, config.panelCols, config.panelRows + 1,
-                              frame_color=color.new(color.gray, 80),
+                              bgcolor=color.new(color.white, 5),
+                              border_color=color.new(color.gray, 60),
                               border_width=1,
-                              bgcolor=color.new(color.white, 95))
+                              frame_color=color.new(color.gray, 40),
+                              frame_width=1)
+
+        color tcStack = color.new(color.gray, 20)
+        color hdStack = color.new(color.gray, 90)
 
         // Header row
         table.cell(stackTable, 0, 0, "HTF STACK",
-                  bgcolor=color.new(color.navy, 0), text_color=color.white, text_size=size.small)
+                  bgcolor=hdStack, text_color=tcStack, text_size=size.small)
         table.cell(stackTable, 1, 0, "TREND",
-                  bgcolor=color.new(color.navy, 0), text_color=color.white, text_size=size.small)
+                  bgcolor=hdStack, text_color=tcStack, text_size=size.small)
         table.cell(stackTable, 2, 0, "STR",
-                  bgcolor=color.new(color.navy, 0), text_color=color.white, text_size=size.small)
+                  bgcolor=hdStack, text_color=tcStack, text_size=size.small)
 
         // Data rows
-        for i = 0 to array.size(state.tfData) - 1
-            if i < config.panelRows
-                data = array.get(state.tfData, i)
-                row = i + 1
+        if array.size(state.tfData) > 0
+            for i = 0 to array.size(state.tfData) - 1
+                if i < config.panelRows
+                    data = array.get(state.tfData, i)
+                    row = i + 1
 
-                // Timeframe cell
-                table.cell(stackTable, 0, row, data.timeframe,
-                          text_color=color.black, text_size=size.tiny)
+                    // Timeframe cell
+                    table.cell(stackTable, 0, row, data.timeframe,
+                              text_color=tcStack, text_size=size.tiny)
 
-                // Trend direction cell
-                trendSymbol = data.trendDirection == "BULL" ? "↑" : data.trendDirection == "BEAR" ? "↓" : "→"
-                table.cell(stackTable, 1, row, trendSymbol,
-                          bgcolor=data.trendColor, text_color=color.white, text_size=size.small)
+                    // Trend direction cell
+                    trendSymbol = data.trendDirection == "BULL" ? "↑" : data.trendDirection == "BEAR" ? "↓" : "→"
+                    table.cell(stackTable, 1, row, trendSymbol,
+                              bgcolor=data.trendColor, text_color=color.white, text_size=size.small)
 
-                // Strength cell
-                strengthText = str.tostring(math.round(data.confidence))
-                table.cell(stackTable, 2, row, strengthText,
-                          text_color=color.black, text_size=size.tiny)
+                    // Strength cell
+                    strengthText = str.tostring(math.round(data.confidence))
+                    table.cell(stackTable, 2, row, strengthText,
+                              text_color=tcStack, text_size=size.tiny)
 
         stackTable
 
@@ -2048,20 +2096,19 @@ processHTFStack(HTFStackState state, HTFConfig config) =>
         state.epsATR_eff := epsATR
         state.adaptiveAlpha := alpha
 
-    // Create visual panel
-    state.stackTable := createStackPanel(state, config)
+    // Create visual panel — only on the last bar (a table per bar would be
+    // recreated thousands of times over history for no visual benefit)
+    if barstate.islast
+        state.stackTable := createStackPanel(state, config)
 
     state
 
-processHTFStackSignals(HTFStackState state, HTFStackState prevState, HTFConfig config) =>
-    // extract confluence floats first — field access on an na object would error,
-    // and Pine ternaries evaluate both branches
-    float prevBullConf = na
-    float prevBearConf = na
-    if not na(prevState)
-        prevBullConf := prevState.bullConfluence
-        prevBearConf := prevState.bearConfluence
-    [bullSig, bearSig, breakSig] = detectStackSignals(state, prevBullConf, prevBearConf, config)
+processHTFStackSignals(HTFStackState state, float prevBullConfluence, float prevBearConfluence, HTFConfig config) =>
+    // NOTE: previous confluence must come in as plain float series. Passing the
+    // state object of the previous bar does not work — the object is mutated in
+    // place, so its "history" always reflects the current values and the
+    // edge-detected stack signals would never fire.
+    [bullSig, bearSig, breakSig] = detectStackSignals(state, prevBullConfluence, prevBearConfluence, config)
     state.bullStackSignal := bullSig
     state.bearStackSignal := bearSig
     state.stackBreakSignal := breakSig
@@ -2077,7 +2124,7 @@ processHTFStackSignals(HTFStackState state, HTFStackState prevState, HTFConfig c
 
 // Display Mode Settings
 groupDisplay = "📊 Display Mode"
-vwapMode = input.string("Smart", "Display Mode", options=["Smart", "Price Only", "Cluster Only"], group=groupDisplay, tooltip="Smart: All signals (3 plots)\\nPrice Only: Price×VWAP only\\nCluster Only: Confluence zones only")
+vwapMode = input.string("Smart", "Display Mode", options=["Smart", "Price Only", "Cluster Only"], group=groupDisplay, tooltip="Smart: All signals (3 plots)\nPrice Only: Price×VWAP only\nCluster Only: Confluence zones only")
 
 // VWAP Detection Settings
 groupVwap = "🎯 VWAP Detection"
@@ -2092,6 +2139,7 @@ minBarsLabel = input.int(50, "Min Bars Between Signals", minval=10, maxval=200, 
 // Visual Settings
 groupVisual = "🎨 Visual Settings"
 showVWAPLines = input.bool(true, "Show VWAP Lines", group=groupVisual, tooltip="Display VWAP lines on chart")
+signalScope = input.string("VWAP Cross only", "Signal Scope", options=["VWAP Cross only", "All signals"], group=groupVisual, tooltip="VWAP Cross only (default) = just the core Price×VWAP cross markers, clean. All signals = also show structure-cross, cluster, entry and (if enabled) zone/volume/HTF markers.")
 
 showLegend = input.bool(true, "Show Legend", group=groupVisual, tooltip="Display signal legend table")
 
@@ -2105,7 +2153,7 @@ enableAlerts = input.bool(true, "Enable Alerts", group=groupFilter)
 
 // Zone Management Settings
 groupZones = "🏗️ Zone Management (Pro)"
-useZoneManagement = input.bool(true, "Enable Zone Management", group=groupZones, tooltip="Advanced multi-timeframe zone detection and ranking")
+useZoneManagement = input.bool(false, "Enable Zone Management", group=groupZones, tooltip="Advanced multi-timeframe zone detection and ranking. Off by default — draws many zone boxes; enable when you want the zone layer.")
 zoneSource = input.string("Orderblock", "Zone Source", options=["Orderblock","Pivots"], group=groupZones)
 
 htfTimeframe = input.timeframe("60", "HTF Timeframe", group=groupZones, tooltip="Higher timeframe for zone detection")
@@ -2140,7 +2188,7 @@ requireBias = input.bool(true, "Require Bias Alignment", group=groupConfirm)
 
 // Volume Profile Settings (Pro)
 groupVolume = "📊 Volume Profile (Pro)"
-useVolumeProfile = input.bool(true, "Enable Volume Profile", group=groupVolume, tooltip="Advanced volume profile analysis with POC, VA, HVN/LVN")
+useVolumeProfile = input.bool(false, "Enable Volume Profile", group=groupVolume, tooltip="Advanced volume profile analysis with POC, VA, HVN/LVN. Off by default — draws many profile boxes; enable when you want the volume layer.")
 
 volumeProfileMode = input.string("ROLLING", "Profile Mode", options=["FIXED", "ROLLING", "SESSIONS"], group=groupVolume)
 
@@ -2161,7 +2209,7 @@ useMOSTFilter = input.bool(true, "MOST Filter (ATR Trailing)", group=groupVolume
 
 // HTF Stack Panel Settings (Pro)
 groupHTFStack = "📊 HTF Stack Panel (Pro)"
-useHTFStack = input.bool(true, "Enable HTF Stack Panel", group=groupHTFStack, tooltip="Advanced multi-timeframe trend confluence analysis")
+useHTFStack = input.bool(false, "Enable HTF Stack Panel", group=groupHTFStack, tooltip="Advanced multi-timeframe trend confluence analysis. Off by default — enable when you want the HTF confluence layer and panel.")
 
 htfStackMethod = input.string("EMA", "Trend Detection Method", options=["EMA", "SUPERTREND", "MOST"], group=groupHTFStack)
 
@@ -2271,6 +2319,10 @@ vwapSignals = generateVwapSignals(vwapState)
 
 // Get confluence metrics
 [confluenceCount, avgConfluenceStrength] = getVwapConfluence(vwapState)
+
+// VWAP-Zone confluence — declared at global scope: it is computed inside the
+// zone block below but also read in the alert section (separate scope)
+float vwapZoneConfluence = 0.0
 
 // Process Zone Management (Pro Feature - Enhanced)
 if useZoneManagement
@@ -2396,8 +2448,7 @@ if useZoneManagement
     zoneState := processZoneManagement(zoneState, zoneConfig)
     zoneState := findNearestZones(zoneState)
 
-    // VWAP-Zone Confluence Analysis
-    vwapZoneConfluence = 0.0
+    // VWAP-Zone Confluence Analysis (assigns the global declared above)
     if not na(zoneState.nearestBullZone) and zoneState.nearestBullZone.isActive
         distanceToVWAP = math.abs(zoneState.nearestBullZone.mid - vwapState.sessionVwap)
         maxDistance = ta.atr(14) * 1.0
@@ -2419,11 +2470,16 @@ if useVolumeProfile
     volumeState := processVolumeProfile(volumeState, volumeConfig)
 
 // Process HTF Stack Panel (Pro Feature)
-var htfStackStatePrev = na
+// Previous confluence tracked as plain float series — storing the previous state
+// object would alias the same (mutated) object and kill the edge detection.
+// (The old `var htfStackStatePrev = na` also failed to compile: untyped na.)
+var float htfPrevBullConf = na
+var float htfPrevBearConf = na
 if useHTFStack
     htfStackState := processHTFStack(htfStackState, htfConfig)
-    htfStackState := processHTFStackSignals(htfStackState, htfStackStatePrev, htfConfig)
-    htfStackStatePrev := htfStackState
+    htfStackState := processHTFStackSignals(htfStackState, htfPrevBullConf, htfPrevBearConf, htfConfig)
+    htfPrevBullConf := htfStackState.bullConfluence
+    htfPrevBearConf := htfStackState.bearConfluence
 
 // ============================================================================
 // SIGNAL FILTERING AND DISPLAY LOGIC
@@ -2521,18 +2577,29 @@ if useHTFStack
 // ============================================================================
 
 getSignalColor(float strength, bool isBullish) =>
+    color result = na
     if not showStrengthColors
-        isBullish ? color.new(color.lime, 0) : color.new(color.red, 0)
+        result := isBullish ? color.new(color.lime, 0) : color.new(color.red, 0)
     else
-        // Color intensity based on strength
+        // Color intensity based on strength (if/else — multi-line ternaries with
+        // series operands trigger compile error CE10156)
         transparency = strength >= 80.0 ? 0 : strength >= 60.0 ? 20 : 40
 
         if isBullish
-            strength >= 80.0 ? color.new(color.green, transparency) : strength >= 60.0 ? color.new(color.lime, transparency) :
-            color.new(color.yellow, transparency)
+            if strength >= 80.0
+                result := color.new(color.green, transparency)
+            else if strength >= 60.0
+                result := color.new(color.lime, transparency)
+            else
+                result := color.new(color.yellow, transparency)
         else
-            strength >= 80.0 ? color.new(color.red, transparency) : strength >= 60.0 ? color.new(color.orange, transparency) :
-            color.new(color.gray, transparency)
+            if strength >= 80.0
+                result := color.new(color.red, transparency)
+            else if strength >= 60.0
+                result := color.new(color.orange, transparency)
+            else
+                result := color.new(color.gray, transparency)
+    result
 
 // VWAP line colors
 COL_VWAP = color.new(color.blue, 0)
@@ -2585,17 +2652,16 @@ plot(showVWAPLines and vwapState.hasAnchoredLow ? vwapState.anchoredVwapLow : na
      title="Anchored VWAP Low", color=COL_AVWAP_L, linewidth=1)
 
 // Plot bias bands and target levels (Pro Feature - Enhanced)
+// NOTE: plot()/bgcolor() are only allowed at global scope — series are gated
+// via ternaries instead of wrapping the calls in `if useZoneManagement`.
+biasBandColor = zoneState.biasRegime == "BULL" ? color.new(color.green, 60) : zoneState.biasRegime == "BEAR" ? color.new(color.red, 60) : color.new(color.blue, 70)
+biasLineColor = zoneState.biasRegime == "BULL" ? color.new(color.green, 0) : zoneState.biasRegime == "BEAR" ? color.new(color.red, 0) : color.new(color.blue, 0)
+
+plot(useZoneManagement ? zoneState.bandUpper : na, title="Bias Upper", color=biasBandColor, linewidth=1)
+plot(useZoneManagement ? zoneState.bandLower : na, title="Bias Lower", color=biasBandColor, linewidth=1)
+plot(useZoneManagement ? zoneState.vwapLevel : na, title="VWAP Bias", color=biasLineColor, linewidth=2)
+
 if useZoneManagement
-    // Bias bands with dynamic coloring based on regime
-    biasUpperColor = zoneState.biasRegime == "BULL" ? color.new(color.green, 60) : zoneState.biasRegime == "BEAR" ? color.new(color.red, 60) : color.new(color.blue, 70)
-    biasLowerColor = zoneState.biasRegime == "BULL" ? color.new(color.green, 60) : zoneState.biasRegime == "BEAR" ? color.new(color.red, 60) : color.new(color.blue, 70)
-
-    plot(zoneState.bandUpper, title="Bias Upper", color=biasUpperColor, linewidth=1)
-    plot(zoneState.bandLower, title="Bias Lower", color=biasLowerColor, linewidth=1)
-    plot(zoneState.vwapLevel, title="VWAP Bias",
-         color=zoneState.biasRegime == "BULL" ? color.new(color.green, 0) : zoneState.biasRegime == "BEAR" ? color.new(color.red, 0) : color.new(color.blue, 0),
-         linewidth=2)
-
     // Dynamic target levels (lines, no plot-in-loop)
     if not na(zoneState.nearestBullZone) and zoneState.nearestBullZone.isActive
         bullTargetBase = zoneState.nearestBullZone.top
@@ -2607,94 +2673,70 @@ if useZoneManagement
     if not na(zoneState.nearestBearZone) and zoneState.nearestBearZone.isActive
         bearTargetBase = zoneState.nearestBearZone.bottom
         float[] bearTargets = targetMode == "ATR" ? calculateTargetsATR(bearTargetBase, atrSteps, 14) : calculateTargetsSigma(bearTargetBase, sigmaSteps, 100)
-        for i = 0 to array.size(bearTargets) - 1
-            float v = array.get(bearTargets, i)
-            array.set(bearTargets, i, bearTargetBase - (v - bearTargetBase))
+        if array.size(bearTargets) > 0
+            for i = 0 to array.size(bearTargets) - 1
+                float v = array.get(bearTargets, i)
+                array.set(bearTargets, i, bearTargetBase - (v - bearTargetBase))
         f_updateTargetLines(bearTargetLines, bearTargets, color.red)
     else
         f_updateTargetLines(bearTargetLines, array.new_float(), color.red)
 
-    // Zone strength visualization background
-    zoneStrengthColor = zoneState.avgZoneScore > 5.0 ? color.new(color.yellow, 97) : zoneState.avgZoneScore > 3.0 ? color.new(color.orange, 98) : na
-    bgcolor(zoneStrengthColor, title="Zone Strength Background")
+// Zone strength visualization background
+zoneStrengthColor = useZoneManagement and zoneState.avgZoneScore > 5.0 ? color.new(color.yellow, 97) : useZoneManagement and zoneState.avgZoneScore > 3.0 ? color.new(color.orange, 98) : na
+bgcolor(zoneStrengthColor, title="Zone Strength Background")
 
 // Plot Volume Profile levels (Pro Feature)
-if useVolumeProfile
-    plot(volumeState.currentProfile.pocPrice, title="POC",
-         color=color.new(color.purple, 0), linewidth=3)
-    plot(volumeState.currentProfile.valueAreaHigh, title="VAH",
-         color=color.new(color.gray, 50), linewidth=1)
-    plot(volumeState.currentProfile.valueAreaLow, title="VAL",
-         color=color.new(color.gray, 50), linewidth=1)
+plot(useVolumeProfile ? volumeState.currentProfile.pocPrice : na, title="POC",
+     color=color.new(color.purple, 0), linewidth=3)
+plot(useVolumeProfile ? volumeState.currentProfile.valueAreaHigh : na, title="VAH",
+     color=color.new(color.gray, 50), linewidth=1)
+plot(useVolumeProfile ? volumeState.currentProfile.valueAreaLow : na, title="VAL",
+     color=color.new(color.gray, 50), linewidth=1)
 
-// SIGNAL 1: Price × VWAP Cross
-plotshape(showPriceCrossUp,
-         title="Price x VWAP Up",
-         style=shape.triangleup,
-         location=location.belowbar,
-         color=getSignalColor(vwapState.crossStrength, true),
-         size=size.tiny,
-         text="P")
+// Signal scope: core (VWAP cross only) vs. all systems
+allSig = signalScope == "All signals"
 
-plotshape(showPriceCrossDown,
-         title="Price x VWAP Down",
-         style=shape.triangledown,
-         location=location.abovebar,
-         color=getSignalColor(vwapState.crossStrength, false),
-         size=size.tiny,
-         text="P")
+// SIGNAL 1: Price × VWAP Cross — the core signal, drawn as labels so each one
+// carries a hover tooltip (price, VWAP, bias, confluence, cross strength).
+f_crossLabel(_isLong) =>
+    string biasTxt = vwapBias > 0 ? "Bullish" : vwapBias < 0 ? "Bearish" : "Neutral"
+    int    strPct  = int(math.round(vwapState.crossStrength * 100))
+    string tip = (_isLong ? "Price crossed ABOVE VWAP — long bias" : "Price crossed BELOW VWAP — short bias") + "\nPrice: " + str.tostring(close, format.mintick) + "\nVWAP: " + str.tostring(vwapState.sessionVwap, format.mintick) + "\nBias: " + biasTxt + "\nConfluence: " + str.tostring(confluenceCount) + "/3\nCross strength: " + str.tostring(strPct) + "%"
+    label.new(bar_index, _isLong ? low : high, _isLong ? "▲" : "▼",
+         xloc=xloc.bar_index, yloc=yloc.price,
+         style=_isLong ? label.style_label_up : label.style_label_down,
+         color=_isLong ? getSignalColor(vwapState.crossStrength, true) : getSignalColor(vwapState.crossStrength, false),
+         textcolor=color.white, size=size.small, tooltip=tip)
 
+if showPriceCrossUp
+    f_crossLabel(true)
+if showPriceCrossDown
+    f_crossLabel(false)
+
+// All other signal systems only appear in "All signals" scope
 // SIGNAL 2: VWAP Structure Cross
-plotshape(showStructureCrossUp,
-         title="VWAP Structure Up",
-         style=shape.diamond,
-         location=location.bottom,
-         color=color.new(color.aqua, 0),
-         size=size.tiny,
-         text="S")
-
-plotshape(showStructureCrossDown,
-         title="VWAP Structure Down",
-         style=shape.diamond,
-         location=location.top,
-         color=color.new(color.orange, 0),
-         size=size.tiny,
-         text="S")
+plotshape(allSig and showStructureCrossUp,   title="VWAP Structure Up",   style=shape.diamond, location=location.bottom, color=color.new(color.aqua, 0),   size=size.tiny, text="S")
+plotshape(allSig and showStructureCrossDown, title="VWAP Structure Down", style=shape.diamond, location=location.top,    color=color.new(color.orange, 0), size=size.tiny, text="S")
 
 // SIGNAL 3: Multi-VWAP Cluster
-plotshape(showCluster,
-         title="VWAP Cluster",
-         style=shape.circle,
-         location=location.absolute,
-         color=getSignalColor(vwapState.clusterStrength, true),
-         size=size.small,
-         text="C")
+plotshape(allSig and showCluster, title="VWAP Cluster", style=shape.circle, location=location.absolute, color=getSignalColor(vwapState.clusterStrength, true), size=size.small, text="C")
 
 // ZONE SIGNALS (Pro)
-plotshape(useZoneManagement and showZoneLong, title="Zone Long", style=shape.triangleup,
-         location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="ZL")
-plotshape(useZoneManagement and showZoneShort, title="Zone Short", style=shape.triangledown,
-         location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="ZS")
+plotshape(allSig and useZoneManagement and showZoneLong,  title="Zone Long",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="ZL")
+plotshape(allSig and useZoneManagement and showZoneShort, title="Zone Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny, text="ZS")
 
 // ENTRY SIGNALS (Context + Setup)
-plotshape(entryLong, title="Entry Long", style=shape.triangleup,
-         location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="L")
-plotshape(entryShort, title="Entry Short", style=shape.triangledown,
-         location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="S")
+plotshape(allSig and entryLong,  title="Entry Long",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="L")
+plotshape(allSig and entryShort, title="Entry Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny, text="S")
 
 // VOLUME PROFILE SIGNALS (Pro)
-plotshape(useVolumeProfile and showVolumeLong, title="Volume Long", style=shape.arrowup,
-         location=location.belowbar, color=color.new(color.purple, 0), size=size.tiny, text="VL")
-plotshape(useVolumeProfile and showVolumeShort, title="Volume Short", style=shape.arrowdown,
-         location=location.abovebar, color=color.new(color.purple, 0), size=size.tiny, text="VS")
+plotshape(allSig and useVolumeProfile and showVolumeLong,  title="Volume Long",  style=shape.arrowup,   location=location.belowbar, color=color.new(color.purple, 0), size=size.tiny, text="VL")
+plotshape(allSig and useVolumeProfile and showVolumeShort, title="Volume Short", style=shape.arrowdown, location=location.abovebar, color=color.new(color.purple, 0), size=size.tiny, text="VS")
 
 // HTF STACK SIGNALS (Pro)
-plotshape(useHTFStack and showHTFLong, title="HTF Stack Long", style=shape.labelup,
-         location=location.belowbar, color=color.new(color.blue, 0), size=size.small, text="HTF↑")
-plotshape(useHTFStack and showHTFShort, title="HTF Stack Short", style=shape.labeldown,
-         location=location.abovebar, color=color.new(color.blue, 0), size=size.small, text="HTF↓")
-plotshape(useHTFStack and showHTFBreak, title="HTF Stack Break", style=shape.xcross,
-         location=location.absolute, color=color.new(color.orange, 0), size=size.small, text="BREAK")
+plotshape(allSig and useHTFStack and showHTFLong,  title="HTF Stack Long",  style=shape.labelup,   location=location.belowbar, color=color.new(color.blue, 0),   size=size.small, text="HTF↑")
+plotshape(allSig and useHTFStack and showHTFShort, title="HTF Stack Short", style=shape.labeldown, location=location.abovebar, color=color.new(color.blue, 0),   size=size.small, text="HTF↓")
+plotshape(allSig and useHTFStack and showHTFBreak, title="HTF Stack Break", style=shape.xcross,    location=location.absolute, color=color.new(color.orange, 0), size=size.small, text="BREAK")
 
 // Cluster zone background (subtle)
 bgcolor(vwapState.vwapsInCluster ? color.new(color.yellow, 93) : na,
@@ -2713,144 +2755,147 @@ if showLegend and barstate.islast
     if useHTFStack
         tableRows += 5
     var table legend = table.new(position.top_right, 2, tableRows,
-                                 frame_color=color.new(color.gray, 80),
-                                 border_width=1)
+                                 bgcolor=color.new(color.white, 5),
+                                 border_color=color.new(color.gray, 60),
+                                 border_width=1,
+                                 frame_color=color.new(color.gray, 40),
+                                 frame_width=1)
+
+    color tcLegend = color.new(color.gray, 20)
+    color hdLegend = color.new(color.gray, 90)
 
     // Header
     table.cell(legend, 0, 0, "VWAP Cross Visuals",
-               text_color=color.white, bgcolor=color.new(color.blue, 0))
+               text_color=tcLegend, bgcolor=hdLegend)
     table.cell(legend, 1, 0, "WUC Powered",
-               text_color=color.white, bgcolor=color.new(color.blue, 0), text_size=size.small)
+               text_color=tcLegend, bgcolor=hdLegend, text_size=size.small)
 
     // Signal legend
     table.cell(legend, 0, 1, "▲/▼ P",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
     table.cell(legend, 1, 1, "Price × VWAP",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
 
     table.cell(legend, 0, 2, "◆ S",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
     table.cell(legend, 1, 2, "Structure Cross",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
 
     table.cell(legend, 0, 3, "● C",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
     table.cell(legend, 1, 3, "VWAP Cluster",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
 
     // Current mode
     table.cell(legend, 0, 4, "Mode:",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
     table.cell(legend, 1, 4, vwapMode,
-               text_color=color.yellow, bgcolor=color.new(color.gray, 70))
+               text_color=#ff6f00)
 
     // VWAP Bias
     biasColor = biasTrend == "BULLISH" ? color.green : biasTrend == "BEARISH" ? color.red : color.gray
     table.cell(legend, 0, 5, "Bias:",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
     table.cell(legend, 1, 5, biasTrend,
-               text_color=biasColor, bgcolor=color.new(color.gray, 70))
+               text_color=biasColor)
 
     // Confluence
     table.cell(legend, 0, 6, "Confluence:",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
     table.cell(legend, 1, 6, str.tostring(confluenceCount) + "/3",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
 
     // Avg Strength
     table.cell(legend, 0, 7, "Strength:",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
     table.cell(legend, 1, 7, str.tostring(avgConfluenceStrength, "#") + "%",
-               text_color=color.white, bgcolor=color.new(color.gray, 70))
+               text_color=tcLegend)
+
+    // Row cursor for the optional sections — declared at this scope; the previous
+    // per-branch declarations were invisible to the following blocks (compile error)
+    int nextRow = 8
 
     // Zone Management Info (Pro)
     if useZoneManagement
         // Zone Bias
         biasColor = zoneState.biasRegime == "BULL" ? color.green : zoneState.biasRegime == "BEAR" ? color.red : color.gray
         table.cell(legend, 0, 8, "Zone Bias:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, 8, zoneState.biasRegime,
-                   text_color=biasColor, bgcolor=color.new(color.gray, 70))
+                   text_color=biasColor)
 
         // Active Zones
         table.cell(legend, 0, 9, "Zones:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, 9, str.tostring(zoneState.activeBullZones) + "/" + str.tostring(zoneState.activeBearZones),
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
 
         // Zone Signals
         zoneSignalText = showZoneLong ? "LONG" : showZoneShort ? "SHORT" : "-"
         zoneSignalColor = showZoneLong ? color.green : showZoneShort ? color.red : color.gray
         table.cell(legend, 0, 10, "Zone Signal:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, 10, zoneSignalText,
-                   text_color=zoneSignalColor, bgcolor=color.new(color.gray, 70))
+                   text_color=zoneSignalColor)
 
         // Zone Score
-        nextRow = 11
+        nextRow := 11
         table.cell(legend, 0, nextRow, "Avg Zone Score:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, nextRow, str.tostring(zoneState.avgZoneScore, "#.#"),
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         nextRow += 1
-    else
-        nextRow = 8
 
     // Volume Profile Info (Pro)
     if useVolumeProfile
         // POC Price
         table.cell(legend, 0, nextRow, "POC:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, nextRow, str.tostring(volumeState.currentProfile.pocPrice, format.mintick),
-                   text_color=color.purple, bgcolor=color.new(color.gray, 70))
+                   text_color=color.purple)
         nextRow += 1
 
         // Value Area
         table.cell(legend, 0, nextRow, "VA Range:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         vaRange = str.tostring(volumeState.currentProfile.valueAreaHigh, format.mintick) +
                  " - " + str.tostring(volumeState.currentProfile.valueAreaLow, format.mintick)
         table.cell(legend, 1, nextRow, vaRange,
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         nextRow += 1
 
         // Volume Signal
         volumeSignalText = showVolumeLong ? "LONG" : showVolumeShort ? "SHORT" : "-"
         volumeSignalColor = showVolumeLong ? color.green : showVolumeShort ? color.red : color.gray
         table.cell(legend, 0, nextRow, "Volume Signal:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, nextRow, volumeSignalText,
-                   text_color=volumeSignalColor, bgcolor=color.new(color.gray, 70))
+                   text_color=volumeSignalColor)
         nextRow += 1
 
         // Volume Score
         table.cell(legend, 0, nextRow, "Volume Score:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, nextRow, str.tostring(volumeState.volumeScore, "#.#") + "/10",
-                   text_color=volumeState.passFilter ? color.green : color.gray, bgcolor=color.new(color.gray, 70))
+                   text_color=volumeState.passFilter ? color.green : color.gray)
         nextRow += 1
-    else
-        nextRow := na(nextRow) ? 8 : nextRow
 
     // HTF Stack Panel Info (Pro)
     if useHTFStack
-        if na(nextRow)
-            nextRow := 8
-
         // Stack Bias
         stackBiasColor = htfStackState.stackBias == "BULL" ? color.green : htfStackState.stackBias == "BEAR" ? color.red : htfStackState.stackBias == "CHOPPY" ? color.orange : color.gray
 
         table.cell(legend, 0, nextRow, "HTF Bias:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, nextRow, htfStackState.stackBias,
-                   text_color=stackBiasColor, bgcolor=color.new(color.gray, 70))
+                   text_color=stackBiasColor)
         nextRow += 1
 
         // Stack Strength
         table.cell(legend, 0, nextRow, "HTF Strength:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, nextRow, str.tostring(htfStackState.stackStrength, "#") + "%",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         nextRow += 1
 
         // Choppiness
@@ -2858,18 +2903,18 @@ if showLegend and barstate.islast
             choppinessColor = htfStackState.choppiness > 61.8 ? color.orange : htfStackState.choppiness < 38.2 ? color.green : color.gray
 
             table.cell(legend, 0, nextRow, "Choppiness:",
-                       text_color=color.white, bgcolor=color.new(color.gray, 70))
+                       text_color=tcLegend)
             table.cell(legend, 1, nextRow, str.tostring(htfStackState.choppiness, "#.#"),
-                       text_color=choppinessColor, bgcolor=color.new(color.gray, 70))
+                       text_color=choppinessColor)
             nextRow += 1
 
         // Market Regime
         regimeColor = htfStackState.marketRegime == "TRENDING" ? color.green : htfStackState.marketRegime == "RANGING" ? color.orange : color.gray
 
         table.cell(legend, 0, nextRow, "Market Regime:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, nextRow, htfStackState.marketRegime,
-                   text_color=regimeColor, bgcolor=color.new(color.gray, 70))
+                   text_color=regimeColor)
         nextRow += 1
 
         // HTF Signal Status
@@ -2877,9 +2922,9 @@ if showLegend and barstate.islast
         htfSignalColor = showHTFLong ? color.green : showHTFShort ? color.red : showHTFBreak ? color.orange : color.gray
 
         table.cell(legend, 0, nextRow, "HTF Signal:",
-                   text_color=color.white, bgcolor=color.new(color.gray, 70))
+                   text_color=tcLegend)
         table.cell(legend, 1, nextRow, htfSignalText,
-                   text_color=htfSignalColor, bgcolor=color.new(color.gray, 70))
+                   text_color=htfSignalColor)
 
 // ============================================================================
 // ALERTS (Enhanced with WUC)
@@ -3056,88 +3101,38 @@ alertcondition(showPriceCrossDown and vwapState.crossStrength >= 80.0,
               "VWAP High Confidence Down", "High confidence bearish VWAP signal")
 
 // Zone alert conditions (Pro)
-if useZoneManagement
-    alertcondition(showZoneLong, "Zone Long Signal", "Zone-based long signal")
-    alertcondition(showZoneShort, "Zone Short Signal", "Zone-based short signal")
-    alertcondition(zoneState.biasRegime == "BULL" and showZoneLong, "Zone Bull Bias Long", "Zone long with bullish bias")
-    alertcondition(zoneState.biasRegime == "BEAR" and showZoneShort, "Zone Bear Bias Short", "Zone short with bearish bias")
+// alertcondition() must live at global scope — the enable toggle is part of the condition
+alertcondition(useZoneManagement and showZoneLong, "Zone Long Signal", "Zone-based long signal")
+alertcondition(useZoneManagement and showZoneShort, "Zone Short Signal", "Zone-based short signal")
+alertcondition(useZoneManagement and zoneState.biasRegime == "BULL" and showZoneLong, "Zone Bull Bias Long", "Zone long with bullish bias")
+alertcondition(useZoneManagement and zoneState.biasRegime == "BEAR" and showZoneShort, "Zone Bear Bias Short", "Zone short with bearish bias")
 
 // Volume Profile alert conditions (Pro)
-if useVolumeProfile
-    alertcondition(showVolumeLong, "Volume Long Signal", "Volume-based long signal")
-    alertcondition(showVolumeShort, "Volume Short Signal", "Volume-based short signal")
-    alertcondition(volumeState.longLVNSignal, "LVN Long", "LVN break and retest long")
-    alertcondition(volumeState.shortLVNSignal, "LVN Short", "LVN break and retest short")
-    alertcondition(volumeState.longVASignal, "VA Long", "Value area re-entry long")
-    alertcondition(volumeState.shortVASignal, "VA Short", "Value area re-entry short")
-    alertcondition(volumeState.passFilter, "Volume Filter Pass", "Volume score >= 6.0")
+alertcondition(useVolumeProfile and showVolumeLong, "Volume Long Signal", "Volume-based long signal")
+alertcondition(useVolumeProfile and showVolumeShort, "Volume Short Signal", "Volume-based short signal")
+alertcondition(useVolumeProfile and volumeState.longLVNSignal, "LVN Long", "LVN break and retest long")
+alertcondition(useVolumeProfile and volumeState.shortLVNSignal, "LVN Short", "LVN break and retest short")
+alertcondition(useVolumeProfile and volumeState.longVASignal, "VA Long", "Value area re-entry long")
+alertcondition(useVolumeProfile and volumeState.shortVASignal, "VA Short", "Value area re-entry short")
+alertcondition(useVolumeProfile and volumeState.passFilter, "Volume Filter Pass", "Volume score >= 6.0")
 
 // ============================================================================
 // EXPORT PLOTS FOR EXTERNAL ACCESS
 // ============================================================================
+// Only the core signals/scores are exported. The granular per-module exports
+// (zone/volume/HTF detail) were removed: TradingView caps an indicator at 64
+// plot-like outputs (plot + plotshape + fill + bgcolor), and ~38 hidden export
+// plots pushed this past the limit so the script would not load. The remaining
+// four cover external strategy access and alerts; the detail values are still
+// visible in the dashboard/panels.
 
 // Trading signals for external strategies
-longSignal = showPriceCrossUp or showStructureCrossUp or
-            (useZoneManagement and showZoneLong) or
-            (useVolumeProfile and showVolumeLong) or
-            (useHTFStack and showHTFLong)
-shortSignal = showPriceCrossDown or showStructureCrossDown or
-             (useZoneManagement and showZoneShort) or
-             (useVolumeProfile and showVolumeShort) or
-             (useHTFStack and showHTFShort)
+longSignal = showPriceCrossUp or showStructureCrossUp or (useZoneManagement and showZoneLong) or (useVolumeProfile and showVolumeLong) or (useHTFStack and showHTFLong)
+shortSignal = showPriceCrossDown or showStructureCrossDown or (useZoneManagement and showZoneShort) or (useVolumeProfile and showVolumeShort) or (useHTFStack and showHTFShort)
 
-plot(longSignal ? 1 : 0, title="VWAP_Long_Signal", display=display.none)
-plot(shortSignal ? 1 : 0, title="VWAP_Short_Signal", display=display.none)
-
-// VWAP values for external access
-plot(vwapState.sessionVwap, title="VWAP_Session", display=display.none)
-plot(vwapState.hasAnchoredHigh ? vwapState.anchoredVwapHigh : na,
-     title="VWAP_Anchored_High", display=display.none)
-plot(vwapState.hasAnchoredLow ? vwapState.anchoredVwapLow : na,
-     title="VWAP_Anchored_Low", display=display.none)
-
-// Bias and confluence for external access
-plot(vwapBias, title="VWAP_Bias_Score", display=display.none)
-plot(confluenceCount, title="VWAP_Confluence_Count", display=display.none)
-
-// Zone data for external access (Pro)
-if useZoneManagement
-    plot(zoneState.bias, title="Zone_Bias", display=display.none)
-    plot(zoneState.biasScore, title="Zone_Bias_Score", display=display.none)
-    plot(zoneState.activeBullZones, title="Zone_Bull_Count", display=display.none)
-    plot(zoneState.activeBearZones, title="Zone_Bear_Count", display=display.none)
-    plot(zoneState.avgZoneScore, title="Zone_Avg_Score", display=display.none)
-    plot(showZoneLong ? 1 : 0, title="Zone_Long_Signal", display=display.none)
-    plot(showZoneShort ? 1 : 0, title="Zone_Short_Signal", display=display.none)
-
-// Volume Profile data for external access (Pro)
-if useVolumeProfile
-    plot(volumeState.currentProfile.pocPrice, title="Volume_POC", display=display.none)
-    plot(volumeState.currentProfile.valueAreaHigh, title="Volume_VAH", display=display.none)
-    plot(volumeState.currentProfile.valueAreaLow, title="Volume_VAL", display=display.none)
-    plot(volumeState.currentProfile.nearestLVN, title="Volume_Nearest_LVN", display=display.none)
-    plot(volumeState.currentProfile.nearestHVN, title="Volume_Nearest_HVN", display=display.none)
-    plot(volumeState.volumeScore, title="Volume_Score", display=display.none)
-    plot(volumeState.passFilter ? 1 : 0, title="Volume_Filter_Pass", display=display.none)
-    plot(showVolumeLong ? 1 : 0, title="Volume_Long_Signal", display=display.none)
-    plot(showVolumeShort ? 1 : 0, title="Volume_Short_Signal", display=display.none)
-    plot(volumeState.longLVNSignal ? 1 : 0, title="Volume_LVN_Long", display=display.none)
-    plot(volumeState.shortLVNSignal ? 1 : 0, title="Volume_LVN_Short", display=display.none)
-    plot(volumeState.longVASignal ? 1 : 0, title="Volume_VA_Long", display=display.none)
-    plot(volumeState.shortVASignal ? 1 : 0, title="Volume_VA_Short", display=display.none)
-
-// HTF Stack Panel data for external access (Pro)
-if useHTFStack
-    plot(htfStackState.stackStrength, title="HTF_Stack_Strength", display=display.none)
-    plot(htfStackState.bullConfluence, title="HTF_Bull_Confluence", display=display.none)
-    plot(htfStackState.bearConfluence, title="HTF_Bear_Confluence", display=display.none)
-    plot(htfStackState.choppiness, title="HTF_Choppiness", display=display.none)
-    plot(showHTFLong ? 1 : 0, title="HTF_Long_Signal", display=display.none)
-    plot(showHTFShort ? 1 : 0, title="HTF_Short_Signal", display=display.none)
-    plot(showHTFBreak ? 1 : 0, title="HTF_Break_Signal", display=display.none)
-    plot(htfStackState.isChoppy ? 1 : 0, title="HTF_Is_Choppy", display=display.none)
-    plot(htfStackState.isTrending ? 1 : 0, title="HTF_Is_Trending", display=display.none)
-    plot(htfStackState.vaPct_eff, title="HTF_Auto_VA_Percent", display=display.none)
-    plot(htfStackState.epsATR_eff, title="HTF_Auto_Epsilon_ATR", display=display.none)
+plot(longSignal ? 1 : 0,  title="VWAP_Long_Signal",      display=display.none)
+plot(shortSignal ? 1 : 0, title="VWAP_Short_Signal",     display=display.none)
+plot(vwapBias,            title="VWAP_Bias_Score",       display=display.none)
+plot(confluenceCount,     title="VWAP_Confluence_Count", display=display.none)
 
 

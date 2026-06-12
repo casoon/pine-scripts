@@ -1,0 +1,403 @@
+//@version=6
+// ============================================================================
+// MTF WaveTrend Opportunity Hunter [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-12 00:00:00
+// ============================================================================
+// MTF scoring system that combines Regime, Opportunity, Timing, and Quality
+// into a weighted final score — fires signals only when all four layers align.
+//
+// Features:
+//   ✓ Three-tier MTF framework: Regime (D) → Setup (4H) → Trigger (1H)
+//   ✓ Regime score: WT trend + EMA alignment + ADX filter
+//   ✓ Opportunity score: JMA pullback depth + WT extreme proximity
+//   ✓ Timing score: WT cross + momentum + JMA structure on trigger TF
+//   ✓ Quality score: Efficiency Ratio + ATR volatility + optional RS filter
+//   ✓ Configurable minimum score thresholds per layer and for final score
+//   ✓ TP1/TP2/TP3 and invalidation levels at signal bars
+//   ✓ Exit warning when trend health drops below threshold or WT crosses back
+//   ✓ Dashboard with live component scores and status label
+//
+// ============================================================================
+
+indicator("MTF WaveTrend Opportunity Hunter [WavesUnchained]", overlay=true, max_labels_count=500, max_lines_count=100, max_bars_back=1500)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Inputs
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+g_tf = "Timeframes"
+tfRegime  = input.timeframe("D",   "Regime TF", group=g_tf)
+tfSetup   = input.timeframe("240", "Setup TF", group=g_tf)
+tfTrigger = input.timeframe("60",  "Trigger TF", group=g_tf)
+
+g_wt = "WaveTrend"
+wtChLen  = input.int(10, "WT Channel Length", minval=1, group=g_wt)
+wtAvgLen = input.int(21, "WT Average Length", minval=1, group=g_wt)
+wtSigLen = input.int(4,  "WT Signal Length", minval=1, group=g_wt)
+wtExtreme = input.float(55.0, "WT Extreme Level", minval=10, group=g_wt)
+
+g_trend = "Trend / Regime"
+emaFastLen = input.int(50,  "EMA Fast", minval=1, group=g_trend)
+emaSlowLen = input.int(200, "EMA Slow", minval=1, group=g_trend)
+adxLen     = input.int(14,  "ADX Length", minval=1, group=g_trend)
+adxMin     = input.float(18.0, "Min ADX", minval=1, group=g_trend)
+
+g_jma = "JMA-like Pullback Smoothing"
+jmaLen   = input.int(34, "JMA Length", minval=1, group=g_jma)
+jmaPhase = input.float(0.5, "JMA Phase", minval=-1.0, maxval=1.0, step=0.1, group=g_jma)
+
+g_quality = "Quality"
+erLen      = input.int(20, "Efficiency Ratio Length", minval=2, group=g_quality)
+atrLen     = input.int(14, "ATR Length", minval=1, group=g_quality)
+useRS      = input.bool(false, "Use Relative Strength Filter", group=g_quality)
+benchmark  = input.symbol("SPY", "Benchmark Symbol", group=g_quality)
+
+g_signal = "Signal Thresholds"
+minRegime      = input.float(65, "Min Regime Score", minval=0, maxval=100, group=g_signal)
+minOpportunity = input.float(65, "Min Opportunity Score", minval=0, maxval=100, group=g_signal)
+minQuality     = input.float(55, "Min Quality Score", minval=0, maxval=100, group=g_signal)
+minTiming      = input.float(70, "Min Timing Score", minval=0, maxval=100, group=g_signal)
+minFinal       = input.float(70, "Min Final Score", minval=0, maxval=100, group=g_signal)
+
+g_mode = "Mode"
+allowLong  = input.bool(true, "Allow Long Signals", group=g_mode)
+allowShort = input.bool(true, "Allow Short Signals", group=g_mode)
+
+g_vis = "Visuals"
+showBg        = input.bool(true, "Show Regime Background", group=g_vis)
+showDashboard = input.bool(true, "Show Dashboard", group=g_vis)
+showLevels    = input.bool(true, "Show TP / Invalidation Levels", group=g_vis)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Helpers
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+scoreBool(cond, pts) =>
+    cond ? pts : 0.0
+
+normalizeSigned(x, scale) =>
+    clamp(50.0 + x / scale * 50.0, 0.0, 100.0)
+
+normalizePositive(x, scale) =>
+    clamp(x / scale * 100.0, 0.0, 100.0)
+
+jmaLike(src, len, phase) =>
+    e1 = ta.ema(src, len)
+    e2 = ta.ema(e1, len)
+    e3 = ta.ema(e2, len)
+    smooth = e1 + (e1 - e2) * phase
+    final = smooth + (smooth - e3) * phase * 0.5
+    final
+
+waveTrend(src, chLen, avgLen, sigLen) =>
+    esa = ta.ema(src, chLen)
+    de = ta.ema(math.abs(src - esa), chLen)
+    ci = de != 0 ? (src - esa) / (0.015 * de) : 0.0
+    wt1 = ta.ema(ci, avgLen)
+    wt2 = ta.sma(wt1, sigLen)
+    [wt1, wt2, wt1 - wt2]
+
+efficiencyRatio(src, len) =>
+    change = math.abs(src - src[len])
+    volatility = ta.sum(math.abs(src - src[1]), len)
+    volatility != 0 ? change / volatility : 0.0
+
+adxValue(len) =>
+    [_, _, adx] = ta.dmi(len, len)
+    adx
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MTF Data
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[dWT1, dWT2, dHist] = request.security(syminfo.tickerid, tfRegime, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen), barmerge.gaps_off, barmerge.lookahead_off)
+dClose   = request.security(syminfo.tickerid, tfRegime, close, barmerge.gaps_off, barmerge.lookahead_off)
+dEMA50   = request.security(syminfo.tickerid, tfRegime, ta.ema(close, emaFastLen), barmerge.gaps_off, barmerge.lookahead_off)
+dEMA200  = request.security(syminfo.tickerid, tfRegime, ta.ema(close, emaSlowLen), barmerge.gaps_off, barmerge.lookahead_off)
+dADX     = request.security(syminfo.tickerid, tfRegime, adxValue(adxLen), barmerge.gaps_off, barmerge.lookahead_off)
+
+[h4WT1, h4WT2, h4Hist] = request.security(syminfo.tickerid, tfSetup, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen), barmerge.gaps_off, barmerge.lookahead_off)
+h4Close = request.security(syminfo.tickerid, tfSetup, close, barmerge.gaps_off, barmerge.lookahead_off)
+h4ATR   = request.security(syminfo.tickerid, tfSetup, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off)
+h4JMA   = request.security(syminfo.tickerid, tfSetup, jmaLike(close, jmaLen, jmaPhase), barmerge.gaps_off, barmerge.lookahead_off)
+
+[h1WT1, h1WT2, h1Hist] = request.security(syminfo.tickerid, tfTrigger, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen), barmerge.gaps_off, barmerge.lookahead_off)
+h1Close = request.security(syminfo.tickerid, tfTrigger, close, barmerge.gaps_off, barmerge.lookahead_off)
+h1JMA   = request.security(syminfo.tickerid, tfTrigger, jmaLike(close, jmaLen, jmaPhase), barmerge.gaps_off, barmerge.lookahead_off)
+h1ER    = request.security(syminfo.tickerid, tfTrigger, efficiencyRatio(close, erLen), barmerge.gaps_off, barmerge.lookahead_off)
+h1ATR   = request.security(syminfo.tickerid, tfTrigger, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off)
+
+benchClose = request.security(benchmark, tfRegime, close, barmerge.gaps_off, barmerge.lookahead_off)
+rsLine = useRS and benchClose != 0 ? dClose / benchClose : na
+rsSlope = useRS ? ta.slope(rsLine, 10) : 0.0
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Regime Score
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dailyBull =
+     dWT1 > dWT2 and
+     dWT1 > dWT1[1]
+
+dailyBear =
+     dWT1 < dWT2 and
+     dWT1 < dWT1[1]
+
+trendBull = dClose > dEMA50 and dEMA50 > dEMA200
+trendBear = dClose < dEMA50 and dEMA50 < dEMA200
+
+adxOk = dADX >= adxMin
+
+bullRegime =
+     scoreBool(dWT1 > dWT2, 25) +
+     scoreBool(dWT1 > dWT1[1], 20) +
+     scoreBool(trendBull, 30) +
+     scoreBool(adxOk, 15) +
+     scoreBool(dHist > dHist[1], 10)
+
+bearRegime =
+     scoreBool(dWT1 < dWT2, 25) +
+     scoreBool(dWT1 < dWT1[1], 20) +
+     scoreBool(trendBear, 30) +
+     scoreBool(adxOk, 15) +
+     scoreBool(dHist < dHist[1], 10)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Opportunity Score
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+h4DistAtr = h4ATR != 0 ? (h4Close - h4JMA) / h4ATR : 0.0
+
+longPullbackScore =
+     clamp((-h4DistAtr + 1.5) / 3.0 * 100.0, 0, 100)
+
+shortPullbackScore =
+     clamp((h4DistAtr + 1.5) / 3.0 * 100.0, 0, 100)
+
+longWtExtremeScore =
+     clamp((-h4WT1 / wtExtreme) * 100.0, 0, 100)
+
+shortWtExtremeScore =
+     clamp((h4WT1 / wtExtreme) * 100.0, 0, 100)
+
+longOpportunity =
+     longPullbackScore * 0.45 +
+     longWtExtremeScore * 0.35 +
+     scoreBool(h4WT1 > h4WT1[1], 20)
+
+shortOpportunity =
+     shortPullbackScore * 0.45 +
+     shortWtExtremeScore * 0.35 +
+     scoreBool(h4WT1 < h4WT1[1], 20)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Timing Score
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+h1BullCross = ta.crossover(h1WT1, h1WT2)
+h1BearCross = ta.crossunder(h1WT1, h1WT2)
+
+h1BullMomentum = h1WT1 > h1WT1[1] and h1Hist > h1Hist[1]
+h1BearMomentum = h1WT1 < h1WT1[1] and h1Hist < h1Hist[1]
+
+h1BullStructure = h1Close > h1JMA and h1JMA > h1JMA[1]
+h1BearStructure = h1Close < h1JMA and h1JMA < h1JMA[1]
+
+longTiming =
+     scoreBool(h1BullCross, 35) +
+     scoreBool(h1BullMomentum, 30) +
+     scoreBool(h1BullStructure, 25) +
+     scoreBool(h4WT1 > h4WT1[1], 10)
+
+shortTiming =
+     scoreBool(h1BearCross, 35) +
+     scoreBool(h1BearMomentum, 30) +
+     scoreBool(h1BearStructure, 25) +
+     scoreBool(h4WT1 < h4WT1[1], 10)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Quality Score
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+erScore = clamp(h1ER * 100.0, 0, 100)
+
+volOk = h1ATR > ta.sma(h1ATR, 20) * 0.7 and h1ATR < ta.sma(h1ATR, 20) * 2.2
+volScore = volOk ? 75.0 : 35.0
+
+rsBullScore = useRS ? scoreBool(rsSlope > 0, 100) : 70
+rsBearScore = useRS ? scoreBool(rsSlope < 0, 100) : 70
+
+accelBull = ta.slope(h1JMA, 5) > ta.slope(h1JMA, 10)
+accelBear = ta.slope(h1JMA, 5) < ta.slope(h1JMA, 10)
+
+longQuality =
+     erScore * 0.35 +
+     volScore * 0.25 +
+     rsBullScore * 0.20 +
+     scoreBool(accelBull, 20)
+
+shortQuality =
+     erScore * 0.35 +
+     volScore * 0.25 +
+     rsBearScore * 0.20 +
+     scoreBool(accelBear, 20)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Final Score
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+longFinal =
+     bullRegime * 0.35 +
+     longOpportunity * 0.30 +
+     longTiming * 0.25 +
+     longQuality * 0.10
+
+shortFinal =
+     bearRegime * 0.35 +
+     shortOpportunity * 0.30 +
+     shortTiming * 0.25 +
+     shortQuality * 0.10
+
+longSignal =
+     allowLong and
+     bullRegime >= minRegime and
+     longOpportunity >= minOpportunity and
+     longQuality >= minQuality and
+     longTiming >= minTiming and
+     longFinal >= minFinal
+
+shortSignal =
+     allowShort and
+     bearRegime >= minRegime and
+     shortOpportunity >= minOpportunity and
+     shortQuality >= minQuality and
+     shortTiming >= minTiming and
+     shortFinal >= minFinal
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Risk / TP / Invalidation
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+riskAtr = ta.atr(atrLen)
+
+longInvalidation  = low - riskAtr * 1.2
+shortInvalidation = high + riskAtr * 1.2
+
+longTP1 = close + riskAtr * 1.5
+longTP2 = close + riskAtr * 2.5
+longTP3 = close + riskAtr * 4.0
+
+shortTP1 = close - riskAtr * 1.5
+shortTP2 = close - riskAtr * 2.5
+shortTP3 = close - riskAtr * 4.0
+
+trendHealthLong =
+     bullRegime * 0.40 +
+     longQuality * 0.30 +
+     scoreBool(h4WT1 > h4WT2, 15) +
+     scoreBool(h1WT1 > h1WT2, 15)
+
+trendHealthShort =
+     bearRegime * 0.40 +
+     shortQuality * 0.30 +
+     scoreBool(h4WT1 < h4WT2, 15) +
+     scoreBool(h1WT1 < h1WT2, 15)
+
+exitLongWarning =
+     trendHealthLong < 45 or ta.crossunder(h1WT1, h1WT2)
+
+exitShortWarning =
+     trendHealthShort < 45 or ta.crossover(h1WT1, h1WT2)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Plots
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+bgcolor(showBg and bullRegime >= minRegime ? color.new(color.green, 90) : na)
+bgcolor(showBg and bearRegime >= minRegime ? color.new(color.red, 90) : na)
+
+plotshape(longSignal, title="Long Signal", style=shape.labelup, text="LONG", location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+plotshape(shortSignal, title="Short Signal", style=shape.labeldown, text="SHORT", location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+
+plotshape(exitLongWarning, title="Long Exit Warning", style=shape.xcross, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny)
+plotshape(exitShortWarning, title="Short Exit Warning", style=shape.xcross, location=location.belowbar, color=color.new(color.orange, 0), size=size.tiny)
+
+plot(showLevels and longSignal ? longTP1 : na, "Long TP1", color=color.new(color.green, 40), style=plot.style_linebr)
+plot(showLevels and longSignal ? longTP2 : na, "Long TP2", color=color.new(color.green, 20), style=plot.style_linebr)
+plot(showLevels and longSignal ? longTP3 : na, "Long TP3", color=color.new(color.green, 0), style=plot.style_linebr)
+plot(showLevels and longSignal ? longInvalidation : na, "Long Invalidation", color=color.new(color.red, 0), style=plot.style_linebr)
+
+plot(showLevels and shortSignal ? shortTP1 : na, "Short TP1", color=color.new(color.red, 40), style=plot.style_linebr)
+plot(showLevels and shortSignal ? shortTP2 : na, "Short TP2", color=color.new(color.red, 20), style=plot.style_linebr)
+plot(showLevels and shortSignal ? shortTP3 : na, "Short TP3", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(showLevels and shortSignal ? shortInvalidation : na, "Short Invalidation", color=color.new(color.green, 0), style=plot.style_linebr)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Dashboard
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var table dash = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+if showDashboard and barstate.islast
+    activeSide = longFinal > shortFinal ? "LONG" : "SHORT"
+    activeFinal = math.max(longFinal, shortFinal)
+    activeRegime = longFinal > shortFinal ? bullRegime : bearRegime
+    activeOpp = longFinal > shortFinal ? longOpportunity : shortOpportunity
+    activeTiming = longFinal > shortFinal ? longTiming : shortTiming
+    activeQuality = longFinal > shortFinal ? longQuality : shortQuality
+    activeHealth = longFinal > shortFinal ? trendHealthLong : trendHealthShort
+
+    table.cell(dash, 0, 0, "MTF WT Hunter", text_color=color.white, bgcolor=color.new(color.black, 0), text_size=size.small)
+    table.cell(dash, 1, 0, activeSide, text_color=color.white, bgcolor=activeSide == "LONG" ? color.new(color.green, 0) : color.new(color.red, 0), text_size=size.small)
+
+    table.cell(dash, 0, 1, "Final",       text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(activeFinal, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Regime",      text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(activeRegime, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Opportunity", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(activeOpp, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Timing",      text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(activeTiming, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Quality",     text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(activeQuality, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 6, "Health",      text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(activeHealth, "#.0"), text_color=tc, text_size=size.small)
+
+    status =
+         longSignal ? "LONG SIGNAL" :
+         shortSignal ? "SHORT SIGNAL" :
+         activeRegime < minRegime ? "WAIT: REGIME" :
+         activeOpp < minOpportunity ? "WAIT: PULLBACK" :
+         activeTiming < minTiming ? "WAIT: TRIGGER" :
+         activeQuality < minQuality ? "WAIT: QUALITY" :
+         "WATCH"
+
+    table.cell(dash, 0, 7, "Status", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 7, status, text_color=tc, bgcolor=hd, text_size=size.small)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Alerts
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+alertcondition(longSignal, title="MTF WT Hunter Long", message="LONG setup on {{ticker}} | Final Score confirmed")
+alertcondition(shortSignal, title="MTF WT Hunter Short", message="SHORT setup on {{ticker}} | Final Score confirmed")
+alertcondition(exitLongWarning, title="MTF WT Hunter Long Exit Warning", message="Long trend health weakening on {{ticker}}")
+alertcondition(exitShortWarning, title="MTF WT Hunter Short Exit Warning", message="Short trend health weakening on {{ticker}}")

@@ -84,6 +84,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | Script | What it does |
 |--------|--------------|
 | [`wavetrend.pine`](indicators/wavetrend/wavetrend.pine) | WaveTrend oscillator — cross signals, divergence, overextension duration, slope quality filter, zone persistence |
+| [`mtf_wavetrend_opportunity_hunter.pine`](indicators/mtf_wavetrend_opportunity_hunter/mtf_wavetrend_opportunity_hunter.pine) | Three-tier MTF scoring (Regime / Opportunity / Timing / Quality) — signals fire only when all four layers pass their thresholds |
 | [`market_stress_oscillator.pine`](indicators/market_stress_oscillator/market_stress_oscillator.pine) | Composite stress index — WVF with JMA and ADX filters |
 | [`market_exhaustion.pine`](indicators/market_exhaustion/market_exhaustion.pine) | Exhaustion signals via MFI and StochRSI with divergence detection |
 | [`oscillator_divergence_zones.pine`](indicators/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI; regular + hidden; ATR-wide zones with retest counter |
@@ -106,6 +107,12 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`zigzag_patterns_framework.pine`](indicators/zigzag_patterns_framework/zigzag_patterns_framework.pine) | ZigZag-based pattern detection — ABC, triangles, Wolfe waves |
 | [`zigzag_fibo_pullback_map.pine`](indicators/zigzag_fibo_pullback_map/zigzag_fibo_pullback_map.pine) | Confirmed ZigZag pivots with pullback-to-Fibonacci labeling and active fib fan |
 | [`elliott_wave_radar.pine`](indicators/elliott_wave_radar/elliott_wave_radar.pine) | Rule-validated Elliott Wave counting — labels impulses/ABC only when hard EW rules hold, Fib-scored, with target projections and invalidation watch |
+
+### Equities & Relative Strength
+
+| Script | What it does |
+|--------|--------------|
+| [`relative_strength_line.pine`](indicators/relative_strength_line/relative_strength_line.pine) | RS vs. a benchmark (SPY/QQQ) — Mansfield RS oscillator or raw RS line, with the IBD leadership signal (RS new high before price). See [MOMENTUM_EQUITIES.md](MOMENTUM_EQUITIES.md) for the equities roadmap |
 
 ---
 

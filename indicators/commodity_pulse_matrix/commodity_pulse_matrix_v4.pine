@@ -1142,8 +1142,9 @@ calculateOBVSlope(int obvLen = 20, int slopeLen = 10) =>
 // @param length Average volume period (default 20)
 // @returns Volume ratio
 calculateVolumeRatio(int length = 20) =>
-    avgVol = ta.sma(volume, length)
-    avgVol > 0 ? volume / avgVol : 1.0
+    float volNz = nz(volume)
+    avgVol = ta.sma(volNz, length)
+    avgVol > 0 ? volNz / avgVol : 1.0
 
 // Calculate VFI (Volume Flow Indicator)
 // @param length VFI period (default 130)
@@ -1153,6 +1154,9 @@ calculateVolumeRatio(int length = 20) =>
 calculateVFI(int length = 130, float coef = 0.2, float vCoef = 2.5) =>
     // Typical price
     typical = hlc3
+
+    // Volume (nz-guarded for feeds without volume data)
+    float vol = nz(volume)
 
     // Inter calculation
     inter = math.log(typical) - math.log(typical[1])
@@ -1164,12 +1168,12 @@ calculateVFI(int length = 130, float coef = 0.2, float vCoef = 2.5) =>
     cutoff = coef * vinter * close
 
     // Vave
-    vave = ta.sma(volume, length)[1]
+    vave = ta.sma(vol, length)[1]
 
     // Vc calculation
     vc = switch
-        volume < vave => volume
-        => vave + (volume - vave) * vCoef
+        vol < vave => vol
+        => vave + (vol - vave) * vCoef
 
     // MF calculation
     mf = typical - typical[1]
@@ -1180,8 +1184,8 @@ calculateVFI(int length = 130, float coef = 0.2, float vCoef = 2.5) =>
         mf < -cutoff => -vc
         => 0
 
-    // VFI
-    vfi = ta.sma(vcp, length) / vave
+    // VFI — guard against vave = 0/na (e.g. early bars or no-volume feeds)
+    vfi = vave != 0 and not na(vave) ? ta.sma(vcp, length) / vave : 0.0
     vfi
 
 // ==== VOLATILITY INDICATORS ====
@@ -1426,8 +1430,9 @@ calculateFlowScore(float mfi, float closePrice, float volume, float obvSlope, in
     float inter = math.log(typical) - math.log(typical[1])
     float vinter = ta.stdev(inter, 30)
     float cutoff = 0.2 * vinter * close
-    float volumeSma = ta.sma(volume, 30)  // Extract ta.sma for consistency
-    float vcp = math.abs(close - close[1]) > cutoff ? volume * (close - close[1]) / (volumeSma * cutoff) : 0.0
+    float volNz = nz(volume)
+    float volumeSma = ta.sma(volNz, 30)  // Extract ta.sma for consistency
+    float vcp = math.abs(close - close[1]) > cutoff and volumeSma * cutoff != 0 ? volNz * (close - close[1]) / (volumeSma * cutoff) : 0.0
     float vfi = calculateJMA(vcp, 30)  // JMA instead of EMA
     float vfiZ = zLocal(vfi, zLen)
 
@@ -2055,7 +2060,7 @@ checkExhaustionCriteria(int rsiLength = 14, int atrLen = 14, int volLength = 20,
     float rsiVal = ta.rsi(close, rsiLength)
     float atrVal = ta.atr(atrLen)
     float atrAvg = ta.sma(atrVal, 20)
-    float volAvg = ta.sma(volume, volLength)
+    float volAvg = ta.sma(nz(volume), volLength)
 
     // Calculate candle metrics
     float bodySize = math.abs(close - open)
@@ -2073,7 +2078,7 @@ checkExhaustionCriteria(int rsiLength = 14, int atrLen = 14, int volLength = 20,
     bool bull2_range = totalRange > (atrAvg * atrMultiplier)
 
     // 3. High Volume (panic selling)
-    bool bull3_vol = volume > (volAvg * volMultiplier)
+    bool bull3_vol = nz(volume) > (volAvg * volMultiplier)
 
     // 4. Asymmetric Wick (lower wick rejection - buyers stepping in)
     bool bull4_wick = lowerWick > (upperWick * wickRatio) and lowerWick > (bodySize * wickBodyRatio)
@@ -2098,7 +2103,7 @@ checkExhaustionCriteria(int rsiLength = 14, int atrLen = 14, int volLength = 20,
     bool bear2_range = totalRange > (atrAvg * atrMultiplier)
 
     // 3. High Volume (panic buying)
-    bool bear3_vol = volume > (volAvg * volMultiplier)
+    bool bear3_vol = nz(volume) > (volAvg * volMultiplier)
 
     // 4. Asymmetric Wick (upper wick rejection - sellers stepping in)
     bool bear4_wick = upperWick > (lowerWick * wickRatio) and upperWick > (bodySize * wickBodyRatio)
@@ -2174,8 +2179,8 @@ detectStrictExhaustion(int confirmBars = 3, int rsiLength = 14, int atrLen = 14,
     float bodyRatio = rng > 0 ? body / rng : 1.0
 
     // Volume comparison
-    float volMA = ta.sma(volume, volLength)
-    bool bigVol = volume > volMA
+    float volMA = ta.sma(nz(volume), volLength)
+    bool bigVol = nz(volume) > volMA
 
     // Range comparison
     float rngMA = ta.sma(rng, atrLen)
@@ -4766,7 +4771,11 @@ drawMatrixTable(MultiTimeframeScores mtfScores, SignalResult signal, HeatScoreBr
     // Create table
     int numCols = mtfScores.chartTF.isValid ? 5 : 4  // +1 for labels
     int numRows = compactMode ? 10 : 17
-    var table mt = table.new(tablePos, numCols, numRows,
+    // Allocate at MAX dimensions (5 cols / 17 rows) so a var table created on the
+    // first bar still fits when chartTF.isValid or compactMode change later —
+    // unused cells are simply never filled. numCols/numRows below still drive
+    // table.clear and cell placement.
+    var table mt = table.new(tablePos, 5, 17,
          bgcolor=color.new(color.white, 5),
          border_color=color.new(color.gray, 60),
          border_width=1,
@@ -4986,11 +4995,15 @@ DiamondZoneResult zones = detectDiamondZonesWithConfluence(5, 5, 14, 0.3, 0.015,
 // NOTE: Reusing 'rsi' from consolidated TA calculations
 DivergenceZonesResult divZones = analyzeDivergenceZones(rsi, 2, 2, 5, 100, 1.0, color.new(color.lime, 0), color.new(color.red, 0))
 
-string setupContext = exhaust.bullConfirmed or exhaust.bearConfirmed ? "STRONG REVERSAL ZONE" :
-     divZones.nearBullZone or divZones.nearBearZone ? "DIVERGENCE CONFIRMED" :
-     regime.isRanging ? "CONSOLIDATION" :
-     regime.isTrending ? "TREND CONTINUATION" :
-     "BUILDING SETUP"
+string setupContext = "BUILDING SETUP"
+if exhaust.bullConfirmed or exhaust.bearConfirmed
+    setupContext := "STRONG REVERSAL ZONE"
+else if divZones.nearBullZone or divZones.nearBearZone
+    setupContext := "DIVERGENCE CONFIRMED"
+else if regime.isRanging
+    setupContext := "CONSOLIDATION"
+else if regime.isTrending
+    setupContext := "TREND CONTINUATION"
 
 // === CALCULATE HEAT SCORE ===
 bool includeChartInHeat = mtfScores.chartTF.isValid and mtfScores.totalTFs == 4

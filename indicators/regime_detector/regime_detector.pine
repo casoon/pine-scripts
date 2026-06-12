@@ -1,15 +1,23 @@
 //@version=6
 // ============================================================================
 // Regime Detector (MA Zones Overlay) [WavesUnchained]
-// Version: 1.0.0
+// Version: 1.1.0
 // Author: WavesUnchained
-// Build: 2025-12-22 23:41:13
+// Build: 2026-06-11 00:00:00
 // ============================================================================
 // MA-zone based trend regime overlay with adaptive sensitivity and HTF gate.
+// v1.1 adds a second dimension (volatility), regime maturity / transition
+// warnings, a plain-language playbook, and an optional RS-vs-benchmark modifier.
 //
 // Features:
 //   ✓ Adaptive core engine — sensitivity adjusts to recent volatility
 //   ✓ Regime detection — Bull, Bear, Neutral via MA zone positioning
+//   ✓ Volatility dimension — Quiet / Normal / Volatile → combined regime
+//     (e.g. "Quiet Bull", "Volatile Range", "Compression")
+//   ✓ Regime maturity + transition warning — Fresh / Mature / Aging-weakening
+//   ✓ Plain-language playbook — what the current regime means for action
+//   ✓ Optional RS vs. benchmark (SPY/QQQ) modifier for equities
+//   ✓ Modern visuals — theme selector, gradient bands, candle tint, soft heatmap
 //   ✓ Multi-timeframe gate — higher-timeframe regime filters chart signals
 //   ✓ Advanced signal filters for quality and frequency management
 //   ✓ Zone visualization (up to 500 lines, 100 boxes)
@@ -427,7 +435,8 @@ updatePerformanceMetrics(PerformanceMetrics metrics, PerformanceConfig config, S
                     metrics.grossLoss += math.abs(pnl)
 
                 metrics.sampleCount := metrics.wins + metrics.losses
-                metrics.winRate := metrics.sampleCount > 0 ? (metrics.wins / metrics.sampleCount) : 0.0
+                // 1.0 * forces float division — int/int truncates in Pine
+                metrics.winRate := metrics.sampleCount > 0 ? (1.0 * metrics.wins / metrics.sampleCount) : 0.0
                 metrics.profitFactor := metrics.grossLoss > 0 ? (metrics.grossProfit / metrics.grossLoss) : (metrics.grossProfit > 0 ? 99.0 : 0.0)
 
         metrics.lastPosition := signalState.position
@@ -476,6 +485,18 @@ erThresholdExit = input.float(0.15, "ER Exit Threshold", minval=0.0, maxval=1.0,
 regimeSensitivity = input.float(0.6, "Regime Sensitivity", minval=0.1, maxval=1.0, step=0.05, group=REGIME_GROUP, tooltip="Higher = more sensitive regime detection")
 regimeConfidenceMin = input.float(0.65, "Min Regime Confidence", minval=0.0, maxval=1.0, step=0.05, group=REGIME_GROUP, tooltip="Minimum confidence for regime classification")
 regimeConfidenceExit = input.float(0.55, "Min Regime Confidence (Exit)", minval=0.0, maxval=1.0, step=0.05, group=REGIME_GROUP, tooltip="Lower confidence threshold to exit regime (hysteresis)")
+
+// === REGIME CONTEXT (v1.1) — second dimension, maturity, playbook, RS ===
+var string CONTEXT_GROUP = "Regime Context (v1.1)"
+enableVolaDim  = input.bool(true,  "Volatility Dimension", group=CONTEXT_GROUP, tooltip="Adds a second axis to the regime: Quiet / Normal / Volatile, from ATR percentile + Bollinger-width percentile. Turns 'Bull' into 'Quiet Bull' vs. 'Volatile Bull' etc.")
+volaLookback   = input.int(100, "Volatility Rank Lookback", minval=20, maxval=500, group=CONTEXT_GROUP, tooltip="Window for the ATR / BB-width percentile rank that defines the volatility state.")
+volaQuietMax   = input.int(33,  "Quiet below (percentile)", minval=5, maxval=49, group=CONTEXT_GROUP)
+volaVolMin     = input.int(66,  "Volatile above (percentile)", minval=51, maxval=95, group=CONTEXT_GROUP)
+showPlaybook   = input.bool(true,  "Playbook Line", group=CONTEXT_GROUP, tooltip="Plain-language action hint for the current combined regime in the info panel.")
+showContextLabels = input.bool(true, "Context Labels on Chart", group=CONTEXT_GROUP, tooltip="Marks regime context events directly on the chart: COMPRESS (volatility contracted → breakout setup), EXPAND (volatility spiked → climax/whipsaw risk), AGING (trend regime weakening).")
+enableRSContext = input.bool(false, "RS vs. Benchmark (equities)", group=CONTEXT_GROUP, tooltip="Adds relative strength vs. a benchmark (SPY/QQQ) as a regime modifier — for stocks like TSLA/MSFT where relative strength matters more than absolute trend.")
+rsBenchSym     = input.symbol("AMEX:SPY", "  Benchmark", group=CONTEXT_GROUP)
+rsMaLen        = input.int(50, "  RS MA Length", minval=5, maxval=200, group=CONTEXT_GROUP)
 
 // Machine Learning Enhancement
 enableMLRegime = input.bool(true, "ML-Enhanced Classification (WIP)", group=WIP_GROUP, tooltip="WIP: not yet used in engine")
@@ -542,10 +563,13 @@ warningRegimeStrengthMin = input.float(0.30, "Warning: Low Regime Strength", min
 warningCooldownBars = input.int(15, "Warning Cooldown (bars)", minval=0, maxval=200, group=SIGNAL_GROUP)
 
 // === VISUALIZATION ===
+visualTheme = input.string("Modern", "Visual Theme", options=["Modern", "Soft", "Classic"], group=VISUAL_GROUP, tooltip="Modern = teal/coral with soft gradients. Soft = muted pastels. Classic = the original saturated green/red.")
+regimeCandleTint = input.bool(true, "Regime Candle Tint", group=VISUAL_GROUP, tooltip="Tints candles by regime direction and volatility intensity for an at-a-glance read. Suppressed automatically when the SSA candle coloring is active.")
+smoothBands = input.bool(true, "Gradient Bands", group=VISUAL_GROUP, tooltip="Layered, soft gradient fill for the ATR bands instead of a single flat fill.")
 showBands = input.bool(true, "Show ATR Bands", group=VISUAL_GROUP)
 showRegimeHeatmap = input.bool(true, "Regime Heatmap", group=VISUAL_GROUP)
-showInfoPanel = input.bool(true, "Info Panel", group=VISUAL_GROUP)
-infoPanelPosition = input.string("Top Right", "Panel Position", ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=VISUAL_GROUP)
+showInfoPanel = input.bool(false, "Info Panel", group=VISUAL_GROUP)
+infoPanelPosition = input.string("Bottom Left", "Panel Position", ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=VISUAL_GROUP, tooltip="Defaults to Bottom Left so the regime context panel sits clear of the SSA status table (Top Right) and the broker's symbol/price overlay (Top Left).")
 compactMode = input.bool(false, "Compact Mode", group=VISUAL_GROUP)
 
 // Advanced Visualization
@@ -660,7 +684,7 @@ ssaLimitActivation = input.string("Touch", "Pending activation", options=["Touch
 ssaCloseConfirmBars = input.int(1, "Close confirm bars", minval=1, maxval=5, group=SSA_TM)
 
 var string SSA_TABLE = "SSA: Component Status Table"
-ssaShowTable = input.bool(true, "Show Status Table", group=SSA_TABLE)
+ssaShowTable = input.bool(false, "Show Status Table", group=SSA_TABLE)
 ssaTablePos = input.string("Top Right", "Position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=SSA_TABLE)
 ssaTableCompact = input.bool(false, "Compact", group=SSA_TABLE)
 
@@ -876,9 +900,14 @@ var performanceMetrics = newPerformanceMetrics()
 
 // === HELPER FUNCTIONS ===
 
-// Get theme colors
+// Get theme colors — [bull, bear, flat] per selected visual theme
 getThemeColors() =>
-    [color.rgb(34, 171, 108), color.rgb(220, 73, 73), color.rgb(120, 120, 120)] // Default
+    if visualTheme == "Soft"
+        [color.rgb(77, 182, 172), color.rgb(229, 115, 115), color.rgb(144, 164, 174)]   // muted teal / coral / blue-gray
+    else if visualTheme == "Classic"
+        [color.rgb(34, 171, 108), color.rgb(220, 73, 73), color.rgb(120, 120, 120)]      // original saturated
+    else
+        [color.rgb(0, 191, 165), color.rgb(255, 82, 82), color.rgb(120, 144, 156)]       // Modern: teal / coral-red / slate
 
 // Calculate adaptive parameters based on market conditions
 calculateAdaptiveParams() =>
@@ -942,6 +971,10 @@ regimeStrength = regimeState.strength
 htfAgreement = enableMTFGate ? mtfState.agreementRatio : 1.0
 htfBias = enableMTFGate ? mtfState.overallBias : currentRegime
 
+// Filter information — plain series copy: filterState is mutated in place, so
+// history-referencing the object ([off]) would always return the current values
+signalQualitySeries = filterState.signalQuality
+
 // Signal information
 longSignal = signalState.longEntry
 shortSignal = signalState.shortEntry
@@ -951,40 +984,134 @@ lowQualityLong = signalState.lowQualityLong
 lowQualityShort = signalState.lowQualityShort
 currentPosition = signalState.position
 
+// ============================================================================
+// REGIME CONTEXT LAYER (v1.1) — additive, does not touch the direction engine
+// ============================================================================
+
+// --- Dimension 2: Volatility state (Quiet / Normal / Volatile) -------------
+// ATR percentile + Bollinger-width percentile, averaged. Computed every bar
+// (ta.* must be unconditional) and only consumed when enabled.
+float ctxAtr     = adaptiveState.atr
+float atrRank    = ta.percentrank(ctxAtr, volaLookback)
+float bbBasisCtx = ta.sma(close, 20)
+float bbDevCtx   = ta.stdev(close, 20)
+float bbWidthCtx = bbBasisCtx != 0 ? (bbDevCtx * 4.0) / bbBasisCtx : 0.0
+float bbwRank    = ta.percentrank(bbWidthCtx, volaLookback)
+float volaScore  = (nz(atrRank, 50.0) + nz(bbwRank, 50.0)) / 2.0
+// volaState: -1 Quiet, 0 Normal, 1 Volatile
+int volaState = volaScore < volaQuietMax ? -1 : volaScore > volaVolMin ? 1 : 0
+string volaTxt = volaState == -1 ? "Quiet" : volaState == 1 ? "Volatile" : "Normal"
+
+// --- Regime maturity & transition warning ----------------------------------
+bool regimeChgd   = currentRegime != currentRegime[1]
+int  barsInRegime = nz(ta.barssince(regimeChgd), bar_index)
+
+// Peak strength reached within the current regime (for fade detection)
+var float regimePeakStr = 0.0
+if regimeChgd
+    regimePeakStr := regimeStrength
+else
+    regimePeakStr := math.max(regimePeakStr, regimeStrength)
+float fadeRatio = regimePeakStr > 0 ? regimeStrength / regimePeakStr : 1.0
+
+float ctxSlope = adaptiveState.normalizedSlope
+float ctxEr    = adaptiveState.efficiencyRatio
+
+// Weakening: trend losing efficiency, fading below peak, or slope turning against it
+bool slopeAgainst = (currentRegime == 1 and ctxSlope < 0) or (currentRegime == -1 and ctxSlope > 0)
+bool regimeWeakening = currentRegime != 0 and (ctxEr < erThresholdExit or fadeRatio < 0.5 or slopeAgainst)
+
+// Context state-change events (used for both chart labels and alerts)
+bool volaCompression     = enableVolaDim and volaState == -1 and volaState[1] != -1
+bool volaExpansion       = enableVolaDim and volaState == 1 and volaState[1] != 1
+bool regimeWeakeningEvent = regimeWeakening and not regimeWeakening[1]
+
+string maturityTxt = "—"
+if currentRegime != 0
+    if regimeWeakening
+        maturityTxt := "Aging / weakening"
+    else if barsInRegime < 10
+        maturityTxt := "Fresh (" + str.tostring(barsInRegime) + ")"
+    else if fadeRatio > 0.8
+        maturityTxt := "Mature / strong"
+    else
+        maturityTxt := "Mature"
+
+// --- RS vs. benchmark (equities modifier) ----------------------------------
+// request.security unconditional (avoids inconsistent-series pitfall); used only when enabled.
+float rsBenchClose = request.security(rsBenchSym, timeframe.period, close, lookahead=barmerge.lookahead_off)
+float ctxRs   = rsBenchClose != 0 and not na(rsBenchClose) ? close / rsBenchClose : na
+float ctxRsMa = ta.sma(ctxRs, rsMaLen)
+float ctxMrs  = not na(ctxRsMa) and ctxRsMa != 0 ? (ctxRs / ctxRsMa - 1.0) * 100.0 : na
+int   rsBias  = not na(ctxMrs) ? (ctxMrs > 0 ? 1 : -1) : 0   // 1 leading, -1 lagging
+
+// --- Playbook --------------------------------------------------------------
+string playbook = "—"
+if currentRegime == 0
+    if enableVolaDim and volaState == -1
+        playbook := "Compression — await breakout"
+    else if enableVolaDim and volaState == 1
+        playbook := "Choppy range — fade edges / stay out"
+    else
+        playbook := "Range — trade the boundaries"
+else
+    if regimeWeakening
+        playbook := "Trend aging — tighten stops / bank profit"
+    else if enableVolaDim and volaState == 1
+        playbook := (currentRegime == 1 ? "Strong but stretched — ride, trail tight" : "Sharp down — ride, trail tight")
+    else if enableVolaDim and volaState == -1
+        playbook := (currentRegime == 1 ? "Healthy uptrend — buy pullbacks" : "Healthy downtrend — sell rallies")
+    else
+        playbook := (currentRegime == 1 ? "Uptrend — follow long" : "Downtrend — follow short")
+
+// RS modifier appended to the playbook for equities
+if enableRSContext and currentRegime != 0 and not na(ctxMrs)
+    playbook := playbook + (rsBias == 1 ? "  ·  RS leading ✓" : "  ·  RS lagging ✗")
+
 // === VISUALIZATION ===
 
 // Theme colors
 [colorBull, colorBear, colorFlat] = getThemeColors()
 
-// Adaptive Line
-lineColor = enableDynamicColors ? (currentRegime == 1 ? colorBull : currentRegime == -1 ? colorBear : color.new(color.black, 0)) : color.new(color.black, 0)
-plot(adaptiveLine, "Adaptive Line", lineColor, linewidth=3)
+// Adaptive Line — regime-colored, slightly heavier for presence
+lineColor = enableDynamicColors ? (currentRegime == 1 ? colorBull : currentRegime == -1 ? colorBear : colorFlat) : color.new(color.black, 0)
+pLine = plot(adaptiveLine, "Adaptive Line", lineColor, linewidth=3)
 
-// ATR Bands (Simple Fill)
+// ATR Bands — soft vertical gradient filling the full channel from the centre
+// line out to the entry edge (vivid at the line, fading at the edge). Filling
+// against the centre line lets us drop the two exit plots and stay within the
+// 64-output budget while looking cleaner. Exit levels remain for signal logic.
 bandBullCol = colorBull
 bandBearCol = colorBear
 
-// Core band lines (Entry als kräftige Kante)
 pUpperEntry = plot(showBands ? upperEntry : na, "Upper Entry",
- color=color.new(bandBullCol, 0), linewidth=2)
+ color=color.new(bandBullCol, 45), linewidth=1)
 pLowerEntry = plot(showBands ? lowerEntry : na, "Lower Entry",
- color=color.new(bandBearCol, 0), linewidth=2)
+ color=color.new(bandBearCol, 45), linewidth=1)
 
-pUpperExit = plot(showBands ? upperExit : na, "Upper Exit",
- color=color.new(bandBullCol, 80), linewidth=1)
-pLowerExit = plot(showBands ? lowerExit : na, "Lower Exit",
- color=color.new(bandBearCol, 80), linewidth=1)
+uOuter = not showBands ? na : smoothBands ? color.new(bandBullCol, 94) : color.new(bandBullCol, 86)
+uInner = not showBands ? na : color.new(bandBullCol, 80)
+fill(pUpperEntry, pLine, upperEntry, adaptiveLine, uOuter, uInner, title="ATR Upper Fill")
 
-fill(pUpperEntry, pUpperExit, title="ATR Upper Fill",
- color=showBands ? color.new(bandBullCol, 88) : na)
-fill(pLowerExit, pLowerEntry, title="ATR Lower Fill",
- color=showBands ? color.new(bandBearCol, 88) : na)
+lInner = not showBands ? na : color.new(bandBearCol, 80)
+lOuter = not showBands ? na : smoothBands ? color.new(bandBearCol, 94) : color.new(bandBearCol, 86)
+fill(pLine, pLowerEntry, adaptiveLine, lowerEntry, lInner, lOuter, title="ATR Lower Fill")
 
-// Regime Heatmap
-heatAlpha = int(90 - (regimeStrength * regimeConfidence * 40))
-heatAlpha := math.max(60, math.min(90, heatAlpha))
+// Regime Heatmap — softer, with a touch more presence in volatile regimes
+heatBase  = 93.0 - (regimeStrength * regimeConfidence * 16.0)
+volaBoost = enableVolaDim and volaState == 1 ? 6.0 : 0.0
+heatAlpha = int(math.max(76, math.min(95, heatBase - volaBoost)))
 bgColor = currentRegime == 1 ? color.new(colorBull, heatAlpha) : currentRegime == -1 ? color.new(colorBear, heatAlpha) : na
 bgcolor(showRegimeHeatmap ? bgColor : na, title="Regime Heatmap")
+
+// Regime candle tint colour (applied by the shared barcolor() call below, so it
+// does not add a second barcolor to the plot budget). Active only when the SSA
+// candle coloring is Off.
+color regimeCandleCol = na
+if regimeCandleTint and ssaCandleColoring == "Off"
+    tintBase = currentRegime == 1 ? colorBull : currentRegime == -1 ? colorBear : colorFlat
+    tintTransp = enableVolaDim ? (volaState == 1 ? 20 : volaState == -1 ? 58 : 38) : 38
+    regimeCandleCol := color.new(tintBase, tintTransp)
 
 // --- Label anchoring (shared)
 float atrLbl = nz(adaptiveState.atr, ta.atr(14))
@@ -1163,7 +1290,7 @@ if logLabelMetrics and barstate.islast and (na(lastLogBar) or lastLogBar != bar_
                 str.tostring(regimeConfidence[off], "#.00"),
                 str.tostring(regimeStrength[off], "#.00"),
                 str.tostring(htfAgreement[off], "#.00"),
-                str.tostring((filterState[off]).signalQuality, "#.00"),
+                str.tostring(signalQualitySeries[off], "#.00"),
                 tierTxt,
                 warnTxt,
                 str.tostring(longEvent[off]),
@@ -1190,6 +1317,24 @@ if warnChopEvent
         tooltip="Chop warning: marketCondition == -1 or regimeStrength below threshold")
 plotshape(warnLowVolEvent, "Warn Low Vol", shape.triangleup, location.abovebar,
  color=color.new(color.yellow, 0), size=size.tiny, text="VOL")
+
+// v1.1 context event labels (label.new — does not count toward the plot budget)
+if showContextLabels and volaCompression
+    label.new(bar_index, low, "COMPRESS",
+        style=label.style_label_up, textcolor=color.white,
+        color=color.new(#2962ff, 0), size=size.tiny, force_overlay=true,
+        tooltip="Volatility contracted to Quiet — energy building, breakout setup")
+if showContextLabels and volaExpansion
+    label.new(bar_index, high, "EXPAND",
+        style=label.style_label_down, textcolor=color.white,
+        color=color.new(#ff6f00, 0), size=size.tiny, force_overlay=true,
+        tooltip="Volatility expanded to Volatile — climax / whipsaw risk")
+if showContextLabels and regimeWeakeningEvent
+    label.new(bar_index, currentRegime == 1 ? high : low,
+        "AGING",
+        style=currentRegime == 1 ? label.style_label_down : label.style_label_up,
+        textcolor=color.white, color=color.new(#d50000, 0), size=size.tiny, force_overlay=true,
+        tooltip="Trend regime is aging/weakening — tighten stops / bank profit")
 
 // Signal Quality Label (right of bar, left-pointing)
 strengthColor = dotColorMode == "By Tier" ? (qualA ? color.new(color.green, 0) : qualB ? color.new(color.yellow, 0) : color.new(color.orange, 0)) : (regimeConfidence >= 0.8 ? color.new(color.green, 0) : regimeConfidence >= 0.6 ? color.new(color.yellow, 0) : regimeConfidence >= 0.4 ? color.new(color.orange, 0) : color.new(color.red, 0))
@@ -1264,9 +1409,12 @@ amaStepRef = ta.sma(amaStep, autoLookbackZones)
 autoFactor = (amaStepRef > 0) ? (amaStep / amaStepRef) : 1.0
 minStrengthAuto = baseMinStrengthZones * autoFactor
 
-minStrengthZones =
- strengthModeZones == "Off" ? baseMinStrengthZones : strengthModeZones == "By MA Type" ? minStrengthByType :
- minStrengthAuto
+// if/else instead of multi-line ternary (CE10156 with series operands)
+float minStrengthZones = minStrengthAuto
+if strengthModeZones == "Off"
+    minStrengthZones := baseMinStrengthZones
+else if strengthModeZones == "By MA Type"
+    minStrengthZones := minStrengthByType
 
 strongTrendZones = spreadATR >= minStrengthZones
 bullFromMAs = barstate.isconfirmed and close >= ma1z and close >= ma2z and close >= ma3z and strongTrendZones
@@ -1341,12 +1489,25 @@ if showInfoPanel and barstate.islast
     int rows = 1  // header
     rows += 6     // Profile, Regime, Confidence, Tier, Warning, Position
 
+    // v1.1 context rows (shown in both modes)
+    if enableVolaDim
+        rows += 1  // Volatility
+    rows += 1      // Maturity
+    if enableRSContext
+        rows += 1  // RS
+    if showPlaybook
+        rows += 1  // Playbook
+
     if compactMode
         if enableMTFGate
             rows += 1
-        rows += 1  // Market Condition
+        if enablePerformanceTracking
+            rows += 2  // Win Rate, Profit Factor — cells are written regardless of compact mode
         if showConfidenceMeters
             rows += 1
+        rows += 1  // Market Condition
+        if enableAutoTuning
+            rows += 1  // Auto-Tune — cell written regardless of compact mode
     else
         rows += 3  // ER, Alpha, Slope
         if enableMTFGate
@@ -1366,98 +1527,129 @@ if showInfoPanel and barstate.islast
         if not na(infoTable)
             table.delete(infoTable)
         infoTable := table.new(panelPos, 2, rows,
-            bgcolor=color.new(color.black, 10),
-            border_width=1, border_color=color.new(color.gray, 30),
-            frame_width=2, frame_color=color.new(color.white, 70))
+            bgcolor=color.new(color.white, 5),
+            border_width=1, border_color=color.new(color.gray, 60),
+            frame_width=1, frame_color=color.new(color.gray, 40))
         lastPanelRows := rows
         lastPanelPos := infoPanelPosition
 
-    table.cell(infoTable, 0, 0, "RDP", text_color=color.white, text_size=size.normal,
-        bgcolor=color.new(color.black, 0))
-    table.cell(infoTable, 1, 0, "v2.0", text_color=color.white, text_size=size.small,
-        bgcolor=color.new(color.black, 0))
+    color rdpTc = color.new(color.gray, 20)
+    color rdpHd = color.new(color.gray, 90)
+
+    table.cell(infoTable, 0, 0, "RDP", text_color=rdpTc, text_size=size.normal,
+        bgcolor=rdpHd)
+    table.cell(infoTable, 1, 0, "v1.1.0", text_color=rdpTc, text_size=size.small,
+        bgcolor=rdpHd)
 
     int r = 1
-    table.cell(infoTable, 0, r, "Profile:", text_color=color.new(color.white, 0), text_size=size.small)
-    table.cell(infoTable, 1, r, profilePreset, text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 0, r, "Profile:", text_color=rdpTc, text_size=size.small)
+    table.cell(infoTable, 1, r, profilePreset, text_color=rdpTc, text_size=size.small)
     r += 1
 
-    table.cell(infoTable, 0, r, "Regime:", text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 0, r, "Regime:", text_color=rdpTc, text_size=size.small)
     regimeText = currentRegime == 1 ? "BULL" : currentRegime == -1 ? "BEAR" : "FLAT"
-    regimeColor = currentRegime == 1 ? colorBull : currentRegime == -1 ? colorBear : color.new(color.white, 0)
+    regimeColor = currentRegime == 1 ? colorBull : currentRegime == -1 ? colorBear : rdpTc
     table.cell(infoTable, 1, r, regimeText, text_color=regimeColor, text_size=size.small)
     r += 1
 
-    table.cell(infoTable, 0, r, "Confidence:", text_color=color.new(color.white, 0), text_size=size.small)
-    table.cell(infoTable, 1, r, str.tostring(regimeConfidence, "#.##"),
-        text_color=color.new(color.white, 0), text_size=size.small)
+    // v1.1: Volatility dimension → combined regime
+    if enableVolaDim
+        volaColor = volaState == 1 ? #ff6f00 : volaState == -1 ? #2962ff : rdpTc
+        table.cell(infoTable, 0, r, "Volatility:", text_color=rdpTc, text_size=size.small)
+        table.cell(infoTable, 1, r, volaTxt + " (" + str.tostring(math.round(volaScore)) + ")", text_color=volaColor, text_size=size.small)
+        r += 1
+
+    // v1.1: Regime maturity
+    matColor = maturityTxt == "Aging / weakening" ? #d50000 : maturityTxt == "Mature / strong" ? #00c853 : rdpTc
+    table.cell(infoTable, 0, r, "Maturity:", text_color=rdpTc, text_size=size.small)
+    table.cell(infoTable, 1, r, maturityTxt, text_color=matColor, text_size=size.small)
     r += 1
 
-    table.cell(infoTable, 0, r, "Tier:", text_color=color.new(color.white, 0), text_size=size.small)
+    // v1.1: RS vs benchmark (equities)
+    if enableRSContext
+        rsColor = na(ctxMrs) ? rdpTc : (ctxMrs > 0 ? #00c853 : #d50000)
+        rsTxt = na(ctxMrs) ? "—" : (ctxMrs > 0 ? "Leading " : "Lagging ") + str.tostring(ctxMrs, "#.#") + "%"
+        table.cell(infoTable, 0, r, "RS:", text_color=rdpTc, text_size=size.small)
+        table.cell(infoTable, 1, r, rsTxt, text_color=rsColor, text_size=size.small)
+        r += 1
+
+    table.cell(infoTable, 0, r, "Confidence:", text_color=rdpTc, text_size=size.small)
+    table.cell(infoTable, 1, r, str.tostring(regimeConfidence, "#.##"),
+        text_color=rdpTc, text_size=size.small)
+    r += 1
+
+    table.cell(infoTable, 0, r, "Tier:", text_color=rdpTc, text_size=size.small)
     tierText = qualA ? "A" : qualB ? "B" : "C"
-    tierColor = qualA ? color.green : qualB ? color.yellow : color.orange
+    tierColor = qualA ? #00c853 : qualB ? #ff6f00 : #d50000
     table.cell(infoTable, 1, r, tierText, text_color=tierColor, text_size=size.small)
     r += 1
 
-    table.cell(infoTable, 0, r, "Warning:", text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 0, r, "Warning:", text_color=rdpTc, text_size=size.small)
     warnText = warnMTF ? "MTF" : warnChop ? "CHOP" : warnLowVol ? "LOWVOL" : "None"
-    table.cell(infoTable, 1, r, warnText, text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 1, r, warnText, text_color=rdpTc, text_size=size.small)
     r += 1
 
-    table.cell(infoTable, 0, r, "Position:", text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 0, r, "Position:", text_color=rdpTc, text_size=size.small)
     posText = currentPosition == 1 ? "LONG" : currentPosition == -1 ? "SHORT" : "FLAT"
-    table.cell(infoTable, 1, r, posText, text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 1, r, posText, text_color=rdpTc, text_size=size.small)
     r += 1
 
     if not compactMode
-        table.cell(infoTable, 0, r, "ER:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 0, r, "ER:", text_color=rdpTc, text_size=size.small)
         table.cell(infoTable, 1, r, str.tostring(adaptiveState.efficiencyRatio, "#.##"),
-            text_color=color.new(color.white, 0), text_size=size.small)
+            text_color=rdpTc, text_size=size.small)
         r += 1
 
-        table.cell(infoTable, 0, r, "Alpha:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 0, r, "Alpha:", text_color=rdpTc, text_size=size.small)
         table.cell(infoTable, 1, r, str.tostring(adaptiveState.currentAlpha, "#.###"),
-            text_color=color.new(color.white, 0), text_size=size.small)
+            text_color=rdpTc, text_size=size.small)
         r += 1
 
-        table.cell(infoTable, 0, r, "Slope:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 0, r, "Slope:", text_color=rdpTc, text_size=size.small)
         table.cell(infoTable, 1, r, str.tostring(adaptiveState.normalizedSlope, "#.###"),
-            text_color=color.new(color.white, 0), text_size=size.small)
+            text_color=rdpTc, text_size=size.small)
         r += 1
 
     if enableMTFGate
-        table.cell(infoTable, 0, r, "HTF Agreement:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 0, r, "HTF Agreement:", text_color=rdpTc, text_size=size.small)
         table.cell(infoTable, 1, r, str.tostring(htfAgreement, "#.##"),
-            text_color=color.new(color.white, 0), text_size=size.small)
+            text_color=rdpTc, text_size=size.small)
         r += 1
 
     if enablePerformanceTracking
         winRateTxt = performanceMetrics.sampleCount > 10 ? str.tostring(performanceMetrics.winRate * 100, "#") + "%" : "—"
         pfTxt = performanceMetrics.sampleCount > 10 ? str.tostring(performanceMetrics.profitFactor, "#.##") : "—"
 
-        table.cell(infoTable, 0, r, "Win Rate:", text_color=color.new(color.white, 0), text_size=size.small)
-        table.cell(infoTable, 1, r, winRateTxt, text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 0, r, "Win Rate:", text_color=rdpTc, text_size=size.small)
+        table.cell(infoTable, 1, r, winRateTxt, text_color=rdpTc, text_size=size.small)
         r += 1
 
-        table.cell(infoTable, 0, r, "Profit Factor:", text_color=color.new(color.white, 0), text_size=size.small)
-        table.cell(infoTable, 1, r, pfTxt, text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 0, r, "Profit Factor:", text_color=rdpTc, text_size=size.small)
+        table.cell(infoTable, 1, r, pfTxt, text_color=rdpTc, text_size=size.small)
         r += 1
 
     if showConfidenceMeters
-        table.cell(infoTable, 0, r, "Signal Quality:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 0, r, "Signal Quality:", text_color=rdpTc, text_size=size.small)
         qualityText = filterState.signalQuality >= 0.8 ? "Excellent" : filterState.signalQuality >= 0.6 ? "Good" : filterState.signalQuality >= 0.4 ? "Fair" : "Poor"
-        table.cell(infoTable, 1, r, qualityText, text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 1, r, qualityText, text_color=rdpTc, text_size=size.small)
         r += 1
 
-    table.cell(infoTable, 0, r, "Market Condition:", text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 0, r, "Market Condition:", text_color=rdpTc, text_size=size.small)
     conditionText = filterState.marketCondition == 1 ? "Trending" : filterState.marketCondition == -1 ? "Choppy" : "Neutral"
-    table.cell(infoTable, 1, r, conditionText, text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(infoTable, 1, r, conditionText, text_color=rdpTc, text_size=size.small)
     r += 1
 
+    // v1.1: plain-language action hint for the current combined regime
+    if showPlaybook
+        pbColor = currentRegime == 1 ? #00c853 : currentRegime == -1 ? #d50000 : #ff6f00
+        table.cell(infoTable, 0, r, "Action:", text_color=rdpTc, text_size=size.tiny)
+        table.cell(infoTable, 1, r, playbook, text_color=pbColor, text_size=size.tiny)
+        r += 1
+
     if enableAutoTuning
-        table.cell(infoTable, 0, r, "Auto-Tune:", text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 0, r, "Auto-Tune:", text_color=rdpTc, text_size=size.small)
         tuneStatus = performanceMetrics.sampleCount >= tuningPeriod ? "ACTIVE" : "LEARNING"
-        table.cell(infoTable, 1, r, tuneStatus, text_color=color.new(color.white, 0), text_size=size.small)
+        table.cell(infoTable, 1, r, tuneStatus, text_color=rdpTc, text_size=size.small)
         r += 1
 
 // === ALERTS ===
@@ -1485,6 +1677,14 @@ alertcondition(enableSmartAlerts and regimeChanged, "RDP Regime Change",
 htfDivergence = enableHTFDivergence and enableMTFGate and (mtfState.divergenceStrength >= 0.7)
 alertcondition(enableSmartAlerts and htfDivergence, "RDP HTF Divergence",
  "Regime Detector: HTF DIVERGENCE - Multi-timeframe conflict detected")
+
+// v1.1 context alerts (events computed in the context layer)
+alertcondition(regimeWeakeningEvent, "RDP Regime Weakening",
+ "Regime Detector: trend regime is aging/weakening — consider tightening stops")
+alertcondition(volaCompression, "RDP Volatility Compression",
+ "Regime Detector: volatility compressed to Quiet — breakout setup forming")
+alertcondition(volaExpansion, "RDP Volatility Expansion",
+ "Regime Detector: volatility expanded to Volatile — climax / whipsaw risk")
 
 if highConfidenceLong
     alert("RDP LONG | Regime=" + str.tostring(currentRegime) + " | Conf=" + str.tostring(regimeConfidence, "#.00") + " | HTF=" + str.tostring(htfAgreement, "#.00") + " | Q=" + str.tostring(filterState.signalQuality, "#.00"), alert.freq_once_per_bar_close)
@@ -1547,6 +1747,10 @@ else
 fvtBull = close >= fvt
 fvtBear = close <= fvt
 
+// Shared ATR(14) — computed unconditionally at global scope so that functions
+// called conditionally (SL source, trail candidate) never skip the ta.* call
+float ssaAtr14 = ta.atr(14)
+
 // Trend Bias Band
 biasLen = input.int(20, "Trend Bias Len", group=SSA_GROUP, minval=2)
 biasMom = ta.ema(close - ssaLine, biasLen)
@@ -1555,7 +1759,7 @@ biasNorm = biasAbs > 0 ? biasMom / biasAbs : 0.0
 biasBull = biasNorm > 0
 biasBear = biasNorm < 0
 
-biasBand = (ta.atr(14) * 0.25) * biasNorm
+biasBand = (ssaAtr14 * 0.25) * biasNorm
 biasTop = ssaLine + biasBand
 biasBot = ssaLine - biasBand
 
@@ -1584,7 +1788,7 @@ longTrend = ssaEnable and ssaCanFire and ssaGateOk and ssaBull
 shortTrend = ssaEnable and ssaCanFire and ssaGateOk and ssaBear
 
 revDistMult = input.float(1.5, "Reversal Distance (ATR)", group=SSA_GROUP, step=0.1)
-revDist = ta.atr(14) * revDistMult
+revDist = ssaAtr14 * revDistMult
 
 longRev = ssaEnable and ssaCanFire and (not ssaFlat) and (close < fvt - revDist) and biasBull
 shortRev = ssaEnable and ssaCanFire and (not ssaFlat) and (close > fvt + revDist) and biasBear
@@ -1660,7 +1864,7 @@ plotshape(ssaShortEvDraw, "SSA Short",
 // Candle coloring
 ssa_norm01(x) => math.max(0.0, math.min(1.0, x))
 mom = ta.ema(close - close[1], 10)
-momN = ssa_norm01(math.abs(mom) / (ta.atr(14) + 1e-6))
+momN = ssa_norm01(math.abs(mom) / (ssaAtr14 + 1e-6))
 volN = ssa_norm01(volume / (ta.sma(volume, 50) + 1e-6))
 
 cTrend = ssaBull ? color.new(color.lime, 0) : ssaBear ? color.new(color.red, 0) : color.new(color.gray, 0)
@@ -1669,7 +1873,10 @@ cMom = ssaBull ? color.new(color.lime, int(80 - momN * 70)) : ssaBear ? color.ne
 cVol = ssaBull ? color.new(color.lime, int(85 - volN * 75)) : ssaBear ? color.new(color.red, int(85 - volN * 75)) : color.new(color.gray, 40)
 ssaIsRanging = ssaFlat or (filterState.marketCondition == -1)
 
-barcolor( ssaEnable ? ssaCandleColoring == "Trend Colors" ? cTrend : ssaCandleColoring == "Momentum Gradient" ? cMom : ssaCandleColoring == "Volume Gradient" ? cVol : ssaCandleColoring == "Gray In Ranging" ? (ssaIsRanging ? cRange : cTrend) : na : na )
+// Shared bar coloring: SSA candle coloring takes precedence; when it is Off the
+// regime candle tint (regimeCandleCol) is used. Single barcolor() to respect the plot budget.
+ssaBarCol = ssaEnable ? ssaCandleColoring == "Trend Colors" ? cTrend : ssaCandleColoring == "Momentum Gradient" ? cMom : ssaCandleColoring == "Volume Gradient" ? cVol : ssaCandleColoring == "Gray In Ranging" ? (ssaIsRanging ? cRange : cTrend) : na : na
+barcolor( na(ssaBarCol) ? regimeCandleCol : ssaBarCol )
 
 // Trade Management (TP/SL)
 var int ssaPos = 0
@@ -1698,9 +1905,9 @@ var line ssaEntryLine = na
 var line ssaSLLine = na
 var line ssaTPLine = na
 
-ssaSL_Long() => ssaSLSource == "RDP Exit Band" ? lowerExit : ssaSLSource == "RDP Entry Band" ? lowerEntry : ssaSLSource == "MA Zone SL (if enabled)" ? (enableMAOverlayZones and not na(longSL) ? longSL : lowerExit) : (ssaLine - ta.atr(14) * 1.2)
+ssaSL_Long() => ssaSLSource == "RDP Exit Band" ? lowerExit : ssaSLSource == "RDP Entry Band" ? lowerEntry : ssaSLSource == "MA Zone SL (if enabled)" ? (enableMAOverlayZones and not na(longSL) ? longSL : lowerExit) : (ssaLine - ssaAtr14 * 1.2)
 
-ssaSL_Short() => ssaSLSource == "RDP Exit Band" ? upperExit : ssaSLSource == "RDP Entry Band" ? upperEntry : ssaSLSource == "MA Zone SL (if enabled)" ? (enableMAOverlayZones and not na(shortSL) ? shortSL : upperExit) : (ssaLine + ta.atr(14) * 1.2)
+ssaSL_Short() => ssaSLSource == "RDP Exit Band" ? upperExit : ssaSLSource == "RDP Entry Band" ? upperEntry : ssaSLSource == "MA Zone SL (if enabled)" ? (enableMAOverlayZones and not na(shortSL) ? shortSL : upperExit) : (ssaLine + ssaAtr14 * 1.2)
 
 f_priceByMode(bool _isLong, string _mode) => _mode == "Close" ? close : _mode == "High/Low" ? (_isLong ? high : low) : _mode == "Entry Band (upper/lower)" ? (_isLong ? upperEntry : lowerEntry) : _mode == "Exit Band (upper/lower)" ? (_isLong ? upperExit : lowerExit) : ssaLine
 
@@ -1719,7 +1926,7 @@ f_activate(bool _isLong, float _lvl) => ssaLimitActivation == "Touch" ? f_touch(
 f_rdpEntryPrice(bool _isLong) => ssaRdpEntryPriceMode == "Close" ? close : ssaRdpEntryPriceMode == "High/Low" ? (_isLong ? high : low) : ssaRdpEntryPriceMode == "Entry Band (upper/lower)" ? (_isLong ? upperEntry : lowerEntry) : ssaRdpEntryPriceMode == "Exit Band (upper/lower)" ? (_isLong ? upperExit : lowerExit) : ssaLine
 
 f_trailCandidate(bool _isLong) =>
-    float atrB = ta.atr(14) * ssaTrailBufferATR
+    float atrB = ssaAtr14 * ssaTrailBufferATR
     float base = ssaTrailSource == "FVT" ? fvt : ssaTrailSource == "Cloud" ? (_isLong ? cloudL : cloudU) : ssaLine
     _isLong ? (base - atrB) : (base + atrB)
 
@@ -1811,39 +2018,52 @@ f_setPending(int _dir, bool _tierA, float _px, bool _pLong_on, bool _pLong_tierA
 ssaEnterLong = ssaEnable and ssaTradeMgmt and ssaLongEvent
 ssaEnterShort = ssaEnable and ssaTradeMgmt and ssaShortEvent
 
+// Apply f_setPending result to the global pending state.
+// NOTE: destructuring directly into the var names ([pLong_on, ...] = ...) would
+// declare shadowing locals and silently discard the update — assign via := instead.
+applyPending(int _dir, bool _tierA, float _px) =>
+    [nLon, nLtA, nLpx, nLbar, nSon, nStA, nSpx, nSbar] = f_setPending(_dir, _tierA, _px, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+    [nLon, nLtA, nLpx, nLbar, nSon, nStA, nSpx, nSbar]
+
 if ssaEnterLong and isRdpSource and ssaRdpLimitStyle
     bool newTierA = ssaRdpLongTierA
     float newPx = f_rdpEntryPriceTier(true, newTierA)
+    bool doSet = true
     if pShort_on
-        if ssaPendingFlipMode == "Flip"
+        if ssaPendingFlipMode == "Flip" or ssaPendingFlipMode == "Cancel Opposite"
             pShort_on := false
-            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
-        else if ssaPendingFlipMode == "Cancel Opposite"
-            pShort_on := false
-            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
         else if ssaPendingFlipMode == "Ignore Opposite"
-            na
-        else
-            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
-    else
-        [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+            doSet := false
+    if doSet
+        [nLon, nLtA, nLpx, nLbar, nSon, nStA, nSpx, nSbar] = applyPending(1, newTierA, newPx)
+        pLong_on := nLon
+        pLong_tierA := nLtA
+        pLong_px := nLpx
+        pLong_bar := nLbar
+        pShort_on := nSon
+        pShort_tierA := nStA
+        pShort_px := nSpx
+        pShort_bar := nSbar
 
 if ssaEnterShort and isRdpSource and ssaRdpLimitStyle
     bool newTierA = ssaRdpShortTierA
     float newPx = f_rdpEntryPriceTier(false, newTierA)
+    bool doSet = true
     if pLong_on
-        if ssaPendingFlipMode == "Flip"
+        if ssaPendingFlipMode == "Flip" or ssaPendingFlipMode == "Cancel Opposite"
             pLong_on := false
-            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(-1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
-        else if ssaPendingFlipMode == "Cancel Opposite"
-            pLong_on := false
-            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(-1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
         else if ssaPendingFlipMode == "Ignore Opposite"
-            na
-        else
-            [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(-1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
-    else
-        [pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar] = f_setPending(-1, newTierA, newPx, pLong_on, pLong_tierA, pLong_px, pLong_bar, pShort_on, pShort_tierA, pShort_px, pShort_bar, ssaPendingDualSlots)
+            doSet := false
+    if doSet
+        [nLon, nLtA, nLpx, nLbar, nSon, nStA, nSpx, nSbar] = applyPending(-1, newTierA, newPx)
+        pLong_on := nLon
+        pLong_tierA := nLtA
+        pLong_px := nLpx
+        pLong_bar := nLbar
+        pShort_on := nSon
+        pShort_tierA := nStA
+        pShort_px := nSpx
+        pShort_bar := nSbar
 
 if ssaEnterLong and not (isRdpSource and ssaRdpLimitStyle)
     ssaPos := 1
@@ -2118,64 +2338,70 @@ if ssaEnable and ssaShowTable and barstate.islast
     if na(ssaTable) or ssaTableRows != rows or ssaTablePosLast != ssaTablePos
         if not na(ssaTable)
             table.delete(ssaTable)
-        ssaTable := table.new(pos, 4, rows, bgcolor=color.new(color.black, 15), border_width=1)
+        ssaTable := table.new(pos, 4, rows,
+            bgcolor=color.new(color.white, 5),
+            border_color=color.new(color.gray, 60), border_width=1,
+            frame_color=color.new(color.gray, 40), frame_width=1)
         ssaTableRows := rows
         ssaTablePosLast := ssaTablePos
 
-    table.cell(ssaTable, 0, 0, "SSA", text_color=color.white, bgcolor=color.new(color.black, 5))
-    table.cell(ssaTable, 1, 0, "State", text_color=color.white, bgcolor=color.new(color.black, 5))
-    table.cell(ssaTable, 2, 0, "Dur", text_color=color.white, bgcolor=color.new(color.black, 5))
-    table.cell(ssaTable, 3, 0, "Info", text_color=color.white, bgcolor=color.new(color.black, 5))
+    color ssaTc = color.new(color.gray, 20)
+    color ssaHd = color.new(color.gray, 90)
+
+    table.cell(ssaTable, 0, 0, "SSA", text_color=ssaTc, bgcolor=ssaHd)
+    table.cell(ssaTable, 1, 0, "State", text_color=ssaTc, bgcolor=ssaHd)
+    table.cell(ssaTable, 2, 0, "Dur", text_color=ssaTc, bgcolor=ssaHd)
+    table.cell(ssaTable, 3, 0, "Info", text_color=ssaTc, bgcolor=ssaHd)
 
     int r = 1
-    table.cell(ssaTable, 0, r, "Regime", text_color=color.white)
-    table.cell(ssaTable, 1, r, f_stateTxt(true, ssaBull, ssaBear, ssaFlat), text_color=color.white)
-    table.cell(ssaTable, 2, r, str.tostring(durReg), text_color=color.white)
-    table.cell(ssaTable, 3, r, "conf " + str.tostring(ssaConf, "#.00"), text_color=color.white)
+    table.cell(ssaTable, 0, r, "Regime", text_color=ssaTc)
+    table.cell(ssaTable, 1, r, f_stateTxt(true, ssaBull, ssaBear, ssaFlat), text_color=ssaTc)
+    table.cell(ssaTable, 2, r, str.tostring(durReg), text_color=ssaTc)
+    table.cell(ssaTable, 3, r, "conf " + str.tostring(ssaConf, "#.00"), text_color=ssaTc)
     r += 1
 
-    table.cell(ssaTable, 0, r, "HTF", text_color=color.white)
-    table.cell(ssaTable, 1, r, f_boolTxt(cond_htf_ok), text_color=color.white)
-    table.cell(ssaTable, 2, r, "", text_color=color.white)
-    table.cell(ssaTable, 3, r, str.tostring(ssaHTF, "#.00"), text_color=color.white)
+    table.cell(ssaTable, 0, r, "HTF", text_color=ssaTc)
+    table.cell(ssaTable, 1, r, f_boolTxt(cond_htf_ok), text_color=ssaTc)
+    table.cell(ssaTable, 2, r, "", text_color=ssaTc)
+    table.cell(ssaTable, 3, r, str.tostring(ssaHTF, "#.00"), text_color=ssaTc)
     r += 1
 
-    table.cell(ssaTable, 0, r, "Quality", text_color=color.white)
-    table.cell(ssaTable, 1, r, f_boolTxt(cond_qual_ok), text_color=color.white)
-    table.cell(ssaTable, 2, r, "", text_color=color.white)
-    table.cell(ssaTable, 3, r, str.tostring(ssaQual, "#.00"), text_color=color.white)
+    table.cell(ssaTable, 0, r, "Quality", text_color=ssaTc)
+    table.cell(ssaTable, 1, r, f_boolTxt(cond_qual_ok), text_color=ssaTc)
+    table.cell(ssaTable, 2, r, "", text_color=ssaTc)
+    table.cell(ssaTable, 3, r, str.tostring(ssaQual, "#.00"), text_color=ssaTc)
     r += 1
 
-    table.cell(ssaTable, 0, r, "TRC", text_color=color.white)
-    table.cell(ssaTable, 1, r, trcTrending ? "TREND" : (filterState.marketCondition == -1 ? "CHOP" : "NEUT"), text_color=color.white)
-    table.cell(ssaTable, 2, r, str.tostring(durTRC), text_color=color.white)
-    table.cell(ssaTable, 3, r, "mc " + str.tostring(filterState.marketCondition), text_color=color.white)
+    table.cell(ssaTable, 0, r, "TRC", text_color=ssaTc)
+    table.cell(ssaTable, 1, r, trcTrending ? "TREND" : (filterState.marketCondition == -1 ? "CHOP" : "NEUT"), text_color=ssaTc)
+    table.cell(ssaTable, 2, r, str.tostring(durTRC), text_color=ssaTc)
+    table.cell(ssaTable, 3, r, "mc " + str.tostring(filterState.marketCondition), text_color=ssaTc)
     r += 1
 
-    table.cell(ssaTable, 0, r, "FVT", text_color=color.white)
-    table.cell(ssaTable, 1, r, f_stateTxt(ssaShowFVT, fvtBull, fvtBear, fvtState == 0), text_color=color.white)
-    table.cell(ssaTable, 2, r, str.tostring(durFVT), text_color=color.white)
-    table.cell(ssaTable, 3, r, "d " + str.tostring((close - fvt), format.mintick), text_color=color.white)
+    table.cell(ssaTable, 0, r, "FVT", text_color=ssaTc)
+    table.cell(ssaTable, 1, r, f_stateTxt(ssaShowFVT, fvtBull, fvtBear, fvtState == 0), text_color=ssaTc)
+    table.cell(ssaTable, 2, r, str.tostring(durFVT), text_color=ssaTc)
+    table.cell(ssaTable, 3, r, "d " + str.tostring((close - fvt), format.mintick), text_color=ssaTc)
     r += 1
 
-    table.cell(ssaTable, 0, r, "Cloud", text_color=color.white)
-    table.cell(ssaTable, 1, r, f_stateTxt(ssaShowClouds, cloudBull, cloudBear, cloudState == 0), text_color=color.white)
-    table.cell(ssaTable, 2, r, str.tostring(durCloud), text_color=color.white)
-    table.cell(ssaTable, 3, r, "", text_color=color.white)
+    table.cell(ssaTable, 0, r, "Cloud", text_color=ssaTc)
+    table.cell(ssaTable, 1, r, f_stateTxt(ssaShowClouds, cloudBull, cloudBear, cloudState == 0), text_color=ssaTc)
+    table.cell(ssaTable, 2, r, str.tostring(durCloud), text_color=ssaTc)
+    table.cell(ssaTable, 3, r, "", text_color=ssaTc)
     r += 1
 
-    table.cell(ssaTable, 0, r, "Tier", text_color=color.white)
-    table.cell(ssaTable, 1, r, cond_super ? "SUPER" : cond_strong ? "STRONG" : "NORMAL", text_color=color.white)
-    table.cell(ssaTable, 2, r, "", text_color=color.white)
-    table.cell(ssaTable, 3, r, "", text_color=color.white)
+    table.cell(ssaTable, 0, r, "Tier", text_color=ssaTc)
+    table.cell(ssaTable, 1, r, cond_super ? "SUPER" : cond_strong ? "STRONG" : "NORMAL", text_color=ssaTc)
+    table.cell(ssaTable, 2, r, "", text_color=ssaTc)
+    table.cell(ssaTable, 3, r, "", text_color=ssaTc)
     r += 1
 
     posTxt = ssaPos == 1 ? "LONG" : ssaPos == -1 ? "SHORT" : "FLAT"
     posInfo = ssaPos != 0 ? ("SL " + str.tostring(ssaSL, format.mintick) + " | TP " + str.tostring(ssaTP, format.mintick)) : ""
-    table.cell(ssaTable, 0, r, "Trade", text_color=color.white)
-    table.cell(ssaTable, 1, r, posTxt, text_color=color.white)
-    table.cell(ssaTable, 2, r, str.tostring(durPos), text_color=color.white)
-    table.cell(ssaTable, 3, r, posInfo, text_color=color.white)
+    table.cell(ssaTable, 0, r, "Trade", text_color=ssaTc)
+    table.cell(ssaTable, 1, r, posTxt, text_color=ssaTc)
+    table.cell(ssaTable, 2, r, str.tostring(durPos), text_color=ssaTc)
+    table.cell(ssaTable, 3, r, posInfo, text_color=ssaTc)
     r += 1
 
     for rr = r to rows - 1
