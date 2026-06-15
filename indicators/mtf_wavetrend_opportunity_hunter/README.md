@@ -1,63 +1,63 @@
 # MTF WaveTrend Opportunity Hunter
 
-Three-tier multi-timeframe scoring system that gates entry signals through four independent layers — Regime, Opportunity, Timing, and Quality — and fires only when all four pass their configured thresholds. Signals are accompanied by ATR-based TP1/TP2/TP3 levels, an invalidation line, and exit warnings when trend health deteriorates.
+MTF confluence pane around WaveTrend. The core idea: make multi-timeframe confluence **visible over time** instead of reducing it to a one-bar label. The pane shows a net confluence histogram (long minus short final score) plus five heat ribbons — one per scoring layer plus a noise floor — so you can always see *why* a signal fired or *which layer* is currently blocking one. A RRG-inspired rotation map shows where the confluence is heading. Signals fire on a slim three-condition gate; Quality grades them (A/B) instead of filtering them out.
 
 ## Features
 
-- **Three-tier MTF framework**: Regime TF (default Daily) → Setup TF (default 4H) → Trigger TF (default 1H); all timeframes configurable
-- **Regime score (0–100)**: WT above signal + rising + EMA50/200 stack + ADX minimum + histogram momentum — maximum 100 points
-- **Opportunity score (0–100)**: Setup-TF pullback depth vs. JMA (45%) + WT extreme proximity (35%) + WT direction (20%)
-- **Timing score (0–100)**: Trigger-TF WT cross (35%) + WT momentum (30%) + JMA structure (25%) + Setup WT confirmation (10%)
-- **Quality score (0–100)**: Efficiency Ratio (35%) + ATR volatility band (25%) + optional Relative Strength vs. benchmark (20%) + JMA acceleration (20%)
-- **Configurable thresholds**: independent minimum per layer plus a minimum for the weighted final score (weights: Regime 35%, Opportunity 30%, Timing 25%, Quality 10%)
-- **TP / Invalidation levels**: drawn at signal bars using ATR multiples (TP1 1.5×, TP2 2.5×, TP3 4.0×, SL 1.2× below/above)
-- **Exit warnings**: orange × marks when trend health drops below 45 or WT crosses back against the trade
-- **Dashboard**: live component scores, dominant side, and status label (LONG SIGNAL / SHORT SIGNAL / WAIT: … / WATCH)
-- **Alerts**: Long signal, Short signal, Long exit warning, Short exit warning
+- **Confluence pane**: net score histogram (−100…+100, green/red) with ±60 strong-confluence reference lines
+- **Heat ribbons**: Regime / Opportunity / Timing / Quality as color strips (green = long-side dominance, red = short-side, gray = neutral) plus a **Noise ribbon** (green = unusually clean tape, orange = unusually noisy) — the "why (no) signal" view over the full history
+- **Confluence Rotation Map** (RRG-inspired): quadrant inset right of the last bar — x = net confluence, y = confluence momentum — with a curved polyline trail. Quadrants: LEADING (+/+), WEAKENING (+/−), LAGGING (−/−), IMPROVING (−/+). A clockwise rotation through IMPROVING → LEADING is the classic early-entry path
+- **Ultimate Smoother core** (John Ehlers, TASC 04/2024): optional zero-lag replacement for the EMA core of WaveTrend (default on) — earlier crosses at the same length, less whipsaw than shortening the EMA
+- **Entropy noise floor**: Shannon sign-entropy of the Trigger TF, percentile-ranked over a lookback window — self-calibrating per instrument, weighted into Quality (20%)
+- **Slim gate** (three conditions instead of five thresholds):
+  1. Regime bias — Regime score ≥ minimum on the Regime TF (default Daily)
+  2. Setup pullback — Opportunity score ≥ minimum on the Setup TF (default 4H)
+  3. Trigger — WaveTrend cross on the Trigger TF (default 1H)
+- **Quality as grade, not gate**: signals are labeled A or B based on the Quality score (Efficiency Ratio, ATR band, optional RS filter, JMA acceleration) — no signal is blocked by it
+- **Persistent TP/SL zones on the price chart** (`force_overlay`): risk box (entry→SL, red), first-target box (entry→TP1, green), TP2/TP3 as dashed/dotted lines; zones extend while the trade is active and freeze on exit warning
+- **Pivot reference (control overlay, never a gate)**: confirmed swing highs/lows (`ta.pivothigh`/`ta.pivotlow`, configurable left/right bars) plotted as triangles at the actual pivot bar. On a signal, a dotted connector runs from the current swing extreme (low for long, high for short) to the entry, and the label prints distance, proximity and the driving scores (`ΔLow 3b / 0.8R · P68` / `O62 R71 T80 Q58`) — small distance = signal fired close to the swing. The reference is the *live* current-leg extreme, so a fresh unconfirmed low is used instead of a stale pivot; a `⚠K` flag marks knife-catches (entry below the last confirmed swing low). The pivot is by nature lagging and is used **only** to review accuracy — it does not influence which signals fire
+- **Exit warnings gated to active trades**: orange × only after a signal, when trend health drops below 45 or WT crosses back
+- **ARMED state**: dashboard shows when Regime + Opportunity pass and only the WT cross is missing — a cross on the next bars would fire
+- **JMA smoothing**: Everget-style JMA (phase −100…+100, power 1.0–4.0), consistent with the repo's other indicators
+- **Alerts**: long/short signal, long/short Grade A signal, long/short exit warning
 
-## Scoring
+## Scoring layers
 
-### Regime (35% of final)
+All four layers are computed for both sides (0–100 each); the ribbons show the net (long − short).
+
+### Regime (Regime TF)
 
 | Component | Points |
 |---|---|
 | WT1 above signal line | 25 |
-| WT1 rising (> previous bar) | 20 |
-| Close > EMA50 > EMA200 (bull) | 30 |
-| ADX ≥ minimum threshold | 15 |
-| Histogram rising | 10 |
+| WT1 rising | 20 |
+| Close > EMA50 > EMA200 (bull) / inverse (bear) | 30 |
+| ADX ≥ minimum | 15 |
+| WT histogram rising/falling | 10 |
 
-### Opportunity (30% of final)
+### Opportunity (Setup TF)
 
-Measures how far price has pulled back toward the JMA on the Setup TF and how close WT is to the extreme level.
+- Pullback depth vs. JMA in ATR units (45%)
+- WT extreme proximity (35%)
+- WT turning in signal direction (+20)
 
-- Pullback score: normalized from ATR-distance to JMA — higher when price is near or below JMA
-- WT extreme score: higher when WT1 is deeply negative (long) or deeply positive (short)
-- +20 flat when WT1 is turning in the signal direction
+### Timing (Trigger TF — display context; the gate is the cross itself)
 
-### Timing (25% of final)
+- WT cross (35) + WT momentum (30) + JMA structure (25) + Setup-TF WT direction (10)
 
-Point-based on the Trigger TF:
+### Quality (Trigger TF — grades A/B)
 
-| Component | Points |
-|---|---|
-| WT crossover / crossunder | 35 |
-| WT momentum (value + histogram both rising) | 30 |
-| Close above/below JMA and JMA sloping | 25 |
-| Setup TF WT turning in direction | 10 |
+- Efficiency Ratio (30%) + ATR within 0.7×–2.2× of its 20-bar SMA (20%) + optional RS slope vs. benchmark (15%) + JMA acceleration (15%) + entropy noise floor (20%, inverted percentile rank — clean tape scores high)
 
-### Quality (10% of final)
+## Reading the pane
 
-| Component | Weight |
-|---|---|
-| Efficiency Ratio (directional movement / total path) | 35% |
-| ATR within 0.7×–2.2× of its 20-bar SMA | 25% |
-| RS slope vs. benchmark (optional, default off) | 20% |
-| JMA short-term acceleration vs. long-term | 20% |
+- **Histogram crossing above +60 with all ribbons green** — strong long confluence
+- **Three ribbons green, Timing gray** — ARMED: waiting for the trigger cross
+- **Regime ribbon flips while in a trade** — expect an exit warning
+- **Histogram near zero, ribbons mixed** — no edge, stand aside
+- **Noise ribbon orange** — tape unusually noisy for this instrument; expect grade B signals
+- **Rotation dot in IMPROVING moving toward LEADING** — confluence building; in WEAKENING — long confluence stalling even if the histogram is still positive
 
-## Modes
+## Final score weights (display only)
 
-- **Allow Long / Allow Short**: independently disable one side
-- **Use Relative Strength Filter**: when enabled, uses the configured benchmark symbol (default SPY) to compute a RS slope and scores it in the Quality layer; when disabled, Quality gets a fixed 70/100 for the RS component
-- **Show Regime Background**: green/red tint when regime score passes the minimum
-- **Show TP / Invalidation Levels**: ATR-based levels drawn only at signal bars
+Regime 35% + Opportunity 30% + Timing 25% + Quality 10% — shown in the dashboard and as the histogram, not used as a gate.

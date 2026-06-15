@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // MTF WaveTrend Opportunity Hunter [WavesUnchained]
-// Version: 2.1.1
+// Version: 2.4
 // Author: WavesUnchained
-// Build: 2026-06-12 00:00:00
+// Build: 2026-06-15 09:00:00
 // ============================================================================
 // MTF confluence pane around WaveTrend — shows WHY a signal fires (or
 // doesn't) over time via a net confluence histogram plus per-layer heat
@@ -11,22 +11,32 @@
 // score thresholds.
 //
 // Features:
-//   ✓ Confluence pane: net score histogram + heat ribbons for Regime /
-//     Opportunity / Timing / Quality — the "why (no) signal" view over time
+//   ✓ Confluence pane: net score histogram (EMA/WMA/HMA) + raw column
+//     layer + heat ribbons for Regime / Opportunity / Timing / Quality /
+//     Noise / Context — the "why (no) signal" view over time
+//   ✓ Context TF ribbon and dashboard row — weekly (or custom) directional
+//     bias shown as sixth ribbon and dashboard row; purely informational,
+//     never a gate condition
 //   ✓ Confluence Rotation Map — RRG-style quadrant inset (Leading /
 //     Improving / Weakening / Lagging) with polyline trail of the net score
 //   ✓ Ultimate Smoother core (Ehlers, TASC 04/2024) — optional zero-lag
 //     replacement for the EMA core of WaveTrend
 //   ✓ Entropy noise floor — Shannon sign-entropy percentile rank as fifth
 //     ribbon and Quality component (self-calibrating per instrument)
-//   ✓ Slim gate: Regime bias + Setup pullback + Trigger WT event — Quality
-//     grades signals (A/B) instead of blocking them
-//   ✓ Persistent TP/SL zones on the price chart — risk box (entry→SL),
-//     target box (entry→TP1), TP2/TP3 lines; extended while the trade is
-//     active, frozen on exit warning
+//   ✓ Stop-and-reverse alternation: a long closes any open short and a short
+//     closes any open long — the exit is the opposite WT trigger, signals
+//     alternate, and Regime/Setup/Quality grade (A/B/C) instead of blocking
+//   ✓ Compact on-chart signal labels (dir · grade · quality, full breakdown
+//     in the tooltip) — no fixed TP/SL boxes; the exit is dynamic (the
+//     opposite signal), so static targets would misrepresent it
 //   ✓ Three-tier MTF framework: Regime (D) → Setup (4H) → Trigger (1H)
+//   ✓ Signals fire on any chart TF; sampled-trigger warning when chart ≠
+//     Trigger TF
 //   ✓ Exit warnings gated to active trades — no noise outside of signals
-//   ✓ Per-side dashboard with ARMED state and rotation quadrant
+//   ✓ Per-side dashboard with ARMED / SETUP / NEAR / BIAS / REGIME states
+//   ✓ Pivot reference control overlay (ta.pivothigh/low) — markers, dotted
+//     pivot→signal connector and bar/ATR distance/proximity/knife flag in
+//     the label to review signal accuracy; never gates or triggers a signal
 //
 // ============================================================================
 
@@ -40,6 +50,11 @@ g_tf = "Timeframes"
 tfRegime  = input.timeframe("D",   "Regime TF", group=g_tf)
 tfSetup   = input.timeframe("240", "Setup TF", group=g_tf)
 tfTrigger = input.timeframe("60",  "Trigger TF", group=g_tf)
+
+g_ctx = "Context TF (Directional Bias — Info Only)"
+tfContext       = input.timeframe("W",    "Context TF", group=g_ctx)
+showContextLayer = input.bool(true, "Show Context Ribbon + Dashboard Row", group=g_ctx,
+     tooltip="Weekly (or custom) directional bias. Never a gate — signals fire regardless of context. Use it to stay aware of the higher-order trend.")
 
 g_wt = "WaveTrend"
 wtChLen  = input.int(10, "WT Channel Length", minval=1, group=g_wt)
@@ -76,23 +91,49 @@ benchmark  = input.symbol("SPY", "Benchmark Symbol", group=g_quality)
 
 g_signal = "Signal Gate"
 minRegime      = input.float(65, "Min Regime Score", minval=0, maxval=100, group=g_signal)
-minOpportunity = input.float(65, "Min Opportunity Score", minval=0, maxval=100, group=g_signal)
+minOpportunity = input.float(35, "Min Opportunity Score", minval=0, maxval=100, group=g_signal)
 gateBuffer     = input.float(10, "Gate Buffer", minval=0, maxval=30, group=g_signal,
      tooltip="Softens Regime/Opportunity gates. A value of 10 means a 65 threshold arms from 55 upward; the dashboard still shows the raw score.")
 nearSetupBuffer = input.float(10, "Near Setup Buffer", minval=0, maxval=30, group=g_signal,
      tooltip="Marks a near setup when Regime passes and Opportunity is within this many points of the effective Opportunity gate.")
-biasConfirmBars = input.int(2, "Bias Confirm Bars", minval=1, maxval=10, group=g_signal,
-     tooltip="Bias labels are informational only. They print after the bias state remains true for this many chart bars.")
-setupHoldBars = input.int(6, "Setup Hold Bars", minval=1, maxval=50, group=g_signal,
-     tooltip="On the Trigger TF, a valid setup remains active for this many bars while waiting for a WT trigger.")
-useNetBias = input.bool(true, "Require Net Confluence For Bias", group=g_signal,
-     tooltip="Bias requires the net confluence score to point in the same direction. This keeps Bias from fighting the pane.")
 gradeAQuality  = input.float(55, "Grade A Quality ≥", minval=0, maxval=100, group=g_signal,
-     tooltip="Quality does not block signals — it grades them. Signals at or above this score are labeled A, below it B.")
+     tooltip="Quality does not block signals — it grades them. Signals at or above this score contribute to Grade A.")
+minTimingGrade = input.float(55, "Grade B Timing Merit ≥", minval=0, maxval=100, group=g_signal,
+     tooltip="The merit path to Grade B needs Timing at or above this. Lower = more counter-trend reversals; higher = stricter.")
+meritOppMin = input.float(40, "Grade B Merit Opportunity ≥", minval=0, maxval=100, group=g_signal,
+     tooltip="Merit also needs a genuinely strong setup, not just clearing the entry gate. Raising this cuts weak-opportunity reversals that the merit path would otherwise pass.")
+meritQualMin = input.float(45, "Grade B Merit Quality Floor", minval=0, maxval=100, group=g_signal,
+     tooltip="Merit will not resurrect low-quality (noisy / inefficient) signals: Quality must be at or above this floor. Set between the entry noise level and the Grade-A Quality threshold. Without it, merit floods with far-from-swing knife-catches that the pivot overlay flags as junk.")
+cooldownBars = input.int(8, "Minimum Hold (bars)", minval=1, maxval=30, group=g_signal,
+     tooltip="Minimum bars a position is held before the opposite WT trigger may reverse it. Prevents whipsaw flip-flopping when the WT oscillates fast. Higher = holds through minor counter-crosses; lower = reverses sooner.")
+reentryOnAdverse = input.bool(true, "Re-entry on Adverse Move", group=g_signal,
+     tooltip="Lifts the same-direction lock when price trades against the open position past its entry (a long is undercut / a short is exceeded): a fresh same-side signal at a better price is then allowed, so a reversal that came too early can be re-taken instead of locking out until the opposite signal. The Minimum Hold still applies between re-entries.")
+maxReentries = input.int(2, "Max Re-entries per Position", minval=0, maxval=10, group=g_signal,
+     tooltip="Caps how many adverse-move re-entries a single position may add before it must wait for the opposite signal. Stops a runaway averaging chain into a one-way move. 0 = no re-entries at all.")
+reentryQualMin = input.float(32, "Re-entry Quality Floor", minval=0, maxval=100, group=g_signal,
+     tooltip="An adverse-move re-entry is only allowed when Quality is at or above this. Prevents averaging deeper into a move at deteriorating quality (the chains where each add scored lower than the last). Does not affect the first entry or the reverse.")
+maxWaitBars = input.int(5, "Setup-Align Max Wait (bars)", minval=0, maxval=60, group=g_signal,
+     tooltip="After the minimum hold, a reverse first waits for a trigger that coincides with a setup (the high-opportunity zone — a better entry location than a bare WT trigger). If no setup-aligned trigger appears within this many bars it falls back to any trigger, so the alternation can never get stuck. 0 = disable the preference (any trigger fires immediately after the hold).")
+setupGraceBars = input.int(3, "Setup Grace (bars)", minval=0, maxval=15, group=g_signal,
+     tooltip="A WT trigger still counts as setup-aligned if a setup was active now OR within this many bars before it — so a setup that forms first and is confirmed by a cross a few bars later still qualifies (the cross follows the setup). 0 = the setup must be active on the exact trigger bar.")
 triggerMode = input.string("Cross or Turn", "Trigger Mode", options=["Cross Only", "Cross or Turn"], group=g_signal,
      tooltip="Cross Only waits for WT1/WT2 crosses. Cross or Turn also accepts an earlier WT turn from an extended zone.")
 triggerTurnLevel = input.float(35.0, "WT Turn Level", minval=5, maxval=100, group=g_signal,
-     tooltip="Used by Cross or Turn mode. Long turns need WT below -level and rising; short turns need WT above +level and falling.")
+     tooltip="Used by Cross or Turn mode. Long turns need WT below -level and hooking up; short turns need WT above +level and hooking down. Lower = catches shallower bottoms (more, earlier, noisier turns).")
+turnFallBars = input.int(2, "WT Turn Min Falling Bars", minval=1, maxval=10, group=g_signal,
+     tooltip="A turn only counts if WT had been falling (long) / rising (short) for at least this many bars into the extreme before it hooks. Higher = stricter, fewer false hooks; lower = earlier but noisier. The turn fires on the hook itself, decoupled from the lagging histogram.")
+wtCrossZone = input.float(0.0, "WT Cross Zone Limit", minval=-40, maxval=40, step=5, group=g_signal,
+     tooltip="Long cross trigger only fires when the WT signal line was BELOW this value before the cross (0 = must come from negative territory, 20 = also accept mid-range continuation crosses up to +20). Short cross mirrors at -value. Higher = more signals incl. momentum continuation in the range; lower = only deep zero-line reversals. Above +~30 starts buying into overbought.")
+useWtVelocity = input.bool(false, "WT Velocity Trigger (experimental)", group=g_signal,
+     tooltip="Opt-in. Fires on a sharp WT1 slope reversal — catches fast, shallow turns the WT Turn (which needs depth) misses. Independent of Trigger Mode. The Turn handles deep-but-gentle hooks; Velocity handles shallow-but-violent ones. Off by default — showed no added signals in the baseline window; enable to test in other regimes.")
+useExhaustion = input.bool(true, "Exhaustion Reversal Trigger", group=g_signal,
+     tooltip="Fires the moment WT1 hooks back from a deep extreme (|WT1| ≥ Exhaustion Level) — the sharp overbought/oversold reversal at a major top or bottom. Narrow by design (only fires at the extremes, so it does not flood) — built to catch big exhaustion turns the lagging core otherwise detects too late, without going full zero-lag. Still gated by setup + grade downstream.")
+exhaustLevel = input.float(50.0, "Exhaustion WT Level", minval=20, maxval=80, step=5, group=g_signal,
+     tooltip="WT1 must have reached at least this far into overbought (short) / oversold (long) on the prior bar before the hook counts as an exhaustion reversal. Higher = only the most extreme tops/bottoms; lower = also milder extremes (more signals).")
+velZone = input.float(0.0, "WT Velocity Zone", minval=-60, maxval=20, step=5, group=g_signal,
+     tooltip="Velocity trigger is only eligible while WT1 was below this value (long) / above -this (short) on the reversal bar. 0 = below the midline. Looser than WT Turn Level — that is the point, it reaches shallower bottoms.")
+velMinSlope = input.float(3.0, "WT Velocity Min Slope", minval=0.5, maxval=20, step=0.5, group=g_signal,
+     tooltip="Minimum 1-bar WT1 jump on the reversal bar to count as a velocity turn. Higher = only sharp/violent reversals (fewer, cleaner); lower = also gentler turns (more, noisier).")
 
 g_mode = "Mode"
 allowLong  = input.bool(true, "Allow Long Signals", group=g_mode)
@@ -108,15 +149,26 @@ rotStep   = input.int(2, "Trail Sampling (bars)", minval=1, maxval=10, group=g_r
 rotTrail  = input.int(24, "Trail Points", minval=5, maxval=100, group=g_rot)
 
 g_vis = "Visuals"
-histSmooth    = input.int(3, "Histogram Smoothing", minval=1, maxval=10, group=g_vis,
-     tooltip="EMA on the displayed net confluence — the raw score is built from binary components and jumps in 10–35 point steps. 1 = raw.")
+histSmooth    = input.int(3, "Histogram Smoothing", minval=1, maxval=20, group=g_vis,
+     tooltip="Smoothing length applied to the net confluence line. 1 = raw. The smoothed line overlays raw columns.")
+histSmoothType = input.string("EMA", "Histogram Smooth Type", options=["EMA", "WMA", "HMA"], group=g_vis,
+     tooltip="EMA = classic exponential. WMA = linearly-weighted (faster response). HMA (Hull) = low-lag, nearly no overshoot.")
 showRibbons   = input.bool(true, "Show Layer Heat Ribbons", group=g_vis)
 showBg        = input.bool(true, "Show Regime Background", group=g_vis)
-showBiasBand   = input.bool(true, "Show Bias Background Band", group=g_vis)
 showDashboard = input.bool(true, "Show Dashboard", group=g_vis)
 showTfWarning = input.bool(false, "Show Lower-TF Sampling Warning", group=g_vis,
      tooltip="Warns when Setup or Trigger TF is below the chart TF. request.security then samples lower-TF values only once per chart bar, so intrabar crosses can be missed.")
-showLevels    = input.bool(true, "Show TP / SL Zones on Chart", group=g_vis)
+labelMode     = input.string("Compact", "Signal Label Detail", options=["Compact", "Full", "None"], group=g_vis,
+     tooltip="Compact = a small tag (dir · grade · Q); Full = all scores + quality breakdown on the chart; None = no on-chart label (pane triangle only). The full breakdown is always in the label's tooltip on hover. Turn 'Show TP / SL Zones' off as well for an unobstructed price view.")
+
+g_piv = "Pivot Reference (Control Overlay — Never a Gate)"
+showPivots   = input.bool(true, "Show Pivot Markers", group=g_piv,
+     tooltip="Confirmed swing highs/lows on the price chart (ta.pivothigh/low). Pure control overlay — never influences which signals fire. Use it to judge how close a signal landed to the actual turn.")
+pivLeftBars  = input.int(5, "Pivot Left Bars", minval=1, group=g_piv)
+pivRightBars = input.int(5, "Pivot Right Bars", minval=1, group=g_piv,
+     tooltip="Bars of confirmation. The marker prints this many bars after the pivot — the same lag the eye needs to call a swing.")
+showPivDist  = input.bool(true, "Show Pivot → Signal Distance", group=g_piv,
+     tooltip="Dotted connector from the current swing extreme to the entry. Long is measured against the swing low, short against the swing high. Bar/ATR distance and proximity also printed in the signal label — diagnostic only, small distance = signal fired close to the swing.")
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Helpers
@@ -148,7 +200,7 @@ f_ultimateSmoother(src, period) =>
     a1 = math.exp(-f)
     c2 = 2 * a1 * math.cos(f)
     c3 = -a1 * a1
-    c1 = (1 + c2 - c3) / 4
+    c1 = (1 - c2 - c3) / 4
     var float us = na
     us := (1 - c1) * src + (2 * c1 - c2) * nz(src[1], src) - (c1 + c3) * nz(src[2], src) + c2 * nz(us[1], src) + c3 * nz(us[2], src)
     us
@@ -194,6 +246,21 @@ f_signEntropy(len) =>
         h := -(p * math.log(p) + (1 - p) * math.log(1 - p)) / math.log(2)
     h
 
+// Hull MA (low-lag, minimal overshoot)
+f_hma(src, len) =>
+    half   = math.max(len / 2, 1)
+    sqLen  = math.max(int(math.sqrt(float(len))), 1)
+    ta.wma(2.0 * ta.wma(src, half) - ta.wma(src, len), sqLen)
+
+// Selectable histogram smoother
+f_smoothHist(src, len, typ) =>
+    if typ == "HMA"
+        f_hma(src, len)
+    else if typ == "WMA"
+        ta.wma(src, len)
+    else
+        ta.ema(src, len)
+
 // Heat color for a net layer score (-100..+100): green bull, red bear, gray neutral
 f_heatColor(net) =>
     color c = color.new(color.gray, 72)
@@ -235,6 +302,12 @@ h1JMA   = request.security(syminfo.tickerid, tfTrigger, f_jma(close, jmaLen, jma
 h1ER    = request.security(syminfo.tickerid, tfTrigger, efficiencyRatio(close, erLen), barmerge.gaps_off, barmerge.lookahead_off)
 h1ATR   = request.security(syminfo.tickerid, tfTrigger, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off)
 h1Entropy = request.security(syminfo.tickerid, tfTrigger, f_signEntropy(entropyLen), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Context TF — directional bias only, never a gate
+[ctxWT1, ctxWT2, _ctxHist] = request.security(syminfo.tickerid, tfContext, waveTrend(hlc3, wtChLen, wtAvgLen, wtSigLen, useUltimate, useJmaCore, jmaCoreBlend, jmaPhase, jmaPower), barmerge.gaps_off, barmerge.lookahead_off)
+ctxClose  = request.security(syminfo.tickerid, tfContext, close, barmerge.gaps_off, barmerge.lookahead_off)
+ctxEMA50  = request.security(syminfo.tickerid, tfContext, ta.ema(close, emaFastLen), barmerge.gaps_off, barmerge.lookahead_off)
+ctxEMA200 = request.security(syminfo.tickerid, tfContext, ta.ema(close, emaSlowLen), barmerge.gaps_off, barmerge.lookahead_off)
 
 benchClose = request.security(benchmark, tfRegime, close, barmerge.gaps_off, barmerge.lookahead_off)
 rsLine = useRS and benchClose != 0 ? dClose / benchClose : na
@@ -278,11 +351,9 @@ bearRegime =
 
 h4DistAtr = h4ATR != 0 ? (h4Close - h4JMA) / h4ATR : 0.0
 
-longPullbackScore =
-     clamp((-h4DistAtr + 1.5) / 3.0 * 100.0, 0, 100)
-
-shortPullbackScore =
-     clamp((h4DistAtr + 1.5) / 3.0 * 100.0, 0, 100)
+// 25 at JMA, 100 at 1.5-ATR pullback, 0 from +0.5 ATR adverse extension onward
+longPullbackScore  = clamp((-h4DistAtr + 0.5) / 2.0 * 100.0, 0, 100)
+shortPullbackScore = clamp((h4DistAtr + 0.5) / 2.0 * 100.0, 0, 100)
 
 longWtExtremeScore =
      clamp((-h4WT1 / wtExtreme) * 100.0, 0, 100)
@@ -304,14 +375,41 @@ shortOpportunity =
 // Timing Score (display context — the gate itself is the WT trigger)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-h1BullCross = ta.crossover(h1WT1, h1WT2)
-h1BearCross = ta.crossunder(h1WT1, h1WT2)
-h1BullTurnRaw = h1WT1 < -triggerTurnLevel and h1WT1 > h1WT1[1] and h1Hist > h1Hist[1]
-h1BearTurnRaw = h1WT1 > triggerTurnLevel and h1WT1 < h1WT1[1] and h1Hist < h1Hist[1]
+// Clamp before cross detection so that detected crosses match the plotted lines.
+// Without this, crosses in the clamped "flat zone" (|WT| > 80) fire signals
+// with no visible cross in the pane.
+plotWT1 = clamp(h1WT1, -80, 80)
+plotWT2 = clamp(h1WT2, -80, 80)
+
+h1BullCross = ta.crossover(plotWT1, plotWT2)
+h1BearCross = ta.crossunder(plotWT1, plotWT2)
+// WT turn = WT1 hooks out of the extreme on the bar it ticks back, after a confirmed
+// falling/rising run into the zone. Decoupled from the histogram (hist lags the WT1 low
+// by 1-2 bars), so the turn fires at the hook — closer to the actual swing.
+h1BullTurnRaw = h1WT1 < -triggerTurnLevel and h1WT1 > h1WT1[1] and h1WT1[1] < h1WT1[1 + turnFallBars]
+h1BearTurnRaw = h1WT1 >  triggerTurnLevel and h1WT1 < h1WT1[1] and h1WT1[1] > h1WT1[1 + turnFallBars]
 h1BullTurn = h1BullTurnRaw and not h1BullTurnRaw[1]
 h1BearTurn = h1BearTurnRaw and not h1BearTurnRaw[1]
-h1BullTrigger = h1BullCross or (triggerMode == "Cross or Turn" and h1BullTurn)
-h1BearTrigger = h1BearCross or (triggerMode == "Cross or Turn" and h1BearTurn)
+
+// WT velocity trigger: a sharp 1-bar WT1 slope reversal from a shallower zone, after a
+// falling/rising run. Catches fast turns that never reach the (deeper) WT Turn Level.
+wtVel = h1WT1 - h1WT1[1]
+h1BullVelRaw = useWtVelocity and h1WT1[1] <  velZone and wtVel >=  velMinSlope and h1WT1[1] < h1WT1[1 + turnFallBars]
+h1BearVelRaw = useWtVelocity and h1WT1[1] > -velZone and wtVel <= -velMinSlope and h1WT1[1] > h1WT1[1 + turnFallBars]
+h1BullVel = h1BullVelRaw and not h1BullVelRaw[1]
+h1BearVel = h1BearVelRaw and not h1BearVelRaw[1]
+
+// Exhaustion reversal: WT1 was at a deep extreme on the prior bar and hooks back now — the
+// sharp top/bottom turn. Narrow (only at |WT1| ≥ exhaustLevel) so it catches the big
+// exhaustion reversals a lagging core detects too late, without flooding the mid-range.
+h1BearExhaustRaw = useExhaustion and h1WT1[1] >=  exhaustLevel and h1WT1 < h1WT1[1]
+h1BullExhaustRaw = useExhaustion and h1WT1[1] <= -exhaustLevel and h1WT1 > h1WT1[1]
+h1BearExhaust = h1BearExhaustRaw and not h1BearExhaustRaw[1]
+h1BullExhaust = h1BullExhaustRaw and not h1BullExhaustRaw[1]
+
+// Zone filter: cross must emerge from the correct side (WT signal line was below zone for long, above for short)
+h1BullTrigger = (h1BullCross and h1WT2[1] < wtCrossZone) or (triggerMode == "Cross or Turn" and h1BullTurn) or h1BullVel or h1BullExhaust
+h1BearTrigger = (h1BearCross and h1WT2[1] > -wtCrossZone) or (triggerMode == "Cross or Turn" and h1BearTurn) or h1BearVel or h1BearExhaust
 
 h1BullMomentum = h1WT1 > h1WT1[1] and h1Hist > h1Hist[1]
 h1BearMomentum = h1WT1 < h1WT1[1] and h1Hist < h1Hist[1]
@@ -335,36 +433,94 @@ shortTiming =
 // Quality Score (grades signals A/B — does not block)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-erScore = clamp(h1ER * 100.0, 0, 100)
-
-volOk = h1ATR > ta.sma(h1ATR, 20) * 0.7 and h1ATR < ta.sma(h1ATR, 20) * 2.2
-volScore = volOk ? 75.0 : 35.0
-
-rsBullScore = useRS ? scoreBool(rsSlope > 0, 100) : 70
-rsBearScore = useRS ? scoreBool(rsSlope < 0, 100) : 70
-
+// JMA slope computed first — used for acceleration and direction-sensitive ER below
 jmaSlope5  = ta.linreg(h1JMA, 5,  0) - ta.linreg(h1JMA, 5,  1)
 jmaSlope10 = ta.linreg(h1JMA, 10, 0) - ta.linreg(h1JMA, 10, 1)
-accelBull = jmaSlope5 > jmaSlope10
-accelBear = jmaSlope5 < jmaSlope10
+// Continuous acceleration: how strong is slope5 pulling away from slope10, as a self-
+// calibrating z-score (÷ its own 50-bar stdev). Replaces the old binary accel > / < step,
+// so a strong momentum thrust at the reversal scores higher than a marginal one.
+accelMag    = jmaSlope5 - jmaSlope10
+accelStdev  = ta.stdev(accelMag, 50)
+accelNorm   = accelStdev > 0 ? accelMag / accelStdev : 0.0
+longAccelScore  = clamp(accelNorm,  0, 2) / 2.0 * 15.0
+shortAccelScore = clamp(-accelNorm, 0, 2) / 2.0 * 15.0
+
+// Direction-sensitive ER: high efficiency ratio during a counter-trend move is NOT
+// evidence of quality for the signal direction. Penalize ER when the 1H JMA trend
+// opposes the signal (e.g. strong downtrend → ER penalized for longs, not for shorts).
+erScoreRaw   = clamp(h1ER * 100.0, 0, 100)
+longERScore  = jmaSlope5 > 0 ? erScoreRaw : erScoreRaw * 0.35
+shortERScore = jmaSlope5 < 0 ? erScoreRaw : erScoreRaw * 0.35
+
+// Continuous vol: a gradient that peaks in the healthy ATR band and falls off toward dead
+// (too quiet) and wild (too volatile) tape — replaces the old binary 75/35 step.
+volSma   = ta.sma(h1ATR, 20)
+volRatio = volSma > 0 ? h1ATR / volSma : 1.0
+float volScore = 50.0
+if volRatio < 0.6
+    volScore := 25.0
+else if volRatio < 1.0
+    volScore := 25.0 + (volRatio - 0.6) / 0.4 * 55.0
+else if volRatio <= 1.4
+    volScore := 80.0
+else if volRatio <= 2.2
+    volScore := 80.0 - (volRatio - 1.4) / 0.8 * 45.0
+else
+    volScore := 30.0
+
+// RS only contributes when enabled. When off (default), its 15% is NOT spent on a flat
+// neutral 50 (dead weight that compressed every score toward the middle) — it is handed to
+// entropy, which is direction-NEUTRAL. (Not to ER: ER is direction-penalised ×0.35 against
+// the trend, so weighting it more would amplify the counter-trend penalty and starve longs
+// in a downtrend / shorts in an uptrend. Entropy keeps the reclaim symmetric.)
+rsBullScore = scoreBool(rsSlope > 0, 100)
+rsBearScore = scoreBool(rsSlope < 0, 100)
+erW  = 0.30
+entW = useRS ? 0.20 : 0.35
+rsW  = useRS ? 0.15 : 0.0
 
 // Entropy noise floor — percentile rank makes it self-calibrating
 entropyRank  = ta.percentrank(h1Entropy, entropyRankLen)
 entropyScore = 100.0 - entropyRank
 
 longQuality =
-     erScore * 0.30 +
+     longERScore  * erW +
      volScore * 0.20 +
-     rsBullScore * 0.15 +
-     scoreBool(accelBull, 15) +
-     entropyScore * 0.20
+     rsBullScore * rsW +
+     longAccelScore +
+     entropyScore * entW
 
 shortQuality =
-     erScore * 0.30 +
+     shortERScore * erW +
      volScore * 0.20 +
-     rsBearScore * 0.15 +
-     scoreBool(accelBear, 15) +
-     entropyScore * 0.20
+     rsBearScore * rsW +
+     shortAccelScore +
+     entropyScore * entW
+
+// Weighted quality contributions (sum to Quality) — exposed in the entry label so the
+// reworked score is legible on a screenshot: which component carries it, ER vs Vol vs
+// Accel vs Entropy (vs RS when enabled).
+longQualBreak  = "ER" + str.tostring(longERScore  * erW, "#") + " V" + str.tostring(volScore * 0.20, "#") + " A" + str.tostring(longAccelScore, "#") + " E" + str.tostring(entropyScore * entW, "#") + (useRS ? " R" + str.tostring(rsBullScore * rsW, "#") : "")
+shortQualBreak = "ER" + str.tostring(shortERScore * erW, "#") + " V" + str.tostring(volScore * 0.20, "#") + " A" + str.tostring(shortAccelScore, "#") + " E" + str.tostring(entropyScore * entW, "#") + (useRS ? " R" + str.tostring(rsBearScore * rsW, "#") : "")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Context TF Bias (info only — not a gate)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ctxTrendBull = ctxClose > ctxEMA50 and ctxEMA50 > ctxEMA200
+ctxTrendBear = ctxClose < ctxEMA50 and ctxEMA50 < ctxEMA200
+
+ctxBullNet =
+     scoreBool(ctxWT1 > ctxWT2, 40) +
+     scoreBool(ctxWT1 > 0, 20) +
+     scoreBool(ctxTrendBull, 40)
+
+ctxBearNet =
+     scoreBool(ctxWT1 < ctxWT2, 40) +
+     scoreBool(ctxWT1 < 0, 20) +
+     scoreBool(ctxTrendBear, 40)
+
+netContext = float(ctxBullNet) - float(ctxBearNet)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Final / Net Scores
@@ -387,65 +543,190 @@ netOpp     = longOpportunity - shortOpportunity
 netTiming  = longTiming - shortTiming
 netQuality = longQuality - shortQuality
 netFinal   = longFinal - shortFinal
-plotWT1 = clamp(h1WT1, -80, 80)
-plotWT2 = clamp(h1WT2, -80, 80)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Signals — slim gate: Regime bias + Setup pullback + Trigger WT event
+// Pivot Reference — swing extremes, proximity, knife-catch (drives grade + trigger)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+riskAtr = ta.atr(atrLen)
+
+pivHi = ta.pivothigh(high, pivLeftBars, pivRightBars)
+pivLo = ta.pivotlow(low,  pivLeftBars, pivRightBars)
+
+// Last *confirmed* pivot — used for the knife-catch test against established structure
+var float lastPivLoPrice = na
+var float lastPivHiPrice = na
+if not na(pivLo)
+    lastPivLoPrice := pivLo
+if not na(pivHi)
+    lastPivHiPrice := pivHi
+
+// Current-leg extremes — the relevant reference for an entry, tracked live so a
+// fresh (still-unconfirmed) low/high is used instead of a stale confirmed pivot.
+// Down-leg trough resets at a confirmed pivot high; up-leg peak at a confirmed pivot low.
+var float legLow     = na
+var int   legLowBar  = na
+var float legHigh    = na
+var int   legHighBar = na
+if na(legLow) or not na(pivHi)
+    legLow    := low
+    legLowBar := bar_index
+else if low <= legLow
+    legLow    := low
+    legLowBar := bar_index
+if na(legHigh) or not na(pivLo)
+    legHigh    := high
+    legHighBar := bar_index
+else if high >= legHigh
+    legHigh    := high
+    legHighBar := bar_index
+
+// Markers at the actual pivot bar (offset back by the right-bar confirmation lag)
+plotshape(showPivots ? pivLo : na, title="Pivot Low",  style=shape.triangleup,   location=location.belowbar, offset=-pivRightBars, color=color.new(#26a69a, 0), size=size.tiny, force_overlay=true)
+plotshape(showPivots ? pivHi : na, title="Pivot High", style=shape.triangledown, location=location.abovebar, offset=-pivRightBars, color=color.new(#ef5350, 0), size=size.tiny, force_overlay=true)
+
+// Distances: long vs swing low, short vs swing high (R is always ≥ 0 by construction)
+longPivBars  = bar_index - legLowBar
+shortPivBars = bar_index - legHighBar
+longPivR     = riskAtr > 0 ? (close - legLow)  / riskAtr : 0.0
+shortPivR    = riskAtr > 0 ? (legHigh - close) / riskAtr : 0.0
+
+// Knife-catch: entering below the last confirmed swing low (long) / above the high (short)
+longKnife  = not na(lastPivLoPrice) and close < lastPivLoPrice
+shortKnife = not na(lastPivHiPrice) and close > lastPivHiPrice
+
+// Proximity 0..100 (display only): 100 = right at the swing extreme, decays with bars and ATR distance
+longProx  = clamp(100.0 - longPivBars  * 4.0 - longPivR  * 30.0, 0, 100)
+shortProx = clamp(100.0 - shortPivBars * 4.0 - shortPivR * 30.0, 0, 100)
+
+f_pivDistStr(barsAway, rAway) =>
+    str.tostring(barsAway) + "b / " + str.tostring(rAway, "#.0") + "R"
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Signals — gate: 4H opportunity + 4H JMA direction; regime grades A/B/C
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 minRegimeEff = clamp(minRegime - gateBuffer, 0, 100)
 minOpportunityEff = clamp(minOpportunity - gateBuffer, 0, 100)
 minOpportunityNear = clamp(minOpportunityEff - nearSetupBuffer, 0, 100)
 
-regimeLongDominant = bullRegime >= minRegimeEff and bullRegime - bearRegime >= gateBuffer
-regimeShortDominant = bearRegime >= minRegimeEff and bearRegime - bullRegime >= gateBuffer
-setupLongStructure = h4Close > h4JMA and h4JMA > h4JMA[1]
-setupShortStructure = h4Close < h4JMA and h4JMA < h4JMA[1]
-netLongOk = not useNetBias or netFinal > 0
-netShortOk = not useNetBias or netFinal < 0
+// Regime dominance — grading only, not a gate
+regimeLongDominant  = bullRegime >= minRegimeEff and bullRegime > bearRegime
+regimeShortDominant = bearRegime >= minRegimeEff and bearRegime > bullRegime
 
-longBias  = allowLong  and regimeLongDominant and setupLongStructure and netLongOk
-shortBias = allowShort and regimeShortDominant and setupShortStructure and netShortOk
+// Bias: regime-aligned direction (informational — dashboard only)
+longBias  = allowLong  and regimeLongDominant
+shortBias = allowShort and regimeShortDominant
 
-longSetup  = longBias  and longOpportunity >= minOpportunityEff
-shortSetup = shortBias and shortOpportunity >= minOpportunityEff
+// Setup: opportunity score alone — no binary structural gate
+// The score already captures WT extreme, pullback depth, and 4H momentum direction.
+// A higher minOpportunity threshold (default 50) requires a meaningful 4H setup
+// without hard-blocking valid signals at turning points.
+longSetup  = allowLong  and longOpportunity >= minOpportunityEff
+shortSetup = allowShort and shortOpportunity >= minOpportunityEff
 
-longNearSetup  = longBias  and not longSetup  and longOpportunity >= minOpportunityNear
-shortNearSetup = shortBias and not shortSetup and shortOpportunity >= minOpportunityNear
+longNearSetup  = allowLong  and not longSetup  and longOpportunity >= minOpportunityNear
+shortNearSetup = allowShort and not shortSetup and shortOpportunity >= minOpportunityNear
+
+// Three-tier grading — defined before signal raw so grade filter can apply
+// A = regime aligned + quality high            (with-trend, high-confidence)
+// B = regime aligned, OR quality high, OR own merit (strong timing + valid opportunity)
+// C = none of the above                        (weak, late, or unconfirmed)
+// The merit path folds Timing + Opportunity into the grade so a well-timed reversal is not
+// killed by a sub-Grade-A Quality when the regime opposes it — but a Quality floor + a real
+// Opportunity bar keep it from resurrecting low-quality, far-from-swing knife-catches.
+// Pivot proximity does NOT enter the grade — the pivot is a control overlay, not a gate.
+longMerit  = longTiming  >= minTimingGrade and longOpportunity  >= meritOppMin and longQuality  >= meritQualMin
+shortMerit = shortTiming >= minTimingGrade and shortOpportunity >= meritOppMin and shortQuality >= meritQualMin
+// Exhaustion reversals grade B on context: a hook out of a deep extreme is high-conviction by
+// itself, so it bypasses the trend-confirmation grade (regime/quality) that inherently rejects
+// tops and bottoms — at a top every trend measure opposes the short, which is the whole point.
+longExhaustOk  = h1BullExhaust and longSetup
+shortExhaustOk = h1BearExhaust and shortSetup
+longGradeA   = regimeLongDominant  and longQuality  >= gradeAQuality
+shortGradeA  = regimeShortDominant and shortQuality >= gradeAQuality
+longGradeB   = not longGradeA  and (regimeLongDominant  or longQuality  >= gradeAQuality  or longMerit  or longExhaustOk)
+shortGradeB  = not shortGradeA and (regimeShortDominant or shortQuality >= gradeAQuality or shortMerit or shortExhaustOk)
+// Grade is informational now (shown on the label) — it no longer gates the signal, so the
+// alternation can't be blocked. A = highest conviction, C = weakest.
+longGradeStr  = longGradeA  ? "A" : longGradeB  ? "B" : "C"
+shortGradeStr = shortGradeA ? "A" : shortGradeB ? "B" : "C"
 
 chartIsTriggerTf = chartTfSec == triggerTfSec
 
-var int longSetupWindow = 0
-var int shortSetupWindow = 0
-longSetupWindow := longSetup ? setupHoldBars : math.max(nz(longSetupWindow[1]) - 1, 0)
-shortSetupWindow := shortSetup ? setupHoldBars : math.max(nz(shortSetupWindow[1]) - 1, 0)
-
-longSignalRaw  = longSetupWindow > 0 and h1BullTrigger
-shortSignalRaw = shortSetupWindow > 0 and h1BearTrigger
-signalTfOk = chartIsTriggerTf
-longSignal  = longSignalRaw  and signalTfOk
-shortSignal = shortSignalRaw and signalTfOk
-sampledLongSignal = longSignalRaw and not signalTfOk
-sampledShortSignal = shortSignalRaw and not signalTfOk
-
-longBiasConfirmed = longBias and nz(ta.barssince(not longBias), biasConfirmBars) >= biasConfirmBars - 1
-shortBiasConfirmed = shortBias and nz(ta.barssince(not shortBias), biasConfirmBars) >= biasConfirmBars - 1
-longBiasInfo = longBiasConfirmed and not longBiasConfirmed[1]
-shortBiasInfo = shortBiasConfirmed and not shortBiasConfirmed[1]
-longNearSetupStart = longNearSetup and not longNearSetup[1]
+// Setup/Near start transitions — must be defined before catchup uses them
+longSetupStart      = longSetup      and not longSetup[1]
+shortSetupStart     = shortSetup     and not shortSetup[1]
+longNearSetupStart  = longNearSetup  and not longNearSetup[1]
 shortNearSetupStart = shortNearSetup and not shortNearSetup[1]
-longSetupStart = longSetup and not longSetup[1]
-shortSetupStart = shortSetup and not shortSetup[1]
-longBiasTip = "Bias -> Long (info only)\nRegime: " + str.tostring(bullRegime, "#.0") + " vs " + str.tostring(bearRegime, "#.0") + "\nNet confluence: " + str.tostring(netFinal, "#.0") + "\n4H structure: close > JMA, JMA rising\nOpportunity: " + str.tostring(longOpportunity, "#.0")
-shortBiasTip = "Bias -> Short (info only)\nRegime: " + str.tostring(bearRegime, "#.0") + " vs " + str.tostring(bullRegime, "#.0") + "\nNet confluence: " + str.tostring(netFinal, "#.0") + "\n4H structure: close < JMA, JMA falling\nOpportunity: " + str.tostring(shortOpportunity, "#.0")
-longNearTip = "Long Near Setup\nRegime: " + str.tostring(bullRegime, "#.0") + " vs " + str.tostring(bearRegime, "#.0") + "\n4H structure: close > JMA, JMA rising\nOpportunity: " + str.tostring(longOpportunity, "#.0")
-shortNearTip = "Short Near Setup\nRegime: " + str.tostring(bearRegime, "#.0") + " vs " + str.tostring(bullRegime, "#.0") + "\n4H structure: close < JMA, JMA falling\nOpportunity: " + str.tostring(shortOpportunity, "#.0")
-longSetupTip = "Long Setup\nRegime: " + str.tostring(bullRegime, "#.0") + " vs " + str.tostring(bearRegime, "#.0") + "\n4H structure: close > JMA, JMA rising\nOpportunity: " + str.tostring(longOpportunity, "#.0")
-shortSetupTip = "Short Setup\nRegime: " + str.tostring(bearRegime, "#.0") + " vs " + str.tostring(bullRegime, "#.0") + "\n4H structure: close < JMA, JMA falling\nOpportunity: " + str.tostring(shortOpportunity, "#.0")
 
-longGradeA  = longQuality  >= gradeAQuality
-shortGradeA = shortQuality >= gradeAQuality
+// ── Stop-and-reverse alternation ────────────────────────────────────────────
+// The exit of a position IS the opposite signal: a long closes any open short and a short
+// closes any open long. Signals therefore alternate — every short is eventually faced by a
+// long — and the exit is indicator-native (the opposite WT trigger, not an external stop).
+// Direction is enforced by the open position, not by the gates: the counter-trigger always
+// fires, so the alternation can never get stuck spamming one side. Grade / Quality / Setup
+// stay on the labels as conviction info; they no longer block a signal.
+var bool  inLong  = false
+var bool  inShort = false
+var int   posBar  = -999
+var float longEntryPx  = na
+var float shortEntryPx = na
+barsHeld = bar_index - posBar
+held = barsHeld >= cooldownBars   // minimum bars held before a reverse
+
+// Setup-aligned reversal: within a preference window after the minimum hold the signal only
+// fires on a trigger that coincides with a setup (the high-opportunity zone — a better entry
+// location than a bare trigger). After maxWaitBars it falls back to any trigger so the
+// alternation can never get stuck. maxWaitBars = 0 disables the preference.
+preferSetup  = maxWaitBars > 0 and barsHeld < cooldownBars + maxWaitBars
+// A setup counts as aligned if it is active now or was active within the grace window — so a
+// setup that forms first and is confirmed by a cross a few bars later still qualifies.
+longSetupRecent  = ta.barssince(longSetup)  <= setupGraceBars
+shortSetupRecent = ta.barssince(shortSetup) <= setupGraceBars
+longAligned  = longSetupRecent  or not preferSetup
+shortAligned = shortSetupRecent or not preferSetup
+
+// Adverse-move release: if price trades against the open position past its entry, the
+// same-direction alternation lock is lifted so a fresh same-side signal (a re-entry at a
+// better price) is allowed — a reversal that came too early can be re-taken instead of
+// locking out. Tamed by a count cap and a quality floor so a chain of ever-worse adds into a
+// one-way move is cut off. The minimum-hold whipsaw guard still applies.
+var int longReentries  = 0
+var int shortReentries = 0
+longUnderwater  = reentryOnAdverse and inLong  and not na(longEntryPx)  and close < longEntryPx  and longReentries  < maxReentries and longQuality  >= reentryQualMin
+shortUnderwater = reentryOnAdverse and inShort and not na(shortEntryPx) and close > shortEntryPx and shortReentries < maxReentries and shortQuality >= reentryQualMin
+
+longSignalRaw  = allowLong  and h1BullTrigger and (not inLong  or longUnderwater)  and held and longAligned
+shortSignalRaw = allowShort and h1BearTrigger and (not inShort or shortUnderwater) and held and shortAligned
+// Ambiguous double-trigger bar → take neither
+if longSignalRaw and shortSignalRaw
+    longSignalRaw  := false
+    shortSignalRaw := false
+
+if longSignalRaw
+    longReentries := inLong ? longReentries + 1 : 0   // re-entry while already long → count; fresh/reverse → reset
+    inLong  := true
+    inShort := false
+    posBar  := bar_index
+    longEntryPx := close
+if shortSignalRaw
+    shortReentries := inShort ? shortReentries + 1 : 0
+    inShort := true
+    inLong  := false
+    posBar  := bar_index
+    shortEntryPx := close
+
+// Signals fire on any chart TF; sampled flag is informational only
+longSignal  = longSignalRaw
+shortSignal = shortSignalRaw
+sampledLongSignal  = longSignalRaw  and not chartIsTriggerTf
+sampledShortSignal = shortSignalRaw and not chartIsTriggerTf
+
+longNearTip  ="Long Near Setup\nOpportunity: " + str.tostring(longOpportunity, "#.0") + "  (threshold: " + str.tostring(minOpportunityNear, "#.0") + ")\nRegime: " + str.tostring(bullRegime, "#.0") + " vs " + str.tostring(bearRegime, "#.0")
+shortNearTip = "Short Near Setup\nOpportunity: " + str.tostring(shortOpportunity, "#.0") + "  (threshold: " + str.tostring(minOpportunityNear, "#.0") + ")\nRegime: " + str.tostring(bearRegime, "#.0") + " vs " + str.tostring(bullRegime, "#.0")
+longSetupTip  = "Long Setup — waiting for WT bull cross\nOpportunity: " + str.tostring(longOpportunity, "#.0") + "  Regime: " + str.tostring(bullRegime, "#.0") + " vs " + str.tostring(bearRegime, "#.0")
+shortSetupTip = "Short Setup — waiting for WT bear cross\nOpportunity: " + str.tostring(shortOpportunity, "#.0") + "  Regime: " + str.tostring(bearRegime, "#.0") + " vs " + str.tostring(bullRegime, "#.0")
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Confluence Rotation (RRG-inspired): x = net confluence, y = its momentum
@@ -480,79 +761,33 @@ if barstate.isconfirmed and bar_index % rotStep == 0
         array.shift(rotYs)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Trend Health / Exit Warnings (gated to active trades)
+// Position exits — the opposite signal closes a trade (stop-and-reverse)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-riskAtr = ta.atr(atrLen)
-
-trendHealthLong =
-     bullRegime * 0.40 +
-     longQuality * 0.30 +
-     scoreBool(h4WT1 > h4WT2, 15) +
-     scoreBool(h1WT1 > h1WT2, 15)
-
-trendHealthShort =
-     bearRegime * 0.40 +
-     shortQuality * 0.30 +
-     scoreBool(h4WT1 < h4WT2, 15) +
-     scoreBool(h1WT1 < h1WT2, 15)
-
-exitLongCond  = trendHealthLong  < 45 or h1BearCross
-exitShortCond = trendHealthShort < 45 or h1BullCross
-
-var bool inLong  = false
-var bool inShort = false
-inLong  := longSignal  ? true : exitLongCond  ? false : inLong
-inShort := shortSignal ? true : exitShortCond ? false : inShort
-
-exitLongWarning  = inLong[1]  and not longSignal  and exitLongCond
-exitShortWarning = inShort[1] and not shortSignal and exitShortCond
+// A long is closed by the short that reverses it (and vice versa). inLong/inShort and the
+// flip are resolved in the signal section above; here we only derive the close events for
+// markers and alerts.
+longExit  = inLong[1]  and shortSignal      // the long just got reversed to short
+shortExit = inShort[1] and longSignal       // the short just got reversed to long
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// TP / SL Zones on the price chart (persistent, extended while active)
+// Signal labels on the price chart (compact / full / none; full detail in the tooltip)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-var box  longRiskBox = na
-var box  longTpBox   = na
-var line longTp2Ln   = na
-var line longTp3Ln   = na
+if longSignal and labelMode != "None"
+    string longFull = "LONG " + longGradeStr + (longKnife ? " ⚠K" : "") + "\nΔLow " + f_pivDistStr(longPivBars, longPivR) + " · P" + str.tostring(longProx, "#") + "\nO" + str.tostring(longOpportunity, "#") + " Rg" + str.tostring(bullRegime, "#") + " T" + str.tostring(longTiming, "#") + " Q" + str.tostring(longQuality, "#") + "\n" + longQualBreak
+    string longTxt  = labelMode == "Full" ? longFull : "L " + longGradeStr + (longKnife ? "⚠" : "") + "·" + str.tostring(longQuality, "#")
+    label.new(bar_index, low, longTxt, style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=labelMode == "Full" ? size.small : size.tiny, yloc=yloc.belowbar, force_overlay=true, tooltip=longFull)
+if shortSignal and labelMode != "None"
+    string shortFull = "SHORT " + shortGradeStr + (shortKnife ? " ⚠K" : "") + "\nΔHigh " + f_pivDistStr(shortPivBars, shortPivR) + " · P" + str.tostring(shortProx, "#") + "\nO" + str.tostring(shortOpportunity, "#") + " Rg" + str.tostring(bearRegime, "#") + " T" + str.tostring(shortTiming, "#") + " Q" + str.tostring(shortQuality, "#") + "\n" + shortQualBreak
+    string shortTxt  = labelMode == "Full" ? shortFull : "S " + shortGradeStr + (shortKnife ? "⚠" : "") + "·" + str.tostring(shortQuality, "#")
+    label.new(bar_index, high, shortTxt, style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=labelMode == "Full" ? size.small : size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip=shortFull)
 
-var box  shortRiskBox = na
-var box  shortTpBox   = na
-var line shortTp2Ln   = na
-var line shortTp3Ln   = na
-
-if showLevels and longSignal
-    float sl  = low - riskAtr * 1.2
-    float tp1 = close + riskAtr * 1.5
-    float tp2 = close + riskAtr * 2.5
-    float tp3 = close + riskAtr * 4.0
-    longRiskBox := box.new(bar_index, close, bar_index + 1, sl, border_color=color.new(#d50000, 50), bgcolor=color.new(#d50000, 88), force_overlay=true)
-    longTpBox   := box.new(bar_index, tp1, bar_index + 1, close, border_color=color.new(#00c853, 50), bgcolor=color.new(#00c853, 88), force_overlay=true)
-    longTp2Ln   := line.new(bar_index, tp2, bar_index + 1, tp2, color=color.new(#00c853, 25), style=line.style_dashed, force_overlay=true)
-    longTp3Ln   := line.new(bar_index, tp3, bar_index + 1, tp3, color=color.new(#00c853, 0), style=line.style_dotted, force_overlay=true)
-    label.new(bar_index, close, (longGradeA ? "LONG A" : "LONG B") + "\nENTRY", style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=size.small, force_overlay=true)
-else if inLong and not na(longRiskBox)
-    box.set_right(longRiskBox, bar_index)
-    box.set_right(longTpBox, bar_index)
-    line.set_x2(longTp2Ln, bar_index)
-    line.set_x2(longTp3Ln, bar_index)
-
-if showLevels and shortSignal
-    float sl  = high + riskAtr * 1.2
-    float tp1 = close - riskAtr * 1.5
-    float tp2 = close - riskAtr * 2.5
-    float tp3 = close - riskAtr * 4.0
-    shortRiskBox := box.new(bar_index, sl, bar_index + 1, close, border_color=color.new(#d50000, 50), bgcolor=color.new(#d50000, 88), force_overlay=true)
-    shortTpBox   := box.new(bar_index, close, bar_index + 1, tp1, border_color=color.new(#00c853, 50), bgcolor=color.new(#00c853, 88), force_overlay=true)
-    shortTp2Ln   := line.new(bar_index, tp2, bar_index + 1, tp2, color=color.new(#00c853, 25), style=line.style_dashed, force_overlay=true)
-    shortTp3Ln   := line.new(bar_index, tp3, bar_index + 1, tp3, color=color.new(#00c853, 0), style=line.style_dotted, force_overlay=true)
-    label.new(bar_index, close, (shortGradeA ? "SHORT A" : "SHORT B") + "\nENTRY", style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=size.small, force_overlay=true)
-else if inShort and not na(shortRiskBox)
-    box.set_right(shortRiskBox, bar_index)
-    box.set_right(shortTpBox, bar_index)
-    line.set_x2(shortTp2Ln, bar_index)
-    line.set_x2(shortTp3Ln, bar_index)
+// Pivot → signal connectors: visualise how far the entry sits from the swing extreme
+if showPivDist and longSignal and not na(legLowBar)
+    line.new(legLowBar, legLow, bar_index, close, color=color.new(#26a69a, 30), style=line.style_dotted, force_overlay=true)
+if showPivDist and shortSignal and not na(legHighBar)
+    line.new(legHighBar, legHigh, bar_index, close, color=color.new(#ef5350, 30), style=line.style_dotted, force_overlay=true)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Pane Plots — net confluence + layer heat ribbons
@@ -569,14 +804,12 @@ else if showBg and bearBgOk and bearBgOk[1] and bearBgOk[2]
     bgColor := color.new(color.red, 92)
 bgcolor(bgColor)
 
-color biasBandColor = na
-if showBiasBand and longBiasConfirmed
-    biasBandColor := color.new(#00c853, 94)
-else if showBiasBand and shortBiasConfirmed
-    biasBandColor := color.new(#d50000, 94)
-bgcolor(biasBandColor, title="Bias Background Band", force_overlay=true)
 
-netFinalSm = ta.ema(netFinal, histSmooth)
+// Raw columns as the base layer — shows unsmoothed bar-by-bar signal
+plot(netFinal, "Net Confluence Raw", color=netFinal >= 0 ? color.new(#00c853, 78) : color.new(#d50000, 78), style=plot.style_columns)
+
+// Smoothed area + line on top — trend direction and momentum at a glance
+netFinalSm = f_smoothHist(netFinal, histSmooth, histSmoothType)
 plot(netFinalSm, "Net Confluence", color=netFinalSm >= 0 ? color.new(#00c853, 60) : color.new(#d50000, 60), style=plot.style_area)
 plot(netFinalSm, "Net Confluence Line", color=netFinalSm >= 0 ? color.new(#00c853, 0) : color.new(#d50000, 0), linewidth=2)
 
@@ -589,49 +822,52 @@ plot(plotWT2, "Trigger WT2", color=color.new(color.gray, 25), linewidth=1)
 plot(triggerTurnLevel, "WT Turn Level +", color=color.new(#ff6f00, 75), linewidth=1, style=plot.style_linebr)
 plot(-triggerTurnLevel, "WT Turn Level -", color=color.new(#00c853, 75), linewidth=1, style=plot.style_linebr)
 
-plot(showRibbons ? 92.0 : na, "Regime Ribbon",      color=f_heatColor(netRegime),  linewidth=6, style=plot.style_line)
-plot(showRibbons ? 102.0 : na, "Opportunity Ribbon", color=f_heatColor(netOpp),     linewidth=6, style=plot.style_line)
-plot(showRibbons ? 112.0 : na, "Timing Ribbon",      color=f_heatColor(netTiming),  linewidth=6, style=plot.style_line)
-plot(showRibbons ? 122.0 : na, "Quality Ribbon",     color=f_heatColor(netQuality), linewidth=6, style=plot.style_line)
-plot(showRibbons ? 132.0 : na, "Noise Ribbon",       color=f_noiseColor(entropyRank), linewidth=6, style=plot.style_line)
+plot(showRibbons ? 92.0 : na,  "Regime Ribbon",      color=f_heatColor(netRegime),    linewidth=6, style=plot.style_line)
+plot(showRibbons ? 102.0 : na, "Opportunity Ribbon", color=f_heatColor(netOpp),        linewidth=6, style=plot.style_line)
+plot(showRibbons ? 112.0 : na, "Timing Ribbon",      color=f_heatColor(netTiming),     linewidth=6, style=plot.style_line)
+plot(showRibbons ? 122.0 : na, "Quality Ribbon",     color=f_heatColor(netQuality),    linewidth=6, style=plot.style_line)
+plot(showRibbons ? 132.0 : na, "Noise Ribbon",       color=f_noiseColor(entropyRank),  linewidth=6, style=plot.style_line)
+plot(showRibbons and showContextLayer ? 142.0 : na, "Context Ribbon", color=f_heatColor(netContext), linewidth=6, style=plot.style_line)
 
 var label ribR = na
 var label ribO = na
 var label ribT = na
 var label ribQ = na
 var label ribN = na
+var label ribC = na
 if showRibbons and barstate.islast
     if na(ribR)
-        ribR := label.new(bar_index, 92, "Regime",      style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
+        ribR := label.new(bar_index, 92,  "Regime",      style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
         ribO := label.new(bar_index, 102, "Opportunity", style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
         ribT := label.new(bar_index, 112, "Timing",      style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
         ribQ := label.new(bar_index, 122, "Quality",     style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
         ribN := label.new(bar_index, 132, "Noise",       style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
+        ribC := label.new(bar_index, 142, "Context",     style=label.style_label_left, color=color.new(color.white, 100), textcolor=color.new(color.gray, 25), size=size.small)
     label.set_x(ribR, bar_index + 2)
     label.set_x(ribO, bar_index + 2)
     label.set_x(ribT, bar_index + 2)
     label.set_x(ribQ, bar_index + 2)
     label.set_x(ribN, bar_index + 2)
+    label.set_x(ribC, bar_index + 2)
 
-// Bias changes + setup markers. Bias labels are context, not entries.
-if longBiasInfo
-    label.new(bar_index, low, "B->L", style=label.style_label_up, color=color.new(#00c853, 70), textcolor=color.white, size=size.tiny, yloc=yloc.belowbar, force_overlay=true, tooltip=longBiasTip)
-if shortBiasInfo
-    label.new(bar_index, high, "B->S", style=label.style_label_down, color=color.new(#d50000, 70), textcolor=color.white, size=size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip=shortBiasTip)
-if longNearSetupStart
+// Setup markers — only shown when trigger-TF WT is already in the correct zone.
+// This ensures "LS" only appears when WT is oversold and "SS" when overbought,
+// matching what the user sees in the pane rather than firing on 4H-driven state changes.
+longSetupWtOk  = plotWT1 < wtCrossZone
+shortSetupWtOk = plotWT1 > -wtCrossZone
+if longNearSetupStart and longSetupWtOk
     label.new(bar_index, low, "LN", style=label.style_label_up, color=color.new(#00c853, 35), textcolor=color.white, size=size.tiny, yloc=yloc.belowbar, force_overlay=true, tooltip=longNearTip)
-if shortNearSetupStart
+if shortNearSetupStart and shortSetupWtOk
     label.new(bar_index, high, "SN", style=label.style_label_down, color=color.new(#d50000, 35), textcolor=color.white, size=size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip=shortNearTip)
-if longSetupStart
+if longSetupStart and longSetupWtOk
     label.new(bar_index, low, "LS", style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=size.tiny, yloc=yloc.belowbar, force_overlay=true, tooltip=longSetupTip)
-if shortSetupStart
+if shortSetupStart and shortSetupWtOk
     label.new(bar_index, high, "SS", style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip=shortSetupTip)
 
-plotshape(longSignal ? -82 : na, title="Long Signal (Pane)", style=shape.triangleup, location=location.absolute, color=color.new(#00c853, 0), size=size.tiny)
-plotshape(shortSignal ? 82 : na, title="Short Signal (Pane)", style=shape.triangledown, location=location.absolute, color=color.new(#d50000, 0), size=size.tiny)
+// Green on exact Trigger TF, orange when sampled from a different chart TF
+plotshape(longSignal  ? -82 : na, title="Long Signal (Pane)",  style=shape.triangleup,   location=location.absolute, color=sampledLongSignal  ? color.new(#ff6f00, 0) : color.new(#00c853, 0), size=size.tiny)
+plotshape(shortSignal ? 82  : na, title="Short Signal (Pane)", style=shape.triangledown, location=location.absolute, color=sampledShortSignal ? color.new(#ff6f00, 0) : color.new(#d50000, 0), size=size.tiny)
 
-plotshape(exitLongWarning, title="Long Exit Warning", style=shape.xcross, location=location.abovebar, color=color.new(#ff6f00, 0), size=size.tiny, force_overlay=true)
-plotshape(exitShortWarning, title="Short Exit Warning", style=shape.xcross, location=location.belowbar, color=color.new(#ff6f00, 0), size=size.tiny, force_overlay=true)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Rotation Map inset (right of the last bar, lower pane area)
@@ -711,7 +947,7 @@ if showRotation and barstate.islast and array.size(rotXs) >= 2
 // Dashboard
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-var table dash = table.new(position.top_right, 3, 11,
+var table dash = table.new(position.top_right, 3, 13,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -759,8 +995,8 @@ if showDashboard and barstate.islast
     table.cell(dash, 2, 3, str.tostring(shortTiming, "#.0"), text_color=tc, text_size=size.tiny)
 
     table.cell(dash, 0, 4, "Quality", text_color=tc, text_size=size.tiny)
-    table.cell(dash, 1, 4, str.tostring(longQuality, "#.0") + (longGradeA ? " A" : " B"), text_color=tc, text_size=size.tiny)
-    table.cell(dash, 2, 4, str.tostring(shortQuality, "#.0") + (shortGradeA ? " A" : " B"), text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(longQuality, "#.0") + " " + longGradeStr,  text_color=longGradeA ? cGood : longGradeB ? color.new(#ff6f00, 0) : tc, text_size=size.tiny)
+    table.cell(dash, 2, 4, str.tostring(shortQuality, "#.0") + " " + shortGradeStr, text_color=shortGradeA ? cBad  : shortGradeB ? color.new(#ff6f00, 0) : tc, text_size=size.tiny)
 
     table.cell(dash, 0, 5, "Final", text_color=tc, text_size=size.tiny)
     table.cell(dash, 1, 5, str.tostring(longFinal, "#.0"), text_color=tc, text_size=size.tiny)
@@ -775,25 +1011,33 @@ if showDashboard and barstate.islast
     table.cell(dash, 1, 6, str.tostring(entropyRank, "#") + "%", text_color=noiseCol, text_size=size.tiny)
     table.cell(dash, 2, 6, "", text_size=size.tiny)
 
-    table.cell(dash, 0, 7, "Rotation", text_color=tc, text_size=size.tiny)
-    table.cell(dash, 1, 7, rotQuad, text_color=rotQuadColor, text_size=size.tiny)
-    table.cell(dash, 2, 7, "", text_size=size.tiny)
+    // Context TF row — informational, green/red if strongly aligned, gray if mixed
+    color ctxLCol = netContext >= 40 ? cGood : netContext <= -40 ? color.new(cGood, 60) : tc
+    color ctxSCol = netContext <= -40 ? cBad  : netContext >= 40  ? color.new(cBad, 60)  : tc
+    table.cell(dash, 0, 7, "Ctx " + tfContext, text_color=tc, text_size=size.tiny,
+         tooltip="Context TF directional bias — informational only, not a gate. Green/red = strong alignment.")
+    table.cell(dash, 1, 7, str.tostring(ctxBullNet, "#"), text_color=ctxLCol, text_size=size.tiny)
+    table.cell(dash, 2, 7, str.tostring(ctxBearNet, "#"), text_color=ctxSCol, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "Rotation", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 8, rotQuad, text_color=rotQuadColor, text_size=size.tiny)
+    table.cell(dash, 2, 8, "", text_size=size.tiny)
 
     string setupL = longSetup ? "SETUP" : longNearSetup ? "NEAR" : longBias ? "BIAS" : "–"
     string setupS = shortSetup ? "SETUP" : shortNearSetup ? "NEAR" : shortBias ? "BIAS" : "–"
-    table.cell(dash, 0, 8, "Setup", text_color=tc, bgcolor=color.new(color.gray, 80), text_size=size.tiny)
-    table.cell(dash, 1, 8, setupL, text_color=longSetup ? cGood : longNearSetup ? color.new(#ff6f00, 0) : longBias ? cGood : tc, bgcolor=color.new(color.gray, 80), text_size=size.tiny)
-    table.cell(dash, 2, 8, setupS, text_color=shortSetup ? cBad : shortNearSetup ? color.new(#ff6f00, 0) : shortBias ? cBad : tc, bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(dash, 0, 9, "Setup", text_color=tc, bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(dash, 1, 9, setupL, text_color=longSetup ? cGood : longNearSetup ? color.new(#ff6f00, 0) : longBias ? color.new(#00c853, 40) : tc, bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(dash, 2, 9, setupS, text_color=shortSetup ? cBad  : shortNearSetup ? color.new(#ff6f00, 0) : shortBias ? color.new(#d50000, 40) : tc, bgcolor=color.new(color.gray, 80), text_size=size.tiny)
 
-    table.cell(dash, 0, 9, "WT Trigger", text_color=tc, text_size=size.tiny)
-    table.cell(dash, 1, 9, h1BullTrigger ? triggerTfBelowChart ? "⚠" : "✓" : "–", text_color=h1BullTrigger ? triggerTfBelowChart ? color.new(#ff6f00, 0) : cGood : tc, text_size=size.tiny,
-         tooltip=h1BullTrigger and triggerTfBelowChart ? "Sampled lower-TF WT trigger. Switch chart to Trigger TF for actionable entry." : h1BullCross ? "WT bull cross" : h1BullTurn ? "WT bull turn from extended zone" : "")
-    table.cell(dash, 2, 9, h1BearTrigger ? triggerTfBelowChart ? "⚠" : "✓" : "–", text_color=h1BearTrigger ? triggerTfBelowChart ? color.new(#ff6f00, 0) : cBad : tc, text_size=size.tiny,
-         tooltip=h1BearTrigger and triggerTfBelowChart ? "Sampled lower-TF WT trigger. Switch chart to Trigger TF for actionable entry." : h1BearCross ? "WT bear cross" : h1BearTurn ? "WT bear turn from extended zone" : "")
+    table.cell(dash, 0, 10, "WT Trigger", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 10, h1BullTrigger ? triggerTfBelowChart ? "⚠" : "✓" : "–", text_color=h1BullTrigger ? triggerTfBelowChart ? color.new(#ff6f00, 0) : cGood : tc, text_size=size.tiny,
+         tooltip=h1BullTrigger and triggerTfBelowChart ? "Sampled lower-TF WT trigger. Switch chart to Trigger TF for actionable entry." : h1BullCross ? "WT bull cross" : h1BullTurn ? "WT bull turn from extended zone" : h1BullVel ? "WT bull velocity turn (sharp shallow reversal)" : h1BullExhaust ? "WT bull exhaustion reversal (hook from deep oversold)" : "")
+    table.cell(dash, 2, 10, h1BearTrigger ? triggerTfBelowChart ? "⚠" : "✓" : "–", text_color=h1BearTrigger ? triggerTfBelowChart ? color.new(#ff6f00, 0) : cBad : tc, text_size=size.tiny,
+         tooltip=h1BearTrigger and triggerTfBelowChart ? "Sampled lower-TF WT trigger. Switch chart to Trigger TF for actionable entry." : h1BearCross ? "WT bear cross" : h1BearTurn ? "WT bear turn from extended zone" : h1BearVel ? "WT bear velocity turn (sharp shallow reversal)" : h1BearExhaust ? "WT bear exhaustion reversal (hook from deep overbought)" : "")
 
-    string stL = "ARMED"
-    color stLBg = color.new(#ff6f00, 0)
-    color stLTx = color.white
+    string stL = longBias ? "BIAS" : "–"
+    color stLBg = color.new(color.gray, 80)
+    color stLTx = longBias ? color.new(#00c853, 40) : tc
     if not allowLong
         stL := "OFF"
         stLBg := color.new(color.gray, 80)
@@ -801,9 +1045,11 @@ if showDashboard and barstate.islast
     else if longSignal
         stL := "SIGNAL"
         stLBg := color.new(#00c853, 0)
+        stLTx := color.white
     else if sampledLongSignal
         stL := "TRIG TF"
         stLBg := color.new(#ff6f00, 0)
+        stLTx := color.white
     else if longSetup
         stL := "SETUP"
         stLBg := color.new(#00c853, 65)
@@ -811,18 +1057,15 @@ if showDashboard and barstate.islast
     else if longNearSetup
         stL := "NEAR"
         stLBg := color.new(#ff6f00, 35)
+        stLTx := color.white
     else if longBias
         stL := "BIAS"
         stLBg := color.new(color.gray, 80)
         stLTx := tc
-    else
-        stL := "REGIME"
-        stLBg := color.new(color.gray, 80)
-        stLTx := tc
 
-    string stS = "ARMED"
-    color stSBg = color.new(#ff6f00, 0)
-    color stSTx = color.white
+    string stS = shortBias ? "BIAS" : "–"
+    color stSBg = color.new(color.gray, 80)
+    color stSTx = shortBias ? color.new(#d50000, 40) : tc
     if not allowShort
         stS := "OFF"
         stSBg := color.new(color.gray, 80)
@@ -830,9 +1073,11 @@ if showDashboard and barstate.islast
     else if shortSignal
         stS := "SIGNAL"
         stSBg := color.new(#d50000, 0)
+        stSTx := color.white
     else if sampledShortSignal
         stS := "TRIG TF"
         stSBg := color.new(#ff6f00, 0)
+        stSTx := color.white
     else if shortSetup
         stS := "SETUP"
         stSBg := color.new(#d50000, 65)
@@ -840,26 +1085,30 @@ if showDashboard and barstate.islast
     else if shortNearSetup
         stS := "NEAR"
         stSBg := color.new(#ff6f00, 35)
+        stSTx := color.white
     else if shortBias
         stS := "BIAS"
         stSBg := color.new(color.gray, 80)
         stSTx := tc
-    else
-        stS := "REGIME"
-        stSBg := color.new(color.gray, 80)
-        stSTx := tc
 
-    table.cell(dash, 0, 10, "Status", text_color=tc, text_size=size.tiny)
-    table.cell(dash, 1, 10, stL, text_color=stLTx, bgcolor=stLBg, text_size=size.tiny)
-    table.cell(dash, 2, 10, stS, text_color=stSTx, bgcolor=stSBg, text_size=size.tiny)
+    table.cell(dash, 0, 11, "Status", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 11, stL, text_color=stLTx, bgcolor=stLBg, text_size=size.tiny)
+    table.cell(dash, 2, 11, stS, text_color=stSTx, bgcolor=stSBg, text_size=size.tiny)
+
+    // Separator row
+    table.cell(dash, 0, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(dash, 1, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(dash, 2, 12, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Alerts
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-alertcondition(longSignal, title="MTF WT Hunter Long", message="LONG setup on {{ticker}} | Regime + Pullback + WT trigger")
-alertcondition(shortSignal, title="MTF WT Hunter Short", message="SHORT setup on {{ticker}} | Regime + Pullback + WT trigger")
-alertcondition(longSignal and longGradeA, title="MTF WT Hunter Long (Grade A)", message="LONG Grade A setup on {{ticker}}")
+alertcondition(longSignal,                title="MTF WT Hunter Long",              message="LONG setup on {{ticker}} | Regime + Pullback + WT trigger")
+alertcondition(shortSignal,               title="MTF WT Hunter Short",             message="SHORT setup on {{ticker}} | Regime + Pullback + WT trigger")
+alertcondition(longSignal and longGradeA, title="MTF WT Hunter Long (Grade A)",    message="LONG Grade A setup on {{ticker}}")
 alertcondition(shortSignal and shortGradeA, title="MTF WT Hunter Short (Grade A)", message="SHORT Grade A setup on {{ticker}}")
-alertcondition(exitLongWarning, title="MTF WT Hunter Long Exit Warning", message="Long trend health weakening on {{ticker}}")
-alertcondition(exitShortWarning, title="MTF WT Hunter Short Exit Warning", message="Short trend health weakening on {{ticker}}")
+alertcondition(sampledLongSignal,         title="MTF WT Hunter Long (Sampled)",    message="LONG sampled signal on {{ticker}} — chart TF ≠ Trigger TF, verify on Trigger TF")
+alertcondition(sampledShortSignal,        title="MTF WT Hunter Short (Sampled)",   message="SHORT sampled signal on {{ticker}} — chart TF ≠ Trigger TF, verify on Trigger TF")
+alertcondition(longExit,                  title="MTF WT Hunter Long Closed",       message="LONG closed — reversed to short on {{ticker}}")
+alertcondition(shortExit,                 title="MTF WT Hunter Short Closed",      message="SHORT closed — reversed to long on {{ticker}}")
