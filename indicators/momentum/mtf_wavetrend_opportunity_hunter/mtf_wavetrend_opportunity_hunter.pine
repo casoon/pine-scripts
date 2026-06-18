@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // MTF WaveTrend Opportunity Hunter [WavesUnchained]
-// Version: 2.4
+// Version: 2.5
 // Author: WavesUnchained
-// Build: 2026-06-15 09:00:00
+// Build: 2026-06-15 21:30:00
 // ============================================================================
 // MTF confluence pane around WaveTrend — shows WHY a signal fires (or
 // doesn't) over time via a net confluence histogram plus per-layer heat
@@ -23,10 +23,17 @@
 //     replacement for the EMA core of WaveTrend
 //   ✓ Entropy noise floor — Shannon sign-entropy percentile rank as fifth
 //     ribbon and Quality component (self-calibrating per instrument)
-//   ✓ Stop-and-reverse alternation: a long closes any open short and a short
-//     closes any open long — the exit is the opposite WT trigger, signals
-//     alternate, and Regime/Setup/Quality grade (A/B/C) instead of blocking
-//   ✓ Compact on-chart signal labels (dir · grade · quality, full breakdown
+//   ✓ Entry/exit-decoupled stop-and-reverse: ENTRIES fire on a WT zone-cross
+//     only (the validated entry); an open position is closed EARLY to flat by
+//     an opposite turn/exhaustion HOOK (profit-take at the extreme), then flat
+//     until the next cross re-enters. A cross reverses outright. Hooks were
+//     measured to be good exits but poor entries — this pairs the two
+//   ✓ Non-blocking tradeable flag: opportunity ≥ threshold marks the
+//     validated high-conviction subset (★, full colour) vs watch (·, dimmed)
+//     — the gate no longer hides signals, it only grades them
+//   ✓ Live layer panel measures the tradeable subset's edge (Trade✓ vs Watch
+//     avg R) so the conviction split is verified on numbers, not by eye
+//   ✓ Compact on-chart signal labels (dir · ★/· · opportunity, full breakdown
 //     in the tooltip) — no fixed TP/SL boxes; the exit is dynamic (the
 //     opposite signal), so static targets would misrepresent it
 //   ✓ Three-tier MTF framework: Regime (D) → Setup (4H) → Trigger (1H)
@@ -40,7 +47,7 @@
 //
 // ============================================================================
 
-indicator("MTF WaveTrend Opportunity Hunter [WavesUnchained]", overlay=false, max_labels_count=100, max_lines_count=100, max_boxes_count=100, max_polylines_count=10)
+indicator("MTF WaveTrend Opportunity Hunter [WavesUnchained]", overlay=false, max_labels_count=500, max_lines_count=100, max_boxes_count=100, max_polylines_count=10)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Inputs
@@ -89,65 +96,29 @@ entropyRankLen = input.int(200, "Entropy Rank Lookback", minval=50, group=g_qual
 useRS      = input.bool(false, "Use Relative Strength Filter", group=g_quality)
 benchmark  = input.symbol("SPY", "Benchmark Symbol", group=g_quality)
 
-g_signal = "Signal Gate"
+g_signal = "Signal Engine"
 minRegime      = input.float(65, "Min Regime Score", minval=0, maxval=100, group=g_signal)
 minOpportunity = input.float(35, "Min Opportunity Score", minval=0, maxval=100, group=g_signal)
-minOppSignal   = input.float(40, "Min Opportunity to Signal", minval=0, maxval=100, group=g_signal,
-     tooltip="A signal only fires when its 4H opportunity is at least this — a real setup-strength gate. The layer test showed opportunity ≥ 40 entries averaged +1.47 R while weaker setups averaged −0.62 R, so the Setup layer is a strong, validated filter. 0 = no gate (every trigger fires). Raising trades signal count for quality.")
+minOppSignal   = input.float(40, "Tradeable Opportunity ≥", minval=0, maxval=100, group=g_signal,
+     tooltip="Marks a signal 'tradeable' (★) when its 4H opportunity is at least this. The layer test showed opportunity ≥ 40 entries averaged +1.47 R vs −0.62 R below, so this is the validated high-conviction subset. It does NOT block: every WT reversal is drawn so nothing is hidden — this only flags which ones are the tradeable edge. The 'Trade✓' row of the layer panel measures exactly this subset.")
 gateBuffer     = input.float(10, "Gate Buffer", minval=0, maxval=30, group=g_signal,
      tooltip="Softens Regime/Opportunity gates. A value of 10 means a 65 threshold arms from 55 upward; the dashboard still shows the raw score.")
 nearSetupBuffer = input.float(10, "Near Setup Buffer", minval=0, maxval=30, group=g_signal,
      tooltip="Marks a near setup when Regime passes and Opportunity is within this many points of the effective Opportunity gate.")
-gradeAQuality  = input.float(55, "Grade A Quality ≥", minval=0, maxval=100, group=g_signal,
-     tooltip="Quality does not block signals — it grades them. Signals at or above this score contribute to Grade A.")
-minTimingGrade = input.float(55, "Grade B Timing Merit ≥", minval=0, maxval=100, group=g_signal,
-     tooltip="The merit path to Grade B needs Timing at or above this. Lower = more counter-trend reversals; higher = stricter.")
-meritOppMin = input.float(40, "Grade B Merit Opportunity ≥", minval=0, maxval=100, group=g_signal,
-     tooltip="Merit also needs a genuinely strong setup, not just clearing the entry gate. Raising this cuts weak-opportunity reversals that the merit path would otherwise pass.")
-meritQualMin = input.float(45, "Grade B Merit Quality Floor", minval=0, maxval=100, group=g_signal,
-     tooltip="Merit will not resurrect low-quality (noisy / inefficient) signals: Quality must be at or above this floor. Set between the entry noise level and the Grade-A Quality threshold. Without it, merit floods with far-from-swing knife-catches that the pivot overlay flags as junk.")
 cooldownBars = input.int(8, "Minimum Hold (bars)", minval=1, maxval=30, group=g_signal,
      tooltip="Minimum bars a position is held before the opposite WT trigger may reverse it. Prevents whipsaw flip-flopping when the WT oscillates fast. Higher = holds through minor counter-crosses; lower = reverses sooner.")
-reentryOnAdverse = input.bool(true, "Re-entry on Adverse Move", group=g_signal,
-     tooltip="Lifts the same-direction lock when price trades against the open position past its entry (a long is undercut / a short is exceeded): a fresh same-side signal at a better price is then allowed, so a reversal that came too early can be re-taken instead of locking out until the opposite signal. The Minimum Hold still applies between re-entries.")
-maxReentries = input.int(2, "Max Re-entries per Position", minval=0, maxval=10, group=g_signal,
-     tooltip="Caps how many adverse-move re-entries a single position may add before it must wait for the opposite signal. Stops a runaway averaging chain into a one-way move. 0 = no re-entries at all.")
-reentryQualMin = input.float(32, "Re-entry Quality Floor", minval=0, maxval=100, group=g_signal,
-     tooltip="An adverse-move re-entry is only allowed when Quality is at or above this. Prevents averaging deeper into a move at deteriorating quality (the chains where each add scored lower than the last). Does not affect the first entry or the reverse.")
-maxWaitBars = input.int(5, "Setup-Align Max Wait (bars)", minval=0, maxval=60, group=g_signal,
-     tooltip="After the minimum hold, a reverse first waits for a trigger that coincides with a setup (the high-opportunity zone — a better entry location than a bare WT trigger). If no setup-aligned trigger appears within this many bars it falls back to any trigger, so the alternation can never get stuck. 0 = disable the preference (any trigger fires immediately after the hold).")
-setupGraceBars = input.int(3, "Setup Grace (bars)", minval=0, maxval=15, group=g_signal,
-     tooltip="A WT trigger still counts as setup-aligned if a setup was active now OR within this many bars before it — so a setup that forms first and is confirmed by a cross a few bars later still qualifies (the cross follows the setup). 0 = the setup must be active on the exact trigger bar.")
-triggerMode = input.string("Cross or Turn", "Trigger Mode", options=["Cross Only", "Cross or Turn"], group=g_signal,
-     tooltip="Cross Only waits for WT1/WT2 crosses. Cross or Turn also accepts an earlier WT turn from an extended zone.")
-triggerTurnLevel = input.float(35.0, "WT Turn Level", minval=5, maxval=100, group=g_signal,
-     tooltip="Used by Cross or Turn mode. Long turns need WT below -level and hooking up; short turns need WT above +level and hooking down. Lower = catches shallower bottoms (more, earlier, noisier turns).")
-turnFallBars = input.int(2, "WT Turn Min Falling Bars", minval=1, maxval=10, group=g_signal,
-     tooltip="A turn only counts if WT had been falling (long) / rising (short) for at least this many bars into the extreme before it hooks. Higher = stricter, fewer false hooks; lower = earlier but noisier. The turn fires on the hook itself, decoupled from the lagging histogram.")
 wtCrossZone = input.float(0.0, "WT Cross Zone Limit", minval=-40, maxval=40, step=5, group=g_signal,
-     tooltip="Long cross trigger only fires when the WT signal line was BELOW this value before the cross (0 = must come from negative territory, 20 = also accept mid-range continuation crosses up to +20). Short cross mirrors at -value. Higher = more signals incl. momentum continuation in the range; lower = only deep zero-line reversals. Above +~30 starts buying into overbought.")
-useWtVelocity = input.bool(false, "WT Velocity Trigger (experimental)", group=g_signal,
-     tooltip="Opt-in. Fires on a sharp WT1 slope reversal — catches fast, shallow turns the WT Turn (which needs depth) misses. Independent of Trigger Mode. The Turn handles deep-but-gentle hooks; Velocity handles shallow-but-violent ones. Off by default — showed no added signals in the baseline window; enable to test in other regimes.")
-useExhaustion = input.bool(true, "Exhaustion Reversal Trigger", group=g_signal,
-     tooltip="Fires the moment WT1 hooks back from a deep extreme (|WT1| ≥ Exhaustion Level) — the sharp overbought/oversold reversal at a major top or bottom. Narrow by design (only fires at the extremes, so it does not flood) — built to catch big exhaustion turns the lagging core otherwise detects too late, without going full zero-lag. Still gated by setup + grade downstream.")
+     tooltip="ENTRY trigger. Long entry only fires when the WT signal line was BELOW this value before the cross (0 = must come from negative territory, 20 = also accept mid-range continuation crosses up to +20). Short mirrors at -value. Higher = more entries incl. momentum continuation in the range; lower = only deep zero-line reversals. Above +~30 starts buying into overbought. Entries are always crosses — the validated entry trigger.")
+useHookExit = input.bool(false, "Early Exit on Turn/Exhaustion Hook", group=g_signal,
+     tooltip="Decouples exit from entry. Entries fire on a WT CROSS; an open position is then closed EARLY to flat by an opposite TURN or EXHAUSTION hook out of the extreme (a profit-take at the top/bottom), and stays flat until the next cross re-enters. The data showed cross entries carry the edge while turn/exhaustion are good EXITS but bad entries — this pairs the two. Off = pure stop-and-reverse (a position is held until the opposite cross reverses it).")
+triggerTurnLevel = input.float(35.0, "WT Turn Level (hook exit)", minval=5, maxval=100, group=g_signal,
+     tooltip="Hook-exit sensitivity. A bear hook (closes a long) needs WT above +level and hooking down; a bull hook (closes a short) needs WT below -level and hooking up. Lower = exits earlier on shallower extremes (more, earlier exits).")
+turnFallBars = input.int(2, "WT Turn Min Falling Bars", minval=1, maxval=10, group=g_signal,
+     tooltip="A hook only counts if WT had been rising (bear hook) / falling (bull hook) for at least this many bars into the extreme before it hooks back. Higher = stricter, fewer false hooks; lower = earlier but noisier. The hook fires on the turn itself, decoupled from the lagging histogram.")
+useExhaustion = input.bool(true, "Exhaustion Hook (deep-extreme exit)", group=g_signal,
+     tooltip="Adds a second hook-exit path: closes an open position the moment WT1 hooks back from a deep extreme (|WT1| ≥ Exhaustion Level) — the sharp top/bottom. Narrow by design (only at the extremes). Combined with the Turn hook above as the early-exit trigger.")
 exhaustLevel = input.float(50.0, "Exhaustion WT Level", minval=20, maxval=80, step=5, group=g_signal,
-     tooltip="WT1 must have reached at least this far into overbought (short) / oversold (long) on the prior bar before the hook counts as an exhaustion reversal. Higher = only the most extreme tops/bottoms; lower = also milder extremes (more signals).")
-velZone = input.float(0.0, "WT Velocity Zone", minval=-60, maxval=20, step=5, group=g_signal,
-     tooltip="Velocity trigger is only eligible while WT1 was below this value (long) / above -this (short) on the reversal bar. 0 = below the midline. Looser than WT Turn Level — that is the point, it reaches shallower bottoms.")
-velMinSlope = input.float(3.0, "WT Velocity Min Slope", minval=0.5, maxval=20, step=0.5, group=g_signal,
-     tooltip="Minimum 1-bar WT1 jump on the reversal bar to count as a velocity turn. Higher = only sharp/violent reversals (fewer, cleaner); lower = also gentler turns (more, noisier).")
-useCrossSettle = input.bool(false, "Cross Settle (cluster → last cross)", group=g_signal,
-     tooltip="Debounces the WT cross: it only fires after a quiet window with no newer valid cross of the same type, so a cluster of crosses resolves to its LAST cross. Shifts a too-early entry forward to the cross that actually held. Off by default — enable and tune the window to test.")
-settleWindow = input.int(2, "Cross Settle Window (bars)", minval=0, maxval=20, group=g_signal,
-     tooltip="Quiet bars required after a cross before it fires. A new cross within the window restarts the count, so only the last cross of a cluster survives. 0 = fire on the cross bar (no debounce). Adds this much lag to every cross — that delay is the point.")
-useConfirmWt = input.bool(false, "Confirmation WT (smoothing filter)", group=g_signal,
-     tooltip="A smoother WT1 (EMA of the trigger WT1) must agree in direction for a cross to count — its slope rejects the cluster micro-crosses the fast WT produces but the smooth one does not. Off by default; enable and tune the smoothing.")
-confirmSmooth = input.int(8, "Confirmation WT Smoothing", minval=2, maxval=50, group=g_signal,
-     tooltip="EMA length of the confirmation WT. Higher = smoother (rejects more cluster crosses, more lag); lower = closer to the raw WT.")
-entryConfirmMode = input.string("All signals", "Entry Confirmation (1 bar)", options=["Off", "All signals", "Counter-trend only"], group=g_signal,
-     tooltip="Takes the entry the bar AFTER the trigger, and only if price did not immediately run against it by more than the confirm distance — cuts the 'held 0b' instant-reversal failures. 'Counter-trend only' applies the confirmation by SITUATION, not by direction: only to a signal that opposes the daily regime (a long while regime is short-dominant, a short while regime is long-dominant), so with-trend signals fire freely. Symmetric — in an uptrend it confirms shorts, in a downtrend it confirms longs. Costs 1 bar of lag on the confirmed side.")
-confirmAtr = input.float(0.5, "Entry Confirm: max adverse ATR", minval=0.1, maxval=2.0, step=0.1, group=g_signal,
-     tooltip="If price moves this many ATR against the trigger price within the confirmation bar, the entry is skipped (it was about to fail immediately). Lower = stricter (skips more); higher = lenient.")
+     tooltip="WT1 must have reached at least this far into overbought / oversold on the prior bar before the hook counts as an exhaustion exit. Higher = only the most extreme tops/bottoms; lower = also milder extremes (more, earlier exits).")
 
 g_mode = "Mode"
 allowLong  = input.bool(true, "Allow Long Signals", group=g_mode)
@@ -175,7 +146,7 @@ showStats     = input.bool(true, "Show Signal Stats", group=g_vis,
 showTfWarning = input.bool(false, "Show Lower-TF Sampling Warning", group=g_vis,
      tooltip="Warns when Setup or Trigger TF is below the chart TF. request.security then samples lower-TF values only once per chart bar, so intrabar crosses can be missed.")
 labelMode     = input.string("Compact", "Signal Label Detail", options=["Compact", "Full", "None"], group=g_vis,
-     tooltip="Compact = a small tag (dir · grade · Q); Full = all scores + quality breakdown on the chart; None = no on-chart label (pane triangle only). The full breakdown is always in the label's tooltip on hover.")
+     tooltip="Compact = a small tag (dir · ★/· tradeable · opportunity); Full = all scores + quality breakdown on the chart; None = no on-chart label (pane triangle only). The full breakdown is always in the label's tooltip on hover.")
 
 g_fail = "Failed Signals (study)"
 markFailed    = input.bool(true, "Mark Failed Signals", group=g_fail,
@@ -419,14 +390,6 @@ h1BearTurnRaw = h1WT1 >  triggerTurnLevel and h1WT1 < h1WT1[1] and h1WT1[1] > h1
 h1BullTurn = h1BullTurnRaw and not h1BullTurnRaw[1]
 h1BearTurn = h1BearTurnRaw and not h1BearTurnRaw[1]
 
-// WT velocity trigger: a sharp 1-bar WT1 slope reversal from a shallower zone, after a
-// falling/rising run. Catches fast turns that never reach the (deeper) WT Turn Level.
-wtVel = h1WT1 - h1WT1[1]
-h1BullVelRaw = useWtVelocity and h1WT1[1] <  velZone and wtVel >=  velMinSlope and h1WT1[1] < h1WT1[1 + turnFallBars]
-h1BearVelRaw = useWtVelocity and h1WT1[1] > -velZone and wtVel <= -velMinSlope and h1WT1[1] > h1WT1[1 + turnFallBars]
-h1BullVel = h1BullVelRaw and not h1BullVelRaw[1]
-h1BearVel = h1BearVelRaw and not h1BearVelRaw[1]
-
 // Exhaustion reversal: WT1 was at a deep extreme on the prior bar and hooks back now — the
 // sharp top/bottom turn. Narrow (only at |WT1| ≥ exhaustLevel) so it catches the big
 // exhaustion reversals a lagging core detects too late, without flooding the mid-range.
@@ -439,21 +402,24 @@ h1BullExhaust = h1BullExhaustRaw and not h1BullExhaustRaw[1]
 rawBullCross = h1BullCross and h1WT2[1] < wtCrossZone
 rawBearCross = h1BearCross and h1WT2[1] > -wtCrossZone
 
-// Cross Settle: fire only after a quiet window with no newer valid cross of the same type —
-// a cluster of crosses resolves to its LAST cross (shifts a too-early entry forward).
-bullCrossOut = useCrossSettle ? (ta.barssince(rawBullCross) == settleWindow) : rawBullCross
-bearCrossOut = useCrossSettle ? (ta.barssince(rawBearCross) == settleWindow) : rawBearCross
+// ── Entry vs exit triggers (decoupled) ──────────────────────────────────────────────────
+// ENTRY = the zone-filtered WT cross only — the validated entry (cross entries carry the
+// edge; turn/exhaustion entries were knife-catches). HOOK = a turn or exhaustion hook out of
+// the extreme — repurposed as an early profit-take EXIT (good at the top/bottom, bad as entry).
+bullEntryTrig = rawBullCross
+bearEntryTrig = rawBearCross
+bullHook = useHookExit and (h1BullTurn or h1BullExhaust)   // hook up from a low  → closes a short
+bearHook = useHookExit and (h1BearTurn or h1BearExhaust)   // hook down from a high → closes a long
+// Any bull/bear WT event — used only for the Timing score + dashboard "WT Trigger" display
+h1BullTrigger = rawBullCross or h1BullTurn or h1BullExhaust
+h1BearTrigger = rawBearCross or h1BearTurn or h1BearExhaust
 
-// Confirmation WT: a smoother WT1 must agree in direction (its slope rejects cluster micro-crosses)
-confWt = ta.ema(h1WT1, confirmSmooth)
-bullConfOk = not useConfirmWt or confWt > confWt[1]
-bearConfOk = not useConfirmWt or confWt < confWt[1]
-
-bullCrossTrig = bullCrossOut and bullConfOk
-bearCrossTrig = bearCrossOut and bearConfOk
-
-h1BullTrigger = bullCrossTrig or (triggerMode == "Cross or Turn" and h1BullTurn) or h1BullVel or h1BullExhaust
-h1BearTrigger = bearCrossTrig or (triggerMode == "Cross or Turn" and h1BearTurn) or h1BearVel or h1BearExhaust
+// Directional WT extreme over the last few bars — how stretched the zone the cross emerged
+// from was. A long entry from a deep oversold (wtLow5 ≪ 0) is a real reversal cross; one from
+// the mid-range (wtLow5 near 0) is a shallow continuation cross — the prime fail candidate.
+// This is the entry-quality criterion captured at the cross and shown on every signal label.
+wtLow5  = ta.lowest(h1WT1, 5)   // most oversold recently  (long entries read this)
+wtHigh5 = ta.highest(h1WT1, 5)  // most overbought recently (short entries read this)
 
 h1BullMomentum = h1WT1 > h1WT1[1] and h1Hist > h1Hist[1]
 h1BearMomentum = h1WT1 < h1WT1[1] and h1Hist < h1Hist[1]
@@ -474,7 +440,7 @@ shortTiming =
      scoreBool(h4WT1 < h4WT1[1], 10)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Quality Score (grades signals A/B — does not block)
+// Quality Score (label diagnostic only — does not block or grade signals)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 // JMA slope computed first — used for acceleration and direction-sensitive ER below
@@ -589,7 +555,7 @@ netQuality = longQuality - shortQuality
 netFinal   = longFinal - shortFinal
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Pivot Reference — swing extremes, proximity, knife-catch (drives grade + trigger)
+// Pivot Reference — swing extremes, proximity, knife-catch (control overlay only — never a gate)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 riskAtr = ta.atr(atrLen)
@@ -647,7 +613,7 @@ f_pivDistStr(barsAway, rAway) =>
     str.tostring(barsAway) + "b / " + str.tostring(rAway, "#.0") + "R"
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Signals — gate: 4H opportunity + 4H JMA direction; regime grades A/B/C
+// Signals — stop-and-reverse on every WT trigger; opportunity flags 'tradeable' (no gate)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 minRegimeEff = clamp(minRegime - gateBuffer, 0, 100)
@@ -672,30 +638,6 @@ shortSetup = allowShort and shortOpportunity >= minOpportunityEff
 longNearSetup  = allowLong  and not longSetup  and longOpportunity >= minOpportunityNear
 shortNearSetup = allowShort and not shortSetup and shortOpportunity >= minOpportunityNear
 
-// Three-tier grading — defined before signal raw so grade filter can apply
-// A = regime aligned + quality high            (with-trend, high-confidence)
-// B = regime aligned, OR quality high, OR own merit (strong timing + valid opportunity)
-// C = none of the above                        (weak, late, or unconfirmed)
-// The merit path folds Timing + Opportunity into the grade so a well-timed reversal is not
-// killed by a sub-Grade-A Quality when the regime opposes it — but a Quality floor + a real
-// Opportunity bar keep it from resurrecting low-quality, far-from-swing knife-catches.
-// Pivot proximity does NOT enter the grade — the pivot is a control overlay, not a gate.
-longMerit  = longTiming  >= minTimingGrade and longOpportunity  >= meritOppMin and longQuality  >= meritQualMin
-shortMerit = shortTiming >= minTimingGrade and shortOpportunity >= meritOppMin and shortQuality >= meritQualMin
-// Exhaustion reversals grade B on context: a hook out of a deep extreme is high-conviction by
-// itself, so it bypasses the trend-confirmation grade (regime/quality) that inherently rejects
-// tops and bottoms — at a top every trend measure opposes the short, which is the whole point.
-longExhaustOk  = h1BullExhaust and longSetup
-shortExhaustOk = h1BearExhaust and shortSetup
-longGradeA   = regimeLongDominant  and longQuality  >= gradeAQuality
-shortGradeA  = regimeShortDominant and shortQuality >= gradeAQuality
-longGradeB   = not longGradeA  and (regimeLongDominant  or longQuality  >= gradeAQuality  or longMerit  or longExhaustOk)
-shortGradeB  = not shortGradeA and (regimeShortDominant or shortQuality >= gradeAQuality or shortMerit or shortExhaustOk)
-// Grade is informational now (shown on the label) — it no longer gates the signal, so the
-// alternation can't be blocked. A = highest conviction, C = weakest.
-longGradeStr  = longGradeA  ? "A" : longGradeB  ? "B" : "C"
-shortGradeStr = shortGradeA ? "A" : shortGradeB ? "B" : "C"
-
 chartIsTriggerTf = chartTfSec == triggerTfSec
 
 // Setup/Near start transitions — must be defined before catchup uses them
@@ -708,9 +650,9 @@ shortNearSetupStart = shortNearSetup and not shortNearSetup[1]
 // The exit of a position IS the opposite signal: a long closes any open short and a short
 // closes any open long. Signals therefore alternate — every short is eventually faced by a
 // long — and the exit is indicator-native (the opposite WT trigger, not an external stop).
-// Direction is enforced by the open position, not by the gates: the counter-trigger always
-// fires, so the alternation can never get stuck spamming one side. Grade / Quality / Setup
-// stay on the labels as conviction info; they no longer block a signal.
+// Direction is enforced by the open position, not by any gate: the counter-trigger always
+// fires, so the alternation can never get stuck spamming one side. Opportunity (tradeable)
+// stays on the labels as conviction info; it no longer blocks a signal.
 var bool  inLong  = false
 var bool  inShort = false
 var int   posBar  = -999
@@ -727,12 +669,16 @@ var int   longOpenBar  = na
 var int   shortOpenBar = na
 var float longCrossCtx  = na
 var float shortCrossCtx = na
-var string longGradeAt  = ""
-var string shortGradeAt = ""
 var bool  longWasWith   = false
 var bool  shortWasWith  = false
 var bool  longOppStrong  = false
 var bool  shortOppStrong = false
+var bool  longWtDeep   = false  // entry came off a deep WT extreme (oversold ≤ −60 / overbought ≥ 60)
+var bool  shortWtDeep  = false
+var float longEntryDepth  = na  // the directional WT extreme the entry cross emerged from
+var float shortEntryDepth = na
+var bool  longExitHookWas  = false  // last long closed via a hook-exit (true) vs a cross-reverse (false)
+var bool  shortExitHookWas = false
 var bool  longFailed  = false
 var bool  shortFailed = false
 var label longPosLbl  = na
@@ -740,90 +686,78 @@ var label shortPosLbl = na
 barsHeld = bar_index - posBar
 held = barsHeld >= cooldownBars   // minimum bars held before a reverse
 
-// Setup-aligned reversal: within a preference window after the minimum hold the signal only
-// fires on a trigger that coincides with a setup (the high-opportunity zone — a better entry
-// location than a bare trigger). After maxWaitBars it falls back to any trigger so the
-// alternation can never get stuck. maxWaitBars = 0 disables the preference.
-preferSetup  = maxWaitBars > 0 and barsHeld < cooldownBars + maxWaitBars
-// A setup counts as aligned if it is active now or was active within the grace window — so a
-// setup that forms first and is confirmed by a cross a few bars later still qualifies.
-longSetupRecent  = ta.barssince(longSetup)  <= setupGraceBars
-shortSetupRecent = ta.barssince(shortSetup) <= setupGraceBars
-longAligned  = longSetupRecent  or not preferSetup
-shortAligned = shortSetupRecent or not preferSetup
+// Non-blocking tradeable flag: opportunity ≥ minOppSignal marks the validated high-conviction
+// subset (layer test: opp ≥ 40 averaged +1.47 R vs −0.62 R below). It does NOT block — every
+// WT reversal still fires; this only flags which signals are the tradeable edge.
+longTradeable  = longOpportunity  >= minOppSignal
+shortTradeable = shortOpportunity >= minOppSignal
 
-// Adverse-move release: if price trades against the open position past its entry, the
-// same-direction alternation lock is lifted so a fresh same-side signal (a re-entry at a
-// better price) is allowed — a reversal that came too early can be re-taken instead of
-// locking out. Tamed by a count cap and a quality floor so a chain of ever-worse adds into a
-// one-way move is cut off. The minimum-hold whipsaw guard still applies.
-var int longReentries  = 0
-var int shortReentries = 0
-longUnderwater  = reentryOnAdverse and inLong  and not na(longEntryPx)  and close < longEntryPx  and longReentries  < maxReentries and longQuality  >= reentryQualMin
-shortUnderwater = reentryOnAdverse and inShort and not na(shortEntryPx) and close > shortEntryPx and shortReentries < maxReentries and shortQuality >= reentryQualMin
+// ── Entry/exit decoupled stop-and-reverse ────────────────────────────────────────────────
+// ENTRIES fire on a WT CROSS only (the validated entry trigger). An open position is closed
+// EARLY to flat by an opposite TURN/EXHAUSTION HOOK (profit-take at the extreme), then stays
+// flat until the next cross re-enters. A cross in the opposite direction reverses outright.
+// The minimum hold gates exits/reverses only — a flat entry fires on any cross immediately,
+// so an exit-at-the-top can re-enter short on the very next confirmed cross.
+flat = not inLong and not inShort
+// A WT cross ARMS a pending entry (raw cross, gated by direction + minimum hold)
+longEntrySig  = allowLong  and bullEntryTrig and not inLong  and (flat or held)
+shortEntrySig = allowShort and bearEntryTrig and not inShort and (flat or held)
+// Ambiguous double-cross bar → take neither
+if longEntrySig and shortEntrySig
+    longEntrySig  := false
+    shortEntrySig := false
 
-// Setup-strength gate (data-validated): only fire when 4H opportunity clears minOppSignal —
-// the layer test showed opp ≥ 40 averages +1.47 R vs −0.62 R below. The reverse still comes,
-// just at a strong setup (alternation holds, weak-setup losers are skipped).
-longWantEntry  = allowLong  and h1BullTrigger and (not inLong  or longUnderwater)  and held and longAligned and longOpportunity  >= minOppSignal
-shortWantEntry = allowShort and h1BearTrigger and (not inShort or shortUnderwater) and held and shortAligned and shortOpportunity >= minOppSignal
+// Hook exit to flat — only when not simultaneously reversed by an opposite confirmed entry
+longHookExit  = inLong  and held and bearHook and not shortEntrySig
+shortHookExit = inShort and held and bullHook and not longEntrySig
 
-// 1-bar entry confirmation: take the entry the bar AFTER the trigger, and only if price did
-// not immediately run confirmAtr ATR against it — cuts the 'held 0b' instant-reversal fails.
-// 'Counter-trend only' applies it by situation (against the regime), symmetric — not by direction.
-confirmLong  = entryConfirmMode == "All signals" or (entryConfirmMode == "Counter-trend only" and regimeShortDominant)
-confirmShort = entryConfirmMode == "All signals" or (entryConfirmMode == "Counter-trend only" and regimeLongDominant)
-longSignalRaw  = confirmLong  ? (longWantEntry[1]  and low  >= close[1] - confirmAtr * riskAtr) : longWantEntry
-shortSignalRaw = confirmShort ? (shortWantEntry[1] and high <= close[1] + confirmAtr * riskAtr) : shortWantEntry
-// Ambiguous double-trigger bar → take neither
-if longSignalRaw and shortSignalRaw
-    longSignalRaw  := false
-    shortSignalRaw := false
-
-// Fresh = opens a new position (reversal or from flat); else a same-direction re-entry
-longFresh  = longSignalRaw  and not inLong
-shortFresh = shortSignalRaw and not inShort
+// Every entry opens a fresh position (no same-direction re-entry)
+longFresh  = longEntrySig
+shortFresh = shortEntrySig
 // WT cross density in the window before the bar — high = choppy multi-cross zone (too-early risk)
 crossCtxNow = math.sum((h1BullCross or h1BearCross) ? 1.0 : 0.0, failCrossLookback)
 
-if longSignalRaw
-    longReentries := longFresh ? 0 : longReentries + 1
-    if longFresh
-        longOpenPx   := close
-        longOpenAtr  := riskAtr
-        longSLlvl    := close - failAtrMult * riskAtr
-        longOpenBar  := bar_index
-        longCrossCtx := crossCtxNow
-        longGradeAt  := longGradeStr
-        longWasWith  := regimeLongDominant
-        longOppStrong := longOpportunity >= 40
-        longFailed   := false
+if longEntrySig
+    longOpenPx    := close
+    longOpenAtr   := riskAtr
+    longSLlvl     := close - failAtrMult * riskAtr
+    longOpenBar   := bar_index
+    longCrossCtx  := crossCtxNow
+    longWasWith   := regimeLongDominant
+    longOppStrong := longTradeable
+    longEntryDepth := wtLow5
+    longWtDeep    := wtLow5 <= -60
+    longFailed    := false
     inLong  := true
     inShort := false
     posBar  := bar_index
     longEntryPx := close
-if shortSignalRaw
-    shortReentries := shortFresh ? 0 : shortReentries + 1
-    if shortFresh
-        shortOpenPx   := close
-        shortOpenAtr  := riskAtr
-        shortSLlvl    := close + failAtrMult * riskAtr
-        shortOpenBar  := bar_index
-        shortCrossCtx := crossCtxNow
-        shortGradeAt  := shortGradeStr
-        shortWasWith  := regimeShortDominant
-        shortOppStrong := shortOpportunity >= 40
-        shortFailed   := false
+if shortEntrySig
+    shortOpenPx    := close
+    shortOpenAtr   := riskAtr
+    shortSLlvl     := close + failAtrMult * riskAtr
+    shortOpenBar   := bar_index
+    shortCrossCtx  := crossCtxNow
+    shortWasWith   := regimeShortDominant
+    shortOppStrong := shortTradeable
+    shortEntryDepth := wtHigh5
+    shortWtDeep    := wtHigh5 >= 60
+    shortFailed    := false
     inShort := true
     inLong  := false
     posBar  := bar_index
     shortEntryPx := close
+// Hook exits flip the position to flat (after the entry/reverse logic above has run)
+if longHookExit
+    inLong := false
+if shortHookExit
+    inShort := false
 
-// Signals fire on any chart TF; sampled flag is informational only
-longSignal  = longSignalRaw
-shortSignal = shortSignalRaw
-sampledLongSignal  = longSignalRaw  and not chartIsTriggerTf
-sampledShortSignal = shortSignalRaw and not chartIsTriggerTf
+// Entry signals fire on any chart TF; sampled flag is informational only
+longSignal  = longEntrySig
+shortSignal = shortEntrySig
+sampledLongSignal  = longEntrySig  and not chartIsTriggerTf
+sampledShortSignal = shortEntrySig and not chartIsTriggerTf
 
 longNearTip  ="Long Near Setup\nOpportunity: " + str.tostring(longOpportunity, "#.0") + "  (threshold: " + str.tostring(minOpportunityNear, "#.0") + ")\nRegime: " + str.tostring(bullRegime, "#.0") + " vs " + str.tostring(bearRegime, "#.0")
 shortNearTip = "Short Near Setup\nOpportunity: " + str.tostring(shortOpportunity, "#.0") + "  (threshold: " + str.tostring(minOpportunityNear, "#.0") + ")\nRegime: " + str.tostring(bearRegime, "#.0") + " vs " + str.tostring(bullRegime, "#.0")
@@ -866,11 +800,16 @@ if barstate.isconfirmed and bar_index % rotStep == 0
 // Position exits — the opposite signal closes a trade (stop-and-reverse)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// A long is closed by the short that reverses it (and vice versa). inLong/inShort and the
-// flip are resolved in the signal section above; here we only derive the close events for
-// markers and alerts.
-longExit  = inLong[1]  and shortSignal      // the long just got reversed to short
-shortExit = inShort[1] and longSignal       // the short just got reversed to long
+// A position closes when it was open at bar start and is no longer open — covers BOTH a
+// cross-reverse and an early hook-exit to flat. The flip is resolved in the signal section
+// above; here we derive the close events for stats, markers and alerts.
+longExit  = inLong[1]  and not inLong
+shortExit = inShort[1] and not inShort
+// Record HOW it closed so the layer test can compare hook-exit R vs cross-reverse R
+if longExit
+    longExitHookWas := longHookExit
+if shortExit
+    shortExitHookWas := shortHookExit
 
 // Live stats over the loaded history, split Long / Short — measure the config (win rate /
 // avg R / failed %) on the chart, so the knobs can be tuned against numbers and the long vs
@@ -891,10 +830,21 @@ var int   statN_w = 0   // with-trend
 var float statR_w = 0.0
 var int   statN_c = 0   // counter-trend
 var float statR_c = 0.0
-var int   statN_s = 0   // strong setup
+var int   statN_s = 0   // strong setup (tradeable)
 var float statR_s = 0.0
-var int   statN_k = 0   // weak setup
+var int   statN_k = 0   // weak setup (watch)
 var float statR_k = 0.0
+// Exit-type buckets — validates the decoupling: does an early HOOK exit (profit-take at the
+// extreme) actually beat a CROSS reverse exit? And does the depth of the extreme the ENTRY
+// came off (≥60 vs shallow) matter?
+var int   statN_hk = 0  // closed via hook exit (to flat)
+var float statR_hk = 0.0
+var int   statN_rv = 0  // closed via opposite-cross reverse
+var float statR_rv = 0.0
+var int   statN_dp = 0  // deep WT extreme (≥60)
+var float statR_dp = 0.0
+var int   statN_sh = 0  // shallow extreme
+var float statR_sh = 0.0
 if longExit and not na(longOpenPx) and longOpenAtr > 0
     float rr = (close - longOpenPx) / longOpenAtr
     statNL    += 1
@@ -909,6 +859,14 @@ if longExit and not na(longOpenPx) and longOpenAtr > 0
     statR_s := statR_s + (longOppStrong ? rr : 0.0)
     statN_k := statN_k + (longOppStrong ? 0 : 1)
     statR_k := statR_k + (longOppStrong ? 0.0 : rr)
+    statN_hk := statN_hk + (longExitHookWas ? 1 : 0)
+    statR_hk := statR_hk + (longExitHookWas ? rr : 0.0)
+    statN_rv := statN_rv + (longExitHookWas ? 0 : 1)
+    statR_rv := statR_rv + (longExitHookWas ? 0.0 : rr)
+    statN_dp := statN_dp + (longWtDeep ? 1 : 0)
+    statR_dp := statR_dp + (longWtDeep ? rr : 0.0)
+    statN_sh := statN_sh + (longWtDeep ? 0 : 1)
+    statR_sh := statR_sh + (longWtDeep ? 0.0 : rr)
 if shortExit and not na(shortOpenPx) and shortOpenAtr > 0
     float rr = (shortOpenPx - close) / shortOpenAtr
     statNS    += 1
@@ -923,23 +881,40 @@ if shortExit and not na(shortOpenPx) and shortOpenAtr > 0
     statR_s := statR_s + (shortOppStrong ? rr : 0.0)
     statN_k := statN_k + (shortOppStrong ? 0 : 1)
     statR_k := statR_k + (shortOppStrong ? 0.0 : rr)
+    statN_hk := statN_hk + (shortExitHookWas ? 1 : 0)
+    statR_hk := statR_hk + (shortExitHookWas ? rr : 0.0)
+    statN_rv := statN_rv + (shortExitHookWas ? 0 : 1)
+    statR_rv := statR_rv + (shortExitHookWas ? 0.0 : rr)
+    statN_dp := statN_dp + (shortWtDeep ? 1 : 0)
+    statR_dp := statR_dp + (shortWtDeep ? rr : 0.0)
+    statN_sh := statN_sh + (shortWtDeep ? 0 : 1)
+    statR_sh := statR_sh + (shortWtDeep ? 0.0 : rr)
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Signal labels on the price chart (compact / full / none; full detail in the tooltip)
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 if longSignal and labelMode != "None"
-    string longFull = "LONG " + longGradeStr + (longKnife ? " ⚠K" : "") + "\nΔLow " + f_pivDistStr(longPivBars, longPivR) + " · P" + str.tostring(longProx, "#") + "\nO" + str.tostring(longOpportunity, "#") + " Rg" + str.tostring(bullRegime, "#") + " T" + str.tostring(longTiming, "#") + " Q" + str.tostring(longQuality, "#") + "\n" + longQualBreak
-    string longTxt  = labelMode == "Full" ? longFull : "L " + longGradeStr + (longKnife ? "⚠" : "") + "·" + str.tostring(longQuality, "#")
-    label ll = label.new(bar_index, low, longTxt, style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=labelMode == "Full" ? size.small : size.tiny, yloc=yloc.belowbar, force_overlay=true, tooltip=longFull)
+    string longTag  = longTradeable ? "★" : "·"   // ★ = tradeable (opp ≥ threshold), · = watch
+    string longFull = "LONG " + longTag + (longKnife ? " ⚠K" : "") + "\ncross from WT " + str.tostring(longEntryDepth, "#") + (longWtDeep ? " (deep)" : " (shallow)") + "\nΔLow " + f_pivDistStr(longPivBars, longPivR) + " · P" + str.tostring(longProx, "#") + "\nO" + str.tostring(longOpportunity, "#") + " Rg" + str.tostring(bullRegime, "#") + " T" + str.tostring(longTiming, "#") + " Q" + str.tostring(longQuality, "#") + "\n" + longQualBreak
+    string longTxt  = labelMode == "Full" ? longFull : "L" + longTag + (longKnife ? "⚠" : "") + " O" + str.tostring(longOpportunity, "#") + " z" + str.tostring(longEntryDepth, "#")
+    label ll = label.new(bar_index, low, longTxt, style=label.style_label_up, color=color.new(#00c853, longTradeable ? 0 : 45), textcolor=color.white, size=labelMode == "Full" ? size.small : size.tiny, yloc=yloc.belowbar, force_overlay=true, tooltip=longFull)
     if longFresh
         longPosLbl := ll
 if shortSignal and labelMode != "None"
-    string shortFull = "SHORT " + shortGradeStr + (shortKnife ? " ⚠K" : "") + "\nΔHigh " + f_pivDistStr(shortPivBars, shortPivR) + " · P" + str.tostring(shortProx, "#") + "\nO" + str.tostring(shortOpportunity, "#") + " Rg" + str.tostring(bearRegime, "#") + " T" + str.tostring(shortTiming, "#") + " Q" + str.tostring(shortQuality, "#") + "\n" + shortQualBreak
-    string shortTxt  = labelMode == "Full" ? shortFull : "S " + shortGradeStr + (shortKnife ? "⚠" : "") + "·" + str.tostring(shortQuality, "#")
-    label sl = label.new(bar_index, high, shortTxt, style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=labelMode == "Full" ? size.small : size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip=shortFull)
+    string shortTag  = shortTradeable ? "★" : "·"
+    string shortFull = "SHORT " + shortTag + (shortKnife ? " ⚠K" : "") + "\ncross from WT +" + str.tostring(shortEntryDepth, "#") + (shortWtDeep ? " (deep)" : " (shallow)") + "\nΔHigh " + f_pivDistStr(shortPivBars, shortPivR) + " · P" + str.tostring(shortProx, "#") + "\nO" + str.tostring(shortOpportunity, "#") + " Rg" + str.tostring(bearRegime, "#") + " T" + str.tostring(shortTiming, "#") + " Q" + str.tostring(shortQuality, "#") + "\n" + shortQualBreak
+    string shortTxt  = labelMode == "Full" ? shortFull : "S" + shortTag + (shortKnife ? "⚠" : "") + " O" + str.tostring(shortOpportunity, "#") + " z" + str.tostring(shortEntryDepth, "#")
+    label sl = label.new(bar_index, high, shortTxt, style=label.style_label_down, color=color.new(#d50000, shortTradeable ? 0 : 45), textcolor=color.white, size=labelMode == "Full" ? size.small : size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip=shortFull)
     if shortFresh
         shortPosLbl := sl
+
+// Hook-exit-to-flat markers — a small neutral tag where a position was closed early on a hook
+// (profit-take at the extreme) rather than reversed by a cross. Shows the flat periods.
+if longHookExit and labelMode != "None"
+    label.new(bar_index, high, "✕", style=label.style_label_down, color=color.new(color.gray, 25), textcolor=color.white, size=size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip="Long closed early on a bear hook (profit-take at the top) → flat until next cross")
+if shortHookExit and labelMode != "None"
+    label.new(bar_index, low, "✕", style=label.style_label_up, color=color.new(color.gray, 25), textcolor=color.white, size=size.tiny, yloc=yloc.belowbar, force_overlay=true, tooltip="Short closed early on a bull hook (profit-take at the bottom) → flat until next cross")
 
 // ── Failed-signal marking: recolour the entry tag + debug label once price trades the
 //    adverse-ATR distance against the open (where the old stop sat). Studies early entries. ──
@@ -949,7 +924,7 @@ if markFailed and inLong and not longFailed and not na(longSLlvl) and low <= lon
         label.set_color(longPosLbl, failColor)
     if showFailDebug
         int heldBars = bar_index - longOpenBar
-        string dbg = "FAILED LONG " + longGradeAt + "\nx" + str.tostring(longCrossCtx, "#") + " crosses in " + str.tostring(failCrossLookback) + "b before entry\nheld " + str.tostring(heldBars) + "b → -" + str.tostring(failAtrMult, "#.0") + "R\nentry " + str.tostring(longEntryPx, format.mintick)
+        string dbg = "FAILED LONG " + (longOppStrong ? "★" : "·") + "\ncross from WT " + str.tostring(longEntryDepth, "#") + (longWtDeep ? " (deep)" : " (SHALLOW)") + "\nx" + str.tostring(longCrossCtx, "#") + " crosses in " + str.tostring(failCrossLookback) + "b before entry\nheld " + str.tostring(heldBars) + "b → -" + str.tostring(failAtrMult, "#.0") + "R\nentry " + str.tostring(longEntryPx, format.mintick)
         label.new(bar_index, low, dbg, style=label.style_label_up, color=failColor, textcolor=color.white, size=size.small, yloc=yloc.belowbar, force_overlay=true)
 if markFailed and inShort and not shortFailed and not na(shortSLlvl) and high >= shortSLlvl
     shortFailed := true
@@ -957,7 +932,7 @@ if markFailed and inShort and not shortFailed and not na(shortSLlvl) and high >=
         label.set_color(shortPosLbl, failColor)
     if showFailDebug
         int heldBars = bar_index - shortOpenBar
-        string dbg = "FAILED SHORT " + shortGradeAt + "\nx" + str.tostring(shortCrossCtx, "#") + " crosses in " + str.tostring(failCrossLookback) + "b before entry\nheld " + str.tostring(heldBars) + "b → -" + str.tostring(failAtrMult, "#.0") + "R\nentry " + str.tostring(shortEntryPx, format.mintick)
+        string dbg = "FAILED SHORT " + (shortOppStrong ? "★" : "·") + "\ncross from WT +" + str.tostring(shortEntryDepth, "#") + (shortWtDeep ? " (deep)" : " (SHALLOW)") + "\nx" + str.tostring(shortCrossCtx, "#") + " crosses in " + str.tostring(failCrossLookback) + "b before entry\nheld " + str.tostring(heldBars) + "b → -" + str.tostring(failAtrMult, "#.0") + "R\nentry " + str.tostring(shortEntryPx, format.mintick)
         label.new(bar_index, high, dbg, style=label.style_label_down, color=failColor, textcolor=color.white, size=size.small, yloc=yloc.abovebar, force_overlay=true)
 
 // Pivot → signal connectors: visualise how far the entry sits from the swing extreme
@@ -1041,9 +1016,11 @@ if longSetupStart and longSetupWtOk
 if shortSetupStart and shortSetupWtOk
     label.new(bar_index, high, "SS", style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip=shortSetupTip)
 
-// Green on exact Trigger TF, orange when sampled from a different chart TF
-plotshape(longSignal  ? -82 : na, title="Long Signal (Pane)",  style=shape.triangleup,   location=location.absolute, color=sampledLongSignal  ? color.new(#ff6f00, 0) : color.new(#00c853, 0), size=size.tiny)
-plotshape(shortSignal ? 82  : na, title="Short Signal (Pane)", style=shape.triangledown, location=location.absolute, color=sampledShortSignal ? color.new(#ff6f00, 0) : color.new(#d50000, 0), size=size.tiny)
+// Entry marker placed AT the WT cross (on the WT1 line) — so you can see at a glance whether
+// the entry actually sits on a real WT1/WT2 cross and where on the oscillator it fired.
+// Full colour = tradeable (opp ≥ threshold), dimmed = watch; orange overrides when sampled.
+plotshape(longSignal  ? plotWT1 : na, title="Long Signal (Pane)",  style=shape.triangleup,   location=location.absolute, color=sampledLongSignal  ? color.new(#ff6f00, 0) : color.new(#00c853, longTradeable  ? 0 : 60), size=size.small)
+plotshape(shortSignal ? plotWT1 : na, title="Short Signal (Pane)", style=shape.triangledown, location=location.absolute, color=sampledShortSignal ? color.new(#ff6f00, 0) : color.new(#d50000, shortTradeable ? 0 : 60), size=size.small)
 
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1172,8 +1149,8 @@ if showDashboard and barstate.islast
     table.cell(dash, 2, 3, str.tostring(shortTiming, "#.0"), text_color=tc, text_size=size.tiny)
 
     table.cell(dash, 0, 4, "Quality", text_color=tc, text_size=size.tiny)
-    table.cell(dash, 1, 4, str.tostring(longQuality, "#.0") + " " + longGradeStr,  text_color=longGradeA ? cGood : longGradeB ? color.new(#ff6f00, 0) : tc, text_size=size.tiny)
-    table.cell(dash, 2, 4, str.tostring(shortQuality, "#.0") + " " + shortGradeStr, text_color=shortGradeA ? cBad  : shortGradeB ? color.new(#ff6f00, 0) : tc, text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(longQuality, "#.0") + (longTradeable ? " ★" : ""),  text_color=longTradeable ? cGood : tc, text_size=size.tiny)
+    table.cell(dash, 2, 4, str.tostring(shortQuality, "#.0") + (shortTradeable ? " ★" : ""), text_color=shortTradeable ? cBad : tc, text_size=size.tiny)
 
     table.cell(dash, 0, 5, "Final", text_color=tc, text_size=size.tiny)
     table.cell(dash, 1, 5, str.tostring(longFinal, "#.0"), text_color=tc, text_size=size.tiny)
@@ -1208,9 +1185,9 @@ if showDashboard and barstate.islast
 
     table.cell(dash, 0, 10, "WT Trigger", text_color=tc, text_size=size.tiny)
     table.cell(dash, 1, 10, h1BullTrigger ? triggerTfBelowChart ? "⚠" : "✓" : "–", text_color=h1BullTrigger ? triggerTfBelowChart ? color.new(#ff6f00, 0) : cGood : tc, text_size=size.tiny,
-         tooltip=h1BullTrigger and triggerTfBelowChart ? "Sampled lower-TF WT trigger. Switch chart to Trigger TF for actionable entry." : h1BullCross ? "WT bull cross" : h1BullTurn ? "WT bull turn from extended zone" : h1BullVel ? "WT bull velocity turn (sharp shallow reversal)" : h1BullExhaust ? "WT bull exhaustion reversal (hook from deep oversold)" : "")
+         tooltip=h1BullTrigger and triggerTfBelowChart ? "Sampled lower-TF WT trigger. Switch chart to Trigger TF for actionable entry." : h1BullCross ? "WT bull cross" : h1BullTurn ? "WT bull turn from extended zone" : h1BullExhaust ? "WT bull exhaustion reversal (hook from deep oversold)" : "")
     table.cell(dash, 2, 10, h1BearTrigger ? triggerTfBelowChart ? "⚠" : "✓" : "–", text_color=h1BearTrigger ? triggerTfBelowChart ? color.new(#ff6f00, 0) : cBad : tc, text_size=size.tiny,
-         tooltip=h1BearTrigger and triggerTfBelowChart ? "Sampled lower-TF WT trigger. Switch chart to Trigger TF for actionable entry." : h1BearCross ? "WT bear cross" : h1BearTurn ? "WT bear turn from extended zone" : h1BearVel ? "WT bear velocity turn (sharp shallow reversal)" : h1BearExhaust ? "WT bear exhaustion reversal (hook from deep overbought)" : "")
+         tooltip=h1BearTrigger and triggerTfBelowChart ? "Sampled lower-TF WT trigger. Switch chart to Trigger TF for actionable entry." : h1BearCross ? "WT bear cross" : h1BearTurn ? "WT bear turn from extended zone" : h1BearExhaust ? "WT bear exhaustion reversal (hook from deep overbought)" : "")
 
     string stL = longBias ? "BIAS" : "–"
     color stLBg = color.new(color.gray, 80)
@@ -1317,9 +1294,11 @@ if showStats and barstate.islast
     table.cell(statsTbl, 1, 5, str.tostring(failL, "#") + "%", text_color=failL >= 50 ? cBad : tc, text_size=size.tiny)
     table.cell(statsTbl, 2, 5, str.tostring(failS, "#") + "%", text_color=failS >= 50 ? cBad : tc, text_size=size.tiny)
 
-// Layer test: avg R by Regime alignment (with / counter) and Setup strength (strong / weak).
-// If a pair separates clearly, that layer is a real filter; if not, it is dead weight.
-var table layerTbl = table.new(position.middle_right, 3, 5,
+// Layer test: avg R per situational bucket. If a pair/group separates clearly, that layer is a
+// real, situation-driven filter; if not, it is dead weight. Regime (with/counter) and Setup
+// (tradeable/watch) proved flat on the full sample; trigger-type and WT-extreme-depth are the
+// new hypotheses for the long/short asymmetry.
+var table layerTbl = table.new(position.middle_right, 3, 9,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -1331,6 +1310,10 @@ if showStats and barstate.islast
     float arC = statN_c > 0 ? statR_c / float(statN_c) : 0.0
     float arS = statN_s > 0 ? statR_s / float(statN_s) : 0.0
     float arK = statN_k > 0 ? statR_k / float(statN_k) : 0.0
+    float arHk = statN_hk > 0 ? statR_hk / float(statN_hk) : 0.0
+    float arRv = statN_rv > 0 ? statR_rv / float(statN_rv) : 0.0
+    float arDp = statN_dp > 0 ? statR_dp / float(statN_dp) : 0.0
+    float arSh = statN_sh > 0 ? statR_sh / float(statN_sh) : 0.0
     table.cell(layerTbl, 0, 0, "Layer", text_color=tc, bgcolor=hd, text_size=size.small)
     table.cell(layerTbl, 1, 0, "AvgR", text_color=tc, bgcolor=hd, text_size=size.small)
     table.cell(layerTbl, 2, 0, "N", text_color=tc, bgcolor=hd, text_size=size.small)
@@ -1340,12 +1323,25 @@ if showStats and barstate.islast
     table.cell(layerTbl, 0, 2, "Regime−", text_color=tc, text_size=size.tiny)
     table.cell(layerTbl, 1, 2, str.tostring(arC, "+0.00;-0.00"), text_color=f_avgRcol(arC), text_size=size.tiny)
     table.cell(layerTbl, 2, 2, str.tostring(statN_c), text_color=tc, text_size=size.tiny)
-    table.cell(layerTbl, 0, 3, "Setup+", text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 0, 3, "Trade✓", text_color=tc, text_size=size.tiny)
     table.cell(layerTbl, 1, 3, str.tostring(arS, "+0.00;-0.00"), text_color=f_avgRcol(arS), text_size=size.tiny)
     table.cell(layerTbl, 2, 3, str.tostring(statN_s), text_color=tc, text_size=size.tiny)
-    table.cell(layerTbl, 0, 4, "Setup−", text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 0, 4, "Watch", text_color=tc, text_size=size.tiny)
     table.cell(layerTbl, 1, 4, str.tostring(arK, "+0.00;-0.00"), text_color=f_avgRcol(arK), text_size=size.tiny)
     table.cell(layerTbl, 2, 4, str.tostring(statN_k), text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 0, 5, "HookExit", text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 1, 5, str.tostring(arHk, "+0.00;-0.00"), text_color=f_avgRcol(arHk), text_size=size.tiny)
+    table.cell(layerTbl, 2, 5, str.tostring(statN_hk), text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 0, 6, "CrossRev", text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 1, 6, str.tostring(arRv, "+0.00;-0.00"), text_color=f_avgRcol(arRv), text_size=size.tiny)
+    table.cell(layerTbl, 2, 6, str.tostring(statN_rv), text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 0, 7, "Deep≥60", text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 1, 7, str.tostring(arDp, "+0.00;-0.00"), text_color=f_avgRcol(arDp), text_size=size.tiny)
+    table.cell(layerTbl, 2, 7, str.tostring(statN_dp), text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 0, 8, "Shallow", text_color=tc, text_size=size.tiny)
+    table.cell(layerTbl, 1, 8, str.tostring(arSh, "+0.00;-0.00"), text_color=f_avgRcol(arSh), text_size=size.tiny)
+    table.cell(layerTbl, 2, 8, str.tostring(statN_sh), text_color=tc, text_size=size.tiny)
+
 
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Alerts
@@ -1353,9 +1349,9 @@ if showStats and barstate.islast
 
 alertcondition(longSignal,                title="MTF WT Hunter Long",              message="LONG setup on {{ticker}} | Regime + Pullback + WT trigger")
 alertcondition(shortSignal,               title="MTF WT Hunter Short",             message="SHORT setup on {{ticker}} | Regime + Pullback + WT trigger")
-alertcondition(longSignal and longGradeA, title="MTF WT Hunter Long (Grade A)",    message="LONG Grade A setup on {{ticker}}")
-alertcondition(shortSignal and shortGradeA, title="MTF WT Hunter Short (Grade A)", message="SHORT Grade A setup on {{ticker}}")
+alertcondition(longSignal and longTradeable, title="MTF WT Hunter Long (Tradeable)",   message="LONG tradeable signal on {{ticker}} — opportunity ≥ threshold")
+alertcondition(shortSignal and shortTradeable, title="MTF WT Hunter Short (Tradeable)", message="SHORT tradeable signal on {{ticker}} — opportunity ≥ threshold")
 alertcondition(sampledLongSignal,         title="MTF WT Hunter Long (Sampled)",    message="LONG sampled signal on {{ticker}} — chart TF ≠ Trigger TF, verify on Trigger TF")
 alertcondition(sampledShortSignal,        title="MTF WT Hunter Short (Sampled)",   message="SHORT sampled signal on {{ticker}} — chart TF ≠ Trigger TF, verify on Trigger TF")
-alertcondition(longExit,                  title="MTF WT Hunter Long Closed",       message="LONG closed — reversed to short on {{ticker}}")
-alertcondition(shortExit,                 title="MTF WT Hunter Short Closed",      message="SHORT closed — reversed to long on {{ticker}}")
+alertcondition(longExit,                  title="MTF WT Hunter Long Closed",       message="LONG closed on {{ticker}} — hook-exit to flat or reversed by a bear cross")
+alertcondition(shortExit,                 title="MTF WT Hunter Short Closed",      message="SHORT closed on {{ticker}} — hook-exit to flat or reversed by a bull cross")
