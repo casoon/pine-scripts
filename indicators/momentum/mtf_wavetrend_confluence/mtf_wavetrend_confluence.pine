@@ -1,0 +1,350 @@
+//@version=6
+// ============================================================================
+// MTF WaveTrend — Tide / Wave / Ripple [WavesUnchained]
+// Version: 0.5
+// Author: WavesUnchained
+// Build: 2026-06-17 15:40:00
+// ============================================================================
+// Markets are nested cycles, so the timeframes contradict each other by nature —
+// that is information, not error. This reads WaveTrend across three FIXED-role
+// horizons and decodes the nesting instead of forcing one "optimal" signal:
+//
+//   Tide   (long  · default 1D)  → bias / regime         — same on every chart
+//   Wave   (mid   · default 4h)  → the tradeable setup    — same on every chart
+//   Ripple (short · CHART TF)    → the entry timing (cross)
+//
+// You look in ONE place: the Ripple cross on your chart IS the signal (both
+// directions, every TF). Nothing gates it — it is GRADED 0–4 by its own extreme
+// depth plus Wave/Tide/Stoch agreement (strong = bold, weak = dim). Quality is
+// shown, never suppressed; depth lets a real reversal survive even when every
+// higher TF still lags the turn. Every TF stays symmetric, not long-biased.
+//
+// WaveTrend is the centre; two thin stabilisers keep the cross honest:
+//   ✓ Price/WT Divergence   (the classic exhaustion confirm)
+//   ✓ StochRSI agreement    (a cheap second oscillator)
+//
+// ============================================================================
+
+indicator("MTF WaveTrend Tide/Wave/Ripple [WavesUnchained]", shorttitle="WT TWR", overlay=false, max_labels_count=300, max_lines_count=500)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+g_wt = "WaveTrend"
+n1 = input.int(10, "Channel Length", minval=2, group=g_wt)
+n2 = input.int(21, "Average Length", minval=2, group=g_wt)
+wtSmooth = input.string("HMA", "WT Smoothing", options=["EMA", "RMA", "SMA", "WMA", "HMA", "JMA"], group=g_wt,
+     tooltip="MA used to smooth WaveTrend (WT1). EMA = raw LazyBear. HMA = low-lag Hull (default). JMA = Jurik. Heavier smoothing = fewer noisy crosses, a little more lag.")
+jmaLen = input.int(6, "JMA Smoothing Length", minval=2, maxval=30, group=g_wt)
+obLevel1 = input.float(60, "Overbought (phase extreme)", group=g_wt)
+osLevel1 = input.float(-60, "Oversold (phase extreme)", group=g_wt)
+
+g_hz = "Horizons (Tide/Wave fixed = same on every chart; Ripple = chart TF)"
+tideTf = input.timeframe("D",   "Tide TF (long-term bias)",  group=g_hz)
+waveTf = input.timeframe("240", "Wave TF (mid-term setup)",  group=g_hz)
+
+g_sig = "Ripple Trigger"
+zoneLevel = input.float(25, "Trigger Zone (|WT| ≥)", minval=0, maxval=80, group=g_sig,
+     tooltip="The Ripple (chart) cross only triggers if WT reached this deep into oversold (long) / overbought (short) within the last 4 bars — filters mid-range continuation crosses.")
+cooldownBars = input.int(8, "Cooldown (bars, thin repeats)", minval=0, maxval=100, group=g_sig,
+     tooltip="Minimum bars between two same-direction signals — collapses the close-together repeats within one wave-leg to the first. 0 = show every trigger.")
+minGrade = input.int(1, "Min Grade (0–4)", minval=0, maxval=4, group=g_sig,
+     tooltip="Every Ripple cross is GRADED 0–4: +1 for a deep extreme (|WT| ≥ OB level), +1 each for Wave-Dir, Tide-Dir and Wave-StochRSI agreement — never suppressed by direction. Show only signals at or above this grade. 0 = every cross; 1 = a deep reversal OR one HTF aligned (catches top/bottom reversals even when the HTFs still lag); 4 = deep AND fully aligned.")
+
+g_stab = "Grade components & Premium"
+useWaveStoch = input.bool(true, "Wave StochRSI in grade", group=g_stab,
+     tooltip="Counts the WAVE (4h) StochRSI toward the grade: +1 when K is rising with room for a long (falling for a short). A second-oscillator MTF agreement. Off = grade is Wave + Tide only (max 2).")
+useDiv = input.bool(true, "Divergence ★ premium marker", group=g_stab,
+     tooltip="Does NOT gate the signal (too rare). When a price/WT divergence is present at a signal, it is marked ★ = high-conviction reversal.")
+divLb = input.int(5, "Divergence Pivot Bars", minval=2, maxval=20, group=g_stab)
+divWin = input.int(6, "Divergence Window (bars)", minval=1, maxval=30, group=g_stab)
+srRsiLen = input.int(14, "StochRSI: RSI Length", group=g_stab)
+srStochLen = input.int(14, "StochRSI: Stoch Length", group=g_stab)
+srK = input.int(3, "StochRSI: K", group=g_stab)
+srD = input.int(3, "StochRSI: D", group=g_stab)
+srOs = input.float(20, "StochRSI Oversold", group=g_stab)
+srOb = input.float(80, "StochRSI Overbought", group=g_stab)
+
+g_vis = "Visuals & Logging"
+showTable = input.bool(true, "Show Horizon Phase Map", group=g_vis)
+enableLog = input.bool(true, "Log Trade Signals", group=g_vis)
+debugCand = input.bool(false, "Debug: log trigger candidates", group=g_vis,
+     tooltip="Logs EVERY ripple cross out of the zone (long/short candidate) and which gate blocks it. Turn on, run on 15m and on 1h, and compare the SHORT-CAND lines — that shows whether the 1h simply has fewer short candidates or whether a filter is blocking them.")
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+f_jma(float src, int length, float phase, float power) =>
+    float phaseRatio = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100 + 1.5
+    float beta = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    float alpha = math.pow(beta, power)
+    var float e0 = 0.0
+    var float e1 = 0.0
+    var float e2 = 0.0
+    var float jma = 0.0
+    e0 := (1 - alpha) * src + alpha * nz(e0[1])
+    e1 := (src - e0) * (1 - beta) + beta * nz(e1[1])
+    e2 := (e0 + phaseRatio * e1 - nz(jma[1], src)) * math.pow(1 - alpha, 2) + math.pow(alpha, 2) * nz(e2[1])
+    jma := e2 + nz(jma[1], src)
+    jma
+
+f_smooth(float src, int length, string mode) =>
+    switch mode
+        "EMA" => ta.ema(src, length)
+        "RMA" => ta.rma(src, length)
+        "SMA" => ta.sma(src, length)
+        "WMA" => ta.wma(src, length)
+        "HMA" => ta.hma(src, length)
+        "JMA" => f_jma(src, jmaLen, 0.0, 2.0)
+        => ta.ema(src, length)
+
+// LazyBear WaveTrend with selectable smoothing — the single core primitive
+f_wt() =>
+    float ap = hlc3
+    float esa = ta.ema(ap, n1)
+    float d = ta.ema(math.abs(ap - esa), n1)
+    float ci = (ap - esa) / (0.015 * d)
+    float wt1 = f_smooth(ci, n2, wtSmooth)
+    float wt2 = ta.sma(wt1, 4)
+    [wt1, wt2]
+
+// Wave horizon: WT + its own StochRSI (the real second-oscillator confirm)
+f_waveData() =>
+    [w1, w2] = f_wt()
+    float r = ta.rsi(close, srRsiLen)
+    float st = ta.stoch(r, r, r, srStochLen)
+    float k = ta.sma(st, srK)
+    float dd = ta.sma(k, srD)
+    [w1, w2, k, dd]
+
+// Phase of a horizon from WT position + slope: 0 Boden, 1 Auf, 2 Top, 3 Ab
+f_phase(float w1, float w2) =>
+    bool up = w1 > w2
+    bool os = w1 <= osLevel1
+    bool ob = w1 >= obLevel1
+    up ? (os ? 0 : 1) : (ob ? 2 : 3)
+f_phaseName(int p) => p == 0 ? "Boden" : p == 1 ? "Auf" : p == 2 ? "Top" : "Ab"
+f_phaseCol(int p)  => p == 0 ? color.new(#00c853, 0) : p == 1 ? color.new(#00c853, 45) : p == 2 ? color.new(#d50000, 0) : color.new(#d50000, 45)
+
+// Regular divergence of an oscillator vs price at its pivots
+f_div(float osc, int lb) =>
+    bool plF = not na(ta.pivotlow(osc, lb, lb))
+    bool phF = not na(ta.pivothigh(osc, lb, lb))
+    float curOscL  = ta.valuewhen(plF, osc[lb], 0)
+    float prevOscL = ta.valuewhen(plF, osc[lb], 1)
+    float curLowP  = ta.valuewhen(plF, low[lb], 0)
+    float prevLowP = ta.valuewhen(plF, low[lb], 1)
+    bool bull = plF and curOscL > prevOscL and curLowP < prevLowP
+    float curOscH  = ta.valuewhen(phF, osc[lb], 0)
+    float prevOscH = ta.valuewhen(phF, osc[lb], 1)
+    float curHighP = ta.valuewhen(phF, high[lb], 0)
+    float prevHighP = ta.valuewhen(phF, high[lb], 1)
+    bool bear = phF and curOscH < prevOscH and curHighP > prevHighP
+    [bull, bear]
+
+f_tfName(string tf) => tf == "" ? timeframe.period : tf
+
+// ============================================================================
+// Layer 1 — WaveTrend engine per horizon
+// ============================================================================
+
+// Ripple = chart TF (native, exact timing)
+[rw1, rw2] = f_wt()
+// Tide / Wave = fixed higher TFs (same on every chart)
+[ww1, ww2, wk, wd] = request.security(syminfo.tickerid, waveTf, f_waveData(), lookahead=barmerge.lookahead_off)
+[tw1, tw2] = request.security(syminfo.tickerid, tideTf, f_wt(), lookahead=barmerge.lookahead_off)
+
+// ============================================================================
+// Layer 2 — Phase map
+// ============================================================================
+
+int ripplePh = f_phase(rw1, rw2)
+int wavePh   = f_phase(ww1, ww2)
+int tidePh   = f_phase(tw1, tw2)
+bool rippleUp = rw1 > rw2
+bool waveUp = ww1 > ww2
+bool tideUp = tw1 > tw2
+
+// ============================================================================
+// Layer 3 — Signal: Ripple cross × Wave/Tide phase × stabiliser
+// ============================================================================
+
+rippleBull = ta.crossover(rw1, rw2)
+rippleBear = ta.crossunder(rw1, rw2)
+// TRIGGER = the Ripple (chart) cross out of its OWN extreme zone — both directions, every TF.
+// The Wave/Tide do NOT gate it: a hard wave-direction gate starved shorts on every TF below the
+// Wave, because the Wave WT lags the faster top (at the chart top the 4h still reads "up", so the
+// short was suppressed). On the 4h chart Ripple == Wave, so the gate was trivially satisfied and
+// only the 4h looked correct. Now the cross is the signal; Wave/Tide GRADE it (see below).
+zoneBull = ta.lowest(rw1, 4) <= -zoneLevel
+zoneBear = ta.highest(rw1, 4) >=  zoneLevel
+longTrig  = rippleBull and zoneBull
+shortTrig = rippleBear and zoneBear
+
+// Wave (4h) StochRSI with room: rising & not overbought for a long, falling & not oversold for a
+// short. A real second oscillator on the higher TF — now a GRADE component, not a gate.
+bool waveStochBull = wk > wd and wk < srOb
+bool waveStochBear = wk < wd and wk > srOs
+
+// Signal STRENGTH — a cross from a DEEP extreme (|WT| ≥ obLevel1, not just the ≥zoneLevel trigger)
+// is a high-quality reversal on its own merit. This is the key: a real top/bottom reversal cannot
+// have HTF agreement (the Wave/Tide lag the turn), so without a depth component the strongest
+// reversals grade 0 and get filtered (e.g. the 06-04 top short in an uptrend). Depth fixes that.
+bool longDeep  = ta.lowest(rw1, 4)  <= -obLevel1
+bool shortDeep = ta.highest(rw1, 4) >=  obLevel1
+
+// GRADE 0..4 — signal strength (depth) + alignment with the bigger picture (Wave + Tide + Stoch).
+// NOT a direction filter: a shallow cross against everything still fires (grade 0), shown dim. A
+// deep reversal scores ≥1 even when every HTF lags, so it survives the floor. Graded, not suppressed.
+int longGrade  = (longDeep ? 1 : 0)  + (waveUp ? 1 : 0)     + (tideUp ? 1 : 0)     + (useWaveStoch and waveStochBull ? 1 : 0)
+int shortGrade = (shortDeep ? 1 : 0) + (not waveUp ? 1 : 0) + (not tideUp ? 1 : 0) + (useWaveStoch and waveStochBear ? 1 : 0)
+
+// PREMIUM ★ — divergence does not gate (too rare), it only marks high-conviction reversals
+[bullDiv, bearDiv] = f_div(rw1, divLb)
+bool bullPrem = useDiv and ta.barssince(bullDiv) <= divWin
+bool bearPrem = useDiv and ta.barssince(bearDiv) <= divWin
+
+// Cooldown thins repeated same-direction signals down to one per stretch
+var int lastLongBar  = -100000
+var int lastShortBar = -100000
+bool longCool  = bar_index - lastLongBar  >= cooldownBars
+bool shortCool = bar_index - lastShortBar >= cooldownBars
+longSignal  = longTrig  and longGrade  >= minGrade and longCool
+shortSignal = shortTrig and shortGrade >= minGrade and shortCool
+if longSignal
+    lastLongBar := bar_index
+if shortSignal
+    lastShortBar := bar_index
+// high grade = aligned with the bigger trend → bold; low grade = counter → dim
+withLong  = longSignal  and longGrade  >= 2
+withShort = shortSignal and shortGrade >= 2
+
+// ============================================================================
+// Resolution (B) — a position opened by a signal is RESOLVED by an opposite
+// Ripple extreme-cross (the short-term recovery the other way), even if the Wave
+// has not flipped yet. The original signal STAYS; a connector shows the outcome:
+// green = it worked, red = it failed. Failures are answered, not hidden.
+// ============================================================================
+var int   posDir   = 0       // 0 flat, 1 long, -1 short
+var int   entryBar = na
+var float entryPx  = na
+
+bool ripBearTop = rippleBear and ta.highest(rw1, 4) >=  zoneLevel   // ripple rolls over from the top zone
+bool ripBullBot = rippleBull and ta.lowest(rw1, 4)  <= -zoneLevel   // ripple turns up from the bottom zone
+bool closeLong  = posDir ==  1 and (ripBearTop or shortSignal)
+bool closeShort = posDir == -1 and (ripBullBot or longSignal)
+if closeLong or closeShort
+    bool win = posDir == 1 ? close >= entryPx : close <= entryPx
+    line.new(entryBar, entryPx, bar_index, close, color = win ? color.new(#00c853, 25) : color.new(#d50000, 15), width = 1, force_overlay = true)
+    posDir := 0
+// open a fresh position when a signal fires while flat
+if longSignal and posDir == 0
+    posDir   := 1
+    entryBar := bar_index
+    entryPx  := close
+if shortSignal and posDir == 0
+    posDir   := -1
+    entryBar := bar_index
+    entryPx  := close
+// resolution markers — a small ✕ at the close point (opposite side), visible without the line
+plotshape(closeLong,  "Long resolved",  shape.xcross, location.abovebar, color.new(color.gray, 20), size=size.tiny, force_overlay=true)
+plotshape(closeShort, "Short resolved", shape.xcross, location.belowbar, color.new(color.gray, 20), size=size.tiny, force_overlay=true)
+
+// ============================================================================
+// Oscillator pane (Ripple = chart TF)
+// ============================================================================
+
+plot(0, "Zero", color=color.new(color.gray, 50))
+plot(obLevel1, "OB", color=color.new(#d50000, 60), style=plot.style_linebr)
+plot(osLevel1, "OS", color=color.new(#00c853, 60), style=plot.style_linebr)
+plot(rw1 - rw2, "WT Hist", color=rw1 - rw2 >= 0 ? color.new(#00c853, 80) : color.new(#d50000, 80), style=plot.style_area)
+plot(rw1, "WT1", color=color.new(#00bcd4, 0), linewidth=2)
+plot(rw2, "WT2", color=color.new(color.gray, 20), linewidth=1)
+plot((longSignal or shortSignal) ? rw2 : na, "Signal", color=longSignal ? color.new(#00e676, 0) : color.new(#d50000, 0), style=plot.style_circles, linewidth=4)
+
+// ============================================================================
+// Signals on the PRICE chart — with-trend = bold, counter-tide = dim
+// ============================================================================
+
+plotshape(withLong,                  "Long (high grade)",   shape.triangleup,   location.belowbar, color.new(#00e676, 0),  size=size.small, force_overlay=true)
+plotshape(withShort,                 "Short (high grade)",  shape.triangledown, location.abovebar, color.new(#d50000, 0),  size=size.small, force_overlay=true)
+plotshape(longSignal  and not withLong,  "Long (low grade)",  shape.triangleup,   location.belowbar, color.new(#00e676, 60), size=size.tiny, force_overlay=true)
+plotshape(shortSignal and not withShort, "Short (low grade)", shape.triangledown, location.abovebar, color.new(#d50000, 60), size=size.tiny, force_overlay=true)
+
+f_sigTip(bool isLong, int grade, bool prem) =>
+    (isLong ? "LONG" : "SHORT") + " · Grade " + str.tostring(grade) + "/4" + (grade >= 2 ? " (stark)" : grade == 1 ? " (tiefes Extrem / teil-aligned)" : " (flach · counter)") + (prem ? " · ★ Divergenz" : "") + "\nWave " + f_phaseName(wavePh) + " · Tide " + f_phaseName(tidePh) + " · Ripple " + f_phaseName(ripplePh) + "\nGrade = Tiefe + Wave-Dir + Tide-Dir" + (useWaveStoch ? " + Wave-Stoch" : "")
+if longSignal
+    label.new(bar_index, low, "▲" + str.tostring(longGrade) + (bullPrem ? "★" : ""), style=label.style_label_up, color=color.new(#00e676, withLong ? 0 : 55), textcolor=color.white, size=size.tiny, yloc=yloc.belowbar, force_overlay=true, tooltip=f_sigTip(true, longGrade, bullPrem))
+if shortSignal
+    label.new(bar_index, high, "▼" + str.tostring(shortGrade) + (bearPrem ? "★" : ""), style=label.style_label_down, color=color.new(#d50000, withShort ? 0 : 55), textcolor=color.white, size=size.tiny, yloc=yloc.abovebar, force_overlay=true, tooltip=f_sigTip(false, shortGrade, bearPrem))
+
+// ============================================================================
+// Horizon Phase Map table + verdict (same on every chart for Tide/Wave)
+// ============================================================================
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table t = table.new(position.top_right, 3, 7,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+f_hrow(int row, string name, string tf, int ph, bool up) =>
+    table.cell(t, 0, row, name + " " + tf, text_color=tc, text_size=size.small)
+    table.cell(t, 1, row, f_phaseName(ph), text_color=f_phaseCol(ph), text_size=size.small)
+    table.cell(t, 2, row, up ? "↑" : "↓", text_color=up ? color.new(#00c853, 0) : color.new(#d50000, 0), text_size=size.small)
+
+if showTable and barstate.islast
+    table.cell(t, 0, 0, "Horizon", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, "Phase",   text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 2, 0, "Dir",     text_color=tc, bgcolor=hd, text_size=size.small)
+    f_hrow(1, "Tide",   f_tfName(tideTf), tidePh, tideUp)
+    f_hrow(2, "Wave",   f_tfName(waveTf), wavePh, waveUp)
+    f_hrow(3, "Ripple", f_tfName(""),     ripplePh, rippleUp)
+    // Verdict — the live grade a Ripple cross in each direction would earn right now (signal = the
+    // cross, graded 0–4 by depth + Wave+Tide+Wave-Stoch). Neither side is gated; grade = conviction.
+    string vSetup = "Long G" + str.tostring(longGrade) + "   ·   Short G" + str.tostring(shortGrade)
+    color vCol = longGrade > shortGrade ? color.new(#00c853, 0) : shortGrade > longGrade ? color.new(#d50000, 0) : tc
+    string vState = waveUp ? (ww1 >= obLevel1 ? "Wave auf · gestreckt (Long-Grade fällt)" : "Wave auf · Raum") : (ww1 <= osLevel1 ? "Wave ab · gestreckt (Short-Grade fällt)" : "Wave ab · Raum")
+    table.cell(t, 0, 4, "Grade", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 4, vSetup, text_color=vCol, text_size=size.small)
+    table.merge_cells(t, 1, 4, 2, 4)
+    table.cell(t, 0, 5, "Wave", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 5, vState, text_color=tc, text_size=size.small)
+    table.merge_cells(t, 1, 5, 2, 5)
+    string posTxt = posDir == 1 ? "LONG offen" : posDir == -1 ? "SHORT offen" : "flat"
+    color posCol = posDir == 1 ? color.new(#00c853, 0) : posDir == -1 ? color.new(#d50000, 0) : tc
+    table.cell(t, 0, 6, "Position", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 6, posTxt, text_color=posCol, text_size=size.small)
+    table.merge_cells(t, 1, 6, 2, 6)
+
+// ============================================================================
+// Logging — each trade signal with the full horizon read (measurable)
+// ============================================================================
+
+if enableLog and (longSignal or shortSignal)
+    string dir = longSignal ? "LONG" : "SHORT"
+    int gr = longSignal ? longGrade : shortGrade
+    bool prem = longSignal ? bullPrem : bearPrem
+    log.info("TWR " + dir + " G" + str.tostring(gr) + (prem ? " ★" : "") + " | Tide=" + f_phaseName(tidePh) + " Wave=" + f_phaseName(wavePh) + " Ripple=" + f_phaseName(ripplePh) + " | rippleWT=" + str.tostring(rw1, "#.0") + " waveStochK=" + str.tostring(wk, "#"))
+
+// Diagnostic — every trigger CANDIDATE (a ripple cross out of the zone) and which gate it hits.
+// Run on 15m and 1h and compare: are there fewer short candidates, or are they being blocked?
+if debugCand and rippleBear and zoneBear
+    log.info("SHORT-CAND | waveDown=" + (not waveUp ? "Y" : "N") + " waveRoom=" + (ww1 > osLevel1 ? "Y" : "N") + " stochBear=" + (waveStochBear ? "Y" : "N") + " cool=" + (shortCool ? "Y" : "N") + " → " + (shortSignal ? "SIGNAL" : "blocked") + " | Wave=" + f_phaseName(wavePh) + " rippleWT=" + str.tostring(rw1, "#") + " waveStochK=" + str.tostring(wk, "#"))
+if debugCand and rippleBull and zoneBull
+    log.info("LONG-CAND  | waveUp="   + (waveUp ? "Y" : "N")     + " waveRoom=" + (ww1 < obLevel1 ? "Y" : "N") + " stochBull=" + (waveStochBull ? "Y" : "N") + " cool=" + (longCool  ? "Y" : "N") + " → " + (longSignal  ? "SIGNAL" : "blocked") + " | Wave=" + f_phaseName(wavePh) + " rippleWT=" + str.tostring(rw1, "#") + " waveStochK=" + str.tostring(wk, "#"))
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertcondition(withLong,  title="TWR Long (with Tide)",  message="WT Tide/Wave/Ripple LONG with-trend on {{ticker}}")
+alertcondition(withShort, title="TWR Short (with Tide)", message="WT Tide/Wave/Ripple SHORT with-trend on {{ticker}}")
+alertcondition(longSignal,  title="TWR Long (any)",  message="WT Tide/Wave/Ripple LONG on {{ticker}}")
+alertcondition(shortSignal, title="TWR Short (any)", message="WT Tide/Wave/Ripple SHORT on {{ticker}}")

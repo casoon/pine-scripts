@@ -25,28 +25,28 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 
 | Script | Focus |
 |--------|-------|
-| [`vein_trend.pine`](indicators/vein/vein_trend.pine) | Trend phase scoring — EMA structure, ADX, regime, composite score |
-| [`vein_pullback.pine`](indicators/vein/vein_pullback.pine) | Pullback quality — Fibonacci depth, volume, EMA proximity, micro BOS |
-| [`vein_exhaustion.pine`](indicators/vein/vein_exhaustion.pine) | Exhaustion detection — candle pressure, volume absorption, momentum streaks |
+| [`vein_trend.pine`](indicators/trend_direction/vein/vein_trend.pine) | Trend phase scoring — EMA structure, ADX, regime, composite score |
+| [`vein_pullback.pine`](indicators/trend_direction/vein/vein_pullback.pine) | Pullback quality — Fibonacci depth, volume, EMA proximity, micro BOS |
+| [`vein_exhaustion.pine`](indicators/trend_direction/vein/vein_exhaustion.pine) | Exhaustion detection — candle pressure, volume absorption, momentum streaks |
 
 **Commodity / NatGas focused**
 
 | Script | Focus |
 |--------|-------|
-| [`vein_accumulation_phase.pine`](indicators/vein/vein_accumulation_phase.pine) | 4H bottom formation and accumulation phase detection — 5-component process state |
-| [`vein_reversal_score.pine`](indicators/vein/vein_reversal_score.pine) | Two-layer reversal scoring (setup conditions + structural confirmation) |
-| [`vein_structure_zones.pine`](indicators/vein/vein_structure_zones.pine) | Swing detection, BOS, spring/upthrust, auto S/R zones with lifecycle tracking |
-| [`vein_execution.pine`](indicators/vein/vein_execution.pine) | 15m entry timing overlay — micro BOS, sweeps, rejection candles, follow-through |
-| [`vein_spread_context.pine`](indicators/vein/vein_spread_context.pine) | Commodity futures calendar spread context — bias and momentum modifier, not a signal |
+| [`vein_accumulation_phase.pine`](indicators/trend_direction/vein/vein_accumulation_phase.pine) | 4H bottom formation and accumulation phase detection — 5-component process state |
+| [`vein_reversal_score.pine`](indicators/trend_direction/vein/vein_reversal_score.pine) | Two-layer reversal scoring (setup conditions + structural confirmation) |
+| [`vein_structure_zones.pine`](indicators/trend_direction/vein/vein_structure_zones.pine) | Swing detection, BOS, spring/upthrust, auto S/R zones with lifecycle tracking |
+| [`vein_execution.pine`](indicators/trend_direction/vein/vein_execution.pine) | 15m entry timing overlay — micro BOS, sweeps, rejection candles, follow-through |
+| [`vein_spread_context.pine`](indicators/trend_direction/vein/vein_spread_context.pine) | Commodity futures calendar spread context — bias and momentum modifier, not a signal |
 
 **Research / utility**
 
 | Script | Focus |
 |--------|-------|
-| [`vein_feature_exporter.pine`](indicators/vein/vein_feature_exporter.pine) | Bar-level feature calculation for reversal research — trend, momentum, volume, candle structure |
-| [`vein_reversal_labeler.pine`](indicators/vein/vein_reversal_labeler.pine) | Historical reversal labeling with forward-looking ATR rules — research and ML labeling only |
+| [`vein_feature_exporter.pine`](indicators/trend_direction/vein/vein_feature_exporter.pine) | Bar-level feature calculation for reversal research — trend, momentum, volume, candle structure |
+| [`vein_reversal_labeler.pine`](indicators/trend_direction/vein/vein_reversal_labeler.pine) | Historical reversal labeling with forward-looking ATR rules — research and ML labeling only |
 
-→ [`indicators/vein/README.md`](indicators/vein/README.md) — full documentation and layered reading guide
+→ [`indicators/trend_direction/vein/README.md`](indicators/trend_direction/vein/README.md) — full documentation and layered reading guide
 
 ---
 
@@ -54,65 +54,76 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 
 | Script | What it does |
 |--------|--------------|
-| [`smc_structure_expectation.pine`](indicators/smc_structure_expectation/smc_structure_expectation.pine) | BOS, CHoCH, order blocks, fair value gaps |
-| [`wyckoff_schematics.pine`](indicators/wyckoff_schematics/wyckoff_schematics.pine) | Wyckoff phases and events — accumulation, distribution, spring, UTAD |
-| [`sr_zones_mtf_v2.pine`](indicators/sr_zones_mtf_v2/sr_zones_mtf_v2.pine) | Multi-timeframe support and resistance zones |
-| [`tweezer_kangaroo_zones.pine`](indicators/tweezer_kangaroo_zones/tweezer_kangaroo_zones.pine) | Tweezer tops/bottoms and kangaroo tails mapped to supply/demand zones |
-| [`jma_struct.pine`](indicators/jma_struct/jma_struct.pine) | JMA entry clusters with Wyckoff and SMC structure context |
-| [`time_to_react_volatility_time.pine`](indicators/time_to_react_volatility_time/time_to_react_volatility_time.pine) | BOS and sweep timing with volatility-adjusted candle coloring |
-| [`coilforge_zones_v1.pine`](indicators/coilforge_zones/coilforge_zones_v1.pine) | Compression zone detection with multi-module scoring and post-zone breakout watch |
-| [`reversal_engine_score_v1.pine`](indicators/reversal_engine_score/reversal_engine_score_v1.pine) | Score-based liquidity sweep reversal signals with HTF trend filter and configurable evidence threshold |
-| [`reversal_type_classifier_v1.pine`](indicators/reversal_type_classifier/reversal_type_classifier_v1.pine) | Ex-post diagnostic: classifies confirmed pivot reversals as Snapback / Grind / Fake / Chop with WT context and R-outcome scoring |
-| [`commodity_heat_reversal.pine`](indicators/commodity_heat_reversal/commodity_heat_reversal.pine) | Score-based mean-reversion reversal signals for commodity futures — ATR distance, expansion, RSI extreme, wick pressure, BB breach |
-| [`exhaustion_scanner.pine`](indicators/exhaustion_scanner/exhaustion_scanner.pine) | Weighted top/bottom exhaustion score (0–100) from distance/momentum/flow/volatility/structure with per-market presets (stocks, commodities, forex, crypto) |
+| [`market_structure_advanced.pine`](indicators/market_structure/market_structure_advanced/market_structure_advanced.pine) | Swing pivot classification (HH/HL/LH/LL) mapped to a bounded score oscillator — continuous structural bias reading without chart labels |
+| [`smc_structure_expectation.pine`](indicators/market_structure/smc_structure_expectation/smc_structure_expectation.pine) | BOS, CHoCH, order blocks, fair value gaps |
+| [`wyckoff_schematics.pine`](indicators/market_structure/wyckoff_schematics/wyckoff_schematics.pine) | Wyckoff phases and events — accumulation, distribution, spring, UTAD |
+| [`sr_zones_mtf_v2.pine`](indicators/market_structure/sr_zones_mtf_v2/sr_zones_mtf_v2.pine) | Multi-timeframe support and resistance zones |
+| [`tweezer_kangaroo_zones.pine`](indicators/market_structure/tweezer_kangaroo_zones/tweezer_kangaroo_zones.pine) | Tweezer tops/bottoms and kangaroo tails mapped to supply/demand zones |
+| [`jma_struct.pine`](indicators/market_structure/jma_struct/jma_struct.pine) | JMA entry clusters with Wyckoff and SMC structure context |
+| [`time_to_react_volatility_time.pine`](indicators/volatility/time_to_react_volatility_time/time_to_react_volatility_time.pine) | BOS and sweep timing with volatility-adjusted candle coloring |
+| [`coilforge_zones_v1.pine`](indicators/market_structure/coilforge_zones/coilforge_zones_v1.pine) | Compression zone detection with multi-module scoring and post-zone breakout watch |
+| [`reversal_engine_score_v1.pine`](indicators/momentum/reversal_engine_score/reversal_engine_score_v1.pine) | Score-based liquidity sweep reversal signals with HTF trend filter and configurable evidence threshold |
+| [`reversal_type_classifier_v1.pine`](indicators/market_structure/reversal_type_classifier/reversal_type_classifier_v1.pine) | Ex-post diagnostic: classifies confirmed pivot reversals as Snapback / Grind / Fake / Chop with WT context and R-outcome scoring |
+| [`commodity_heat_reversal.pine`](indicators/composite/commodity_heat_reversal/commodity_heat_reversal.pine) | Score-based mean-reversion reversal signals for commodity futures — ATR distance, expansion, RSI extreme, wick pressure, BB breach |
+| [`exhaustion_scanner.pine`](indicators/momentum/exhaustion_scanner/exhaustion_scanner.pine) | Weighted top/bottom exhaustion score (0–100) from distance/momentum/flow/volatility/structure with per-market presets (stocks, commodities, forex, crypto) |
 
 ### Trend & Regime
 
 | Script | What it does |
 |--------|--------------|
-| [`commodity_pulse_matrix_v3.pine`](indicators/commodity_pulse_matrix/commodity_pulse_matrix_v3.pine) | Multi-timeframe confluence scoring matrix across instruments — [published on TradingView](https://de.tradingview.com/script/aJmdpe8H/) |
-| [`regime_detector.pine`](indicators/regime_detector/regime_detector.pine) | MA-zone based trend regime overlay |
-| [`ma_regime_bands.pine`](indicators/ma_regime_bands/ma_regime_bands.pine) | Moving average regime classification bands |
-| [`relative_leg_efficiency.pine`](indicators/relative_leg_efficiency/relative_leg_efficiency.pine) | Efficiency ratio per price leg — how directional each move is |
-| [`auto_trendlines.pine`](indicators/auto_trendlines/auto_trendlines.pine) | Combinatorial trendline detection with OLS refinement, quality scoring, and greedy selection |
-| [`adaptive_supertrend_v1.pine`](indicators/adaptive_supertrend/adaptive_supertrend_v1.pine) | Supertrend with conviction-adaptive band width — narrows in strong trends, widens in chop |
-| [`chandelier_flip_radar.pine`](indicators/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips |
-| [`smooth_trend_radar.pine`](indicators/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — auto-scaled per timeframe, pivot-based rejections, statistical overextension via candle coloring, automatic SL/TP setup on flips |
+| [`adx_advanced.pine`](indicators/trend_strength/adx_advanced/adx_advanced.pine) | ADX with DI± display, pluggable signal smoothing, 4-state histogram, gradient line, and DI crossover / threshold alerts |
+| [`commodity_pulse_matrix_v3.pine`](indicators/composite/commodity_pulse_matrix/commodity_pulse_matrix_v3.pine) | Multi-timeframe confluence scoring matrix across instruments — [published on TradingView](https://de.tradingview.com/script/aJmdpe8H/) |
+| [`regime_detector.pine`](indicators/trend_strength/regime_detector/regime_detector.pine) | MA-zone based trend regime overlay |
+| [`ma_regime_bands.pine`](indicators/trend_direction/ma_regime_bands/ma_regime_bands.pine) | Moving average regime classification bands |
+| [`relative_leg_efficiency.pine`](indicators/relative_strength/relative_leg_efficiency/relative_leg_efficiency.pine) | Efficiency ratio per price leg — how directional each move is |
+| [`auto_trendlines.pine`](indicators/market_structure/auto_trendlines/auto_trendlines.pine) | Combinatorial trendline detection with OLS refinement, quality scoring, and greedy selection |
+| [`adaptive_supertrend_v1.pine`](indicators/trend_direction/adaptive_supertrend/adaptive_supertrend_v1.pine) | Supertrend with conviction-adaptive band width — narrows in strong trends, widens in chop |
+| [`chandelier_flip_radar.pine`](indicators/trend_direction/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips |
+| [`smooth_trend_radar.pine`](indicators/trend_direction/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — auto-scaled per timeframe, pivot-based rejections, statistical overextension via candle coloring, automatic SL/TP setup on flips |
+
+### Volatility
+
+| Script | What it does |
+|--------|--------------|
+| [`atr_advanced.pine`](indicators/volatility/atr_advanced/atr_advanced.pine) | ATR in four display modes (Raw, ATR%, Normalized, Percentile Rank) with pluggable smoothing, gradient visualization, and expansion/contraction signals |
 
 ### Momentum & Oscillators
 
 | Script | What it does |
 |--------|--------------|
-| [`wavetrend.pine`](indicators/wavetrend/wavetrend.pine) | WaveTrend oscillator — cross signals, divergence, overextension duration, slope quality filter, zone persistence |
-| [`mtf_wavetrend_opportunity_hunter.pine`](indicators/mtf_wavetrend_opportunity_hunter/mtf_wavetrend_opportunity_hunter.pine) | Three-tier MTF scoring (Regime / Opportunity / Timing / Quality) — signals fire only when all four layers pass their thresholds |
-| [`market_stress_oscillator.pine`](indicators/market_stress_oscillator/market_stress_oscillator.pine) | Composite stress index — WVF with JMA and ADX filters |
-| [`market_exhaustion.pine`](indicators/market_exhaustion/market_exhaustion.pine) | Exhaustion signals via MFI and StochRSI with divergence detection |
-| [`oscillator_divergence_zones.pine`](indicators/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI; regular + hidden; ATR-wide zones with retest counter |
-| [`market_pressure_scale.pine`](indicators/market_pressure_scale/market_pressure_scale.pine) | Dual-component oscillator — Setup Pressure (coiling) vs Impulse Pressure (expansion), phase labels, signal markers, POC/range context lines |
-| [`mtf_stochrsi_pair_score.pine`](indicators/mtf_stochrsi_pair_score/mtf_stochrsi_pair_score.pine) | Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus and conflict penalty, weighted total, signal markers |
+| [`cci_advanced.pine`](indicators/momentum/cci_advanced/cci_advanced.pine) | CCI with pluggable smoothing, three scale modes, OB/OS extreme-zone filter, gradient line, and shadow fills |
+| [`wavetrend.pine`](indicators/momentum/wavetrend/wavetrend.pine) | WaveTrend oscillator — cross signals, divergence, overextension duration, slope quality filter, zone persistence |
+| [`wavetrend_advanced_smoothing.pine`](indicators/momentum/wavetrend_advanced_smoothing/wavetrend_advanced_smoothing.pine) | WaveTrend with 8 pluggable smoothing kernels, gradient line coloring, shadow fills, 4-state histogram, and configurable scale modes |
+| [`commodity_flow_trend.pine`](indicators/money_flow/commodity_flow_trend/commodity_flow_trend.pine) | MFI + CCI composite oscillator for commodities — 4-state flow background, extreme-zone reversal signals, optional CCI gate, normalized CCI overlay |
+| [`mtf_wavetrend_opportunity_hunter.pine`](indicators/momentum/mtf_wavetrend_opportunity_hunter/mtf_wavetrend_opportunity_hunter.pine) | MTF confluence pane — net score histogram + heat ribbons per layer, RRG-style rotation map, Ehlers Ultimate Smoother core, entropy noise floor, persistent TP/SL zones on the price chart |
+| [`market_stress_oscillator.pine`](indicators/momentum/market_stress_oscillator/market_stress_oscillator.pine) | Composite stress index — WVF with JMA and ADX filters |
+| [`market_exhaustion.pine`](indicators/momentum/market_exhaustion/market_exhaustion.pine) | Exhaustion signals via MFI and StochRSI with divergence detection |
+| [`oscillator_divergence_zones.pine`](indicators/momentum/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI; regular + hidden; ATR-wide zones with retest counter |
+| [`market_pressure_scale.pine`](indicators/momentum/market_pressure_scale/market_pressure_scale.pine) | Dual-component oscillator — Setup Pressure (coiling) vs Impulse Pressure (expansion), phase labels, signal markers, POC/range context lines |
+| [`mtf_stochrsi_pair_score.pine`](indicators/momentum/mtf_stochrsi_pair_score/mtf_stochrsi_pair_score.pine) | Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus and conflict penalty, weighted total, signal markers |
 
 ### Liquidity & Order Flow
 
 | Script | What it does |
 |--------|--------------|
-| [`volume_strata.pine`](indicators/volume_strata/volume_strata.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN/LVN zones, naked POC tracking |
-| [`money_flow_delta_profile.pine`](indicators/money_flow_delta_profile/money_flow_delta_profile.pine) | Center-out diverging profile — green (right) = net buying, red (left) = net selling at each price level; POC, Value Area, optional recency weighting |
-| [`vwap_cross_visuals.pine`](indicators/vwap_cross_visuals/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
-| [`liquidity_hunter.pine`](indicators/liquidity_hunter/liquidity_hunter.pine) | Ranked equal highs/lows — quality-scored BSL/SSL levels, sweep markers, reclaim detection with event scoring |
+| [`volume_strata.pine`](indicators/money_flow/volume_strata/volume_strata.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN/LVN zones, naked POC tracking |
+| [`money_flow_delta_profile.pine`](indicators/money_flow/money_flow_delta_profile/money_flow_delta_profile.pine) | Center-out diverging profile — green (right) = net buying, red (left) = net selling at each price level; POC, Value Area, optional recency weighting |
+| [`vwap_cross_visuals.pine`](indicators/mean_reversion/vwap_cross_visuals/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
+| [`liquidity_hunter.pine`](indicators/market_structure/liquidity_hunter/liquidity_hunter.pine) | Ranked equal highs/lows — quality-scored BSL/SSL levels, sweep markers, reclaim detection with event scoring |
 
 ### Pattern & Wave Analysis
 
 | Script | What it does |
 |--------|--------------|
-| [`zigzag_patterns_framework.pine`](indicators/zigzag_patterns_framework/zigzag_patterns_framework.pine) | ZigZag-based pattern detection — ABC, triangles, Wolfe waves |
-| [`zigzag_fibo_pullback_map.pine`](indicators/zigzag_fibo_pullback_map/zigzag_fibo_pullback_map.pine) | Confirmed ZigZag pivots with pullback-to-Fibonacci labeling and active fib fan |
-| [`elliott_wave_radar.pine`](indicators/elliott_wave_radar/elliott_wave_radar.pine) | Rule-validated Elliott Wave counting — labels impulses/ABC only when hard EW rules hold, Fib-scored, with target projections and invalidation watch |
+| [`zigzag_patterns_framework.pine`](indicators/market_structure/zigzag_patterns_framework/zigzag_patterns_framework.pine) | ZigZag-based pattern detection — ABC, triangles, Wolfe waves |
+| [`zigzag_fibo_pullback_map.pine`](indicators/market_structure/zigzag_fibo_pullback_map/zigzag_fibo_pullback_map.pine) | Confirmed ZigZag pivots with pullback-to-Fibonacci labeling and active fib fan |
+| [`elliott_wave_radar.pine`](indicators/market_structure/elliott_wave_radar/elliott_wave_radar.pine) | Rule-validated Elliott Wave counting — labels impulses/ABC only when hard EW rules hold, Fib-scored, with target projections and invalidation watch |
 
 ### Equities & Relative Strength
 
 | Script | What it does |
 |--------|--------------|
-| [`relative_strength_line.pine`](indicators/relative_strength_line/relative_strength_line.pine) | RS vs. a benchmark (SPY/QQQ) — Mansfield RS oscillator or raw RS line, with the IBD leadership signal (RS new high before price). See [MOMENTUM_EQUITIES.md](MOMENTUM_EQUITIES.md) for the equities roadmap |
+| [`relative_strength_line.pine`](indicators/relative_strength/relative_strength_line/relative_strength_line.pine) | RS vs. a benchmark (SPY/QQQ) — Mansfield RS oscillator or raw RS line, with the IBD leadership signal (RS new high before price). See [MOMENTUM_EQUITIES.md](MOMENTUM_EQUITIES.md) for the equities roadmap |
 
 ---
 
@@ -122,7 +133,7 @@ Most strategy files are **auto-generated** from indicator source files via `scri
 
 ```bash
 python3 scripts/build_strategies.py          # rebuild all
-python3 scripts/build_strategies.py indicators/chandelier_flip_radar/
+python3 scripts/build_strategies.py indicators/trend_direction/chandelier_flip_radar/
 ```
 
 | Strategy | Based on | SL type | Backtest rating |

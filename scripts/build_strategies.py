@@ -8,8 +8,8 @@ annotated indicator.
 
 Usage:
     python scripts/build_strategies.py                     # rebuild all
-    python scripts/build_strategies.py indicators/smooth_trend_radar/
-    python scripts/build_strategies.py indicators/smooth_trend_radar/smooth_trend_radar.pine
+    python scripts/build_strategies.py indicators/trend_direction/smooth_trend_radar/
+    python scripts/build_strategies.py indicators/trend_direction/smooth_trend_radar/smooth_trend_radar.pine
 """
 
 import re

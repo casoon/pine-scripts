@@ -1,0 +1,206 @@
+//@version=6
+// ============================================================================
+// ADX Advanced [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-18 00:00:00
+// ============================================================================
+// ADX with DI± lines, smoothed ADX, gradient fills, and configurable alerts.
+// Designed for trend-strength context across all asset classes and timeframes.
+//
+// Features:
+//   ✓ ADX smoothing via full pluggable kernel suite
+//   ✓ DI+ / DI- display with fill between lines
+//   ✓ 4-state ADX histogram (rising/falling × above/below threshold)
+//   ✓ Gradient ADX line color (weak ↔ strong trend)
+//   ✓ DI crossover and ADX threshold cross signal markers
+//   ✓ Alert conditions
+//
+// ============================================================================
+
+indicator("ADX Advanced [WavesUnchained]", "ADX·ADV", overlay=false, max_labels_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+g_adx = "1 · ADX"
+diLen       = input.int(14, "DI Length",         minval=1, group=g_adx)
+adxSmooth   = input.int(14, "ADX Smoothing",     minval=1, group=g_adx)
+sigLen      = input.int(3,  "ADX Signal Length", minval=1, group=g_adx,
+     tooltip="Signal line smoothed over the ADX — cross above = rising trend momentum.")
+
+g_smooth = "2 · ADX Smoothing"
+smoothType = input.string("EMA", "Type",
+     options=["EMA", "SMA", "RMA", "WMA", "SuperSmoother", "T3", "KAMA", "JMA Approx"],
+     group=g_smooth)
+jmaPhase = input.int(50,    "  JMA Phase", minval=-100, maxval=100,             group=g_smooth)
+jmaPower = input.float(2.0, "  JMA Power", minval=1.0, maxval=4.0, step=0.25,  group=g_smooth)
+
+g_levels = "3 · Levels"
+levelWeak   = input.float(20, "Weak / Strong Threshold",   group=g_levels,
+     tooltip="ADX above this = trend is active. Below = ranging/weak.")
+levelStrong = input.float(40, "Strong / Very Strong",      group=g_levels)
+
+g_col = "4 · Colors"
+colBull   = input.color(#00bcd4,              "Bull (DI+)",        group=g_col)
+colBear   = input.color(#f06292,              "Bear (DI−)",        group=g_col)
+colADXWeak   = input.color(color.new(color.gray, 40), "ADX Weak Color",   group=g_col)
+colADXStrong = input.color(#ffb300,           "ADX Strong Color",  group=g_col)
+
+g_disp = "5 · Display"
+showDI       = input.bool(true, "Show DI+ / DI−",          group=g_disp)
+showDIFill   = input.bool(true, "Fill DI+ / DI−",           group=g_disp)
+showShadow   = input.bool(true, "Shadow Fill (ADX vs Zero)", group=g_disp)
+showHist     = input.bool(true, "Show ADX Histogram",        group=g_disp)
+showSignals  = input.bool(true, "Show Signal Markers",        group=g_disp)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMOOTHING FUNCTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+f_supersmoother(series float x, simple int len) =>
+    float pi = math.pi
+    float a1 = math.exp(-1.414 * pi / len)
+    float b1 = 2.0 * a1 * math.cos(1.414 * pi / len)
+    float c2 = b1
+    float c3 = -(a1 * a1)
+    float c1 = 1.0 - c2 - c3
+    var float ss = na
+    ss := c1 * (x + nz(x[1])) / 2.0 + c2 * nz(ss[1]) + c3 * nz(ss[2])
+    ss
+
+f_t3(series float x, simple int len) =>
+    float b  = 0.7
+    float e1 = ta.ema(x, len)
+    float e2 = ta.ema(e1, len)
+    float e3 = ta.ema(e2, len)
+    float e4 = ta.ema(e3, len)
+    float e5 = ta.ema(e4, len)
+    float e6 = ta.ema(e5, len)
+    float c1 = -(b * b * b)
+    float c2 =  3.0 * b * b + 3.0 * b * b * b
+    float c3 = -6.0 * b * b - 3.0 * b - 3.0 * b * b * b
+    float c4 =  1.0 + 3.0 * b + b * b * b + 3.0 * b * b
+    c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
+
+f_kama(series float x, simple int len) =>
+    float change   = math.abs(x - x[len])
+    float vol      = math.sum(math.abs(x - x[1]), len)
+    float er       = vol != 0.0 ? change / vol : 0.0
+    float sc       = math.pow(er * (2.0 / 3.0 - 2.0 / 31.0) + 2.0 / 31.0, 2)
+    var float kama = na
+    kama := nz(kama[1], x) + sc * (x - nz(kama[1], x))
+    kama
+
+f_jma(series float x, simple int len, simple int phase, simple float power) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+    float phaseRatio = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    float beta       = 0.45 * (len - 1) / (0.45 * (len - 1) + 2.0)
+    float alpha      = math.pow(beta, power)
+    e0  := (1.0 - alpha) * x + alpha * nz(e0[1], x)
+    e1  := (x - e0) * (1.0 - beta) + beta * nz(e1[1], 0.0)
+    e2  := (e0 + phaseRatio * e1 - nz(jma[1], x)) * math.pow(1.0 - alpha, 2.0) + math.pow(alpha, 2.0) * nz(e2[1], 0.0)
+    jma := nz(jma[1], x) + e2
+    jma
+
+f_smooth(series float x, simple int len, simple string mode) =>
+    switch mode
+        "SMA"           => ta.sma(x, len)
+        "RMA"           => ta.rma(x, len)
+        "WMA"           => ta.wma(x, len)
+        "SuperSmoother" => f_supersmoother(x, len)
+        "T3"            => f_t3(x, len)
+        "KAMA"          => f_kama(x, len)
+        "JMA Approx"    => f_jma(x, len, jmaPhase, jmaPower)
+        =>                 ta.ema(x, len)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADX / DI CORE
+// ─────────────────────────────────────────────────────────────────────────────
+
+[diPlus, diMinus, adxRaw] = ta.dmi(diLen, adxSmooth)
+adxLine = f_smooth(adxRaw, sigLen, smoothType)
+adxHist = adxRaw - adxLine
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNALS (on raw values)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bullDICross       = ta.crossover(diPlus, diMinus)
+bearDICross       = ta.crossunder(diPlus, diMinus)
+bullThreshCross   = ta.crossover(adxRaw, levelWeak)
+bearThreshCross   = ta.crossunder(adxRaw, levelWeak)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLORS
+// ─────────────────────────────────────────────────────────────────────────────
+
+color adxCol = color.from_gradient(adxRaw, levelWeak, levelStrong, colADXWeak, colADXStrong)
+
+histAbove  = adxRaw >= levelWeak
+histRising = adxHist >= adxHist[1]
+histColor  = histAbove
+     ? (histRising ? colADXStrong : color.new(colADXStrong, 55))
+     : (histRising ? color.new(color.gray, 65) : color.new(color.gray, 80))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HLINES
+// ─────────────────────────────────────────────────────────────────────────────
+
+hline(levelWeak,   "Weak",   color=color.new(color.gray, 55), linestyle=hline.style_dashed, linewidth=1)
+hline(levelStrong, "Strong", color=color.new(#ffb300, 55),    linestyle=hline.style_dashed, linewidth=1)
+hline(0,           "Zero",   color=color.new(color.gray, 70), linestyle=hline.style_dotted, linewidth=1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+plot(showHist  ? adxHist  : na, "ADX Histogram", style=plot.style_columns, color=histColor)
+plot(showDI    ? diPlus   : na, "DI+",  color=color.new(colBull, 20), linewidth=1)
+pDIPlus  = plot(showDI ? diPlus  : na, display=display.none)
+pDIMinus = plot(showDI ? diMinus : na, display=display.none)
+plot(showDI ? diMinus : na, "DI−", color=color.new(colBear, 20), linewidth=1)
+
+fill(pDIPlus, pDIMinus,
+     color=showDIFill ? (diPlus >= diMinus ? color.new(colBull, 88) : color.new(colBear, 88)) : na,
+     title="DI Fill")
+
+pADXSig = plot(adxLine, "ADX Signal", color=color.new(colADXStrong, 50), linewidth=1)
+pADX    = plot(adxRaw,  "ADX",        color=adxCol,                      linewidth=2)
+
+pZero = plot(0.0, display=display.none)
+fill(pADX, pZero, levelWeak, 0.0, color.new(colADXStrong, 78), color.new(colADXStrong, 100),
+     title="ADX Shadow", display=showShadow ? display.all : display.none)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNAL MARKERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+plotshape(showSignals and bullDICross, "DI Bull Cross",
+     style=shape.triangleup, location=location.bottom,
+     color=colBull, size=size.small, text="DI↑", textcolor=colBull)
+
+plotshape(showSignals and bearDICross, "DI Bear Cross",
+     style=shape.triangledown, location=location.top,
+     color=colBear, size=size.small, text="DI↓", textcolor=colBear)
+
+plotshape(showSignals and bullThreshCross ? adxRaw : na, "ADX Activated",
+     style=shape.diamond, location=location.absolute,
+     color=color.new(colADXStrong, 10), size=size.tiny)
+
+plotshape(showSignals and bearThreshCross ? adxRaw : na, "ADX Deactivated",
+     style=shape.diamond, location=location.absolute,
+     color=color.new(color.gray, 30), size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+alertcondition(bullDICross,     "DI+ Cross Above DI−", "ADX: DI+ crossed above DI−, bullish trend starting")
+alertcondition(bearDICross,     "DI− Cross Above DI+", "ADX: DI− crossed above DI+, bearish trend starting")
+alertcondition(bullThreshCross, "ADX Activated",        "ADX crossed above trend threshold")
+alertcondition(bearThreshCross, "ADX Deactivated",      "ADX crossed below trend threshold")

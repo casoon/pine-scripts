@@ -2,7 +2,7 @@
 
 ## Indicator directory structure
 
-Each indicator (or suite of related indicators) lives in its own subdirectory under `indicators/`. The `indicators/commodity_pulse_matrix/` directory is the reference for how a directory should be structured.
+Each indicator (or suite of related indicators) lives in its own subdirectory under a category folder inside `indicators/`. The category folders are: `momentum`, `money_flow`, `trend_strength`, `trend_direction`, `market_structure`, `volatility`, `mean_reversion`, `relative_strength`, `composite`. The `indicators/composite/commodity_pulse_matrix/` directory is the reference for how an indicator directory should be structured.
 
 Every indicator directory contains:
 
@@ -64,7 +64,7 @@ TradingView supports only a subset of BBCode. Use only these tags:
 ### The `.pine` file(s)
 The script itself. No additional wrapper or build files.
 
-The header of `indicators/commodity_pulse_matrix/commodity_pulse_matrix_v3.pine` is the reference for how every `.pine` file should start. The exact structure:
+The header of `indicators/composite/commodity_pulse_matrix/commodity_pulse_matrix_v3.pine` is the reference for how every `.pine` file should start. The exact structure:
 
 ```pine
 //@version=6
@@ -96,7 +96,7 @@ Rules:
 
 ## Dashboard table style
 
-All indicator dashboards use the same light-theme table style. The reference implementation is `indicators/vein/vein_trend.pine`.
+All indicator dashboards use the same light-theme table style. The reference implementation is `indicators/trend_direction/vein/vein_trend.pine`.
 
 ### Table init
 
@@ -129,7 +129,7 @@ color hd = color.new(color.gray, 90)   // header row background (very light gray
 
 ## When adding a new indicator
 
-1. Create a subdirectory under `indicators/<name>/`
+1. Create a subdirectory under `indicators/<category>/<name>/`
 2. Place the `.pine` file there
 3. Write `README.md` following the structure above
 4. Create `CHANGELOG.md` with the initial version entry
@@ -154,7 +154,7 @@ To check whether a strategy is standalone: if the corresponding indicator has no
 
 ```bash
 python3 scripts/build_strategies.py                        # rebuild all
-python3 scripts/build_strategies.py indicators/foo/        # rebuild one
+python3 scripts/build_strategies.py indicators/momentum/foo/  # rebuild one
 ```
 
 ### @strategy-config annotation

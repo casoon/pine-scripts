@@ -1,0 +1,11 @@
+## v1.0 — 2026-06-18
+- Initial release
+- 8 smoothing kernels: EMA, SMA, RMA, WMA, SuperSmoother, T3, KAMA, JMA
+- Three scale modes: Classic, Clamp ±100, Adaptive ±100
+- Gradient line color (bull ↔ bear based on oscillator level)
+- Gradient shadow fills between WT main line and zero
+- 4-state color-coded histogram
+- Optional fill between WT main and signal lines
+- OB/OS zone background fills
+- Extreme cross signal markers + subtle dots for all crosses
+- Alert conditions for all cross types

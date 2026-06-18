@@ -1,0 +1,234 @@
+//@version=6
+// ============================================================================
+// ATR Advanced [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-18 00:00:00
+// ============================================================================
+// ATR in four display modes: Raw, ATR%, Normalized (z-score), and Percentile.
+// Designed to give actionable volatility context across asset classes.
+//
+// Features:
+//   ✓ Four display modes: Raw, ATR%, Normalized (z-score), Percentile Rank
+//   ✓ Pluggable smoothing (EMA, SMA, RMA, WMA, SuperSmoother, T3, KAMA, JMA Approx)
+//   ✓ 4-state histogram (rising/falling × above/below signal)
+//   ✓ Gradient line color (low vol ↔ high vol)
+//   ✓ Shadow fill between ATR line and signal
+//   ✓ Expansion and contraction signal markers
+//   ✓ Alert conditions
+//
+// ============================================================================
+
+indicator("ATR Advanced [WavesUnchained]", "ATR·ADV", overlay=false, max_labels_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+g_atr = "1 · ATR"
+atrLen  = input.int(14,  "ATR Length",    minval=1, group=g_atr)
+sigLen  = input.int(20,  "Signal Length", minval=1, group=g_atr,
+     tooltip="Smoothed average of the ATR — histogram = ATR minus signal.")
+normLen = input.int(100, "Normalization Lookback", minval=10, group=g_atr,
+     tooltip="Lookback for z-score and percentile-rank modes.")
+dispMode = input.string("ATR%", "Display Mode",
+     options=["Raw", "ATR%", "Normalized", "Percentile Rank"],
+     group=g_atr,
+     tooltip="Raw: plain ATR. ATR%: ATR / close × 100. Normalized: z-score (ATR vs recent avg+stdev). Percentile Rank: rank vs lookback (0–100).")
+
+g_smooth = "2 · Smoothing"
+smoothType = input.string("RMA", "Type",
+     options=["EMA", "SMA", "RMA", "WMA", "SuperSmoother", "T3", "KAMA", "JMA Approx"],
+     group=g_smooth)
+jmaPhase = input.int(50,    "  JMA Phase", minval=-100, maxval=100,             group=g_smooth)
+jmaPower = input.float(2.0, "  JMA Power", minval=1.0, maxval=4.0, step=0.25,  group=g_smooth)
+
+g_levels = "3 · Levels"
+lvlLow  = input.float(-1.0, "Low Vol Level (Normalized)",  group=g_levels,
+     tooltip="Only visible in Normalized mode.")
+lvlHigh = input.float( 1.0, "High Vol Level (Normalized)", group=g_levels)
+lvlPctLow  = input.float(25, "Low Vol Percentile",   minval=1, maxval=99, group=g_levels,
+     tooltip="Only visible in Percentile Rank mode.")
+lvlPctHigh = input.float(75, "High Vol Percentile",  minval=1, maxval=99, group=g_levels)
+
+g_col = "4 · Colors"
+colLow  = input.color(#00bcd4, "Low Vol Color",  group=g_col)
+colHigh = input.color(#f06292, "High Vol Color", group=g_col)
+
+g_disp = "5 · Display"
+showHist    = input.bool(true,  "Show Histogram",            group=g_disp)
+showShadow  = input.bool(true,  "Shadow Fill (ATR vs Sig)",  group=g_disp)
+showSignals = input.bool(true,  "Show Signal Markers",        group=g_disp)
+showLevels  = input.bool(true,  "Show Levels",                group=g_disp)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMOOTHING FUNCTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+f_supersmoother(series float x, simple int len) =>
+    float pi = math.pi
+    float a1 = math.exp(-1.414 * pi / len)
+    float b1 = 2.0 * a1 * math.cos(1.414 * pi / len)
+    float c2 = b1
+    float c3 = -(a1 * a1)
+    float c1 = 1.0 - c2 - c3
+    var float ss = na
+    ss := c1 * (x + nz(x[1])) / 2.0 + c2 * nz(ss[1]) + c3 * nz(ss[2])
+    ss
+
+f_t3(series float x, simple int len) =>
+    float b  = 0.7
+    float e1 = ta.ema(x, len)
+    float e2 = ta.ema(e1, len)
+    float e3 = ta.ema(e2, len)
+    float e4 = ta.ema(e3, len)
+    float e5 = ta.ema(e4, len)
+    float e6 = ta.ema(e5, len)
+    float c1 = -(b * b * b)
+    float c2 =  3.0 * b * b + 3.0 * b * b * b
+    float c3 = -6.0 * b * b - 3.0 * b - 3.0 * b * b * b
+    float c4 =  1.0 + 3.0 * b + b * b * b + 3.0 * b * b
+    c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
+
+f_kama(series float x, simple int len) =>
+    float change   = math.abs(x - x[len])
+    float vol      = math.sum(math.abs(x - x[1]), len)
+    float er       = vol != 0.0 ? change / vol : 0.0
+    float sc       = math.pow(er * (2.0 / 3.0 - 2.0 / 31.0) + 2.0 / 31.0, 2)
+    var float kama = na
+    kama := nz(kama[1], x) + sc * (x - nz(kama[1], x))
+    kama
+
+f_jma(series float x, simple int len, simple int phase, simple float power) =>
+    var float jma = na
+    var float e0  = na
+    var float e1  = na
+    var float e2  = na
+    float phaseRatio = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    float beta       = 0.45 * (len - 1) / (0.45 * (len - 1) + 2.0)
+    float alpha      = math.pow(beta, power)
+    e0  := (1.0 - alpha) * x + alpha * nz(e0[1], x)
+    e1  := (x - e0) * (1.0 - beta) + beta * nz(e1[1], 0.0)
+    e2  := (e0 + phaseRatio * e1 - nz(jma[1], x)) * math.pow(1.0 - alpha, 2.0) + math.pow(alpha, 2.0) * nz(e2[1], 0.0)
+    jma := nz(jma[1], x) + e2
+    jma
+
+f_smooth(series float x, simple int len, simple string mode) =>
+    switch mode
+        "SMA"           => ta.sma(x, len)
+        "RMA"           => ta.rma(x, len)
+        "WMA"           => ta.wma(x, len)
+        "SuperSmoother" => f_supersmoother(x, len)
+        "T3"            => f_t3(x, len)
+        "KAMA"          => f_kama(x, len)
+        "JMA Approx"    => f_jma(x, len, jmaPhase, jmaPower)
+        =>                 ta.ema(x, len)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATR CORE + DISPLAY MODES
+// ─────────────────────────────────────────────────────────────────────────────
+
+atrRaw = ta.atr(atrLen)
+
+f_atr_pct(series float a) =>
+    close > 0.0 ? 100.0 * a / close : na
+
+f_normalize(series float a, simple int len) =>
+    float avg  = ta.sma(a, len)
+    float dev  = ta.stdev(a, len)
+    dev > 0.0 ? (a - avg) / dev : 0.0
+
+f_percentile(series float a, simple int len) =>
+    float count = 0.0
+    for i = 0 to len - 1
+        if a[i] <= a
+            count := count + 1.0
+    100.0 * count / len
+
+float atrDisp = switch dispMode
+    "ATR%"            => f_atr_pct(atrRaw)
+    "Normalized"      => f_normalize(atrRaw, normLen)
+    "Percentile Rank" => f_percentile(atrRaw, normLen)
+    =>                   atrRaw
+
+atrSmooth = f_smooth(atrDisp, sigLen, smoothType)
+hist      = atrDisp - atrSmooth
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GRADIENT BOUNDS PER MODE
+// ─────────────────────────────────────────────────────────────────────────────
+
+float gradLow  = dispMode == "Normalized"      ? lvlLow   :
+                 dispMode == "Percentile Rank"  ? lvlPctLow  :
+                 ta.lowest(atrDisp, normLen)
+
+float gradHigh = dispMode == "Normalized"      ? lvlHigh  :
+                 dispMode == "Percentile Rank"  ? lvlPctHigh :
+                 ta.highest(atrDisp, normLen)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNALS (on raw display-mode values, before smoothing)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bullExpansion = ta.crossover(atrDisp, atrSmooth)
+bearContractionSig = ta.crossunder(atrDisp, atrSmooth)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLORS
+// ─────────────────────────────────────────────────────────────────────────────
+
+color lineCol = color.from_gradient(atrDisp, gradLow, gradHigh, colLow, colHigh)
+
+histRising = hist >= hist[1]
+histAbove  = atrDisp >= atrSmooth
+histColor  = histAbove
+     ? (histRising  ? colHigh                     : color.new(colHigh, 55))
+     : (not histRising ? colLow                   : color.new(colLow, 55))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEVELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+hline(0, "Zero", color=color.new(color.gray, 70), linestyle=hline.style_dotted, linewidth=1)
+
+hLow  = hline(dispMode == "Normalized" ? lvlLow  : dispMode == "Percentile Rank" ? lvlPctLow  : na,
+     "Low Vol",  color=color.new(#00bcd4, 55), linestyle=hline.style_dashed, linewidth=1,
+     display=showLevels ? display.all : display.none)
+
+hHigh = hline(dispMode == "Normalized" ? lvlHigh : dispMode == "Percentile Rank" ? lvlPctHigh : na,
+     "High Vol", color=color.new(#f06292, 55), linestyle=hline.style_dashed, linewidth=1,
+     display=showLevels ? display.all : display.none)
+
+fill(hLow, hHigh, color=color.new(color.gray, 93), title="Mid Zone")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+plot(showHist ? hist : na, "Histogram", style=plot.style_columns, color=histColor)
+
+pSig  = plot(atrSmooth, "ATR Signal", color=color.new(lineCol, 50), linewidth=1)
+pATR  = plot(atrDisp,   "ATR",        color=lineCol,                linewidth=2)
+
+fill(pATR, pSig,
+     color=showShadow ? (atrDisp >= atrSmooth ? color.new(colHigh, 88) : color.new(colLow, 88)) : na,
+     title="ATR Shadow")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNAL MARKERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+plotshape(showSignals and bullExpansion ? atrDisp : na, "Vol Expansion",
+     style=shape.triangleup, location=location.absolute,
+     color=colHigh, size=size.tiny)
+
+plotshape(showSignals and bearContractionSig ? atrDisp : na, "Vol Contraction",
+     style=shape.triangledown, location=location.absolute,
+     color=colLow, size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+alertcondition(bullExpansion,      "ATR Expansion",   "ATR crossed above signal — volatility expanding")
+alertcondition(bearContractionSig, "ATR Contraction", "ATR crossed below signal — volatility contracting")
