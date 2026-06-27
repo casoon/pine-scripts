@@ -34,6 +34,7 @@ Quality columns (★ 1–5):
 | [ma_regime_bands](indicators/trend_direction/ma_regime_bands/) | 1.0.1 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [relative_leg_efficiency](indicators/relative_strength/relative_leg_efficiency/) | 1.0.1 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [adx_advanced](indicators/trend_strength/adx_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | ADX + DI± mit pluggablem Smoothing, 4-State-Histogramm, Gradient-Linie, DI-Crossover-Signale |
+| [regime_classifier](indicators/trend_strength/regime_classifier/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Reversal-Pipeline Stufe 1: FDI + Kaufman Efficiency Ratio + Choppiness → Trend/Range/Chaos mit Hysterese; symmetrische Reversal-/Trend-Permission als Quality-Output (kein Trigger); ungetestet |
 
 ## Volatility
 
@@ -51,7 +52,7 @@ Quality columns (★ 1–5):
 | [mtf_wavetrend_opportunity_hunter](indicators/momentum/mtf_wavetrend_opportunity_hunter/) | 2.1.1 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Konfluenz-Pane + Heat-Ribbons; v2.1: RRG-Rotation-Map (Polyline), Ehlers Ultimate Smoother Core (TASC 2024), Entropie-Noise-Floor; ungetestet |
 | [commodity_flow_trend](indicators/money_flow/commodity_flow_trend/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | MFI + CCI Composite für Rohstoffe; 4-State-Flow-Background, Extreme-Zone-Signale, CCI-Gate |
 | [market_pressure_scale](indicators/momentum/market_pressure_scale/) | 1.2.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Regime Map + Market Character Score |
-| [oscillator_divergence_zones](indicators/momentum/oscillator_divergence_zones/) | 1.2.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [oscillator_divergence_zones](indicators/momentum/oscillator_divergence_zones/) | 1.3.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | v1.3: Fisher Transform + TSI als Quellen (ruhige Oszillatoren, sauberere Divergenzen) — Reversal-Pipeline Stufe 2 |
 | [mtf_stochrsi_pair_score](indicators/momentum/mtf_stochrsi_pair_score/) | 1.7.1 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | Fractal Alignment + Compression Detector |
 | [market_exhaustion](indicators/momentum/market_exhaustion/) | 1.1.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [market_stress_oscillator](indicators/momentum/market_stress_oscillator/) | 1.0.1 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
@@ -72,6 +73,7 @@ Quality columns (★ 1–5):
 | [volume_strata](indicators/money_flow/volume_strata/) | 1.9 | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
 | [money_flow_delta_profile](indicators/money_flow/money_flow_delta_profile/) | 2.0 | Aktiv | ★★★★★ | ★★★★☆ | ★★★☆☆ | HVN/LVN/AVN + LVN-Zonen; v2.0: Intrabar-Delta (LTF) + Absorption-Profil/-Zonen — neue Features ungetestet |
 | [vwap_cross_visuals](indicators/mean_reversion/vwap_cross_visuals/) | 2.1.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | v2.1: auf VWAP-Cross-Kernsignal fokussiert (Signal Scope default), Cross-Marker als Hover-Labels; Runtime-/Limit-Fixes |
+| [anchored_vwap](indicators/mean_reversion/anchored_vwap/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Reversal-Pipeline Stufe 4 (Location): AVWAP ankerbar an Swing-Pivot/Session/Periode/Datum, volumengewichtete σ-Bänder, Distanz-zu-Value in σ als symmetrischer Location-Output (kein Trigger); ungetestet |
 | [liquidity_hunter](indicators/market_structure/liquidity_hunter/) | 3.2.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | BSL/SSL scoring + Gaps + Stop Hunts + Exhaustion Events |
 
 ## Pattern & Wave

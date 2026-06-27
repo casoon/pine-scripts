@@ -1,0 +1,253 @@
+//@version=6
+// ============================================================================
+// Regime Classifier [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-27 00:00:00
+// ============================================================================
+// Stage-1 regime filter for the reversal pipeline: fuses Fractal Dimension Index,
+// Kaufman Efficiency Ratio and the Choppiness Index into one Trend / Range / Chaos
+// classification. It is a Quality/context layer — it answers "is a reversal even
+// sensible here?", it never fires a long/short trigger.
+//
+// Features:
+//   ✓ Three regime sensors (FDI, Efficiency Ratio, Choppiness) on one trendiness axis
+//   ✓ Trend / Range / Chaos classification with threshold hysteresis
+//   ✓ Symmetric reversal- and trend-permission outputs (0..1) for downstream gating
+//   ✓ Per-sensor visual breakdown + light-theme dashboard
+//   ✓ Regime-change watch markers and alerts (no trade triggers)
+//   ✓ Debug log on every regime change
+//
+// ============================================================================
+
+indicator("Regime Classifier [WavesUnchained]", "REGIME", overlay=false, max_labels_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+g_sens = "1 · Sensors"
+erLen   = input.int(20, "Efficiency Ratio Length", minval=2, group=g_sens,
+     tooltip="Kaufman ER over this lookback. High ER = efficient/trending move, low ER = back-and-forth.")
+fdiLen  = input.int(30, "Fractal Dimension Length", minval=6, group=g_sens,
+     tooltip="Box-counting fractal dimension over this (even) lookback. D≈1 = smooth/trend, D≈1.5+ = rough/range.")
+chopLen = input.int(14, "Choppiness Length",        minval=2, group=g_sens,
+     tooltip="Choppiness Index lookback. High = choppy/ranging, low = directional.")
+
+g_map = "2 · Sensor → Trendiness Mapping"
+erTrendAt  = input.float(0.55, "ER: full-trend at",  minval=0.0, maxval=1.0, step=0.05, group=g_map)
+erRangeAt  = input.float(0.20, "ER: full-range at",  minval=0.0, maxval=1.0, step=0.05, group=g_map)
+fdiTrendAt = input.float(1.35, "FDI: full-trend at", minval=1.0, maxval=2.0, step=0.05, group=g_map)
+fdiRangeAt = input.float(1.55, "FDI: full-range at", minval=1.0, maxval=2.0, step=0.05, group=g_map)
+chopTrendAt= input.float(38.2, "Chop: full-trend at",minval=0.0, maxval=100.0, group=g_map)
+chopRangeAt= input.float(61.8, "Chop: full-range at",minval=0.0, maxval=100.0, group=g_map)
+
+g_w = "3 · Sensor Weights"
+wEr   = input.float(1.0, "Weight · Efficiency Ratio", minval=0.0, step=0.1, group=g_w)
+wFdi  = input.float(1.0, "Weight · Fractal Dimension",minval=0.0, step=0.1, group=g_w)
+wChop = input.float(1.0, "Weight · Choppiness",       minval=0.0, step=0.1, group=g_w)
+
+g_reg = "4 · Regime Thresholds"
+trendHi = input.float(0.62, "Trend enters above", minval=0.5, maxval=1.0, step=0.01, group=g_reg,
+     tooltip="Trendiness ≥ this → Trend regime. Between this and the Range level the previous regime is held (hysteresis).")
+rangeLo = input.float(0.38, "Range enters below", minval=0.0, maxval=0.5, step=0.01, group=g_reg)
+
+g_chaos = "5 · Chaos Override"
+chopChaos = input.float(65.0, "Chaos: Chop above", minval=0.0, maxval=100.0, group=g_chaos,
+     tooltip="Chaos requires ALL three: Chop very high AND ER very low AND FDI very high — i.e. no exploitable structure either way.")
+erChaos   = input.float(0.18, "Chaos: ER below",   minval=0.0, maxval=1.0, step=0.01, group=g_chaos)
+fdiChaos  = input.float(1.55, "Chaos: FDI above",  minval=1.0, maxval=2.0, step=0.05, group=g_chaos)
+chaosDamp = input.float(0.30, "Chaos permission multiplier", minval=0.0, maxval=1.0, step=0.05, group=g_chaos)
+
+g_disp = "6 · Display"
+showSensors = input.bool(true,  "Show per-sensor lines", group=g_disp)
+showWatch   = input.bool(true,  "Show regime-change markers", group=g_disp)
+showTable   = input.bool(true,  "Show dashboard", group=g_disp)
+tablePos    = input.string("Top Right", "Dashboard position",
+     options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=g_disp)
+enableLog   = input.bool(false, "Debug log on regime change", group=g_disp)
+
+g_col = "7 · Colors"
+colTrend = input.color(#00c853,             "Trend",  group=g_col)
+colRange = input.color(#2962ff,             "Range",  group=g_col)
+colChaos = input.color(#d50000,             "Chaos",  group=g_col)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Map a sensor reading onto a 0..1 trendiness axis given its full-trend / full-range
+// anchor values. Direction-agnostic: works whether trend is the high or low anchor.
+f_map(float v, float trendAt, float rangeAt) =>
+    float span = trendAt - rangeAt
+    float t = span == 0.0 ? 0.5 : (v - rangeAt) / span
+    math.max(0.0, math.min(1.0, t))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SENSOR 1 · KAUFMAN EFFICIENCY RATIO  (0..1, high = trend)
+// ─────────────────────────────────────────────────────────────────────────────
+
+float erChange = math.abs(close - close[erLen])
+float erVol    = math.sum(math.abs(close - close[1]), erLen)
+float er       = erVol > 0.0 ? erChange / erVol : 0.0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SENSOR 2 · FRACTAL DIMENSION INDEX  (box-counting, 1..2, low = trend)
+// ─────────────────────────────────────────────────────────────────────────────
+
+int   fdiHalf = int(math.max(2, fdiLen / 2))
+float r1 = (ta.highest(high, fdiHalf) - ta.lowest(low, fdiHalf)) / fdiHalf
+float r2 = (ta.highest(high, fdiHalf)[fdiHalf] - ta.lowest(low, fdiHalf)[fdiHalf]) / fdiHalf
+float r3 = (ta.highest(high, fdiLen) - ta.lowest(low, fdiLen)) / fdiLen
+float fdi = na
+if r1 + r2 > 0.0 and r3 > 0.0
+    fdi := (math.log(r1 + r2) - math.log(r3)) / math.log(2.0)
+fdi := math.max(1.0, math.min(2.0, nz(fdi, 1.5)))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SENSOR 3 · CHOPPINESS INDEX  (0..100, high = chop)
+// ─────────────────────────────────────────────────────────────────────────────
+
+float tr      = ta.tr(true)
+float sumTr   = math.sum(tr, chopLen)
+float chRange = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
+float chop    = chRange > 0.0 ? 100.0 * math.log10(sumTr / chRange) / math.log10(chopLen) : na
+chop := math.max(0.0, math.min(100.0, nz(chop, 50.0)))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPOSITE TRENDINESS  (0..1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+float tEr   = f_map(er,   erTrendAt,   erRangeAt)
+float tFdi  = f_map(fdi,  fdiTrendAt,  fdiRangeAt)
+float tChop = f_map(chop, chopTrendAt, chopRangeAt)
+
+float wSum = wEr + wFdi + wChop
+float trendScore = wSum > 0.0 ? (wEr * tEr + wFdi * tFdi + wChop * tChop) / wSum : 0.5
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGIME STATE  (hysteresis: hold previous inside the dead zone)
+// ─────────────────────────────────────────────────────────────────────────────
+
+var int regimeState = 0   // 1 = Trend, -1 = Range, 0 = uninitialised
+if trendScore >= trendHi
+    regimeState := 1
+else if trendScore <= rangeLo
+    regimeState := -1
+else if regimeState == 0
+    regimeState := trendScore >= 0.5 ? 1 : -1
+
+bool chaos = chop >= chopChaos and er <= erChaos and fdi >= fdiChaos
+
+string regimeLabel = chaos ? "Chaos" : (regimeState == 1 ? "Trend" : "Range")
+color  regimeCol   = chaos ? colChaos : (regimeState == 1 ? colTrend : colRange)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PERMISSIONS  (Quality outputs, symmetric — never a trade trigger)
+// ─────────────────────────────────────────────────────────────────────────────
+
+float chaosMult          = chaos ? chaosDamp : 1.0
+float reversalPermission = (1.0 - trendScore) * chaosMult
+float trendPermission    = trendScore * chaosMult
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+color scoreCol = color.from_gradient(trendScore, rangeLo, trendHi, colRange, colTrend)
+plot(trendScore * 100.0, "Trendiness", color=chaos ? colChaos : scoreCol, linewidth=2)
+
+plot(showSensors ? tEr   * 100.0 : na, "ER (mapped)",   color=color.new(#ffb300, 35), linewidth=1)
+plot(showSensors ? tFdi  * 100.0 : na, "FDI (mapped)",  color=color.new(#00bcd4, 35), linewidth=1)
+plot(showSensors ? tChop * 100.0 : na, "Chop (mapped)", color=color.new(#ab47bc, 35), linewidth=1)
+
+hline(trendHi * 100.0, "Trend Level", color=color.new(colTrend, 50), linestyle=hline.style_dashed)
+hline(rangeLo * 100.0, "Range Level", color=color.new(colRange, 50), linestyle=hline.style_dashed)
+hline(50.0,            "Mid",         color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+bgcolor(color.new(regimeCol, 90), title="Regime Tint")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGIME-CHANGE WATCH MARKERS  (state change, not a trigger — see §7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool toRange = regimeLabel == "Range" and regimeLabel[1] != "Range"
+bool toTrend = regimeLabel == "Trend" and regimeLabel[1] != "Trend"
+bool toChaos = regimeLabel == "Chaos" and regimeLabel[1] != "Chaos"
+
+plotshape(showWatch and toRange, "→ Range (reversal window)",
+     style=shape.circle, location=location.bottom, color=colRange, size=size.tiny, text="R")
+plotshape(showWatch and toTrend, "→ Trend",
+     style=shape.circle, location=location.top, color=colTrend, size=size.tiny, text="T")
+plotshape(showWatch and toChaos, "→ Chaos",
+     style=shape.xcross, location=location.top, color=colChaos, size=size.tiny, text="X")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────────
+
+f_pos(string p) =>
+    switch p
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        =>                position.top_right
+
+var table t = table.new(f_pos(tablePos), 2, 8,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+if showTable and barstate.islast
+    table.cell(t, 0, 0, "REGIME", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, regimeLabel, text_color=color.white, bgcolor=regimeCol, text_size=size.small)
+
+    table.cell(t, 0, 1, "Trendiness", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(trendScore * 100.0, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 2, "Efficiency Ratio", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 2, str.tostring(er, "#.00"), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 3, "Fractal Dimension", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 3, str.tostring(fdi, "#.00"), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 4, "Choppiness", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(chop, "#.0"), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 5, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+    table.cell(t, 1, 5, "", bgcolor=color.new(color.gray, 80), text_size=size.tiny)
+
+    table.cell(t, 0, 6, "Reversal OK", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 6, str.tostring(reversalPermission * 100.0, "#") + "%",
+         text_color=reversalPermission >= 0.5 ? colRange : tc, text_size=size.small)
+
+    table.cell(t, 0, 7, "Trend-follow OK", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(trendPermission * 100.0, "#") + "%",
+         text_color=trendPermission >= 0.5 ? colTrend : tc, text_size=size.small)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS  (regime context, not entries)
+// ─────────────────────────────────────────────────────────────────────────────
+
+alertcondition(regimeLabel == "Range" and regimeLabel[1] != "Range",
+     "Regime → Range", "Regime Classifier: entered RANGE — reversal/mean-reversion window open")
+alertcondition(regimeLabel == "Trend" and regimeLabel[1] != "Trend",
+     "Regime → Trend", "Regime Classifier: entered TREND — fade counter-trend with caution")
+alertcondition(regimeLabel == "Chaos" and regimeLabel[1] != "Chaos",
+     "Regime → Chaos", "Regime Classifier: entered CHAOS — no exploitable structure, stand aside")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEBUG LOG  (§10 — answer "why this regime?")
+// ─────────────────────────────────────────────────────────────────────────────
+
+if enableLog and barstate.isconfirmed and regimeLabel != regimeLabel[1]
+    log.info("REGIME → {0} | trendScore={1} er={2} fdi={3} chop={4} | tEr={5} tFdi={6} tChop={7}",
+         regimeLabel,
+         str.tostring(trendScore, "#.000"),
+         str.tostring(er, "#.000"), str.tostring(fdi, "#.000"), str.tostring(chop, "#.0"),
+         str.tostring(tEr, "#.00"), str.tostring(tFdi, "#.00"), str.tostring(tChop, "#.00"))

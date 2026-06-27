@@ -147,6 +147,40 @@ Regeln symmetrisch halten: kein hartcodiertes Long/Short. Asymmetrie kommt aus d
 *Situation* (Regime/Kontext), nicht aus der Richtung (Memory
 `feedback_symmetric_situation_driven`).
 
+### 6.1 Reversal-Pipeline — die vier Stufen
+
+Grundsatz: **Kein Indikator erkennt die Trendwende.** Er erkennt nur, dass sich *eine
+Eigenschaft* des Marktes geändert hat (Momentum erschöpft, Struktur gebrochen, Volatilität
+komprimiert). Robuste Wendepunkt-Erkennung kombiniert deshalb mehrere Eigenschaften in
+**fester Reihenfolge** — nicht ein einzelner Oszillator, der im Trend dauernd Fehlsignale
+meldet.
+
+Die vier Stufen sind eine Konkretisierung von §6 (Regime zuerst) und mappen direkt auf das
+Rollen-Modell (§1):
+
+| Stufe | Frage | Rolle | Sensoren (Repo) |
+|---|---|---|---|
+| **1. Regime** | Ist hier ein Reversal überhaupt sinnvoll? | Quality / Veto | FDI, Efficiency Ratio, ADX, Chop |
+| **2. Erschöpfung** | Ist die Bewegung am Ende? | Momentum | Divergenz, WaveTrend, MFI, ruhige Osz. (Fisher/TSI) |
+| **3. Bestätigung** | Dreht die Struktur *jetzt*? | Trigger + Location | BOS/CHOCH, SFP, Kerzen-Rejection (Pivot nur Diagnose, §8) |
+| **4. Qualität** | Wie gut ist das Setup? | Quality + Location | BB-Width-Kompression, AVWAP-Distanz, Zonennähe |
+
+**Die Reihenfolge ist die Regel.** Stufe 1 ist ein *Filter/Veto*, kein Trigger — sie
+entscheidet, ob die Erschöpfungs-Logik überhaupt scharf ist. Erschöpfungssignale **ohne**
+vorgeschaltetes Regime-Gate sind genau das wiederkehrende Fehlsignal-Muster im starken Trend
+(`.claude/CLAUDE.md`: Gates blockten 94 % ohne besser zu selektieren — die Ursache war, dass
+gefiltert *statt* regime-gestaffelt wurde).
+
+Aber: das Regime-Veto darf den eigentlichen Reversal-Trigger nicht abwürgen (§3, Memory
+`feedback_er_gates_blocking_reversals`) — es verschiebt die *Schwelle*, killt nicht das
+Signal. Ein Modul deckt **eine** Stufe sauber ab (§0); ein Reversal-Scanner führt die vier
+Stufen-Scores zusammen (§4), statt alles in eine AND-Kette zu pressen (§2).
+
+**Repo-Abdeckung (Stand 2026-06-27):** Stufe 2 (Erschöpfung) und Stufe 3 (Bestätigung) sind
+breit besetzt; **Stufe 1 (Regime-Klassifikator aus FDI/ER/Chop) und Stufe 4 (Anchored VWAP)
+sind die offenen Lücken** — beim Bauen dort priorisieren, bevor weitere Erschöpfungs-Sensoren
+hinzukommen.
+
 ## 7. Signaltypen trennen
 
 Nicht alles in *ein* finales Signal pressen — das macht alles zu hart. Mindestens:

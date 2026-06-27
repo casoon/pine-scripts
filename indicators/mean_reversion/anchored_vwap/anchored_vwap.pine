@@ -1,0 +1,217 @@
+//@version=6
+// ============================================================================
+// Anchored VWAP [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-27 00:00:00
+// ============================================================================
+// Volume-weighted average price anchored to a selectable origin (swing pivot,
+// session / week / month / year, or a manual date) with volume-weighted σ bands.
+// Stage-4 "fair value zone" location sensor for the reversal pipeline: it reports
+// how stretched price is from value (distance in σ), it never fires a long/short
+// trigger.
+//
+// Features:
+//   ✓ Anchor at auto swing pivot, period start, or manual timestamp
+//   ✓ Volume-weighted standard-deviation bands (two configurable multiples)
+//   ✓ Distance-from-value in σ as a symmetric Location output
+//   ✓ Stretched / band-touch context markers (no entries)
+//   ✓ Anchor markers, light-theme dashboard, alerts
+//
+// ============================================================================
+
+indicator("Anchored VWAP [WavesUnchained]", "AVWAP", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+g_anchor = "1 · Anchor"
+anchorMode = input.string("Auto: Last Swing", "Anchor on",
+     options=["Auto: Last Swing", "Auto: Swing High", "Auto: Swing Low",
+              "Session", "Week", "Month", "Year", "Manual Date"], group=g_anchor)
+pivLeft    = input.int(5, "Swing Left Bars",  minval=1, group=g_anchor)
+pivR       = input.int(5, "Swing Right Bars", minval=1, group=g_anchor,
+     tooltip="Auto modes re-seed the VWAP from the actual pivot bar (pivR bars back), so value accrues from the real swing, not the confirmation bar.")
+anchorTime = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Manual Anchor", group=g_anchor)
+srcSel     = input.source(hlc3, "Price Source", group=g_anchor)
+
+g_bands = "2 · Bands"
+showBands = input.bool(true, "Show σ Bands", group=g_bands)
+mult1     = input.float(1.0, "Band 1 (σ)", minval=0.0, step=0.25, group=g_bands)
+mult2     = input.float(2.0, "Band 2 (σ)", minval=0.0, step=0.25, group=g_bands)
+
+g_loc = "3 · Location"
+stretchSigma = input.float(2.0, "Stretched at (σ)", minval=0.5, step=0.25, group=g_loc,
+     tooltip="|distance| ≥ this σ → flag a stretched location. Above value = potential short location, below = long location. Context only, not a trigger.")
+showStretch  = input.bool(true, "Show stretched markers", group=g_loc)
+
+g_disp = "4 · Display"
+showAnchor = input.bool(true, "Show anchor markers", group=g_disp)
+showTable  = input.bool(true, "Show dashboard", group=g_disp)
+tablePos   = input.string("Top Right", "Dashboard position",
+     options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=g_disp)
+
+g_col = "5 · Colors"
+colVwap = input.color(#ff6f00,            "VWAP",  group=g_col)
+colUp   = input.color(#d50000,            "Above value", group=g_col)
+colDn   = input.color(#00c853,            "Below value", group=g_col)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ANCHOR EVENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+float ph = ta.pivothigh(pivLeft, pivR)
+float pl = ta.pivotlow(pivLeft, pivR)
+bool isPivotMode = str.startswith(anchorMode, "Auto")
+
+// All ta.* computed globally for a consistent series (v6 pitfall: no conditional ta.*)
+bool chD = ta.change(time("D"))   != 0
+bool chW = ta.change(time("W"))   != 0
+bool chM = ta.change(time("M"))   != 0
+bool chY = ta.change(time("12M")) != 0
+
+bool evt = false
+if anchorMode == "Auto: Last Swing"
+    evt := not na(ph) or not na(pl)
+else if anchorMode == "Auto: Swing High"
+    evt := not na(ph)
+else if anchorMode == "Auto: Swing Low"
+    evt := not na(pl)
+else if anchorMode == "Session"
+    evt := chD
+else if anchorMode == "Week"
+    evt := chW
+else if anchorMode == "Month"
+    evt := chM
+else if anchorMode == "Year"
+    evt := chY
+else
+    evt := time >= anchorTime and time[1] < anchorTime
+
+bool active = anchorMode != "Manual Date" or time >= anchorTime
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VWAP ACCUMULATION  (running sums, reset on anchor event)
+// ─────────────────────────────────────────────────────────────────────────────
+
+var float sumPV  = na
+var float sumV   = na
+var float sumPV2 = na
+
+float src = srcSel
+
+if active
+    if evt or na(sumV)
+        sumPV  := 0.0
+        sumV   := 0.0
+        sumPV2 := 0.0
+        if isPivotMode
+            for i = pivR to 0
+                float p = nz(src[i])
+                float v = nz(volume[i])
+                sumPV  := sumPV + p * v
+                sumV   := sumV + v
+                sumPV2 := sumPV2 + p * p * v
+        else
+            sumPV  := src * volume
+            sumV   := volume
+            sumPV2 := src * src * volume
+    else
+        sumPV  := sumPV + src * volume
+        sumV   := sumV + volume
+        sumPV2 := sumPV2 + src * src * volume
+
+float vwap     = sumV > 0.0 ? sumPV / sumV : na
+float variance = sumV > 0.0 ? math.max(0.0, sumPV2 / sumV - vwap * vwap) : na
+float sd       = math.sqrt(variance)
+
+float up1 = vwap + mult1 * sd
+float dn1 = vwap - mult1 * sd
+float up2 = vwap + mult2 * sd
+float dn2 = vwap - mult2 * sd
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOCATION OUTPUT  (distance from value in σ — symmetric, never a trigger)
+// ─────────────────────────────────────────────────────────────────────────────
+
+float distSigma = sd > 0.0 ? (close - vwap) / sd : na
+bool stretchedUp = active and not na(distSigma) and distSigma >=  stretchSigma   // potential short location
+bool stretchedDn = active and not na(distSigma) and distSigma <= -stretchSigma   // potential long location
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+plot(active ? vwap : na, "AVWAP", color=colVwap, linewidth=2)
+
+pUp2 = plot(active and showBands ? up2 : na, "Upper 2σ", color=color.new(colUp, 60))
+pUp1 = plot(active and showBands ? up1 : na, "Upper 1σ", color=color.new(colUp, 75))
+pDn1 = plot(active and showBands ? dn1 : na, "Lower 1σ", color=color.new(colDn, 75))
+pDn2 = plot(active and showBands ? dn2 : na, "Lower 2σ", color=color.new(colDn, 60))
+
+fill(pUp1, pUp2, color=showBands ? color.new(colUp, 92) : na, title="Upper Band Fill")
+fill(pDn1, pDn2, color=showBands ? color.new(colDn, 92) : na, title="Lower Band Fill")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTEXT MARKERS  (Location flags — not entries, see design skill §1/§9)
+// ─────────────────────────────────────────────────────────────────────────────
+
+plotshape(showAnchor and evt and active, "Anchor",
+     style=shape.flag, location=location.belowbar, color=color.new(colVwap, 20), size=size.tiny)
+
+plotshape(showStretch and stretchedUp, "Stretched ↑ (short location)",
+     style=shape.triangledown, location=location.abovebar, color=color.new(colUp, 25), size=size.tiny)
+plotshape(showStretch and stretchedDn, "Stretched ↓ (long location)",
+     style=shape.triangleup, location=location.belowbar, color=color.new(colDn, 25), size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────────
+
+f_pos(string p) =>
+    switch p
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        =>                position.top_right
+
+var table t = table.new(f_pos(tablePos), 2, 5,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+if showTable and barstate.islast
+    table.cell(t, 0, 0, "ANCHORED VWAP", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, anchorMode, text_color=tc, bgcolor=hd, text_size=size.tiny)
+
+    table.cell(t, 0, 1, "AVWAP", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, na(vwap) ? "—" : str.tostring(vwap, format.mintick), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 2, "σ", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 2, na(sd) ? "—" : str.tostring(sd, format.mintick), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 3, "Distance (σ)", text_color=tc, text_size=size.small)
+    color dcol = na(distSigma) ? tc : (distSigma >= 0 ? colUp : colDn)
+    table.cell(t, 1, 3, na(distSigma) ? "—" : str.tostring(distSigma, "#.00"), text_color=dcol, text_size=size.small)
+
+    table.cell(t, 0, 4, "Location", text_color=tc, text_size=size.small)
+    string locTxt = stretchedUp ? "Stretched ↑" : stretchedDn ? "Stretched ↓" : "Near value"
+    color  locCol = stretchedUp ? colUp : stretchedDn ? colDn : tc
+    table.cell(t, 1, 4, locTxt, text_color=locCol, text_size=size.small)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS  (location context, not entries)
+// ─────────────────────────────────────────────────────────────────────────────
+
+alertcondition(stretchedUp and not stretchedUp[1], "Stretched Above Value",
+     "Anchored VWAP: price stretched above value (potential short location)")
+alertcondition(stretchedDn and not stretchedDn[1], "Stretched Below Value",
+     "Anchored VWAP: price stretched below value (potential long location)")
+alertcondition(ta.cross(close, vwap), "Price Crossed AVWAP",
+     "Anchored VWAP: price crossed the anchored VWAP")

@@ -1,10 +1,13 @@
 # Oscillator Divergence Zones
 
-Detects regular and hidden divergences by comparing consecutive price pivots with the corresponding oscillator values. Supports RSI (default), CCI, and MFI — selectable via a single dropdown. Confirmed signals appear as labeled markers on both the oscillator pane and the main chart, and project ATR-wide horizontal price zones that stay active until the underlying structure fully breaks.
+Detects regular and hidden divergences by comparing consecutive price pivots with the corresponding oscillator values. Supports RSI (default), CCI, MFI, Fisher Transform, and TSI — selectable via a single dropdown. Confirmed signals appear as labeled markers on both the oscillator pane and the main chart, and project ATR-wide horizontal price zones that stay active until the underlying structure fully breaks.
+
+This is **Stage 2** (exhaustion/momentum) of the reversal pipeline. The Fisher Transform and TSI sources are the *ruhige Oszillatoren* — they react more smoothly than RSI, which tends to produce the cleanest divergences (see the `indicator-design` skill, §6.1).
 
 ## Features
 
-- **Oscillator selector**: RSI, CCI, MFI — one dropdown, all settings adapt automatically including the pane midline (50 for RSI/MFI, 0 for CCI)
+- **Oscillator selector**: RSI, CCI, MFI, Fisher Transform, TSI — one dropdown, all settings adapt automatically including the pane midline (50 for RSI/MFI, 0 for CCI/Fisher/TSI) and auto OB/OS levels (Fisher ±1.5, TSI ±25)
+- **TSI two-length control**: the main Length is the TSI long smoothing; a separate TSI Short Length sets the second (classic 25/13)
 - **Regular divergence**: price makes a lower low while the oscillator makes a higher low (bullish), or price makes a higher high while the oscillator makes a lower high (bearish) — reversal signal
 - **Hidden divergence**: price/oscillator diverge in trend direction rather than against it — continuation signal, toggled separately with distinct visual style (dashed edge, transparent fill, triangle markers)
 - **Level filter (three modes)**: Off / Fixed (percentage of the OB–OS range) / Dynamic Zones (adaptive percentile thresholds from recent oscillator history) — suppresses signals in the neutral oscillator zone
