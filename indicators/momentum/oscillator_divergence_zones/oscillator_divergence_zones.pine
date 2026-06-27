@@ -1,14 +1,15 @@
 //@version=6
 // ============================================================================
 // Oscillator Divergence Zones [WavesUnchained]
-// Version: 1.3.0
+// Version: 1.4.0
 // Author: WavesUnchained
-// Build: 2026-06-27 00:00:00
+// Build: 2026-06-27 18:15:00
 // ============================================================================
-// Detects regular and hidden divergences for RSI, CCI, MFI, Fisher Transform, or TSI.
+// Detects regular and hidden divergences for RSI, CCI, MFI, Fisher Transform, TSI,
+// Schaff Trend Cycle, DPO, Ehlers Roofing Filter or Ehlers Cyber Cycle.
 //
 // Features:
-//   ✓ Oscillator selector: RSI (default), CCI, MFI, Fisher Transform, TSI
+//   ✓ Oscillator selector: RSI (default), CCI, MFI, Fisher, TSI, STC, DPO, Roofing, Cyber
 //   ✓ Regular divergence: price/oscillator structural opposition at pivots
 //   ✓ Hidden divergence: trend-continuation counterpart (toggle separately)
 //   ✓ Three-mode level filter: Off / Fixed OB-OS / Dynamic Zones (percentile-based)
@@ -26,14 +27,28 @@ indicator("Oscillator Divergence Zones [WavesUnchained]", format=format.price, p
 
 // ─── Inputs ──────────────────────────────────────────────────────────────────
 g_osc    = "Oscillator"
-oscType  = input.string("RSI", "Type", options=["RSI", "CCI", "MFI", "Fisher", "TSI"], group=g_osc)
-oscSrc   = input.source(close, "Source",                     group=g_osc)
+oscType  = input.string("RSI", "Type", options=["RSI", "CCI", "MFI", "Fisher", "TSI", "STC", "DPO", "Roofing", "Cyber"], group=g_osc,
+     tooltip="STC: Schaff Trend Cycle (bounded 0–100). DPO: Detrended Price Oscillator (centered). Roofing: Ehlers Roofing Filter (cycle, centered). Cyber: Ehlers Cyber Cycle (centered). DPO/Roofing/Cyber are unbounded — prefer the Dynamic Zones level filter for them.")
+srcAuto  = input.bool(true, "Auto Source per Oscillator",    group=g_osc,
+     tooltip="On: each oscillator uses its canonical source automatically — close for RSI/STC/DPO/TSI, hl2 for Fisher and the Ehlers filters (Roofing/Cyber), hlc3 for CCI/MFI. Off: every oscillator uses the manual Source below.")
+oscSrc   = input.source(close, "Source (manual)",            group=g_osc,
+     tooltip="Used only when Auto Source is off — then this source applies to all oscillator types.")
 oscLen   = input.int(14,       "Length",       minval=2,     group=g_osc,
-     tooltip="Lookback for RSI/CCI/MFI/Fisher. For TSI this is the long (first) smoothing length; the short length is set below.")
+     tooltip="Lookback for RSI/CCI/MFI/Fisher/DPO. For TSI the long (first) smoothing length; for STC the cycle length. Roofing/Cyber use their own params below.")
 tsiShortLen = input.int(13,    "TSI Short Length", minval=1, group=g_osc,
      tooltip="Second (short) smoothing length — TSI only. Classic TSI is 25 (long) / 13 (short).")
+stcFast  = input.int(23,    "STC Fast Length",  minval=1, group=g_osc,
+     tooltip="STC only — fast MACD EMA. The double-stochastic cycle uses 'Length'.")
+stcSlow  = input.int(50,    "STC Slow Length",  minval=2, group=g_osc,
+     tooltip="STC only — slow MACD EMA.")
+hpLen    = input.int(48,    "Roofing HighPass", minval=2, group=g_osc,
+     tooltip="Roofing only — high-pass period (removes the trend).")
+ssLen    = input.int(10,    "Roofing SuperSmoother", minval=2, group=g_osc,
+     tooltip="Roofing only — SuperSmoother period (removes the noise).")
+cyberAlpha = input.float(0.07, "Cyber Cycle Alpha", minval=0.01, maxval=0.5, step=0.01, group=g_osc,
+     tooltip="Cyber Cycle only — smaller = smoother/slower cycle.")
 autoLevels = input.bool(true,  "Auto OB/OS per Oscillator", group=g_osc,
-     tooltip="Automatically applies standard OB/OS levels per oscillator: RSI 70/30 · CCI 100/−100 · MFI 80/20 · Fisher ±1.5 · TSI ±25. Disable to set custom values below.")
+     tooltip="Automatically applies standard OB/OS levels per oscillator: RSI 70/30 · CCI 100/−100 · MFI 80/20 · Fisher ±1.5 · TSI ±25 · STC 75/25 · DPO/Roofing/Cyber ±1.5σ rolling band. Disable to set custom values below.")
 obLevel  = input.int(70,       "Overbought",  minval=-500, maxval=500, group=g_osc,
      tooltip="Used only when Auto OB/OS is disabled. RSI: 70 · CCI: 100 · MFI: 80 · Fisher: 1.5 · TSI: 25")
 osLevel  = input.int(30,       "Oversold",    minval=-500, maxval=500, group=g_osc,
@@ -53,8 +68,10 @@ bearFilterPct  = input.int(25,  "Min for Bear (%)", minval=0, maxval=100, group=
      tooltip="Fixed mode only. Lower limit for bearish signals as % of the OB–OS range. 25% ≈ RSI 40 · CCI −50 · MFI 35")
 dynSampleLen  = input.int(100,  "DZ Sample Length", minval=10, group=g_div,
      tooltip="Dynamic Zones mode only. Number of bars used to compute the percentile distribution of the oscillator.")
-dynPcntile    = input.float(90.0, "DZ Threshold (%)", minval=50.0, maxval=99.0, step=1.0, group=g_div,
-     tooltip="Dynamic Zones mode only. Symmetric threshold: bull filter uses the (100−X)th percentile as upper limit; bear filter uses the Xth percentile as lower limit. E.g. 90 → only fire when oscillator is in the bottom/top 10% of its recent history.")
+bullDynPcntile = input.float(10.0, "DZ Bull Threshold (%)", minval=1.0, maxval=50.0, step=1.0, group=g_div,
+     tooltip="Dynamic Zones mode only. Upper percentile limit for bullish signals (e.g. 10 means bottom 10% of recent history).")
+bearDynPcntile = input.float(90.0, "DZ Bear Threshold (%)", minval=50.0, maxval=99.0, step=1.0, group=g_div,
+     tooltip="Dynamic Zones mode only. Lower percentile limit for bearish signals (e.g. 90 means top 10% of recent history).")
 
 g_std        = "StdDev Filter"
 useStdFilter = input.bool(false,  "Statistical Overextension Filter", group=g_std,
@@ -94,26 +111,22 @@ var array<Zone> bearZones    = array.new<Zone>()
 var array<Zone> hidBullZones = array.new<Zone>()
 var array<Zone> hidBearZones = array.new<Zone>()
 
-var int   prevBullBar    = na
-var float prevBullOsc    = na
-var int   prevBearBar    = na
-var float prevBearOsc    = na
-var int   prevHidBullBar = na
-var float prevHidBullOsc = na
-var int   prevHidBearBar = na
-var float prevHidBearOsc = na
-
 // ─── Oscillator ──────────────────────────────────────────────────────────────
+// Effective source per oscillator: canonical when Auto, else the manual Source.
+srcClose = srcAuto ? close : oscSrc
+srcHl2   = srcAuto ? hl2   : oscSrc
+srcHlc3  = srcAuto ? hlc3  : oscSrc
+
 atr         = ta.atr(atrLen)
-rsiSeries = ta.rsi(oscSrc, oscLen)
-cciSeries = ta.cci(oscSrc, oscLen)
-mfiSeries = ta.mfi(oscSrc, oscLen)
+rsiSeries = ta.rsi(srcClose, oscLen)
+cciSeries = ta.cci(srcHlc3, oscLen)
+mfiSeries = ta.mfi(srcHlc3, oscLen)
 
 // Fisher Transform (Ehlers) — normalize source into [-1,1] then transform; centered on 0
-fHigh = ta.highest(oscSrc, oscLen)
-fLow  = ta.lowest(oscSrc, oscLen)
+fHigh = ta.highest(srcHl2, oscLen)
+fLow  = ta.lowest(srcHl2, oscLen)
 fRng  = fHigh - fLow
-fNorm = fRng > 0 ? (oscSrc - fLow) / fRng - 0.5 : 0.0
+fNorm = fRng > 0 ? (srcHl2 - fLow) / fRng - 0.5 : 0.0
 var float fishVal = 0.0
 fishVal := 0.66 * fNorm + 0.67 * nz(fishVal[1])
 fishVal := math.max(-0.999, math.min(0.999, fishVal))
@@ -121,24 +134,70 @@ var float fisherSeries = 0.0
 fisherSeries := 0.5 * math.log((1.0 + fishVal) / (1.0 - fishVal)) + 0.5 * nz(fisherSeries[1])
 
 // True Strength Index — double-smoothed momentum, ×100, centered on 0
-tsiPC    = ta.change(oscSrc)
+tsiPC    = ta.change(srcClose)
 tsiDS    = ta.ema(ta.ema(tsiPC, oscLen), tsiShortLen)
 tsiAbs   = ta.ema(ta.ema(math.abs(tsiPC), oscLen), tsiShortLen)
 tsiSeries = tsiAbs != 0.0 ? 100.0 * tsiDS / tsiAbs : 0.0
 
+// Schaff Trend Cycle — MACD run through a double stochastic; bounded 0..100
+stcMacd = ta.ema(srcClose, stcFast) - ta.ema(srcClose, stcSlow)
+stcLL1  = ta.lowest(stcMacd, oscLen)
+stcHH1  = ta.highest(stcMacd, oscLen) - stcLL1
+var float stcF1 = 0.0
+stcF1 := stcHH1 > 0.0 ? (stcMacd - stcLL1) / stcHH1 * 100.0 : nz(stcF1[1])
+var float stcD1 = 0.0
+stcD1 := na(stcD1[1]) ? stcF1 : stcD1[1] + 0.5 * (stcF1 - stcD1[1])
+stcLL2  = ta.lowest(stcD1, oscLen)
+stcHH2  = ta.highest(stcD1, oscLen) - stcLL2
+var float stcF2 = 0.0
+stcF2 := stcHH2 > 0.0 ? (stcD1 - stcLL2) / stcHH2 * 100.0 : nz(stcF2[1])
+var float stcSeries = 0.0
+stcSeries := na(stcSeries[1]) ? stcF2 : stcSeries[1] + 0.5 * (stcF2 - stcSeries[1])
+
+// Detrended Price Oscillator — price minus a displaced SMA; centered on 0
+dpoSeries = srcClose - ta.sma(srcClose, oscLen)[int(oscLen / 2) + 1]
+
+// Ehlers Roofing Filter — high-pass (trend out) + SuperSmoother (noise out); centered on 0
+_pi   = 2.0 * math.asin(1.0)
+rfA1  = (math.cos(0.707 * 2.0 * _pi / hpLen) + math.sin(0.707 * 2.0 * _pi / hpLen) - 1.0) / math.cos(0.707 * 2.0 * _pi / hpLen)
+var float rfHp = 0.0
+rfHp := math.pow(1.0 - rfA1 / 2.0, 2.0) * (srcHl2 - 2.0 * nz(srcHl2[1]) + nz(srcHl2[2])) + 2.0 * (1.0 - rfA1) * nz(rfHp[1]) - math.pow(1.0 - rfA1, 2.0) * nz(rfHp[2])
+rfA2  = math.exp(-1.414 * _pi / ssLen)
+rfB2  = 2.0 * rfA2 * math.cos(1.414 * _pi / ssLen)
+rfC2  = rfB2
+rfC3  = -rfA2 * rfA2
+rfC1  = 1.0 - rfC2 - rfC3
+var float roofingSeries = 0.0
+roofingSeries := rfC1 * (rfHp + nz(rfHp[1])) / 2.0 + rfC2 * nz(roofingSeries[1]) + rfC3 * nz(roofingSeries[2])
+
+// Ehlers Cyber Cycle — smoothed second difference of price; centered on 0
+ccSmooth = (srcHl2 + 2.0 * nz(srcHl2[1]) + 2.0 * nz(srcHl2[2]) + nz(srcHl2[3])) / 6.0
+var float cyberSeries = 0.0
+cyberSeries := bar_index < 7 ? (srcHl2 - 2.0 * nz(srcHl2[1]) + nz(srcHl2[2])) / 4.0 : (1.0 - 0.5 * cyberAlpha) * (1.0 - 0.5 * cyberAlpha) * (ccSmooth - 2.0 * nz(ccSmooth[1]) + nz(ccSmooth[2])) + 2.0 * (1.0 - cyberAlpha) * nz(cyberSeries[1]) - (1.0 - cyberAlpha) * (1.0 - cyberAlpha) * nz(cyberSeries[2])
+
 oscVal = switch oscType
-    "CCI"    => cciSeries
-    "MFI"    => mfiSeries
-    "Fisher" => fisherSeries
-    "TSI"    => tsiSeries
+    "CCI"     => cciSeries
+    "MFI"     => mfiSeries
+    "Fisher"  => fisherSeries
+    "TSI"     => tsiSeries
+    "STC"     => stcSeries
+    "DPO"     => dpoSeries
+    "Roofing" => roofingSeries
+    "Cyber"   => cyberSeries
     => rsiSeries
 
-// CCI / Fisher / TSI are centered on 0; RSI and MFI on 50
-midLevel   = (oscType == "CCI" or oscType == "Fisher" or oscType == "TSI") ? 0 : 50
+// DPO/Roofing/Cyber are unbounded and centered on 0 — no fixed OB/OS exists.
+bool oscUnbounded = oscType == "DPO" or oscType == "Roofing" or oscType == "Cyber"
+
+// CCI / Fisher / TSI and the unbounded types are centered on 0; RSI / MFI / STC on 50
+midLevel   = (oscType == "CCI" or oscType == "Fisher" or oscType == "TSI" or oscUnbounded) ? 0 : 50
 oscAtPiv   = oscVal[pivRight]
 
-effectiveOB = autoLevels ? (oscType == "CCI" ? 100.0 : oscType == "MFI" ? 80.0 : oscType == "Fisher" ? 1.5 : oscType == "TSI" ? 25.0 : 70.0)  : obLevel
-effectiveOS = autoLevels ? (oscType == "CCI" ? -100.0 : oscType == "MFI" ? 20.0 : oscType == "Fisher" ? -1.5 : oscType == "TSI" ? -25.0 : 30.0) : osLevel
+// Unbounded oscillators use a rolling ±1.5σ band as their auto OB/OS guide.
+float lvlBand = ta.stdev(oscVal, stdPeriod) * 1.5
+
+effectiveOB = autoLevels ? (oscUnbounded ? lvlBand : oscType == "CCI" ? 100.0 : oscType == "MFI" ? 80.0 : oscType == "Fisher" ? 1.5 : oscType == "TSI" ? 25.0 : oscType == "STC" ? 75.0 : 70.0)  : obLevel
+effectiveOS = autoLevels ? (oscUnbounded ? -lvlBand : oscType == "CCI" ? -100.0 : oscType == "MFI" ? 20.0 : oscType == "Fisher" ? -1.5 : oscType == "TSI" ? -25.0 : oscType == "STC" ? 25.0 : 30.0) : osLevel
 
 // ─── Pivots on price ─────────────────────────────────────────────────────────
 foundPL = not na(ta.pivotlow(low,   pivLeft, pivRight))
@@ -149,8 +208,8 @@ pivBarIdx = bar_index - pivRight
 bullFilterLvl = effectiveOS + bullFilterPct / 100.0 * (effectiveOB - effectiveOS)
 bearFilterLvl = effectiveOS + bearFilterPct / 100.0 * (effectiveOB - effectiveOS)
 
-dZoneAbove = ta.percentile_nearest_rank(oscVal, dynSampleLen, dynPcntile)
-dZoneBelow = ta.percentile_nearest_rank(oscVal, dynSampleLen, 100.0 - dynPcntile)
+dZoneAbove = ta.percentile_nearest_rank(oscVal, dynSampleLen, bearDynPcntile)
+dZoneBelow = ta.percentile_nearest_rank(oscVal, dynSampleLen, bullDynPcntile)
 
 bullOk = switch filterMode
     "Fixed"         => oscAtPiv < bullFilterLvl
@@ -170,40 +229,59 @@ _oscLower = _oscMean - stdMult * _oscStd
 stdBullOk = not useStdFilter or oscAtPiv < _oscLower[pivRight]
 stdBearOk = not useStdFilter or oscAtPiv > _oscUpper[pivRight]
 
-// Check divergence against one of the last 3 preceding pivots so that
-// intermediate pivots do not prevent detection of the structurally relevant pair.
-_bullDivWith(n) =>
-    prevP = ta.valuewhen(foundPL, low[pivRight],  n)
-    prevO = ta.valuewhen(foundPL, oscAtPiv,        n)
-    dist  = pivBarIdx - ta.valuewhen(foundPL, pivBarIdx, n)
-    not na(prevP) and dist >= minRange and dist <= maxRange and low[pivRight] < prevP and oscAtPiv > prevO
+// Check divergence against one of the last 3 preceding pivots so that intermediate
+// pivots do not prevent detection of the structurally relevant pair. Each function
+// returns [hit, prevBar, prevOsc] of the nearest matching pivot, so the connector
+// line can be drawn between the actual two pivots that form the divergence.
+_bullData(bool hid) =>
+    p1 = ta.valuewhen(foundPL, low[pivRight], 1)
+    o1 = ta.valuewhen(foundPL, oscAtPiv,      1)
+    b1 = ta.valuewhen(foundPL, pivBarIdx,     1)
+    p2 = ta.valuewhen(foundPL, low[pivRight], 2)
+    o2 = ta.valuewhen(foundPL, oscAtPiv,      2)
+    b2 = ta.valuewhen(foundPL, pivBarIdx,     2)
+    p3 = ta.valuewhen(foundPL, low[pivRight], 3)
+    o3 = ta.valuewhen(foundPL, oscAtPiv,      3)
+    b3 = ta.valuewhen(foundPL, pivBarIdx,     3)
+    d1 = pivBarIdx - b1
+    d2 = pivBarIdx - b2
+    d3 = pivBarIdx - b3
+    ok1 = not na(p1) and d1 >= minRange and d1 <= maxRange and (hid ? low[pivRight] > p1 and oscAtPiv < o1 : low[pivRight] < p1 and oscAtPiv > o1)
+    ok2 = not na(p2) and d2 >= minRange and d2 <= maxRange and (hid ? low[pivRight] > p2 and oscAtPiv < o2 : low[pivRight] < p2 and oscAtPiv > o2)
+    ok3 = not na(p3) and d3 >= minRange and d3 <= maxRange and (hid ? low[pivRight] > p3 and oscAtPiv < o3 : low[pivRight] < p3 and oscAtPiv > o3)
+    [ok1 or ok2 or ok3, ok1 ? b1 : ok2 ? b2 : b3, ok1 ? o1 : ok2 ? o2 : o3]
 
-_bearDivWith(n) =>
-    prevP = ta.valuewhen(foundPH, high[pivRight], n)
-    prevO = ta.valuewhen(foundPH, oscAtPiv,       n)
-    dist  = pivBarIdx - ta.valuewhen(foundPH, pivBarIdx, n)
-    not na(prevP) and dist >= minRange and dist <= maxRange and high[pivRight] > prevP and oscAtPiv < prevO
+_bearData(bool hid) =>
+    p1 = ta.valuewhen(foundPH, high[pivRight], 1)
+    o1 = ta.valuewhen(foundPH, oscAtPiv,       1)
+    b1 = ta.valuewhen(foundPH, pivBarIdx,      1)
+    p2 = ta.valuewhen(foundPH, high[pivRight], 2)
+    o2 = ta.valuewhen(foundPH, oscAtPiv,       2)
+    b2 = ta.valuewhen(foundPH, pivBarIdx,      2)
+    p3 = ta.valuewhen(foundPH, high[pivRight], 3)
+    o3 = ta.valuewhen(foundPH, oscAtPiv,       3)
+    b3 = ta.valuewhen(foundPH, pivBarIdx,      3)
+    d1 = pivBarIdx - b1
+    d2 = pivBarIdx - b2
+    d3 = pivBarIdx - b3
+    ok1 = not na(p1) and d1 >= minRange and d1 <= maxRange and (hid ? high[pivRight] < p1 and oscAtPiv > o1 : high[pivRight] > p1 and oscAtPiv < o1)
+    ok2 = not na(p2) and d2 >= minRange and d2 <= maxRange and (hid ? high[pivRight] < p2 and oscAtPiv > o2 : high[pivRight] > p2 and oscAtPiv < o2)
+    ok3 = not na(p3) and d3 >= minRange and d3 <= maxRange and (hid ? high[pivRight] < p3 and oscAtPiv > o3 : high[pivRight] > p3 and oscAtPiv < o3)
+    [ok1 or ok2 or ok3, ok1 ? b1 : ok2 ? b2 : b3, ok1 ? o1 : ok2 ? o2 : o3]
 
-_bullHidWith(n) =>
-    prevP = ta.valuewhen(foundPL, low[pivRight],  n)
-    prevO = ta.valuewhen(foundPL, oscAtPiv,        n)
-    dist  = pivBarIdx - ta.valuewhen(foundPL, pivBarIdx, n)
-    not na(prevP) and dist >= minRange and dist <= maxRange and low[pivRight] > prevP and oscAtPiv < prevO
-
-_bearHidWith(n) =>
-    prevP = ta.valuewhen(foundPH, high[pivRight], n)
-    prevO = ta.valuewhen(foundPH, oscAtPiv,       n)
-    dist  = pivBarIdx - ta.valuewhen(foundPH, pivBarIdx, n)
-    not na(prevP) and dist >= minRange and dist <= maxRange and high[pivRight] < prevP and oscAtPiv > prevO
+[bullHit, bullPrevBar, bullPrevOsc]          = _bullData(false)
+[bearHit, bearPrevBar, bearPrevOsc]          = _bearData(false)
+[bullHidHit, bullHidPrevBar, bullHidPrevOsc] = _bullData(true)
+[bearHidHit, bearHidPrevBar, bearHidPrevOsc] = _bearData(true)
 
 // Regular: price/oscillator oppose → reversal signal
-bullDiv    = foundPL and bullOk and stdBullOk and (_bullDivWith(1) or _bullDivWith(2) or _bullDivWith(3))
-bearDiv    = foundPH and bearOk and stdBearOk and (_bearDivWith(1) or _bearDivWith(2) or _bearDivWith(3))
+bullDiv    = foundPL and bullOk and stdBullOk and bullHit
+bearDiv    = foundPH and bearOk and stdBearOk and bearHit
 
 // Hidden: price/oscillator diverge in trend direction → continuation signal
 // Always calculated so strategy/alerts can use them; display gated by showHidden
-bullHidDiv = foundPL and bullOk and (_bullHidWith(1) or _bullHidWith(2) or _bullHidWith(3))
-bearHidDiv = foundPH and bearOk and (_bearHidWith(1) or _bearHidWith(2) or _bearHidWith(3))
+bullHidDiv = foundPL and bullOk and bullHidHit
+bearHidDiv = foundPH and bearOk and bearHidHit
 
 // ─── Zone functions ───────────────────────────────────────────────────────────
 _addZone(arr, col, priceLevel, isHidden, isBull) =>
@@ -220,9 +298,11 @@ _addZone(arr, col, priceLevel, isHidden, isBull) =>
          border_color=color.new(col, 60),
          bgcolor=isHidden ? color.new(col, 100) : color.new(col, 90),
          force_overlay=true)
+    // Retest counter: text-only (no bubble), stays invisible until price actually
+    // re-enters the zone, so untouched zones show nothing.
     infoLbl  = label.new(x2, labelY, "",
-         xloc=xloc.bar_index, style=label.style_label_left,
-         color=color.new(col, 20), textcolor=color.white, size=size.small,
+         xloc=xloc.bar_index, style=label.style_none,
+         textcolor=col, size=size.small,
          tooltip="Retest count: how many times price re-entered this zone without breaking it.",
          force_overlay=true)
     arr.push(Zone.new(edgeLine, areaBox, 0, infoLbl, halfW, isBull))
@@ -276,43 +356,46 @@ if showZones
     if showHidden and bearHidDiv
         _addZone(hidBearZones, bearCol, high[pivRight], true,  false)
 
-// Regular connector lines: dotted, full opacity
+// Divergence lines: connect the two pivots that actually form each divergence
+// (matched prior pivot → current pivot), drawn at their oscillator values.
+// Each line carries a subtle midpoint node whose hover tooltip explains the setup.
+currBar = bar_index - pivRight
+
+_divDraw(int x1, float y1, int x2, float y2, color col, bool hid, string txt) =>
+    line.new(x1, y1, x2, y2,
+         color=color.new(col, hid ? 50 : 25),
+         style=hid ? line.style_dashed : line.style_dotted,
+         width=hid ? 1 : 2)
+    label.new(int(math.avg(x1, x2)), math.avg(y1, y2), "",
+         style=label.style_circle, size=size.tiny,
+         color=color.new(col, hid ? 75 : 60), tooltip=txt)
+
+// Chart-overlay signal: a coloured bubble at the pivot with a hover explanation.
+_sig(float y, color col, bool up, string tag, string txt) =>
+    label.new(currBar, y, tag,
+         style=up ? label.style_label_up : label.style_label_down,
+         color=col, textcolor=color.white, size=size.small,
+         tooltip=txt, force_overlay=true)
+
 if bullDiv
-    currBar = bar_index - pivRight
-    if not na(prevBullBar)
-        line.new(prevBullBar, prevBullOsc, currBar, oscAtPiv,
-             color=color.new(bullCol, 20), style=line.style_dotted, width=2)
-    prevBullBar := currBar
-    prevBullOsc := oscAtPiv
-
+    tt = oscType + " · Bullish divergence (reversal)\nPrice: lower low   " + oscType + ": higher low\n" + oscType + " " + str.tostring(bullPrevOsc, "#.0") + "  →  " + str.tostring(oscAtPiv, "#.0")
+    _divDraw(bullPrevBar, bullPrevOsc, currBar, oscAtPiv, bullCol, false, tt)
+    _sig(low[pivRight], bullCol, true, "Reversal", tt)
 if bearDiv
-    currBar = bar_index - pivRight
-    if not na(prevBearBar)
-        line.new(prevBearBar, prevBearOsc, currBar, oscAtPiv,
-             color=color.new(bearCol, 20), style=line.style_dotted, width=2)
-    prevBearBar := currBar
-    prevBearOsc := oscAtPiv
+    tt = oscType + " · Bearish divergence (reversal)\nPrice: higher high   " + oscType + ": lower high\n" + oscType + " " + str.tostring(bearPrevOsc, "#.0") + "  →  " + str.tostring(oscAtPiv, "#.0")
+    _divDraw(bearPrevBar, bearPrevOsc, currBar, oscAtPiv, bearCol, false, tt)
+    _sig(high[pivRight], bearCol, false, "Reversal", tt)
 
-// Hidden connector lines: dashed, reduced opacity
 if showHidden and bullHidDiv
-    currBar = bar_index - pivRight
-    if not na(prevHidBullBar)
-        line.new(prevHidBullBar, prevHidBullOsc, currBar, oscAtPiv,
-             color=color.new(bullCol, 55), style=line.style_dashed, width=1)
-    prevHidBullBar := currBar
-    prevHidBullOsc := oscAtPiv
-
+    tt = oscType + " · Hidden bullish divergence (continuation)\nPrice: higher low   " + oscType + ": lower low\n" + oscType + " " + str.tostring(bullHidPrevOsc, "#.0") + "  →  " + str.tostring(oscAtPiv, "#.0")
+    _divDraw(bullHidPrevBar, bullHidPrevOsc, currBar, oscAtPiv, bullCol, true, tt)
+    _sig(low[pivRight], color.new(bullCol, 30), true, "Cont.", tt)
 if showHidden and bearHidDiv
-    currBar = bar_index - pivRight
-    if not na(prevHidBearBar)
-        line.new(prevHidBearBar, prevHidBearOsc, currBar, oscAtPiv,
-             color=color.new(bearCol, 55), style=line.style_dashed, width=1)
-    prevHidBearBar := currBar
-    prevHidBearOsc := oscAtPiv
+    tt = oscType + " · Hidden bearish divergence (continuation)\nPrice: lower high   " + oscType + ": higher high\n" + oscType + " " + str.tostring(bearHidPrevOsc, "#.0") + "  →  " + str.tostring(oscAtPiv, "#.0")
+    _divDraw(bearHidPrevBar, bearHidPrevOsc, currBar, oscAtPiv, bearCol, true, tt)
+    _sig(high[pivRight], color.new(bearCol, 30), false, "Cont.", tt)
 
 // ─── Oscillator pane plots ───────────────────────────────────────────────────
-noneCol = color.new(color.white, 100)
-
 p_ob  = plot(effectiveOB, "OB",  color=color.new(bearCol, 50))
 p_os  = plot(effectiveOS, "OS",  color=color.new(bullCol, 50))
 p_mid = plot(midLevel, "Mid", color=color.new(color.gray, 70))
@@ -344,22 +427,8 @@ plotshape(showHidden and bearHidDiv ? oscAtPiv + _hidDist : na, offset=-pivRight
      title="Bear hidden (pane)", style=shape.triangledown, location=location.absolute,
      color=color.new(bearCol, 40), size=size.small)
 
-// ─── Chart overlay shapes ────────────────────────────────────────────────────
-plotshape(bullDiv ? low[pivRight] : na, offset=-pivRight,
-     title="Bull reversal (chart)", style=shape.labelup, location=location.absolute,
-     color=noneCol, textcolor=bullCol, text="▲\nReversal", force_overlay=true)
-
-plotshape(bearDiv ? high[pivRight] : na, offset=-pivRight,
-     title="Bear reversal (chart)", style=shape.labeldown, location=location.absolute,
-     color=noneCol, textcolor=bearCol, text="Reversal\n▼", force_overlay=true)
-
-plotshape(showHidden and bullHidDiv ? low[pivRight] : na, offset=-pivRight,
-     title="Bull continuation (chart)", style=shape.labelup, location=location.absolute,
-     color=noneCol, textcolor=color.new(bullCol, 35), text="▲\nCont.", force_overlay=true)
-
-plotshape(showHidden and bearHidDiv ? high[pivRight] : na, offset=-pivRight,
-     title="Bear continuation (chart)", style=shape.labeldown, location=location.absolute,
-     color=noneCol, textcolor=color.new(bearCol, 35), text="Cont.\n▼", force_overlay=true)
+// Chart-overlay signal bubbles are drawn as labels in the divergence section above
+// (coloured bubble + hover tooltip), replacing the former transparent-text shapes.
 
 // ─── Debug: all detected pivots ──────────────────────────────────────────────
 // Semi-transparent circles on every pivot — bull pivots teal, bear pivots red.

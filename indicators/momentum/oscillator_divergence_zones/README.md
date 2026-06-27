@@ -1,12 +1,12 @@
 # Oscillator Divergence Zones
 
-Detects regular and hidden divergences by comparing consecutive price pivots with the corresponding oscillator values. Supports RSI (default), CCI, MFI, Fisher Transform, and TSI — selectable via a single dropdown. Confirmed signals appear as labeled markers on both the oscillator pane and the main chart, and project ATR-wide horizontal price zones that stay active until the underlying structure fully breaks.
+Detects regular and hidden divergences by comparing consecutive price pivots with the corresponding oscillator values. Supports RSI (default), CCI, MFI, Fisher Transform, TSI, Schaff Trend Cycle (STC), DPO, Ehlers Roofing Filter and Ehlers Cyber Cycle — selectable via a single dropdown. Confirmed signals appear as labeled markers on both the oscillator pane and the main chart, and project ATR-wide horizontal price zones that stay active until the underlying structure fully breaks.
 
-This is **Stage 2** (exhaustion/momentum) of the reversal pipeline. The Fisher Transform and TSI sources are the *ruhige Oszillatoren* — they react more smoothly than RSI, which tends to produce the cleanest divergences (see the `indicator-design` skill, §6.1).
+This is **Stage 2** (exhaustion/momentum) of the reversal pipeline. The Fisher Transform and TSI sources are the *ruhige Oszillatoren* — they react more smoothly than RSI, which tends to produce the cleanest divergences (see the `indicator-design` skill, §6.1). STC, DPO, Roofing and Cyber Cycle are added as additional divergence sources so their reversal-signal quality can be evaluated against the existing oscillators within one comparable framework.
 
 ## Features
 
-- **Oscillator selector**: RSI, CCI, MFI, Fisher Transform, TSI — one dropdown, all settings adapt automatically including the pane midline (50 for RSI/MFI, 0 for CCI/Fisher/TSI) and auto OB/OS levels (Fisher ±1.5, TSI ±25)
+- **Oscillator selector**: RSI, CCI, MFI, Fisher, TSI, STC, DPO, Roofing, Cyber — one dropdown, all settings adapt automatically including the pane midline (50 for RSI/MFI/STC, 0 for CCI/Fisher/TSI/DPO/Roofing/Cyber) and auto OB/OS levels (Fisher ±1.5, TSI ±25, STC 75/25, unbounded types use a rolling ±1.5σ band)
 - **TSI two-length control**: the main Length is the TSI long smoothing; a separate TSI Short Length sets the second (classic 25/13)
 - **Regular divergence**: price makes a lower low while the oscillator makes a higher low (bullish), or price makes a higher high while the oscillator makes a lower high (bearish) — reversal signal
 - **Hidden divergence**: price/oscillator diverge in trend direction rather than against it — continuation signal, toggled separately with distinct visual style (dashed edge, transparent fill, triangle markers)
@@ -25,8 +25,16 @@ This is **Stage 2** (exhaustion/momentum) of the reversal pipeline. The Fisher T
 | RSI | 70 | 30 | 50 | default |
 | CCI | 100 | −100 | 0 | update filter thresholds to ~±25 |
 | MFI | 80 | 20 | 50 | requires volume data |
+| Fisher | 1.5 | −1.5 | 0 | smoother than RSI |
+| TSI | 25 | −25 | 0 | long/short = Length / TSI Short Length |
+| STC | 75 | 25 | 50 | MACD via double stochastic; Fast/Slow Length params |
+| DPO | +1.5σ | −1.5σ | 0 | unbounded; displaced SMA; prefer Dynamic Zones |
+| Roofing | +1.5σ | −1.5σ | 0 | unbounded; HighPass + SuperSmoother params |
+| Cyber | +1.5σ | −1.5σ | 0 | unbounded; Cyber Cycle Alpha param |
 
-With **Auto OB/OS per Oscillator** enabled (default), the script applies these levels automatically when switching oscillators. Disable it to set custom OB/OS values; the fixed filter thresholds are defined as a percentage of the OB–OS range and adapt either way.
+**Auto Source per Oscillator** (default on) picks each oscillator's canonical input automatically — `close` for RSI/STC/DPO/TSI, `hl2` for Fisher and the Ehlers filters (Roofing/Cyber), `hlc3` for CCI/MFI. Turn it off to force the manual *Source (manual)* input on every oscillator.
+
+With **Auto OB/OS per Oscillator** enabled (default), the script applies these levels automatically when switching oscillators. The unbounded types (DPO/Roofing/Cyber) have no fixed OB/OS, so auto mode uses a rolling ±1.5σ band as a visual guide — for these, the **Dynamic Zones** level filter (percentile-based) is the recommended filter mode. Disable Auto OB/OS to set custom values; the fixed filter thresholds are defined as a percentage of the OB–OS range and adapt either way.
 
 ## Zone Behavior
 
@@ -38,4 +46,4 @@ Hidden divergence zones use a dashed edge and transparent fill to visually disti
 
 Bar distance between consecutive pivots is measured between the actual pivot bars, not the confirmation bars. Pivots are detected on price (low for bullish, high for bearish), with the oscillator used only for momentum confirmation.
 
-Regular and hidden divergences use separate zone arrays and separate connector line styles (dotted/full opacity for regular, dashed/reduced opacity for hidden).
+Each divergence line connects the **two pivots that actually form the divergence** — the matched prior pivot (one of the last three preceding pivots in range) and the current pivot — drawn at their oscillator values. Regular and hidden divergences use separate zone arrays and separate line styles (dotted/full opacity for regular, dashed/reduced opacity for hidden).

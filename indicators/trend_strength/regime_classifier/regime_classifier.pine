@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Regime Classifier [WavesUnchained]
-// Version: 1.0
+// Version: 1.1
 // Author: WavesUnchained
-// Build: 2026-06-27 00:00:00
+// Build: 2026-06-27 16:19:24
 // ============================================================================
 // Stage-1 regime filter for the reversal pipeline: fuses Fractal Dimension Index,
 // Kaufman Efficiency Ratio and the Choppiness Index into one Trend / Range / Chaos
@@ -16,6 +16,7 @@
 //   ✓ Symmetric reversal- and trend-permission outputs (0..1) for downstream gating
 //   ✓ Per-sensor visual breakdown + light-theme dashboard
 //   ✓ Regime-change watch markers and alerts (no trade triggers)
+//   ✓ Optional higher-timeframe regime line (visual context only, no veto)
 //   ✓ Debug log on every regime change
 //
 // ============================================================================
@@ -72,6 +73,14 @@ colTrend = input.color(#00c853,             "Trend",  group=g_col)
 colRange = input.color(#2962ff,             "Range",  group=g_col)
 colChaos = input.color(#d50000,             "Chaos",  group=g_col)
 
+g_htf = "8 · Higher-Timeframe Regime (visual)"
+showHtf  = input.bool(false, "Show HTF regime line", group=g_htf,
+     tooltip="Visual context only — the HTF regime is NOT used as a veto/gate (§3 over-filtering). Off by default.")
+htfMode  = input.string("Auto (4× chart)", "HTF source",
+     options=["Auto (4× chart)", "Manual"], group=g_htf)
+htfManual= input.timeframe("240", "Manual HTF", group=g_htf,
+     tooltip="Used only when HTF source = Manual.")
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -84,46 +93,41 @@ f_map(float v, float trendAt, float rangeAt) =>
     math.max(0.0, math.min(1.0, t))
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SENSOR 1 · KAUFMAN EFFICIENCY RATIO  (0..1, high = trend)
+// REGIME ENGINE  (one source of truth — reused for the chart TF and the HTF line)
 // ─────────────────────────────────────────────────────────────────────────────
+// Returns [trendScore, er, fdi, chop, tEr, tFdi, tChop] on whatever timeframe it
+// is evaluated on. Sensor convention: ER high = trend, FDI low = trend, Chop high
+// = range; each is mapped to a 0..1 trendiness via its own anchors.
 
-float erChange = math.abs(close - close[erLen])
-float erVol    = math.sum(math.abs(close - close[1]), erLen)
-float er       = erVol > 0.0 ? erChange / erVol : 0.0
+f_regime() =>
+    // Sensor 1 · Kaufman Efficiency Ratio (0..1, high = trend)
+    float erChange = math.abs(close - close[erLen])
+    float erVol    = math.sum(math.abs(close - close[1]), erLen)
+    float erV      = erVol > 0.0 ? erChange / erVol : 0.0
+    // Sensor 2 · Fractal Dimension Index (box-counting, 1..2, low = trend)
+    int   fdiHalf = int(math.max(2, fdiLen / 2))
+    float r1 = (ta.highest(high, fdiHalf) - ta.lowest(low, fdiHalf)) / fdiHalf
+    float r2 = (ta.highest(high, fdiHalf)[fdiHalf] - ta.lowest(low, fdiHalf)[fdiHalf]) / fdiHalf
+    float r3 = (ta.highest(high, fdiLen) - ta.lowest(low, fdiLen)) / fdiLen
+    float fdiV = na
+    if r1 + r2 > 0.0 and r3 > 0.0
+        fdiV := (math.log(r1 + r2) - math.log(r3)) / math.log(2.0)
+    fdiV := math.max(1.0, math.min(2.0, nz(fdiV, 1.5)))
+    // Sensor 3 · Choppiness Index (0..100, high = chop)
+    float trV     = ta.tr(true)
+    float sumTr   = math.sum(trV, chopLen)
+    float chRange = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
+    float chopV   = chRange > 0.0 ? 100.0 * math.log10(sumTr / chRange) / math.log10(chopLen) : na
+    chopV := math.max(0.0, math.min(100.0, nz(chopV, 50.0)))
+    // Composite trendiness (0..1)
+    float tErV   = f_map(erV,   erTrendAt,   erRangeAt)
+    float tFdiV  = f_map(fdiV,  fdiTrendAt,  fdiRangeAt)
+    float tChopV = f_map(chopV, chopTrendAt, chopRangeAt)
+    float wSum   = wEr + wFdi + wChop
+    float tsV    = wSum > 0.0 ? (wEr * tErV + wFdi * tFdiV + wChop * tChopV) / wSum : 0.5
+    [tsV, erV, fdiV, chopV, tErV, tFdiV, tChopV]
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SENSOR 2 · FRACTAL DIMENSION INDEX  (box-counting, 1..2, low = trend)
-// ─────────────────────────────────────────────────────────────────────────────
-
-int   fdiHalf = int(math.max(2, fdiLen / 2))
-float r1 = (ta.highest(high, fdiHalf) - ta.lowest(low, fdiHalf)) / fdiHalf
-float r2 = (ta.highest(high, fdiHalf)[fdiHalf] - ta.lowest(low, fdiHalf)[fdiHalf]) / fdiHalf
-float r3 = (ta.highest(high, fdiLen) - ta.lowest(low, fdiLen)) / fdiLen
-float fdi = na
-if r1 + r2 > 0.0 and r3 > 0.0
-    fdi := (math.log(r1 + r2) - math.log(r3)) / math.log(2.0)
-fdi := math.max(1.0, math.min(2.0, nz(fdi, 1.5)))
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SENSOR 3 · CHOPPINESS INDEX  (0..100, high = chop)
-// ─────────────────────────────────────────────────────────────────────────────
-
-float tr      = ta.tr(true)
-float sumTr   = math.sum(tr, chopLen)
-float chRange = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
-float chop    = chRange > 0.0 ? 100.0 * math.log10(sumTr / chRange) / math.log10(chopLen) : na
-chop := math.max(0.0, math.min(100.0, nz(chop, 50.0)))
-
-// ─────────────────────────────────────────────────────────────────────────────
-// COMPOSITE TRENDINESS  (0..1)
-// ─────────────────────────────────────────────────────────────────────────────
-
-float tEr   = f_map(er,   erTrendAt,   erRangeAt)
-float tFdi  = f_map(fdi,  fdiTrendAt,  fdiRangeAt)
-float tChop = f_map(chop, chopTrendAt, chopRangeAt)
-
-float wSum = wEr + wFdi + wChop
-float trendScore = wSum > 0.0 ? (wEr * tEr + wFdi * tFdi + wChop * tChop) / wSum : 0.5
+[trendScore, er, fdi, chop, tEr, tFdi, tChop] = f_regime()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REGIME STATE  (hysteresis: hold previous inside the dead zone)
@@ -151,11 +155,29 @@ float reversalPermission = (1.0 - trendScore) * chaosMult
 float trendPermission    = trendScore * chaosMult
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HIGHER-TIMEFRAME REGIME LINE  (visual context only — never a veto/gate, §3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+f_htfScore() =>
+    [tsV, erV, fdiV, chopV, tErV, tFdiV, tChopV] = f_regime()
+    tsV
+
+int    chartSec = timeframe.in_seconds(timeframe.period)
+string htfTf    = htfMode == "Manual" ? htfManual : timeframe.from_seconds(chartSec * 4)
+float  htfScore = request.security(syminfo.tickerid, htfTf, f_htfScore())
+
+string htfReg = htfScore >= trendHi ? "Trend" : htfScore <= rangeLo ? "Range" : "Neutral"
+color  htfCol = htfScore >= trendHi ? colTrend : htfScore <= rangeLo ? colRange : color.new(color.gray, 40)
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PLOTS
 // ─────────────────────────────────────────────────────────────────────────────
 
 color scoreCol = color.from_gradient(trendScore, rangeLo, trendHi, colRange, colTrend)
 plot(trendScore * 100.0, "Trendiness", color=chaos ? colChaos : scoreCol, linewidth=2)
+
+plot(showHtf ? htfScore * 100.0 : na, "HTF Trendiness", color=color.new(htfCol, 30),
+     linewidth=2, style=plot.style_stepline)
 
 plot(showSensors ? tEr   * 100.0 : na, "ER (mapped)",   color=color.new(#ffb300, 35), linewidth=1)
 plot(showSensors ? tFdi  * 100.0 : na, "FDI (mapped)",  color=color.new(#00bcd4, 35), linewidth=1)
@@ -193,7 +215,7 @@ f_pos(string p) =>
         "Bottom Left"  => position.bottom_left
         =>                position.top_right
 
-var table t = table.new(f_pos(tablePos), 2, 8,
+var table t = table.new(f_pos(tablePos), 2, 9,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -229,6 +251,11 @@ if showTable and barstate.islast
     table.cell(t, 0, 7, "Trend-follow OK", text_color=tc, text_size=size.small)
     table.cell(t, 1, 7, str.tostring(trendPermission * 100.0, "#") + "%",
          text_color=trendPermission >= 0.5 ? colTrend : tc, text_size=size.small)
+
+    if showHtf
+        table.cell(t, 0, 8, "HTF " + htfTf + " (visual)", text_color=tc, text_size=size.tiny)
+        table.cell(t, 1, 8, htfReg + " " + str.tostring(htfScore * 100.0, "#"),
+             text_color=color.white, bgcolor=htfCol, text_size=size.tiny)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ALERTS  (regime context, not entries)

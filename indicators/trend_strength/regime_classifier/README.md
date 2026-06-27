@@ -11,6 +11,7 @@ This implements **Stage 1** of the four-stage reversal pipeline (see the `indica
 - Symmetric **reversal-permission** and **trend-permission** outputs (0–1) — no hardcoded long/short
 - Per-sensor mapped lines so you can see *which* sensor drives the verdict
 - Regime-change **watch markers** and alerts (state changes, not entries)
+- Optional **higher-timeframe regime line** (Auto = 4× chart, or manual) — visual context only
 - Light-theme dashboard and a debug log on every regime change
 
 ## Sensors
@@ -40,4 +41,4 @@ These are *Quality* signals (skill §1): they shift the threshold of a downstrea
 
 - FDI length is treated as even (the older/recent half-windows use `length/2`).
 - All thresholds are inputs — tune per timeframe/market rather than hardcoding into signal logic.
-- HTF regime confirmation is a planned addition; v1.0 runs on the chart timeframe only.
+- The optional HTF regime line is **purely visual** (default off). It is deliberately not wired into the permission outputs — adding it as a second veto would re-introduce the over-filtering failure mode (skill §3).

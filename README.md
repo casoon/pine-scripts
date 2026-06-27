@@ -72,7 +72,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | Script | What it does |
 |--------|--------------|
 | [`adx_advanced.pine`](indicators/trend_strength/adx_advanced/adx_advanced.pine) | ADX with DI± display, pluggable signal smoothing, 4-state histogram, gradient line, and DI crossover / threshold alerts |
-| [`regime_classifier.pine`](indicators/trend_strength/regime_classifier/regime_classifier.pine) | Stage-1 reversal-pipeline filter — fuses Fractal Dimension, Kaufman Efficiency Ratio and Choppiness into a Trend / Range / Chaos classification with hysteresis and symmetric reversal/trend permission outputs (no triggers) |
+| [`regime_classifier.pine`](indicators/trend_strength/regime_classifier/regime_classifier.pine) | Stage-1 reversal-pipeline filter — fuses Fractal Dimension, Kaufman Efficiency Ratio and Choppiness into a Trend / Range / Chaos classification with hysteresis, symmetric reversal/trend permission outputs (no triggers) and an optional HTF regime line |
 | [`commodity_pulse_matrix_v3.pine`](indicators/composite/commodity_pulse_matrix/commodity_pulse_matrix_v3.pine) | Multi-timeframe confluence scoring matrix across instruments — [published on TradingView](https://de.tradingview.com/script/aJmdpe8H/) |
 | [`signal_quality_engine.pine`](indicators/composite/signal_quality_engine/signal_quality_engine.pine) | Range-fade signal engine — fades exhausted range edges (long the lows, short the highs) via a Distance+Structure+Momentum exhaustion score, with an Edge → Setup → Watch → Trigger read and candle-rejection confirmation |
 | [`regime_detector.pine`](indicators/trend_strength/regime_detector/regime_detector.pine) | MA-zone based trend regime overlay |
@@ -100,7 +100,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`mtf_wavetrend_opportunity_hunter.pine`](indicators/momentum/mtf_wavetrend_opportunity_hunter/mtf_wavetrend_opportunity_hunter.pine) | MTF confluence pane — net score histogram + heat ribbons per layer, RRG-style rotation map, Ehlers Ultimate Smoother core, entropy noise floor, persistent TP/SL zones on the price chart |
 | [`market_stress_oscillator.pine`](indicators/momentum/market_stress_oscillator/market_stress_oscillator.pine) | Composite stress index — WVF with JMA and ADX filters |
 | [`market_exhaustion.pine`](indicators/momentum/market_exhaustion/market_exhaustion.pine) | Exhaustion signals via MFI and StochRSI with divergence detection |
-| [`oscillator_divergence_zones.pine`](indicators/momentum/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI, Fisher Transform, TSI; regular + hidden; ATR-wide zones with retest counter |
+| [`oscillator_divergence_zones.pine`](indicators/momentum/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI, Fisher, TSI, STC, DPO, Roofing, Cyber Cycle; regular + hidden; ATR-wide zones with retest counter |
 | [`market_pressure_scale.pine`](indicators/momentum/market_pressure_scale/market_pressure_scale.pine) | Dual-component oscillator — Setup Pressure (coiling) vs Impulse Pressure (expansion), phase labels, signal markers, POC/range context lines |
 | [`mtf_stochrsi_pair_score.pine`](indicators/momentum/mtf_stochrsi_pair_score/mtf_stochrsi_pair_score.pine) | Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus and conflict penalty, weighted total, signal markers |
 
