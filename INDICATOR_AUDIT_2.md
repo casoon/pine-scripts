@@ -2,7 +2,7 @@
 
 **Datum:** 2026-06-27  
 **Fokus:** Logische Kohärenz auf dem Chart, Trading-Sinnhaftigkeit, Einhaltung des Rollen-Modells und Abstimmung zwischen Indikatoren und Strategien (ausgenommen `mtf_wavetrend_confluence.pine`).  
-**Umfang:** Vollständiges Audit aller 66 aktiven Indikatoren im Repository.
+**Umfang:** Vollständiges Audit aller 66 aktiven Indikatoren im Repository und Dokumentation der durchgeführten Fehlerbehebungen.
 
 ---
 
@@ -14,7 +14,7 @@ Der Indikator (v1.5) und die Strategie (v1.6) laufen logisch komplett asynchron.
 * **Die Logik der Strategie:** Im Backtest wurde bewiesen, dass rein additive Punkte scheitern. Daher wurden 5 Kriterien als **harte Pflicht-Gates** umgebaut. Nur noch 2 Kriterien (RSI und Struktur) sind als optionale Qualitätspunkte (0–2) übrig.
 * **Warum das keinen Sinn macht:** 
   * Der Trader sieht ein Signal auf dem Chart (z. B. 5/7 Punkte), das im Backtest blockiert wird, weil ein Pflicht-Gate (wie `bodyOk`) verletzt ist.
-  * Der Trader sieht ein schwaches "Tier C" (1/2) Signal auf dem Chart, obwohl es im Backtest ein hochqualitatives Signal ist, weil alle Pflicht-Gates perfekt erfüllt sind.
+  * Der Trader sieht ein schwaches "Tier C" (1/2) Signal auf dem Chart, obwohl es im Backtest ein hochqualitatives Signal is, weil alle Pflicht-Gates perfekt erfüllt sind.
   * **UI-Fehler:** Der Indikator-Tooltip zeigt dem Trader hartcodiert `x/2` an, obwohl die Punktzahl bis 7 hochgeht (es entstehen irreführende Anzeigen wie "6/2").
 
 ---
@@ -31,7 +31,7 @@ In Zeile 2913 überschattet eine lokale Variable `scoreDelta` (Änderung seit de
 ### 1.3 `ma_regime_bands.pine` — Die MA-Spike-Falle
 Der Indikator definiert ein bullishes Regime, sobald der Schlusskurs über allen drei MAs (21, 55, 89) liegt.
 * **Das Chart-Problem:** Es wird nicht geprüft, ob die MAs selbst bullish aufgefächert sind (21 > 55 > 89). 
-* **Warum das keinen Sinn macht:** In einem etablierten Abwärtstrend (bearish gestapelte MAs) kann ein plötzlicher Short-Squeeze oder eine News-Kerze den Preis über alle drei Linien katapultieren. Der Indikator deklariert sofort ein "BULL REGIME". In der Realität ist dies jedoch meist nur ein tiefer Pullback im Bärenmarkt (eine exzellente Short-Gelegenheit). Der Trader wird hier in eine klassische Bullen-Falle gelockt, weil die übergeordnete Trend-Struktur ignoriert wird.
+* **Warum das keinen Sinn macht:** In einem etablierten Abwärtstrend (bearish gestapelte MAs) kann ein plötzlicher Short-Squeeze oder eine News-Kerze den Preis über alle drei Linien katapultieren. Der Indikator deklariert sofort ein "BULL REGIME". In der Realität is dies jedoch meist nur ein tiefer Pullback im Bärenmarkt (eine exzellente Short-Gelegenheit). Der Trader wird hier in eine klassische Bullen-Falle gelockt, weil die übergeordnete Trend-Struktur ignoriert wird.
 
 ---
 
@@ -74,7 +74,7 @@ Hier ist die lückenlose Prüfung aller Pine-Dateien im `indicators/`-Verzeichni
 | 10 | [market_structure_advanced.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/market_structure_advanced/market_structure_advanced.pine) | Market Structure | **OK** | Fokussierter Oszillator zur Messung des strukturellen Überhangs (HH/LL-Verhältnis). |
 | 11 | [mtf_structure_bias.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/mtf_structure_bias/mtf_structure_bias.pine) | Market Structure | **OK** | Vorbildliche TF-Gewichtung (höhere Timeframes dominieren den Trend-Score). |
 | 12 | [reversal_type_classifier_v1.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/reversal_type_classifier/reversal_type_classifier_v1.pine) | Market Structure | **OK** | Klassifiziert Reversals erst ex-post zu Diagnosezwecken, verfälscht somit keine Live-Signale. |
-| 13 | [smc_structure_expectation.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/smc_structure_expectation/smc_structure_expectation.pine) | Market Structure | **OK** | Sauberes Struktur-Tool mit exzellenter "Why-Not"-Fehlersuche. |
+| 13 | [smc_structure_expectation.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/smc_structure_expectation.pine) | Market Structure | **OK** | Sauberes Struktur-Tool mit exzellenter "Why-Not"-Fehlersuche. |
 | 14 | [sr_zones_mtf_v2.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/sr_zones_mtf_v2.pine) | Market Structure | **OK** | Reine Zonen-Visualisierung, die die S/R-Location-Rolle sauber und ohne Signaldrang abbildet. |
 | 15 | [swing_conviction_radar.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/swing_conviction_radar.pine) | Market Structure | **OK** | Reiner Momentum/Struktur-Score ohne harten Signalzwang. |
 | 16 | [tweezer_kangaroo_zones.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/tweezer_kangaroo_zones/tweezer_kangaroo_zones.pine) | Market Structure | Fehlerhaft | Eierlegende Wollmilchsau mit integriertem Backtester und dreifacher Trend-Messung. |
@@ -128,3 +128,32 @@ Hier ist die lückenlose Prüfung aller Pine-Dateien im `indicators/`-Verzeichni
 | 64 | [regime_detector.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/trend_strength/regime_detector/regime_detector.pine) | Trend Strength | Ungenügend | Überfrachtet mit einer kompletten Handels-Engine (TP, SL, Trailing, Performance-Dashboard). |
 | 65 | [atr_advanced.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/volatility/atr_advanced/atr_advanced.pine) | Volatility | **OK** | Perfekte Vola-Normierung (z-Score & Perzentile) für risikoadjustierte Stop-Loss-Berechnungen. |
 | 66 | [time_to_react_volatility_time.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/volatility/time_to_react_volatility_time/time_to_react_volatility_time.pine) | Volatility | Ungenügend | Swing-Pivots speisen direkt die Signalrichtung `eventDir` (Rollenverletzung). |
+
+---
+
+## 3. Durchgeführte Korrekturen (2026-06-27)
+
+Folgende Abarbeitungen wurden vorgenommen, um die Fehler aus den Befunden erfolgreich zu beheben:
+
+1. **[reversal_engine_score_v1.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/momentum/reversal_engine_score/reversal_engine_score_v1.pine) auf v1.6 aktualisiert:**
+   * Die Toggles für alle 8 Pflicht-Gates (`useGateA` bis `useGateH`) wurden aus der Strategie übernommen.
+   * Die Signalgenerierung prüft nun die logischen Verknüpfungen der Gates (`longGateOk` / `shortGateOk`).
+   * Optionale Qualitätsbewertung wurde auf eine 0–2 Skala reduziert (RSI und Struktur sind optional).
+   * Die Tooltips wurden aktualisiert und zeigen nun für jedes Gate ein detailliertes `✓` oder `✗` sowie den korrekten Qualitäts-Score out of 2 an.
+
+2. **[jma_struct.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/market_structure/jma_struct/jma_struct.pine) Shadowing & Parameter korrigiert:**
+   * Bei den Live-Berechnungen von `entryQualityShort`/`entryQualityLong` wird nun das korrekte alert-relative Score-Delta (`scoreDeltaFromAlertShort`/`scoreDeltaFromAlertLong`) übergeben, anstatt des 1-Bar-Rauschens.
+   * Die lokale Variable im Log-Block wurde von `scoreDelta` zu `alertScoreDelta` umbenannt, wodurch das Variable Shadowing behoben ist und Live-Anzeige und Logs zu 100% synchron laufen.
+
+3. **[ma_regime_bands.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/trend_direction/ma_regime_bands/ma_regime_bands.pine) MA-Auffächerungsschutz implementiert:**
+   * `bullRaw` erfordert nun zusätzlich `ma1 >= ma2 and ma2 >= ma3`.
+   * `bearRaw` erfordert nun zusätzlich `ma1 <= ma2 and ma2 <= ma3`.
+   * Dies verhindert falsche Regime-Wechsel in Gegen-Trend-Spikes (Mean Reversion Pullbacks).
+
+4. **[commodity_heat_reversal.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/composite/commodity_heat_reversal/commodity_heat_reversal.pine) Pflicht-Gates eingebaut:**
+   * Es wurden die Pflichtbedingungen `hasExhaustionShort`/`hasExhaustionLong` (RSI im Extrembereich oder Bollinger Band-Durchbruch) und `hasRejectionShort`/`hasRejectionLong` (Kerzen-Docht Rejection) implementiert.
+   * Reversal-Signale können nun nur noch triggern, wenn sowohl Erschöpfungs- als auch Rejection-Bedingungen erfüllt sind, womit Signalfehlschläge in Trendphasen drastisch minimiert werden.
+
+5. **[cvd_bias.pine](file:///Users/jseidel/GitHub/pine-scripts/indicators/money_flow/cvd_bias/cvd_bias.pine) auf Swing-Pivot-Divergenzen umgestellt:**
+   * Die kurzfristige 5-Bar-ROC-Divergenz wurde durch eine echte strukturelle Swing-Divergenz mittels Pivot-Hochs (`ta.pivothigh`) und Pivot-Tiefs (`ta.pivotlow`) mit konfigurierbaren Parametern (`pivLeft = 5`, `pivRight = 5`) ersetzt.
+   * Die Visualisierung zeichnet die Divergenz-Markersymbole mittels `offset = -pivRight` exakt an den historischen Peaks/Troughs des Oszillators, was eine hervorragende visuelle Einordnung ermöglicht.

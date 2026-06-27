@@ -9,6 +9,7 @@
 - Auto Source per Oscillator (default on): each oscillator now uses its canonical source automatically — close for RSI/STC/DPO/TSI, hl2 for Fisher/Roofing/Cyber, hlc3 for CCI/MFI; turn off to force the manual Source for all
 - Chart signals restyled: the former transparent-text markers are now solid coloured label bubbles (accent fill, white text) at the pivot, each with a hover tooltip explaining the divergence
 - Retest counter cleaned up: now text-only (×N) that stays invisible until price actually re-enters a zone, instead of an empty coloured arrow bubble dangling on every untouched zone
+- Divergence now uses the oscillator's window extreme (trough for bull, peak for bear) for both the comparison and the draw point — pane markers and lines sit on the oscillator's own high/low instead of mid-slope; price pivots still set the timing
 
 ## v1.3.0 — 2026-06-27
 - Add Fisher Transform and TSI as oscillator sources (ruhige Oszillatoren → cleaner divergences); auto OB/OS Fisher ±1.5 · TSI ±25; new TSI Short Length input
