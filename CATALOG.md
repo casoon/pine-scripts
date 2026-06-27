@@ -93,6 +93,7 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [commodity_pulse_matrix](indicators/composite/commodity_pulse_matrix/) | 3.1.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Published, v4 in progress |
+| [signal_quality_engine](indicators/composite/signal_quality_engine/) | 3.1 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Range-Fader (eine Logik): fadet Range-Ränder — Long an erschöpften Tiefs, Short an erschöpften Hochs. Exhaustion-Score (Distance+Struktur+Momentum, aus Exhaustion Scanner), Edge→Setup→Watch→Trigger, Candle-Rejection. Für Ranges; im Trend bewusst still. Pivots nur Control-Overlay; ungetestet |
 
 ## Momentum Intelligence Suite
 
