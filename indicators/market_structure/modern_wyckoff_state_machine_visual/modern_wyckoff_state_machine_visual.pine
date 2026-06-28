@@ -1,0 +1,813 @@
+//@version=6
+// ============================================================================
+// Modern Wyckoff State Machine Lite [WavesUnchained]
+// Version: 1.3
+// Author: WavesUnchained
+// Build: 2026-06-28 12:00:00
+// ============================================================================
+// Lightweight Wyckoff state machine for range context, A-E phase tracking,
+// accumulation/distribution scoring, event labels and visual phase state.
+//
+// Features:
+//   ✓ Accumulation, Distribution, Markup and Markdown state tracking
+//   ✓ A-E phase model with minimum phase dwell time
+//   ✓ Locked trading range after state start
+//   ✓ Quality-graded Spring, UTAD, SOS, SOW, LPS and LPSY event detection
+//   ✓ Stored Spring/UTAD retest logic
+//   ✓ Pivot-confirmed LPS and LPSY detection
+//   ✓ Event cooldowns for labels and alerts
+//   ✓ Selling Climax / Buying Climax and absorption context
+//   ✓ Accumulation vs Distribution score dashboard with Cause Score
+//   ✓ Trading range, midpoint, phase zones and phase-track visualization
+//   ✓ Alerts for key Wyckoff events and Phase E trend release
+//
+// ============================================================================
+
+indicator("Modern Wyckoff State Machine Lite [WavesUnchained]",
+     shorttitle="Wyckoff Lite",
+     overlay=true,
+     max_labels_count=500,
+     max_lines_count=200,
+     max_boxes_count=50)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+var string gRange = "Range Detection"
+int rangeLen      = input.int(80, "Trading Range Length", minval=30, group=gRange)
+int pivotLen      = input.int(5, "Swing Pivot Length", minval=2, group=gRange)
+int adxLen        = input.int(14, "ADX Length", minval=2, group=gRange)
+int atrLen        = input.int(14, "ATR Length", minval=1, group=gRange)
+int volLen        = input.int(50, "Volume Z Length", minval=5, group=gRange)
+
+float rangeAtrMax = input.float(8.0, "Max Range Width in ATR", minval=0.25, step=0.25, group=gRange)
+float adxMax      = input.float(24.0, "Max ADX for Range", minval=1.0, step=0.5, group=gRange)
+bool refreshCauseRange = input.bool(true, "Refresh Range During Cause (Phase A/B)", group=gRange)
+
+var string gState = "State Machine"
+int eventLookback = input.int(30, "Event Memory", minval=5, group=gState)
+int minPhaseBars  = input.int(5, "Minimum Bars per Phase", minval=1, group=gState)
+int eventCooldown = input.int(10, "Event Cooldown", minval=1, group=gState)
+int breakoutConfirmBars = input.int(2, "Phase E Breakout Confirm Bars", minval=1, maxval=5, group=gState)
+bool resetStuckRange = input.bool(true, "Reset Stuck Accumulation/Distribution", group=gState)
+int  maxCauseBars    = input.int(120, "Max Bars in Phase Before Reset", minval=20, group=gState)
+int  staleRangeBars  = input.int(40, "Reset After Bars Range Lost", minval=5, group=gState)
+
+var string gEventQuality = "Event Quality"
+float springAtrMin = input.float(0.25, "Spring / UTAD Min Depth ATR", minval=0.05, step=0.05, group=gEventQuality)
+float springPctMin = input.float(0.75, "Spring / UTAD Min Depth %", minval=0.1, step=0.05, group=gEventQuality)
+float minWickRatio = input.float(0.30, "Min Spring / UTAD Wick Ratio", minval=0.1, maxval=0.8, step=0.05, group=gEventQuality)
+float minCandleAtr = input.float(0.50, "Min Spring / UTAD Candle ATR", minval=0.1, step=0.05, group=gEventQuality)
+float strongWickRatio = input.float(0.50, "Strong Event Wick Ratio", minval=0.2, maxval=0.9, step=0.05, group=gEventQuality)
+float strongCandleAtr = input.float(1.00, "Strong Event Candle ATR", minval=0.3, step=0.1, group=gEventQuality)
+float strongVolRatio = input.float(1.40, "Strong Event Relative Volume", minval=0.5, step=0.1, group=gEventQuality)
+float testAtrWindow = input.float(1.00, "Spring / UTAD Test Window ATR", minval=0.2, step=0.1, group=gEventQuality)
+float testVolFactor = input.float(0.85, "Test Max Volume vs Event", minval=0.2, maxval=1.2, step=0.05, group=gEventQuality)
+float lpsVolFactor = input.float(0.85, "LPS / LPSY Max Pivot Volume", minval=0.2, maxval=1.2, step=0.05, group=gEventQuality)
+
+var string gDisplay = "Display"
+bool showRange     = input.bool(true, "Show Range", group=gDisplay)
+bool showZones     = input.bool(true, "Show Phase Zones", group=gDisplay)
+bool showLabels    = input.bool(true, "Show Event Labels", group=gDisplay)
+bool showDash      = input.bool(false, "Show Dashboard", group=gDisplay)
+bool showPhaseLine = input.bool(true, "Show Phase Track", group=gDisplay)
+int maxPhaseZones  = input.int(20, "Max Phase Zones", minval=1, maxval=45, group=gDisplay)
+string oldZoneMode = input.string("Fade", "Old Zone Mode", options=["Delete", "Fade", "Hide Labels", "Current Only"], group=gDisplay)
+int oldZoneTransp  = input.int(96, "Old Zone Transparency", minval=80, maxval=100, group=gDisplay)
+int maxEventLabels = input.int(120, "Max Event Labels", minval=20, maxval=450, group=gDisplay)
+
+// ============================================================================
+// TYPES / STATE
+// ============================================================================
+
+enum WState
+    Neutral
+    Accumulation
+    Distribution
+    Markup
+    Markdown
+
+enum WPhase
+    None
+    A
+    B
+    C
+    D
+    E
+
+var WState wyState = WState.Neutral
+var WPhase wyPhase = WPhase.None
+var int phaseStartBar = na
+var float lockedRangeHigh = na
+var float lockedRangeLow = na
+var int lockedRangeStartBar = na
+
+// ============================================================================
+// CORE MEASURES
+// ============================================================================
+
+float atr = ta.atr(atrLen)
+
+float upMove   = high - high[1]
+float downMove = low[1] - low
+
+float plusDM  = upMove > downMove and upMove > 0 ? upMove : 0.0
+float minusDM = downMove > upMove and downMove > 0 ? downMove : 0.0
+
+float trur    = ta.rma(ta.tr(true), adxLen)
+float plusDI  = 100 * ta.rma(plusDM, adxLen) / math.max(trur, syminfo.mintick)
+float minusDI = 100 * ta.rma(minusDM, adxLen) / math.max(trur, syminfo.mintick)
+float dx      = 100 * math.abs(plusDI - minusDI) / math.max(plusDI + minusDI, 0.0001)
+float adx     = ta.rma(dx, adxLen)
+
+float volMean = ta.sma(volume, volLen)
+float volDev  = ta.stdev(volume, volLen)
+float volZ    = volDev > 0 ? (volume - volMean) / volDev : 0.0
+float relVol  = volMean > 0 ? volume / volMean : 1.0
+
+float spread  = high - low
+float body    = math.abs(close - open)
+float bodyPct = body / math.max(spread, syminfo.mintick)
+float lowerWick = math.min(open, close) - low
+float upperWick = high - math.max(open, close)
+float lowerWickRatio = lowerWick / math.max(spread, syminfo.mintick)
+float upperWickRatio = upperWick / math.max(spread, syminfo.mintick)
+float candleAtr = spread / math.max(atr, syminfo.mintick)
+float spreadMean = ta.sma(spread, volLen)
+float spreadDev = ta.stdev(spread, volLen)
+float spreadZ = spreadDev > 0 ? (spread - spreadMean) / spreadDev : 0.0
+
+float rangeHigh = ta.highest(high, rangeLen)
+float rangeLow  = ta.lowest(low, rangeLen)
+float rangeHighPrev = rangeHigh[1]
+float rangeLowPrev  = rangeLow[1]
+
+bool lockActiveRange = wyState == WState.Accumulation or wyState == WState.Distribution or wyState == WState.Markup or wyState == WState.Markdown
+if lockActiveRange and na(lockedRangeHigh)
+    lockedRangeHigh := rangeHigh
+    lockedRangeLow := rangeLow
+    lockedRangeStartBar := bar_index
+if wyState == WState.Neutral and not na(lockedRangeHigh)
+    lockedRangeHigh := na
+    lockedRangeLow := na
+    lockedRangeStartBar := na
+
+bool rangeLocked = not na(lockedRangeHigh) and not na(lockedRangeLow)
+float activeRangeHigh = rangeLocked ? lockedRangeHigh : rangeHigh
+float activeRangeLow = rangeLocked ? lockedRangeLow : rangeLow
+float activeRangeHighRef = rangeLocked ? lockedRangeHigh : rangeHighPrev
+float activeRangeLowRef = rangeLocked ? lockedRangeLow : rangeLowPrev
+float rangeMid  = (activeRangeHigh + activeRangeLow) / 2.0
+float rangeW    = activeRangeHigh - activeRangeLow
+float rangeAtr  = rangeW / math.max(atr, syminfo.mintick)
+
+float pos        = (close - activeRangeLow) / math.max(rangeW, syminfo.mintick)
+float posClamped = math.max(0.0, math.min(1.0, pos))
+
+bool nearLow  = posClamped < 0.28
+bool nearHigh = posClamped > 0.72
+
+bool rangeOk = adx < adxMax and rangeAtr < rangeAtrMax and bar_index > rangeLen
+
+// ============================================================================
+// STRUCTURE
+// ============================================================================
+
+float emaFast = ta.ema(close, 21)
+float emaSlow = ta.ema(close, 55)
+float emaTrend = ta.ema(close, 34)
+
+bool trendUp   = emaFast > emaSlow
+bool trendDown = emaFast < emaSlow
+
+int priorRef = int(math.max(1, math.round(rangeLen / 2.0)))
+bool priorTrendDown = close < emaTrend[priorRef]
+bool priorTrendUp   = close > emaTrend[priorRef]
+
+float ph = ta.pivothigh(high, pivotLen, pivotLen)
+float pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(ph)
+    lastSwingHigh := ph
+
+if not na(pl)
+    lastSwingLow := pl
+
+bool bullBos = not na(lastSwingHigh) and close > lastSwingHigh
+bool bearBos = not na(lastSwingLow) and close < lastSwingLow
+
+// ============================================================================
+// WYCKOFF EVENTS
+// ============================================================================
+
+eventQuality(bool triggered, float wickRatio, float candleAtrRatio, float volumeRatio, float sweepAtr) =>
+    int q = 0
+    if triggered
+        int factors = 0
+        if wickRatio >= strongWickRatio
+            factors += 1
+        if candleAtrRatio >= strongCandleAtr
+            factors += 1
+        if volumeRatio >= strongVolRatio
+            factors += 1
+        if sweepAtr >= springAtrMin * 2.0
+            factors += 1
+        q := factors >= 3 ? 3 : factors >= 1 ? 2 : 1
+    q
+
+qualityTag(int quality) =>
+    quality == 3 ? "★ " : quality == 1 ? "~ " : ""
+
+float springDepth = activeRangeLowRef - low
+float springDepthPct = not na(activeRangeLowRef) and math.abs(activeRangeLowRef) > syminfo.mintick ? springDepth / activeRangeLowRef * 100.0 : 0.0
+float springSweepAtr = springDepth / math.max(atr, syminfo.mintick)
+bool springDepthOk = springDepth > atr * springAtrMin or springDepthPct >= springPctMin
+bool springRaw = rangeOk and springDepth > 0 and close > activeRangeLowRef
+bool spring    = springRaw and springDepthOk and nearLow and close > open and lowerWickRatio >= minWickRatio and candleAtr >= minCandleAtr
+int springQuality = eventQuality(spring, lowerWickRatio, candleAtr, relVol, springSweepAtr)
+
+float utadDepth = high - activeRangeHighRef
+float utadDepthPct = not na(activeRangeHighRef) and math.abs(activeRangeHighRef) > syminfo.mintick ? utadDepth / activeRangeHighRef * 100.0 : 0.0
+float utadSweepAtr = utadDepth / math.max(atr, syminfo.mintick)
+bool utadDepthOk = utadDepth > atr * springAtrMin or utadDepthPct >= springPctMin
+bool utadRaw = rangeOk and utadDepth > 0 and close < activeRangeHighRef
+bool utad    = utadRaw and utadDepthOk and nearHigh and close < open and upperWickRatio >= minWickRatio and candleAtr >= minCandleAtr
+int utadQuality = eventQuality(utad, upperWickRatio, candleAtr, relVol, utadSweepAtr)
+
+var int lastSpringBar = na
+var int lastUtadBar = na
+var int lastSosBar = na
+var int lastSowBar = na
+var int lastTestSpringBar = na
+var int lastTestUtadBar = na
+var int lastLpsBar = na
+var int lastLpsyBar = na
+var int lastScBar = na
+var int lastBcBar = na
+var float lastSpringPrice = na
+var float lastSpringVolRatio = na
+var int lastSpringQuality = 0
+var float lastUtadPrice = na
+var float lastUtadVolRatio = na
+var int lastUtadQuality = 0
+
+bool springFire = spring and (na(lastSpringBar) or bar_index - lastSpringBar > eventCooldown)
+if springFire
+    lastSpringBar := bar_index
+    lastSpringPrice := low
+    lastSpringVolRatio := relVol
+    lastSpringQuality := springQuality
+
+bool utadFire = utad and (na(lastUtadBar) or bar_index - lastUtadBar > eventCooldown)
+if utadFire
+    lastUtadBar := bar_index
+    lastUtadPrice := high
+    lastUtadVolRatio := relVol
+    lastUtadQuality := utadQuality
+
+bool springMemory = ta.highest(springFire ? 1 : 0, eventLookback) > 0
+bool utadMemory   = ta.highest(utadFire ? 1 : 0, eventLookback) > 0
+
+bool sos = rangeOk and springMemory and close > rangeMid and close > high[1] and volZ > -0.5
+bool sow = rangeOk and utadMemory and close < rangeMid and close < low[1] and volZ > -0.5
+
+bool sosFire = sos and (na(lastSosBar) or bar_index - lastSosBar > eventCooldown)
+if sosFire
+    lastSosBar := bar_index
+
+bool sowFire = sow and (na(lastSowBar) or bar_index - lastSowBar > eventCooldown)
+if sowFire
+    lastSowBar := bar_index
+
+bool springTestInWindow = not na(lastSpringPrice) and not na(lastSpringBar) and bar_index > lastSpringBar and bar_index - lastSpringBar <= eventLookback
+bool utadTestInWindow = not na(lastUtadPrice) and not na(lastUtadBar) and bar_index > lastUtadBar and bar_index - lastUtadBar <= eventLookback
+bool springTestPrice = springTestInWindow and low <= lastSpringPrice + atr * testAtrWindow and low >= lastSpringPrice - atr * testAtrWindow and close > lastSpringPrice
+bool utadTestPrice = utadTestInWindow and high >= lastUtadPrice - atr * testAtrWindow and high <= lastUtadPrice + atr * testAtrWindow and close < lastUtadPrice
+bool testSpring = rangeOk and springMemory and not spring and springTestPrice and relVol <= nz(lastSpringVolRatio, relVol) * testVolFactor
+bool testUtad   = rangeOk and utadMemory and not utad and utadTestPrice and relVol <= nz(lastUtadVolRatio, relVol) * testVolFactor
+
+bool testSpringFire = testSpring and (na(lastTestSpringBar) or bar_index - lastTestSpringBar > eventCooldown)
+if testSpringFire
+    lastTestSpringBar := bar_index
+
+bool testUtadFire = testUtad and (na(lastTestUtadBar) or bar_index - lastTestUtadBar > eventCooldown)
+if testUtadFire
+    lastTestUtadBar := bar_index
+
+bool sosMemory = ta.highest(sosFire ? 1 : 0, eventLookback) > 0
+bool sowMemory = ta.highest(sowFire ? 1 : 0, eventLookback) > 0
+
+bool pivotLowConfirmed = not na(pl)
+bool pivotHighConfirmed = not na(ph)
+float pivotLowVolRatio = volMean[pivotLen] > 0 ? volume[pivotLen] / volMean[pivotLen] : 1.0
+float pivotHighVolRatio = volMean[pivotLen] > 0 ? volume[pivotLen] / volMean[pivotLen] : 1.0
+bool pivotLowInLpsZone = low[pivotLen] > activeRangeLow and low[pivotLen] < activeRangeLow + rangeW * 0.45
+bool pivotHighInLpsyZone = high[pivotLen] < activeRangeHigh and high[pivotLen] > activeRangeHigh - rangeW * 0.45
+bool lps  = rangeOk and sosMemory and not sos and pivotLowConfirmed and pivotLowInLpsZone and pivotLowVolRatio <= lpsVolFactor and close[pivotLen] > open[pivotLen]
+bool lpsy = rangeOk and sowMemory and not sow and pivotHighConfirmed and pivotHighInLpsyZone and pivotHighVolRatio <= lpsVolFactor and close[pivotLen] < open[pivotLen]
+
+bool lpsFire = lps and (na(lastLpsBar) or bar_index - lastLpsBar > eventCooldown)
+if lpsFire
+    lastLpsBar := bar_index
+
+bool lpsyFire = lpsy and (na(lastLpsyBar) or bar_index - lastLpsyBar > eventCooldown)
+if lpsyFire
+    lastLpsyBar := bar_index
+
+bool sellingClimax = priorTrendDown and volZ > 1.5 and spreadZ > 1.0 and bodyPct > 0.45 and low <= activeRangeLow and close > low + spread * 0.35
+bool buyingClimax  = priorTrendUp and volZ > 1.5 and spreadZ > 1.0 and bodyPct > 0.45 and high >= activeRangeHigh and close < high - spread * 0.35
+
+bool sellingClimaxFire = sellingClimax and (na(lastScBar) or bar_index - lastScBar > eventCooldown)
+if sellingClimaxFire
+    lastScBar := bar_index
+
+bool buyingClimaxFire = buyingClimax and (na(lastBcBar) or bar_index - lastBcBar > eventCooldown)
+if buyingClimaxFire
+    lastBcBar := bar_index
+
+bool absorptionLow  = rangeOk and nearLow and volZ > 0.75 and close > low + spread * 0.5
+bool absorptionHigh = rangeOk and nearHigh and volZ > 0.75 and close < high - spread * 0.5
+
+// ============================================================================
+// SCORES
+// ============================================================================
+
+float rangeScore = rangeOk ? 20.0 : 0.0
+
+float accLocation  = nearLow ? 18.0 : posClamped < 0.5 ? 10.0 : 0.0
+float distLocation = nearHigh ? 18.0 : posClamped > 0.5 ? 10.0 : 0.0
+
+float accEvent  = springFire ? 15.0 + springQuality * 3.0 : testSpringFire ? 16.0 : sellingClimaxFire ? 12.0 : 0.0
+float distEvent = utadFire ? 15.0 + utadQuality * 3.0 : testUtadFire ? 16.0 : buyingClimaxFire ? 12.0 : 0.0
+
+float accAbsorb  = absorptionLow ? 18.0 : 0.0
+float distAbsorb = absorptionHigh ? 18.0 : 0.0
+
+float accReclaim = close > rangeMid ? 15.0 : 0.0
+float distLoss   = close < rangeMid ? 15.0 : 0.0
+
+float accStruct  = bullBos or trendUp ? 15.0 : 0.0
+float distStruct = bearBos or trendDown ? 15.0 : 0.0
+
+float accScore  = math.min(100.0, rangeScore + accLocation + accEvent + accAbsorb + accReclaim + accStruct)
+float distScore = math.min(100.0, rangeScore + distLocation + distEvent + distAbsorb + distLoss + distStruct)
+
+float rangeQuality = math.min(100.0,
+     (rangeOk ? 45.0 : 0.0) +
+     (adx < adxMax ? 25.0 : 0.0) +
+     (rangeAtr < rangeAtrMax ? 20.0 : 0.0) +
+     (math.abs(posClamped - 0.5) < 0.35 ? 10.0 : 0.0))
+
+float volMeanSlow = ta.sma(volume, volLen * 2)
+float compressionScore = 100.0 - math.min(100.0, rangeAtr * 10.0)
+float rangeDwellBars = rangeLocked and not na(lockedRangeStartBar) ? bar_index - lockedRangeStartBar : 0.0
+float dwellScore = math.min(30.0, rangeDwellBars)
+float swingScore = not na(lastSwingHigh) and not na(lastSwingLow) ? 20.0 : 0.0
+float volumeDryScore = volMean < volMeanSlow ? 15.0 : 0.0
+float respectScore = high <= activeRangeHigh and low >= activeRangeLow ? 15.0 : 0.0
+float causeScore = math.min(100.0, compressionScore * 0.35 + dwellScore + swingScore + volumeDryScore + respectScore)
+bool causeBuilding = causeScore >= 45.0 and (causeScore >= causeScore[1] or causeScore >= 65.0)
+
+// ============================================================================
+// STATE MACHINE
+// ============================================================================
+
+int barsInPhase = na(phaseStartBar) ? 0 : bar_index - phaseStartBar
+bool phaseCanAdvance = barsInPhase >= minPhaseBars
+
+bool accBias    = accScore > distScore and accScore >= 45
+bool distBias   = distScore > accScore and distScore >= 45
+bool strongAcc  = accScore >= 65 and accScore > distScore + 15
+bool strongDist = distScore >= 65 and distScore > accScore + 15
+
+bool bullBreakoutRaw = close > activeRangeHighRef and accScore > distScore and (bullBos or spreadZ > 0.5 or close > activeRangeHighRef + atr * 0.1)
+bool bearBreakoutRaw = close < activeRangeLowRef and distScore > accScore and (bearBos or spreadZ > 0.5 or close < activeRangeLowRef - atr * 0.1)
+bool bullBreakoutConfirmed = ta.barssince(close <= activeRangeHighRef) >= breakoutConfirmBars and bullBreakoutRaw
+bool bearBreakoutConfirmed = ta.barssince(close >= activeRangeLowRef) >= breakoutConfirmBars and bearBreakoutRaw
+
+bool accPhaseA = sellingClimaxFire or (priorTrendDown and rangeOk and nearLow and volZ > 1.0)
+bool accPhaseB = rangeOk and accBias and causeBuilding and not springFire and not sosFire
+bool accPhaseC = springFire or testSpringFire
+bool accPhaseD = sosFire or lpsFire or (close > rangeMid and close <= activeRangeHigh)
+bool accPhaseE = bullBreakoutConfirmed
+
+bool distPhaseA = buyingClimaxFire or (priorTrendUp and rangeOk and nearHigh and volZ > 1.0)
+bool distPhaseB = rangeOk and distBias and causeBuilding and not utadFire and not sowFire
+bool distPhaseC = utadFire or testUtadFire
+bool distPhaseD = sowFire or lpsyFire or (close < rangeMid and close >= activeRangeLow)
+bool distPhaseE = bearBreakoutConfirmed
+
+if wyState == WState.Neutral
+    if accPhaseA
+        wyState := WState.Accumulation
+        wyPhase := WPhase.A
+        phaseStartBar := bar_index
+        lockedRangeHigh := rangeHigh
+        lockedRangeLow := rangeLow
+        lockedRangeStartBar := bar_index
+    else if distPhaseA
+        wyState := WState.Distribution
+        wyPhase := WPhase.A
+        phaseStartBar := bar_index
+        lockedRangeHigh := rangeHigh
+        lockedRangeLow := rangeLow
+        lockedRangeStartBar := bar_index
+    else if strongAcc and rangeOk and causeBuilding
+        wyState := WState.Accumulation
+        wyPhase := WPhase.B
+        phaseStartBar := bar_index
+        lockedRangeHigh := rangeHigh
+        lockedRangeLow := rangeLow
+        lockedRangeStartBar := bar_index
+    else if strongDist and rangeOk and causeBuilding
+        wyState := WState.Distribution
+        wyPhase := WPhase.B
+        phaseStartBar := bar_index
+        lockedRangeHigh := rangeHigh
+        lockedRangeLow := rangeLow
+        lockedRangeStartBar := bar_index
+
+if wyState == WState.Accumulation and phaseCanAdvance
+    if wyPhase == WPhase.A and accPhaseB
+        wyPhase := WPhase.B
+        phaseStartBar := bar_index
+    else if wyPhase == WPhase.B and accPhaseC
+        wyPhase := WPhase.C
+        phaseStartBar := bar_index
+    else if wyPhase == WPhase.C and accPhaseD
+        wyPhase := WPhase.D
+        phaseStartBar := bar_index
+    else if wyPhase == WPhase.D and accPhaseE
+        wyPhase := WPhase.E
+        wyState := WState.Markup
+        phaseStartBar := bar_index
+
+if wyState == WState.Distribution and phaseCanAdvance
+    if wyPhase == WPhase.A and distPhaseB
+        wyPhase := WPhase.B
+        phaseStartBar := bar_index
+    else if wyPhase == WPhase.B and distPhaseC
+        wyPhase := WPhase.C
+        phaseStartBar := bar_index
+    else if wyPhase == WPhase.C and distPhaseD
+        wyPhase := WPhase.D
+        phaseStartBar := bar_index
+    else if wyPhase == WPhase.D and distPhaseE
+        wyPhase := WPhase.E
+        wyState := WState.Markdown
+        phaseStartBar := bar_index
+
+bool hardBullInvalidation = wyState == WState.Distribution and close > activeRangeHighRef and accScore > distScore + 25
+bool hardBearInvalidation = wyState == WState.Accumulation and close < activeRangeLowRef and distScore > accScore + 25
+
+if hardBullInvalidation
+    wyState := WState.Accumulation
+    wyPhase := WPhase.B
+    phaseStartBar := bar_index
+    lockedRangeHigh := rangeHigh
+    lockedRangeLow := rangeLow
+    lockedRangeStartBar := bar_index
+
+if hardBearInvalidation
+    wyState := WState.Distribution
+    wyPhase := WPhase.B
+    phaseStartBar := bar_index
+    lockedRangeHigh := rangeHigh
+    lockedRangeLow := rangeLow
+    lockedRangeStartBar := bar_index
+
+if wyState == WState.Markup and rangeOk and barsInPhase > 20 and close < activeRangeHighRef
+    wyState := WState.Neutral
+    wyPhase := WPhase.None
+    phaseStartBar := na
+    lockedRangeHigh := na
+    lockedRangeLow := na
+    lockedRangeStartBar := na
+
+if wyState == WState.Markdown and rangeOk and barsInPhase > 20 and close > activeRangeLowRef
+    wyState := WState.Neutral
+    wyPhase := WPhase.None
+    phaseStartBar := na
+    lockedRangeHigh := na
+    lockedRangeLow := na
+    lockedRangeStartBar := na
+
+// Lever 1 — reset a stuck Accumulation/Distribution back to Neutral when the
+// trading-range context is lost (range conditions gone too long) or the phase
+// has dwelled far past any realistic cause-building window.
+bool inCause = wyState == WState.Accumulation or wyState == WState.Distribution
+int  barsSinceRangeOk = ta.barssince(rangeOk)
+bool causeStale = resetStuckRange and inCause and (barsInPhase >= maxCauseBars or nz(barsSinceRangeOk, 0) >= staleRangeBars)
+if causeStale
+    wyState := WState.Neutral
+    wyPhase := WPhase.None
+    phaseStartBar := na
+    lockedRangeHigh := na
+    lockedRangeLow := na
+    lockedRangeStartBar := na
+
+// Lever 2 — while still building cause (Phase A/B) and the range is valid, keep
+// the locked range in sync with the live structure so the zone tracks current
+// price; it freezes naturally once a Spring/UTAD advances the state to Phase C.
+bool causeBuildingPhase = (wyState == WState.Accumulation or wyState == WState.Distribution) and (wyPhase == WPhase.A or wyPhase == WPhase.B)
+if refreshCauseRange and causeBuildingPhase and rangeOk and not na(lockedRangeHigh)
+    lockedRangeHigh := rangeHigh
+    lockedRangeLow := rangeLow
+
+rangeLocked := not na(lockedRangeHigh) and not na(lockedRangeLow)
+activeRangeHigh := rangeLocked ? lockedRangeHigh : rangeHigh
+activeRangeLow := rangeLocked ? lockedRangeLow : rangeLow
+activeRangeHighRef := rangeLocked ? lockedRangeHigh : rangeHighPrev
+activeRangeLowRef := rangeLocked ? lockedRangeLow : rangeLowPrev
+rangeMid := (activeRangeHigh + activeRangeLow) / 2.0
+rangeW := activeRangeHigh - activeRangeLow
+rangeAtr := rangeW / math.max(atr, syminfo.mintick)
+
+bool markupStarted = wyState == WState.Markup and wyPhase == WPhase.E and (wyState[1] != WState.Markup or wyPhase[1] != WPhase.E)
+bool markdownStarted = wyState == WState.Markdown and wyPhase == WPhase.E and (wyState[1] != WState.Markdown or wyPhase[1] != WPhase.E)
+
+// ============================================================================
+// DISPLAY STRINGS
+// ============================================================================
+
+string stateText =
+     wyState == WState.Accumulation ? "ACCUMULATION" :
+     wyState == WState.Distribution ? "DISTRIBUTION" :
+     wyState == WState.Markup ? "MARKUP" :
+     wyState == WState.Markdown ? "MARKDOWN" :
+     "NEUTRAL"
+
+string phaseText =
+     wyPhase == WPhase.A ? "A: Stopping Action" :
+     wyPhase == WPhase.B ? "B: Building Cause" :
+     wyPhase == WPhase.C ? wyState == WState.Distribution ? "C: UTAD / Test" : "C: Spring / Test" :
+     wyPhase == WPhase.D ? wyState == WState.Distribution ? "D: Markdown Prep" : "D: Markup Prep" :
+     wyPhase == WPhase.E ? "E: Trend Release" :
+     "None"
+
+float confidence =
+     wyState == WState.Accumulation or wyState == WState.Markup ? accScore :
+     wyState == WState.Distribution or wyState == WState.Markdown ? distScore :
+     math.max(accScore, distScore)
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+
+color longZoneColor = #00c853
+color markupZoneColor = #009688
+color shortZoneColor = #d50000
+color markdownZoneColor = #ff6f00
+
+color stateColor =
+     wyState == WState.Accumulation ? longZoneColor :
+     wyState == WState.Distribution ? shortZoneColor :
+     wyState == WState.Markup ? markupZoneColor :
+     wyState == WState.Markdown ? markdownZoneColor :
+     color.gray
+
+color zoneFillColor =
+     wyState == WState.Accumulation ? color.new(longZoneColor, 80) :
+     wyState == WState.Distribution ? color.new(shortZoneColor, 80) :
+     wyState == WState.Markup ? color.new(markupZoneColor, 80) :
+     wyState == WState.Markdown ? color.new(markdownZoneColor, 80) :
+     color.new(color.gray, 92)
+
+color zoneBorderColor =
+     wyState == WState.Accumulation ? color.new(longZoneColor, 30) :
+     wyState == WState.Distribution ? color.new(shortZoneColor, 30) :
+     wyState == WState.Markup ? color.new(markupZoneColor, 30) :
+     wyState == WState.Markdown ? color.new(markdownZoneColor, 30) :
+     color.new(color.gray, 45)
+color previousStateColor = stateColor[1]
+
+var box activePhaseZone = na
+var label activePhaseZoneLabel = na
+var box[] phaseZoneBoxes = array.new_box()
+var label[] phaseZoneLabels = array.new_label()
+
+bool hasPhaseZone = showZones and wyState != WState.Neutral and wyPhase != WPhase.None and not na(activeRangeHigh) and not na(activeRangeLow) and rangeW > 0
+bool phaseZoneChanged = wyState != wyState[1] or wyPhase != wyPhase[1]
+string zoneStateShort =
+     wyState == WState.Accumulation ? "ACC" :
+     wyState == WState.Distribution ? "DIST" :
+     wyState == WState.Markup ? "MARKUP" :
+     wyState == WState.Markdown ? "MARKDOWN" :
+     "NEUTRAL"
+string phaseLetter =
+     wyPhase == WPhase.A ? "A" :
+     wyPhase == WPhase.B ? "B" :
+     wyPhase == WPhase.C ? "C" :
+     wyPhase == WPhase.D ? "D" :
+     wyPhase == WPhase.E ? "E" :
+     "-"
+string phaseZoneText = zoneStateShort + "\nPhase " + phaseLetter
+string phaseZoneTooltip =
+     "Zone: " + zoneStateShort + " Phase " + phaseLetter +
+     "\nState: " + stateText +
+     "\nPhase: " + phaseText +
+     "\nConfidence: " + str.tostring(confidence, "#") + " / 100" +
+     "\nAccumulation: " + str.tostring(accScore, "#") +
+     "\nDistribution: " + str.tostring(distScore, "#") +
+     "\nCause: " + str.tostring(causeScore, "#") +
+     "\nLocked Range: " + (rangeLocked ? "Yes" : "No") +
+     "\nRange Quality: " + str.tostring(rangeQuality, "#") +
+     "\nRange ATR: " + str.tostring(rangeAtr, "#.##") +
+     "\nRange High: " + str.tostring(activeRangeHigh, format.mintick) +
+     "\nRange Low: " + str.tostring(activeRangeLow, format.mintick)
+
+if hasPhaseZone and (na(activePhaseZone) or phaseZoneChanged)
+    if not na(activePhaseZone)
+        box.set_right(activePhaseZone, bar_index)
+        if oldZoneMode == "Fade"
+            box.set_bgcolor(activePhaseZone, color.new(previousStateColor, oldZoneTransp))
+            box.set_border_color(activePhaseZone, color.new(previousStateColor, 85))
+        if oldZoneMode == "Hide Labels" and not na(activePhaseZoneLabel)
+            label.delete(activePhaseZoneLabel)
+            if array.size(phaseZoneLabels) > 0
+                array.pop(phaseZoneLabels)
+        if oldZoneMode == "Current Only"
+            box.delete(activePhaseZone)
+            if not na(activePhaseZoneLabel)
+                label.delete(activePhaseZoneLabel)
+            if array.size(phaseZoneBoxes) > 0
+                array.pop(phaseZoneBoxes)
+            if array.size(phaseZoneLabels) > 0
+                array.pop(phaseZoneLabels)
+
+    activePhaseZone := box.new(left=bar_index, top=activeRangeHigh, right=bar_index + 1, bottom=activeRangeLow,
+         border_color=zoneBorderColor,
+         bgcolor=zoneFillColor)
+    activePhaseZoneLabel := label.new(bar_index, activeRangeHigh, phaseZoneText,
+         style=label.style_label_down,
+         textcolor=color.white,
+         color=color.new(stateColor, 0),
+         size=size.tiny,
+         tooltip=phaseZoneTooltip)
+
+    array.push(phaseZoneBoxes, activePhaseZone)
+    array.push(phaseZoneLabels, activePhaseZoneLabel)
+
+    if array.size(phaseZoneBoxes) > maxPhaseZones
+        box oldBox = array.shift(phaseZoneBoxes)
+        box.delete(oldBox)
+    if array.size(phaseZoneLabels) > maxPhaseZones
+        label oldLabel = array.shift(phaseZoneLabels)
+        label.delete(oldLabel)
+else if hasPhaseZone and not na(activePhaseZone)
+    box.set_right(activePhaseZone, bar_index + 1)
+    box.set_top(activePhaseZone, activeRangeHigh)
+    box.set_bottom(activePhaseZone, activeRangeLow)
+    box.set_bgcolor(activePhaseZone, zoneFillColor)
+    box.set_border_color(activePhaseZone, zoneBorderColor)
+    label.set_x(activePhaseZoneLabel, bar_index)
+    label.set_y(activePhaseZoneLabel, activeRangeHigh)
+    label.set_text(activePhaseZoneLabel, phaseZoneText)
+    label.set_color(activePhaseZoneLabel, color.new(stateColor, 0))
+    label.set_tooltip(activePhaseZoneLabel, phaseZoneTooltip)
+else if not hasPhaseZone and not na(activePhaseZone)
+    box.set_right(activePhaseZone, bar_index)
+    activePhaseZone := na
+    activePhaseZoneLabel := na
+
+plot(showRange ? activeRangeHigh : na, "Range High", color=color.new(color.red, 10), linewidth=1)
+plot(showRange ? rangeMid : na, "Range Mid", color=color.new(color.gray, 30), linewidth=1)
+plot(showRange ? activeRangeLow : na, "Range Low", color=color.new(color.lime, 10), linewidth=1)
+
+upperBand = plot(showRange ? activeRangeHigh : na, display=display.none)
+lowerBand = plot(showRange ? activeRangeLow : na, display=display.none)
+fill(upperBand, lowerBand, color=rangeOk ? color.new(color.gray, 94) : na)
+
+barcolor(
+     springFire or sosFire or lpsFire ? color.lime :
+     utadFire or sowFire or lpsyFire ? color.red :
+     testSpringFire ? color.new(color.lime, 35) :
+     testUtadFire ? color.new(color.red, 35) :
+     sellingClimaxFire ? color.new(color.green, 0) :
+     buyingClimaxFire ? color.new(color.maroon, 0) :
+     na)
+
+float phaseValue =
+     wyPhase == WPhase.A ? activeRangeLow :
+     wyPhase == WPhase.B ? activeRangeLow + rangeW * 0.25 :
+     wyPhase == WPhase.C ? activeRangeLow + rangeW * 0.50 :
+     wyPhase == WPhase.D ? activeRangeLow + rangeW * 0.75 :
+     wyPhase == WPhase.E ? activeRangeHigh :
+     na
+
+plot(showPhaseLine ? phaseValue : na, "Wyckoff Phase Track", color=color.new(stateColor, 0), linewidth=2, style=plot.style_linebr)
+
+// ============================================================================
+// EVENT LABELS
+// ============================================================================
+
+var label[] eventLabels = array.new_label()
+
+storeEventLabel(label eventLabel) =>
+    array.push(eventLabels, eventLabel)
+    if array.size(eventLabels) > maxEventLabels
+        label oldEventLabel = array.shift(eventLabels)
+        label.delete(oldEventLabel)
+
+if showLabels and sellingClimaxFire
+    storeEventLabel(label.new(bar_index, low, "SC", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0), size=size.tiny))
+
+if showLabels and buyingClimaxFire
+    storeEventLabel(label.new(bar_index, high, "BC", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0), size=size.tiny))
+
+if showLabels and springFire
+    storeEventLabel(label.new(bar_index, low, qualityTag(springQuality) + "Spring", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0), size=size.small,
+         tooltip="Spring quality: " + str.tostring(springQuality) + " / 3\nSweep: " + str.tostring(springSweepAtr, "#.00") + " ATR\nWick: " + str.tostring(lowerWickRatio * 100, "#.0") + "%\nRelVol: " + str.tostring(relVol, "#.00") + "x"))
+
+if showLabels and utadFire
+    storeEventLabel(label.new(bar_index, high, qualityTag(utadQuality) + "UTAD", style=label.style_label_down, textcolor=color.white, color=color.new(color.maroon, 0), size=size.small,
+         tooltip="UTAD quality: " + str.tostring(utadQuality) + " / 3\nSweep: " + str.tostring(utadSweepAtr, "#.00") + " ATR\nWick: " + str.tostring(upperWickRatio * 100, "#.0") + "%\nRelVol: " + str.tostring(relVol, "#.00") + "x"))
+
+if showLabels and testSpringFire
+    storeEventLabel(label.new(bar_index, low, "Test", style=label.style_label_up, textcolor=color.white, color=color.new(color.teal, 0), size=size.tiny,
+         tooltip="Spring Test\nSpring: " + str.tostring(lastSpringPrice, format.mintick) + "\nEvent Quality: " + str.tostring(lastSpringQuality) + " / 3\nRelVol: " + str.tostring(relVol, "#.00") + "x vs event " + str.tostring(lastSpringVolRatio, "#.00") + "x"))
+
+if showLabels and testUtadFire
+    storeEventLabel(label.new(bar_index, high, "Test", style=label.style_label_down, textcolor=color.white, color=color.new(color.orange, 0), size=size.tiny,
+         tooltip="UTAD Test\nUTAD: " + str.tostring(lastUtadPrice, format.mintick) + "\nEvent Quality: " + str.tostring(lastUtadQuality) + " / 3\nRelVol: " + str.tostring(relVol, "#.00") + "x vs event " + str.tostring(lastUtadVolRatio, "#.00") + "x"))
+
+if showLabels and sosFire
+    storeEventLabel(label.new(bar_index, high, "SOS", style=label.style_label_up, textcolor=color.white, color=color.new(color.blue, 0), size=size.tiny))
+
+if showLabels and sowFire
+    storeEventLabel(label.new(bar_index, low, "SOW", style=label.style_label_down, textcolor=color.white, color=color.new(color.purple, 0), size=size.tiny))
+
+if showLabels and lpsFire
+    storeEventLabel(label.new(bar_index - pivotLen, low[pivotLen], "LPS", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 25), size=size.tiny,
+         tooltip="Pivot-confirmed LPS\nPivot volume: " + str.tostring(pivotLowVolRatio, "#.00") + "x\nConfirmed " + str.tostring(pivotLen) + " bars later"))
+
+if showLabels and lpsyFire
+    storeEventLabel(label.new(bar_index - pivotLen, high[pivotLen], "LPSY", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 25), size=size.tiny,
+         tooltip="Pivot-confirmed LPSY\nPivot volume: " + str.tostring(pivotHighVolRatio, "#.00") + "x\nConfirmed " + str.tostring(pivotLen) + " bars later"))
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+var table dash = table.new(position.top_right, 2, 10,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+color bullAccent = #00c853
+color bearAccent = #d50000
+color warningAccent = #ff6f00
+color stateTextColor =
+     wyState == WState.Accumulation or wyState == WState.Markup ? bullAccent :
+     wyState == WState.Distribution or wyState == WState.Markdown ? bearAccent :
+     tc
+
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "Wyckoff", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 0, stateText, text_color=stateTextColor, bgcolor=hd, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Phase", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, phaseText, text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Confidence", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(confidence, "#") + " / 100", text_color=stateTextColor, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Accumulation", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(accScore, "#"), text_color=bullAccent, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Distribution", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(distScore, "#"), text_color=bearAccent, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Cause", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(causeScore, "#"), text_color=warningAccent, text_size=size.small)
+
+    table.cell(dash, 0, 6, "Range Quality", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(rangeQuality, "#"), text_color=warningAccent, text_size=size.small)
+
+    table.cell(dash, 0, 7, "Range ATR", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(rangeAtr, "#.##"), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 8, "Locked Range", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 8, rangeLocked ? "Yes" : "No", text_color=rangeLocked ? stateTextColor : tc, text_size=size.small)
+
+    table.cell(dash, 0, 9, "Bars in Phase", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 9, str.tostring(barsInPhase), text_color=tc, text_size=size.small)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(springFire, "Wyckoff Spring", "Wyckoff Spring detected")
+alertcondition(utadFire, "Wyckoff UTAD", "Wyckoff UTAD detected")
+alertcondition(sosFire, "Wyckoff SOS", "Sign of Strength detected")
+alertcondition(sowFire, "Wyckoff SOW", "Sign of Weakness detected")
+alertcondition(markupStarted, "Wyckoff Markup", "Wyckoff Phase E / Markup detected")
+alertcondition(markdownStarted, "Wyckoff Markdown", "Wyckoff Phase E / Markdown detected")

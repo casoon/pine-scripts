@@ -1,0 +1,816 @@
+//@version=6
+// ============================================================================
+// Bayesian Trend Factor [WavesUnchained]
+// Version: 1.7
+// Author: WavesUnchained
+// Build: 2026-06-28
+// ============================================================================
+// Bayesian-inspired probabilistic trend-quality engine.
+// Output: Trend Factor -100..+100 + Confidence 0..100.
+//
+// Evidence blocks:
+//   1. Direction     = linear-regression slope normalized by ATR
+//   2. Strength      = ADX + Efficiency Ratio + Regression R2
+//   3. Structure     = swing-based HH/HL or LL/LH structure
+//   4. Volatility    = ATR percentile with optimal regime zone
+//   5. Exhaustion    = overextension, acceleration, wick rejection
+//
+// Optional Pullback / Continuation module:
+//   - BTF trend + confidence define the allowed direction.
+//   - Pullback starts on a controlled move back to the EMA/Fair Path zone.
+//   - Continuation fires on reclaim, micro-BOS or rejection while structure holds.
+//
+// Optional Trend Candles module:
+//   - HAMA-style smoothed overlay candles.
+//   - Candle color follows BTF gradient or smoothed candle direction.
+//
+// ============================================================================
+
+indicator("Bayesian Trend Factor [WavesUnchained]", "BTF", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+groupCore = "Core"
+lenReg    = input.int(34, "Regression Length", minval=10, group=groupCore)
+lenAtr    = input.int(14, "ATR Length", minval=5, group=groupCore)
+lenAdx    = input.int(14, "ADX Length", minval=5, group=groupCore)
+lenER     = input.int(20, "Efficiency Length", minval=5, group=groupCore)
+pivotLen  = input.int(4, "Structure Pivot Length", minval=2, maxval=20, group=groupCore)
+
+groupWeights = "Evidence Weights"
+wDirection   = input.float(1.25, "Direction Weight", minval=0.0, step=0.05, group=groupWeights)
+wStrength    = input.float(1.10, "Strength Weight", minval=0.0, step=0.05, group=groupWeights)
+wStructure   = input.float(1.30, "Structure Weight", minval=0.0, step=0.05, group=groupWeights)
+wVolatility  = input.float(0.85, "Volatility Quality Weight", minval=0.0, maxval=1.0, step=0.05, group=groupWeights)
+wExhaustion  = input.float(1.00, "Exhaustion Penalty Weight", minval=0.0, step=0.05, group=groupWeights)
+
+groupDisplay = "Display"
+showBarColor  = input.bool(true, "Color Candles", group=groupDisplay)
+showLabels    = input.bool(true, "Show Candle Scores", group=groupDisplay)
+labelStep     = input.float(15.0, "Show Label When Factor Changes By", minval=1.0, group=groupDisplay)
+labelCooldown = input.int(10, "Score Label Cooldown Bars", minval=0, group=groupDisplay)
+showDashboard = input.bool(false, "Show Dashboard", group=groupDisplay)
+showBands     = input.bool(true, "Show Fair Path / ATR Bands", group=groupDisplay)
+fairPathColor = input.color(color.rgb(255, 193, 7), "Fair Path Color", group=groupDisplay)
+
+groupThresholds = "Thresholds"
+trendThreshold  = input.float(55.0, "Trend Threshold", minval=20, maxval=90, group=groupThresholds)
+trendExitThreshold = input.float(45.0, "Trend Exit Threshold", minval=0, maxval=55, group=groupThresholds)
+strongThreshold = input.float(80.0, "Strong Trend Threshold", minval=50, maxval=100, group=groupThresholds)
+confThreshold   = input.float(60.0, "Minimum Confidence", minval=0, maxval=100, group=groupThresholds)
+factorSmoothLen = input.int(2, "Factor Smoothing", minval=1, maxval=10, group=groupThresholds)
+strengthDirGate = input.float(0.15, "Min Direction For Strength Evidence", minval=0.0, maxval=1.0, step=0.01, group=groupThresholds)
+structureFreshBars = input.int(50, "Structure Freshness Bars", minval=10, maxval=300, group=groupThresholds)
+
+groupPullback = "Pullback / Continuation"
+enablePullback = input.bool(true, "Enable Pullback Signals", group=groupPullback)
+pbEmaLen       = input.int(13, "Pullback EMA Length", minval=3, group=groupPullback)
+pbRsiLen       = input.int(14, "Pullback RSI Length", minval=3, group=groupPullback)
+pbMinBars      = input.int(2, "Min Pullback Bars", minval=0, maxval=20, group=groupPullback)
+pbTimeout      = input.int(30, "Pullback Timeout", minval=5, maxval=100, group=groupPullback)
+pbCooldown     = input.int(5, "Continuation Cooldown", minval=0, maxval=50, group=groupPullback)
+pbImpulseLookback = input.int(20, "Impulse Reference Lookback", minval=5, maxval=100, group=groupPullback)
+pbMinDepthAtr  = input.float(0.25, "Min Pullback Depth (ATR)", minval=0.0, step=0.05, group=groupPullback)
+pbMaxDepthAtr  = input.float(1.75, "Max Pullback Depth (ATR)", minval=0.25, step=0.05, group=groupPullback)
+pbMinScore     = input.float(6.5, "Min Continuation Score", minval=1.0, maxval=10.0, step=0.5, group=groupPullback)
+pbRsiBullFloor = input.float(42.0, "Bull Pullback RSI Floor", minval=20.0, maxval=55.0, step=1.0, group=groupPullback)
+pbRsiBearCeil  = input.float(58.0, "Bear Pullback RSI Ceiling", minval=45.0, maxval=80.0, step=1.0, group=groupPullback)
+pbWickMin      = input.float(0.35, "Rejection Wick Ratio", minval=0.10, maxval=0.80, step=0.05, group=groupPullback)
+pbConfirmClose = input.bool(true, "Confirm Signals On Bar Close", group=groupPullback)
+showPbSignals  = input.bool(true, "Show Pullback / Continuation Marks", group=groupPullback)
+showPbZone     = input.bool(true, "Show Pullback EMA / Zone", group=groupPullback)
+
+groupTrendCandles = "Trend Candles"
+showTrendCandles = input.bool(true, "Show Smoothed Trend Candles", group=groupTrendCandles)
+hideNativeColors  = input.bool(false, "Hide Native Candle Coloring", group=groupTrendCandles)
+candleColorMode   = input.string("BTF Gradient", "Candle Color Mode", options=["BTF Gradient", "Smoothed Candle Direction"], group=groupTrendCandles)
+candleOpenLen     = input.int(25, "Open Length", minval=1, group=groupTrendCandles)
+candleOpenType    = input.string("EMA", "Open MA Type", options=["EMA", "SMA", "WMA"], group=groupTrendCandles)
+candleCloseLen    = input.int(20, "Close Length", minval=1, group=groupTrendCandles)
+candleCloseType   = input.string("EMA", "Close MA Type", options=["EMA", "SMA", "WMA"], group=groupTrendCandles)
+candleHighLen     = input.int(20, "High Length", minval=1, group=groupTrendCandles)
+candleLowLen      = input.int(20, "Low Length", minval=1, group=groupTrendCandles)
+showTrendMa       = input.bool(true, "Show Trend Candle MA", group=groupTrendCandles)
+candleMaLen       = input.int(55, "MA Line Length", minval=1, group=groupTrendCandles)
+candleMaType      = input.string("WMA", "MA Line Type", options=["EMA", "SMA", "WMA"], group=groupTrendCandles)
+candleMaSource    = input.source(hl2, "MA Line Source", group=groupTrendCandles)
+gradientSteps     = input.int(5, "Gradient Steps", minval=1, maxval=20, group=groupTrendCandles)
+trendBullWeak     = input.color(color.new(color.lime, 55), "Bull Weak", group=groupTrendCandles)
+trendBullStrong   = input.color(color.rgb(0, 255, 0), "Bull Strong", group=groupTrendCandles)
+trendBearWeak     = input.color(color.new(color.red, 55), "Bear Weak", group=groupTrendCandles)
+trendBearStrong   = input.color(color.rgb(255, 0, 0), "Bear Strong", group=groupTrendCandles)
+trendNeutralColor = input.color(color.new(color.yellow, 20), "Neutral", group=groupTrendCandles)
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+f_clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_norm_signed(x, scale) =>
+    f_clamp(x / scale, -1.0, 1.0)
+
+f_norm01(x, lo, hi) =>
+    f_clamp((x - lo) / math.max(hi - lo, 0.000001), 0.0, 1.0)
+
+f_logit(p) =>
+    pp = f_clamp(p, 0.01, 0.99)
+    math.log(pp / (1.0 - pp))
+
+f_sigmoid(x) =>
+    1.0 / (1.0 + math.exp(-x))
+
+f_ma(src, len, maType) =>
+    maType == "EMA" ? ta.ema(src, len) :
+     maType == "SMA" ? ta.sma(src, len) :
+     maType == "WMA" ? ta.wma(src, len) :
+     na
+
+f_gradient_adv_dec(src, center, steps, bearWeak, bearStrong, bullWeak, bullStrong) =>
+    var float qtyAdvDec = 0.0
+    maxSteps = math.max(1.0, steps)
+    xUp = ta.crossover(src, center)
+    xDn = ta.crossunder(src, center)
+    srcChange = ta.change(src)
+    srcUp = srcChange > 0
+    srcDown = srcChange < 0
+    srcBull = src > center
+    srcBear = src < center
+    qtyAdvDec := srcBull ? xUp ? 1.0 : srcUp ? math.min(maxSteps, qtyAdvDec + 1.0) : srcDown ? math.max(1.0, qtyAdvDec - 1.0) : qtyAdvDec :
+         srcBear ? xDn ? 1.0 : srcDown ? math.min(maxSteps, qtyAdvDec + 1.0) : srcUp ? math.max(1.0, qtyAdvDec - 1.0) : qtyAdvDec :
+         qtyAdvDec
+    var color gradientColor = na
+    gradientColor := srcBull ? color.from_gradient(qtyAdvDec, 1.0, maxSteps, bullWeak, bullStrong) :
+         srcBear ? color.from_gradient(qtyAdvDec, 1.0, maxSteps, bearWeak, bearStrong) :
+         gradientColor
+    gradientColor
+
+// ============================================================================
+// Base Data
+// ============================================================================
+
+atr = ta.atr(lenAtr)
+safeAtr = math.max(atr, syminfo.mintick)
+barRange = math.max(high - low, syminfo.mintick)
+closePos = (close - low) / barRange
+
+// ============================================================================
+// 1. Direction Evidence: Regression Slope / ATR
+// ============================================================================
+
+regNow  = ta.linreg(close, lenReg, 0)
+regPrev = ta.linreg(close, lenReg, 1)
+regSlope = regNow - regPrev
+dirRaw = regSlope / safeAtr
+dirScore = f_norm_signed(dirRaw, 0.18)
+
+// -1 bearish, +1 bullish
+directionEvidence = dirScore
+dirAbs = math.abs(directionEvidence)
+
+// ============================================================================
+// 2. Strength Evidence: ADX + Efficiency Ratio + R2
+// ============================================================================
+
+[_, _, adx] = ta.dmi(lenAdx, lenAdx)
+netMove = math.abs(close - close[lenER])
+sumMove = math.sum(math.abs(close - close[1]), lenER)
+efficiency = sumMove > 0 ? netMove / sumMove : 0.0
+
+corr = ta.correlation(close, bar_index, lenReg)
+r2 = math.pow(nz(corr), 2)
+
+adxScore = f_norm01(adx, 15.0, 35.0)
+erScore  = f_clamp(efficiency, 0.0, 1.0)
+r2Score  = f_clamp(r2, 0.0, 1.0)
+strengthScore = (adxScore * 0.40) + (erScore * 0.35) + (r2Score * 0.25)
+
+// Directional strength:
+// strength only matters once direction is strong enough to carry it.
+strengthEvidence = dirAbs >= strengthDirGate ? strengthScore * math.sign(directionEvidence) : 0.0
+
+// ============================================================================
+// 3. Structure Evidence: Swing HH/HL or LL/LH
+// ============================================================================
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastHigh = na
+var float prevHigh = na
+var float lastLow  = na
+var float prevLow  = na
+var int lastStructureBar = na
+
+if not na(ph)
+    prevHigh := lastHigh
+    lastHigh := ph
+    lastStructureBar := bar_index - pivotLen
+
+if not na(pl)
+    prevLow := lastLow
+    lastLow := pl
+    lastStructureBar := bar_index - pivotLen
+
+hh = not na(lastHigh) and not na(prevHigh) and lastHigh > prevHigh
+lh = not na(lastHigh) and not na(prevHigh) and lastHigh < prevHigh
+hl = not na(lastLow) and not na(prevLow) and lastLow > prevLow
+ll = not na(lastLow) and not na(prevLow) and lastLow < prevLow
+
+bullStructure = (hh ? 0.5 : 0.0) + (hl ? 0.5 : 0.0)
+bearStructure = (ll ? 0.5 : 0.0) + (lh ? 0.5 : 0.0)
+structureAge = bar_index - nz(lastStructureBar, bar_index)
+structureFreshness = f_clamp(1.0 - structureAge / structureFreshBars, 0.25, 1.0)
+structureEvidence = (bullStructure - bearStructure) * structureFreshness
+
+// Extra live structure pressure:
+aboveLastLow  = not na(lastLow) and close > lastLow
+belowLastHigh = not na(lastHigh) and close < lastHigh
+structureEvidence += directionEvidence > 0 and aboveLastLow ? 0.15 : 0.0
+structureEvidence -= directionEvidence < 0 and belowLastHigh ? 0.15 : 0.0
+structureEvidence := f_clamp(structureEvidence, -1.0, 1.0)
+
+// ============================================================================
+// 4. Volatility Regime Evidence: ATR Percentile Zone
+// ============================================================================
+
+atrRankLen = 100
+atrLow = ta.lowest(atr, atrRankLen)
+atrHigh = ta.highest(atr, atrRankLen)
+atrRank = f_norm01(atr, atrLow, atrHigh)
+
+// Optimal zone: not dead, not chaotic.
+// Best around 0.45 - 0.75.
+volOptimal =
+     atrRank < 0.20 ? atrRank / 0.20 :
+     atrRank <= 0.75 ? 1.0 :
+     atrRank <= 1.00 ? 1.0 - ((atrRank - 0.75) / 0.25) :
+     0.0
+volOptimal := f_clamp(volOptimal, 0.0, 1.0)
+
+// Volatility does not define direction.
+// It confirms or degrades the whole thesis later as a quality multiplier.
+volatilityWeight = f_clamp(wVolatility, 0.0, 1.0)
+qualityMultiplier = (1.0 - volatilityWeight) + volatilityWeight * (0.65 + volOptimal * 0.35)
+
+// ============================================================================
+// 5. Exhaustion Evidence: Overextension / Acceleration / Wick Rejection
+// ============================================================================
+
+fairPath = regNow
+distanceAtr = (close - fairPath) / safeAtr
+lenFastReg = math.max(10, int(math.floor(lenReg / 2.0)))
+slopeFast = ta.linreg(close, lenFastReg, 0) - ta.linreg(close, lenFastReg, 1)
+acceleration = (slopeFast - regSlope) / safeAtr
+
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+upperWickRatio = upperWick / barRange
+lowerWickRatio = lowerWick / barRange
+
+bullOverextended = directionEvidence > 0 and distanceAtr > 2.0
+bearOverextended = directionEvidence < 0 and distanceAtr < -2.0
+bullRejection = directionEvidence > 0 and distanceAtr > 1.25 and upperWickRatio > 0.45 and closePos < 0.65
+bearRejection = directionEvidence < 0 and distanceAtr < -1.25 and lowerWickRatio > 0.45 and closePos > 0.35
+bullMomentumFade = directionEvidence > 0 and distanceAtr > 1.50 and acceleration < -0.05
+bearMomentumFade = directionEvidence < 0 and distanceAtr < -1.50 and acceleration > 0.05
+bullExhaustion = bullOverextended and (upperWickRatio > 0.35 or acceleration < 0.0)
+bearExhaustion = bearOverextended and (lowerWickRatio > 0.35 or acceleration > 0.0)
+
+exhaustionRaw =
+     (bullExhaustion or bearExhaustion ? 0.45 : 0.0) +
+     (bullRejection or bearRejection ? 0.35 : 0.0) +
+     (bullMomentumFade or bearMomentumFade ? 0.20 : 0.0)
+exhaustionScore = f_clamp(exhaustionRaw, 0.0, 1.0)
+
+// Exhaustion is a penalty against the active direction.
+exhaustionEvidence = -exhaustionScore * math.sign(directionEvidence)
+
+// ============================================================================
+// Bayesian Fusion via Log-Odds
+// ============================================================================
+
+// Convert evidence from [-1..+1] to pseudo probability.
+pDirection  = 0.5 + directionEvidence * 0.45
+pStrength   = 0.5 + strengthEvidence * 0.35
+pStructure  = 0.5 + structureEvidence * 0.40
+pExhaustion = 0.5 + exhaustionEvidence * 0.35
+
+logOdds =
+     f_logit(pDirection)  * wDirection +
+     f_logit(pStrength)   * wStrength +
+     f_logit(pStructure)  * wStructure +
+     f_logit(pExhaustion) * wExhaustion
+
+// Correlation / overconfidence brake.
+// The more one-sided the evidence gets, the less the global dampener reduces it.
+evidenceAgreement =
+     (math.abs(directionEvidence) +
+      math.abs(strengthEvidence) +
+      math.abs(structureEvidence) +
+      math.abs(exhaustionEvidence)) / 4.0
+confidenceBrake = 0.75 + evidenceAgreement * 0.25
+logOddsAdjusted = logOdds * confidenceBrake * qualityMultiplier
+
+bullProb = f_sigmoid(logOddsAdjusted)
+bearProb = 1.0 - bullProb
+trendFactor = (bullProb - bearProb) * 100.0
+
+// Confidence: quality of evidence, not direction.
+confidence =
+     dirAbs * 24.0 +
+     strengthScore * 26.0 +
+     math.abs(structureEvidence) * 24.0 +
+     volOptimal * 16.0 -
+     exhaustionScore * 16.0
+confidence := f_clamp(confidence, 0.0, 100.0)
+
+// Neutralize weak confidence.
+factorGated = confThreshold <= 0 ? trendFactor : confidence >= confThreshold ? trendFactor : trendFactor * (confidence / confThreshold)
+factorFinal = factorSmoothLen <= 1 ? factorGated : ta.ema(factorGated, factorSmoothLen)
+bullProbFinal = f_clamp((factorFinal + 100.0) / 200.0, 0.0, 1.0)
+bearProbFinal = 1.0 - bullProbFinal
+
+// ============================================================================
+// States
+// ============================================================================
+
+var int trendState = 0
+trendExitLevel = math.min(trendExitThreshold, trendThreshold - 1.0)
+if factorFinal >= trendThreshold
+    trendState := 1
+else if factorFinal <= -trendThreshold
+    trendState := -1
+else if trendState == 1 and factorFinal > trendExitLevel
+    trendState := 1
+else if trendState == -1 and factorFinal < -trendExitLevel
+    trendState := -1
+else
+    trendState := 0
+
+isBull = trendState == 1
+isBear = trendState == -1
+isStrongBull = factorFinal >= strongThreshold
+isStrongBear = factorFinal <= -strongThreshold
+isNeutral = not isBull and not isBear
+
+state =
+     isStrongBull ? "Strong Bull" :
+     isBull ? "Bull Trend" :
+     isStrongBear ? "Strong Bear" :
+     isBear ? "Bear Trend" :
+     "Neutral / Transition"
+
+// ============================================================================
+// Pullback / Continuation Module
+// ============================================================================
+
+confOk = confThreshold <= 0 ? true : confidence >= confThreshold
+bullTrendOk = enablePullback and isBull and confOk and bullProbFinal > bearProbFinal and exhaustionScore < 0.80
+bearTrendOk = enablePullback and isBear and confOk and bearProbFinal > bullProbFinal and exhaustionScore < 0.80
+
+pbEma = ta.ema(close, pbEmaLen)
+pbRsi = ta.rsi(close, pbRsiLen)
+pbImpulseHigh = ta.highest(high[1], pbImpulseLookback)
+pbImpulseLow = ta.lowest(low[1], pbImpulseLookback)
+
+bullWasAbove = close[1] > pbEma[1] and close[1] > fairPath[1]
+bearWasBelow = close[1] < pbEma[1] and close[1] < fairPath[1]
+bullInPullbackZone = low <= pbEma and low <= fairPath + atr * 0.25 and low >= fairPath - atr * 0.75
+bearInPullbackZone = high >= pbEma and high >= fairPath - atr * 0.25 and high <= fairPath + atr * 0.75
+pbTouchBull = bullTrendOk and bullWasAbove and bullInPullbackZone
+pbTouchBear = bearTrendOk and bearWasBelow and bearInPullbackZone
+
+// Pullback state machine: 0=Idle, 1=Armed, 2=Mature, 3=Triggered, 4=Invalidated.
+// Armed   = pullback into the zone detected.
+// Mature  = deep enough and old enough to accept a continuation trigger.
+// Triggered / Invalidated are one-bar terminal states that reset to Idle next bar.
+var int bullPbState = 0
+var int bearPbState = 0
+var int pbStartBar = na
+var float pbExtreme = na
+var float pbStartHigh = na
+var float pbStartLow = na
+
+// Clear terminal states left over from the previous bar.
+if bullPbState == 3 or bullPbState == 4
+    bullPbState := 0
+if bearPbState == 3 or bearPbState == 4
+    bearPbState := 0
+
+bullPBStart = enablePullback and bullPbState == 0 and pbTouchBull and not (pbTouchBull[1] == true)
+bearPBStart = enablePullback and bearPbState == 0 and pbTouchBear and not (pbTouchBear[1] == true)
+
+if bullPBStart
+    bullPbState := 1
+    bearPbState := 0
+    pbStartBar := bar_index
+    pbExtreme := low
+    pbStartHigh := nz(pbImpulseHigh, high)
+    pbStartLow := low
+
+if bearPBStart
+    bearPbState := 1
+    bullPbState := 0
+    pbStartBar := bar_index
+    pbExtreme := high
+    pbStartHigh := high
+    pbStartLow := nz(pbImpulseLow, low)
+
+inBullPB = bullPbState == 1 or bullPbState == 2
+inBearPB = bearPbState == 1 or bearPbState == 2
+
+if inBullPB
+    pbExtreme := math.min(pbExtreme, low)
+if inBearPB
+    pbExtreme := math.max(pbExtreme, high)
+
+pbBarsIn = na(pbStartBar) ? 0 : bar_index - pbStartBar
+bullPbDepthAtr = inBullPB ? math.max(0.0, (pbStartHigh - pbExtreme) / safeAtr) : 0.0
+bearPbDepthAtr = inBearPB ? math.max(0.0, (pbExtreme - pbStartLow) / safeAtr) : 0.0
+pbDepthAtr = inBullPB ? bullPbDepthAtr : inBearPB ? bearPbDepthAtr : 0.0
+
+bullPbStructOk = inBullPB and (na(lastLow) or close > lastLow)
+bearPbStructOk = inBearPB and (na(lastHigh) or close < lastHigh)
+bullPbTimeout = inBullPB and pbBarsIn >= pbTimeout
+bearPbTimeout = inBearPB and pbBarsIn >= pbTimeout
+
+pbTrendScore = f_norm01(math.abs(factorFinal), trendThreshold, strongThreshold) * 3.0
+pbDepthScore =
+     pbDepthAtr >= pbMinDepthAtr and pbDepthAtr <= pbMaxDepthAtr ? 2.0 :
+     pbDepthAtr > 0.0 and pbDepthAtr < pbMinDepthAtr ? 1.0 :
+     0.0
+pbStructureScore = (bullPbStructOk or bearPbStructOk) ? 2.0 : 0.0
+pbWeaknessScore =
+     (((inBullPB and pbRsi >= pbRsiBullFloor) or (inBearPB and pbRsi <= pbRsiBearCeil)) ? 1.0 : 0.0) +
+     (exhaustionScore <= 0.60 ? 1.0 : 0.0) +
+     (volOptimal >= 0.35 ? 1.0 : 0.0)
+pbContinuationScore = (inBullPB or inBearPB) ? f_clamp(pbTrendScore + pbDepthScore + pbStructureScore + pbWeaknessScore, 0.0, 10.0) : 0.0
+
+// Mature = old enough AND deep enough. Shallow pullbacks stay Armed and cannot trigger.
+bullPbMature = inBullPB and pbBarsIn >= pbMinBars and bullPbDepthAtr >= pbMinDepthAtr
+bearPbMature = inBearPB and pbBarsIn >= pbMinBars and bearPbDepthAtr >= pbMinDepthAtr
+
+if bullPbState == 1 and bullPbMature
+    bullPbState := 2
+if bearPbState == 1 and bearPbMature
+    bearPbState := 2
+
+bullReclaim = bullPbMature and close > pbEma and close[1] <= pbEma[1]
+bearReclaim = bearPbMature and close < pbEma and close[1] >= pbEma[1]
+bullMicroBos = bullPbMature and close > high[1] and close > open
+bearMicroBos = bearPbMature and close < low[1] and close < open
+bullPbReject = bullPbMature and lowerWickRatio >= pbWickMin and close > open and closePos > 0.55
+bearPbReject = bearPbMature and upperWickRatio >= pbWickMin and close < open and closePos < 0.45
+
+var int lastBullContBar = na
+var int lastBearContBar = na
+bullContCooldownOk = na(lastBullContBar) or bar_index - lastBullContBar >= pbCooldown
+bearContCooldownOk = na(lastBearContBar) or bar_index - lastBearContBar >= pbCooldown
+pbConfirmOk = not pbConfirmClose or barstate.isconfirmed
+
+bullContinuationRaw =
+     enablePullback and
+     bullTrendOk and
+     bullPbStructOk and
+     not bullPbTimeout and
+     bullContCooldownOk and
+     pbContinuationScore >= pbMinScore and
+     (bullReclaim or bullMicroBos or bullPbReject)
+bearContinuationRaw =
+     enablePullback and
+     bearTrendOk and
+     bearPbStructOk and
+     not bearPbTimeout and
+     bearContCooldownOk and
+     pbContinuationScore >= pbMinScore and
+     (bearReclaim or bearMicroBos or bearPbReject)
+
+bullContinuation = bullContinuationRaw and not bullContinuationRaw[1] and pbConfirmOk
+bearContinuation = bearContinuationRaw and not bearContinuationRaw[1] and pbConfirmOk
+
+if bullContinuation
+    lastBullContBar := bar_index
+    bullPbState := 3
+    pbStartBar := na
+    pbExtreme := na
+    pbStartHigh := na
+    pbStartLow := na
+
+if bearContinuation
+    lastBearContBar := bar_index
+    bearPbState := 3
+    pbStartBar := na
+    pbExtreme := na
+    pbStartHigh := na
+    pbStartLow := na
+
+if (bullPbState == 1 or bullPbState == 2) and (bullPbTimeout or not bullTrendOk or not bullPbStructOk)
+    bullPbState := 4
+    pbStartBar := na
+    pbExtreme := na
+    pbStartHigh := na
+    pbStartLow := na
+
+if (bearPbState == 1 or bearPbState == 2) and (bearPbTimeout or not bearTrendOk or not bearPbStructOk)
+    bearPbState := 4
+    pbStartBar := na
+    pbExtreme := na
+    pbStartHigh := na
+    pbStartLow := na
+
+pbState =
+     bullPbState == 3 ? "Bull Cont" :
+     bearPbState == 3 ? "Bear Cont" :
+     bullPbState == 4 or bearPbState == 4 ? "PB Invalidated" :
+     bullPbState == 2 ? "Bull PB Mature" :
+     bearPbState == 2 ? "Bear PB Mature" :
+     bullPbState == 1 ? "Bull PB Armed" :
+     bearPbState == 1 ? "Bear PB Armed" :
+     "Idle"
+
+// ============================================================================
+// Trend Candles
+// ============================================================================
+
+trendCandleOpen = f_ma((open[1] + close[1]) / 2.0, candleOpenLen, candleOpenType)
+trendCandleHighRaw = f_ma(math.max(high, close), candleHighLen, "EMA")
+trendCandleLowRaw = f_ma(math.min(low, close), candleLowLen, "EMA")
+trendCandleClose = f_ma(ohlc4, candleCloseLen, candleCloseType)
+trendCandleHigh = math.max(trendCandleHighRaw, math.max(trendCandleOpen, trendCandleClose))
+trendCandleLow = math.min(trendCandleLowRaw, math.min(trendCandleOpen, trendCandleClose))
+trendCandleMa = f_ma(candleMaSource, candleMaLen, candleMaType)
+trendCandleCenter = ta.ema(trendCandleMa, 3)
+
+btfGradientColor =
+     factorFinal > trendThreshold ? color.from_gradient(factorFinal, trendThreshold, 100.0, trendBullWeak, trendBullStrong) :
+     factorFinal < -trendThreshold ? color.from_gradient(factorFinal, -100.0, -trendThreshold, trendBearStrong, trendBearWeak) :
+     trendNeutralColor
+trendMaGradientColor = f_gradient_adv_dec(trendCandleMa, trendCandleCenter, gradientSteps, trendNeutralColor, trendBearStrong, trendNeutralColor, trendBullStrong)
+trendDirectionColor = trendCandleClose >= trendCandleOpen ? trendBullStrong : trendBearStrong
+trendCandleColor = candleColorMode == "BTF Gradient" ? btfGradientColor : trendDirectionColor
+trendMaColor = candleColorMode == "BTF Gradient" ? btfGradientColor : trendMaGradientColor
+trendCandleWickColor = color.new(trendCandleColor, 35)
+trendCandleBorderColor = color.new(trendCandleColor, 15)
+
+// ============================================================================
+// Plots
+// ============================================================================
+
+bullColor = color.new(color.lime, 0)
+bearColor = color.new(color.red, 0)
+neutralColor = color.new(color.gray, 40)
+softBullColor = color.new(color.green, 35)
+softBearColor = color.new(color.maroon, 35)
+
+barCol =
+     isStrongBull ? bullColor :
+     isBull ? softBullColor :
+     isStrongBear ? bearColor :
+     isBear ? softBearColor :
+     neutralColor
+
+barcolor(hideNativeColors ? na : showBarColor ? barCol : na)
+
+plotcandle(
+     showTrendCandles ? trendCandleOpen : na,
+     showTrendCandles ? trendCandleHigh : na,
+     showTrendCandles ? trendCandleLow : na,
+     showTrendCandles ? trendCandleClose : na,
+     "Smoothed Trend Candles",
+     color=trendCandleColor,
+     wickcolor=trendCandleWickColor,
+     bordercolor=trendCandleBorderColor
+)
+
+plot(showBands ? fairPath : na, "Fair Path", color=fairPathColor, linewidth=2)
+plot(showBands ? fairPath + atr * 2.0 : na, "+2 ATR Fair Band", color=color.new(color.gray, 70))
+plot(showBands ? fairPath - atr * 2.0 : na, "-2 ATR Fair Band", color=color.new(color.gray, 70))
+plot(showPbZone and enablePullback ? pbEma : na, "Pullback EMA", color=color.new(color.yellow, 25))
+plot(showTrendCandles and showTrendMa ? trendCandleMa : na, "Trend Candle MA", color=trendMaColor, linewidth=2)
+
+bgcolor(showPbZone and inBullPB ? color.new(color.green, 90) : showPbZone and inBearPB ? color.new(color.red, 90) : na)
+
+// Hidden data-window plots
+plot(factorFinal, "Bayesian Trend Factor", display=display.data_window)
+plot(confidence, "Confidence", display=display.data_window)
+plot(bullProbFinal * 100.0, "Bull Probability", display=display.data_window)
+plot(bearProbFinal * 100.0, "Bear Probability", display=display.data_window)
+plot(bullProb * 100.0, "Raw Bull Probability", display=display.data_window)
+plot(bearProb * 100.0, "Raw Bear Probability", display=display.data_window)
+plot(pbContinuationScore, "Continuation Score", display=display.data_window)
+plot(bullPbState, "Bull Pullback State", display=display.data_window)
+plot(bearPbState, "Bear Pullback State", display=display.data_window)
+plot(trendCandleClose, "Smoothed Candle Close", display=display.data_window)
+
+// ============================================================================
+// Candle Labels
+// ============================================================================
+
+factorChange = math.abs(factorFinal - factorFinal[1])
+prevTrendState = nz(trendState[1], 0)
+crossedBull = trendState == 1 and prevTrendState != 1
+crossedBear = trendState == -1 and prevTrendState != -1
+crossedNeutralBull = trendState == 0 and prevTrendState == 1
+crossedNeutralBear = trendState == 0 and prevTrendState == -1
+var int lastScoreLabelBar = na
+scoreLabelCooldownOk = labelCooldown <= 0 or na(lastScoreLabelBar) or bar_index - lastScoreLabelBar >= labelCooldown
+
+showScoreNow = showLabels and (
+     crossedBull or
+     crossedBear or
+     crossedNeutralBull or
+     crossedNeutralBear or
+     (factorChange >= labelStep and scoreLabelCooldownOk)
+)
+
+if showScoreNow
+    labelText = str.tostring(math.round(factorFinal))
+    labelY = factorFinal >= 0 ? low - atr * 0.35 : high + atr * 0.35
+    labelStyle = factorFinal >= 0 ? label.style_label_up : label.style_label_down
+    labelColor = factorFinal >= 0 ? color.new(color.green, 10) : color.new(color.red, 10)
+    scoreTooltip =
+         "BTF score label\n" +
+         "Factor: " + str.tostring(math.round(factorFinal)) + "\n" +
+         "State: " + state + "\n" +
+         "Confidence: " + str.tostring(math.round(confidence)) + "% (min " + str.tostring(math.round(confThreshold)) + "%)\n" +
+         "Bull/Bear probability: " + str.tostring(math.round(bullProbFinal * 100.0)) + "% / " + str.tostring(math.round(bearProbFinal * 100.0)) + "%\n" +
+         "Raw bull/bear probability: " + str.tostring(math.round(bullProb * 100.0)) + "% / " + str.tostring(math.round(bearProb * 100.0)) + "%\n" +
+         "Direction: " + str.tostring(math.round(directionEvidence * 100.0)) + "\n" +
+         "Strength: " + str.tostring(math.round(strengthScore * 100.0)) + "\n" +
+         "Structure: " + str.tostring(math.round(structureEvidence * 100.0)) + "\n" +
+         "Vol quality: " + str.tostring(math.round(volOptimal * 100.0)) + "%\n" +
+         "Quality multiplier: " + str.tostring(math.round(qualityMultiplier * 100.0)) + "%\n" +
+         "Exhaustion: " + str.tostring(math.round(exhaustionScore * 100.0)) + "%\n" +
+         "Strength direction gate: " + (dirAbs >= strengthDirGate ? "active" : "blocked")
+    label.new(
+         bar_index,
+         labelY,
+         labelText,
+         style=labelStyle,
+         textcolor=color.white,
+         color=labelColor,
+         size=size.tiny,
+         tooltip=scoreTooltip
+     )
+    lastScoreLabelBar := bar_index
+
+if showPbSignals and bullPBStart
+    bullPbTooltip =
+         "Bull pullback setup\n" +
+         "BTF trend gate is active and confidence is sufficient.\n" +
+         "Price returned from above the Pullback EMA and Fair Path into the pullback zone.\n" +
+         "Factor: " + str.tostring(math.round(factorFinal)) + "\n" +
+         "Confidence: " + str.tostring(math.round(confidence)) + "%\n" +
+         "Vol quality: " + str.tostring(math.round(volOptimal * 100.0)) + "%\n" +
+         "Structure must hold above the last confirmed swing low.\n" +
+         "Continuation still needs reclaim, micro-BOS or rejection confirmation."
+    label.new(
+         bar_index,
+         low - atr * 0.45,
+         "PB",
+         style=label.style_label_up,
+         textcolor=color.white,
+         color=color.new(color.green, 35),
+         size=size.tiny,
+         tooltip=bullPbTooltip
+     )
+
+if showPbSignals and bearPBStart
+    bearPbTooltip =
+         "Bear pullback setup\n" +
+         "BTF trend gate is active and confidence is sufficient.\n" +
+         "Price returned from below the Pullback EMA and Fair Path into the pullback zone.\n" +
+         "Factor: " + str.tostring(math.round(factorFinal)) + "\n" +
+         "Confidence: " + str.tostring(math.round(confidence)) + "%\n" +
+         "Vol quality: " + str.tostring(math.round(volOptimal * 100.0)) + "%\n" +
+         "Structure must hold below the last confirmed swing high.\n" +
+         "Continuation still needs reclaim, micro-BOS or rejection confirmation."
+    label.new(
+         bar_index,
+         high + atr * 0.45,
+         "PB",
+         style=label.style_label_down,
+         textcolor=color.white,
+         color=color.new(color.red, 35),
+         size=size.tiny,
+         tooltip=bearPbTooltip
+     )
+
+if showPbSignals and bullContinuation
+    bullContReason = bullReclaim ? "Pullback EMA reclaim" : bullMicroBos ? "One-bar micro-BOS" : bullPbReject ? "Rejection wick from pullback zone" : "Continuation confirmation"
+    bullContTooltip =
+         "Bull continuation trigger\n" +
+         "Reason: " + bullContReason + "\n" +
+         "Continuation score: " + str.tostring(math.round(pbContinuationScore)) + " / 10 (min " + str.tostring(pbMinScore) + ")\n" +
+         "BTF factor: " + str.tostring(math.round(factorFinal)) + "\n" +
+         "Confidence: " + str.tostring(math.round(confidence)) + "%\n" +
+         "Pullback depth: " + str.tostring(math.round(pbDepthAtr * 100.0) / 100.0) + " ATR\n" +
+         "Structure: held above last confirmed swing low\n" +
+         "Exhaustion: " + str.tostring(math.round(exhaustionScore * 100.0)) + "%\n" +
+         "Use as continuation context in the active BTF trend, not as a standalone signal."
+    label.new(
+         bar_index,
+         low - atr * 0.70,
+         "CONT " + str.tostring(math.round(pbContinuationScore)),
+         style=label.style_label_up,
+         textcolor=color.white,
+         color=color.new(color.green, 0),
+         size=size.small,
+         tooltip=bullContTooltip
+     )
+
+if showPbSignals and bearContinuation
+    bearContReason = bearReclaim ? "Pullback EMA reclaim" : bearMicroBos ? "One-bar micro-BOS" : bearPbReject ? "Rejection wick from pullback zone" : "Continuation confirmation"
+    bearContTooltip =
+         "Bear continuation trigger\n" +
+         "Reason: " + bearContReason + "\n" +
+         "Continuation score: " + str.tostring(math.round(pbContinuationScore)) + " / 10 (min " + str.tostring(pbMinScore) + ")\n" +
+         "BTF factor: " + str.tostring(math.round(factorFinal)) + "\n" +
+         "Confidence: " + str.tostring(math.round(confidence)) + "%\n" +
+         "Pullback depth: " + str.tostring(math.round(pbDepthAtr * 100.0) / 100.0) + " ATR\n" +
+         "Structure: held below last confirmed swing high\n" +
+         "Exhaustion: " + str.tostring(math.round(exhaustionScore * 100.0)) + "%\n" +
+         "Use as continuation context in the active BTF trend, not as a standalone signal."
+    label.new(
+         bar_index,
+         high + atr * 0.70,
+         "CONT " + str.tostring(math.round(pbContinuationScore)),
+         style=label.style_label_down,
+         textcolor=color.white,
+         color=color.new(color.red, 0),
+         size=size.small,
+         tooltip=bearContTooltip
+     )
+
+// ============================================================================
+// Dashboard
+// ============================================================================
+
+var table dash = table.new(position.top_right, 2, 14,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+if showDashboard and barstate.islast
+    dirGateActive = dirAbs >= strengthDirGate
+    factorCellColor =
+         isStrongBull ? #00c853 :
+         isBull ? color.new(#00c853, 35) :
+         isStrongBear ? #d50000 :
+         isBear ? color.new(#d50000, 35) :
+         color.new(color.gray, 80)
+    table.cell(dash, 0, 0, "Bayesian Trend Factor", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 0, str.tostring(math.round(factorFinal)), text_color=isNeutral ? tc : color.white, bgcolor=factorCellColor, text_size=size.small)
+    table.cell(dash, 0, 1, "State", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, state, text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 2, "Confidence", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(math.round(confidence)) + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 3, "Bull Prob", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(math.round(bullProbFinal * 100.0)) + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 4, "Raw Bull Prob", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(math.round(bullProb * 100.0)) + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 5, "Direction", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(math.round(directionEvidence * 100.0)), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 6, "Strength", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(math.round(strengthScore * 100.0)), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 7, "Structure", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(math.round(structureEvidence * 100.0)), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 8, "Exhaustion", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 8, str.tostring(math.round(exhaustionScore * 100.0)), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 9, "Pullback", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 9, pbState, text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 10, "Cont Score", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 10, str.tostring(math.round(pbContinuationScore)), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 11, "Vol Quality", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 11, str.tostring(math.round(volOptimal * 100.0)) + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 12, "Quality Mult", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 12, str.tostring(math.round(qualityMultiplier * 100.0)) + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 13, "Dir Gate", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 13, dirGateActive ? "active" : "blocked", text_color=dirGateActive ? color.white : tc, bgcolor=dirGateActive ? #00c853 : color.new(color.gray, 80), text_size=size.small)
+else if not showDashboard and barstate.islast
+    table.clear(dash, 0, 0, 1, 13)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertcondition(crossedBull, "Bull Trend Activated", "Bayesian Trend Factor crossed into bullish trend zone.")
+alertcondition(crossedBear, "Bear Trend Activated", "Bayesian Trend Factor crossed into bearish trend zone.")
+alertcondition(isStrongBull and not isStrongBull[1], "Strong Bull Trend", "Bayesian Trend Factor reached strong bullish trend zone.")
+alertcondition(isStrongBear and not isStrongBear[1], "Strong Bear Trend", "Bayesian Trend Factor reached strong bearish trend zone.")
+alertcondition(isNeutral and not isNeutral[1], "Neutral / Transition", "Bayesian Trend Factor moved back into neutral transition zone.")
+alertcondition(bullPBStart, "Bull Pullback Setup", "Bayesian Trend Factor detected a bullish pullback setup inside an active trend.")
+alertcondition(bearPBStart, "Bear Pullback Setup", "Bayesian Trend Factor detected a bearish pullback setup inside an active trend.")
+alertcondition(bullContinuation, "Bull Continuation Trigger", "Bayesian Trend Factor pullback module fired a bullish continuation trigger.")
+alertcondition(bearContinuation, "Bear Continuation Trigger", "Bayesian Trend Factor pullback module fired a bearish continuation trigger.")
+alertcondition(ta.rising(trendCandleMa, 2), "Trend Candle MA Rising", "Bayesian Trend Factor smoothed trend candle MA is rising.")
+alertcondition(ta.falling(trendCandleMa, 2), "Trend Candle MA Falling", "Bayesian Trend Factor smoothed trend candle MA is falling.")

@@ -1,5 +1,22 @@
 # Changelog
 
+## v4.8.0 — 2026-06-28
+- Stricter breakout release — Markup/Markdown now require Phase D **plus** a confirmed internal structure (Spring/UTAD test, in-range SOS/SOW, or pivot-confirmed LPS/LPSY) **and** a minimum setup score, instead of any Phase-D state. The floor is a new input, **Min Breakout Score (Markup/Markdown)** (default 50)
+- Sequence validation in the setup score: Test is only credited when it follows its Spring/UTAD, and in-range SOS/SOW only when it follows the Test (Schematic #1); a clean Spring → Test → SOS order earns an extra structure bonus
+- Confirmed breakout/breakdown events (SOSB/SOWB) now contribute to the setup score; the score keeps updating through Markup/Markdown (scored against the originating schematic) so the breakout is credited
+- New alerts: SOSB Breakout and SOWB Breakdown (Phase E) — the breakout is exposed as its own subphase
+- "Old Phase Ranges → Hide Labels" replaced by a dedicated **Show Current Phase Label** toggle and a clearer **Keep** mode (boxes retained at full color)
+
+## v4.7.0 — 2026-06-28
+- Stricter confirmation — addresses the schematic being confirmed too early:
+- Prior-trend context for climaxes: a Selling Climax no longer fires inside a clear uptrend, a Buying Climax no longer fires inside a clear downtrend
+- Automatic Rally/Reaction now requires the swing to travel ≥ 1 ATR away from the climax extreme, instead of accepting the first counter-candle
+- Markup/Markdown require Phase D **and** a confirmed close beyond the range edge on expanding volume (≥ 1.2× avg) — a bare range probe no longer flips the phase
+- The breakout is emitted as a distinct event (SOSB / SOWB), visually separating the decisive break from in-range SOS/SOW strength
+- Range Invalidation Factor default lowered 0.5 → 0.33 so broken schematics are dropped sooner
+- "Old Phase Ranges → Hide Labels" now implemented: schematic boxes render without the phase text overlay
+- Event labels are tracked and capped (60) so the chart never sits near TradingView's drawing limit
+
 ## v4.5.0 — 2026-06-11
 - Fix: 4H lookback input was never used — every intraday timeframe above 30 minutes fell into the 1H branch; 2H/4H charts now use the 4H lookback
 - Fix: trend EMA, volume SMAs and range-score pivots are now computed at global scope — previously they ran inside conditionally-executed functions, which skews `ta.*` rolling state (e.g. on bars with `high == low` or outside active phases) and could distort Prior Trend and Range Score
