@@ -1,24 +1,26 @@
 //@version=6
 // ============================================================================
 // Signal Quality Engine [WavesUnchained]
-// Version: 3.1
+// Version: 3.2
 // Author: WavesUnchained
-// Build: 2026-06-28 16:00:00
+// Build: 2026-06-28 18:00:00
 // ============================================================================
 // One thing done well: a range-fade signal engine for commodities, futures,
 // stocks and indices. It fades the range edges — long the exhausted lows, short
 // the exhausted highs — when price is stretched, structure says "edge", and a
-// candle rejects. Built for ranging markets (where a trend-pullback tool is
-// quiet). No regime switching, no MTF, no divergence, no pivot signals.
+// candle rejects. Built for ranging markets: a regime gate (ADX + EMA slope)
+// stands the tool down in strong trends, so it never fades a trend pullback.
+// No regime switching, no MTF, no divergence, no pivot signals.
 //
 // The one logic (mirrored for both sides):
-//   Price stretched to an edge (distance + structure) → momentum turns back →
-//   candle rejects → score high enough → Trigger (fade).
+//   Range regime ok → price stretched to an edge (distance + structure) →
+//   momentum turns back → candle rejects → score high enough → Trigger (fade).
 //
 // Features:
+//   ✓ Range regime gate (ADX + EMA slope) — only fades when actually ranging
 //   ✓ Edge bias (which side is exhausted) → Setup → Watch → Trigger, one logic
 //   ✓ Exhaustion score (0–100): Distance + Structure + Momentum
-//   ✓ Candle-rejection confirmation; confirmation window (no one-bar miss)
+//   ✓ Candle-rejection confirmation (sweep & reclaim); confirmation window
 //   ✓ Market profiles tune band width / edge sensitivity
 //   ✓ Strictness presets (score threshold + cooldown)
 //   ✓ ATR risk levels (SL beyond the edge / TP toward the mean)
@@ -58,30 +60,53 @@ int confirmWindow = input.int(3, "Confirmation Window (bars)", minval=1, maxval=
 
 bool showStates     = input.bool(true, "Show Setup / Watch Markers", group="Visuals", tooltip="Gray circle = exhaustion building at an edge, yellow circle = extreme reached, rejection pending.")
 bool showBands      = input.bool(true, "Show Mean & Bands", group="Visuals")
-bool showTable      = input.bool(true, "Show Table", group="Visuals")
+bool showTable      = input.bool(false, "Show Table", group="Visuals")
 bool showRiskLevels = input.bool(true, "Show ATR Risk Levels", group="Visuals")
-bool showPivots     = input.bool(true, "Show Pivot Reference", group="Visuals", tooltip="Confirmed swing high/low markers. Control overlay only — never feeds the signals.")
+bool showPivots     = input.bool(false, "Show Pivot Reference", group="Visuals", tooltip="Confirmed swing high/low markers. Control overlay only — never feeds the signals.")
 bool colorBars      = input.bool(false, "Color Bars", group="Visuals")
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Profile presets — band width (edge distance) and high/low proximity
+// Profile presets — what actually differs by asset class for a range-fade tool:
+//   bbMult       band width — how stretched before an "edge" (spiky commodities
+//                overshoot more, so they need wider bands than indices)
+//   nearAtrMult  edge proximity tolerance
+//   adxMax       regime tolerance — how trendy the tape can be and still be faded.
+//                Commodities mean-revert through choppy trends (fade readily);
+//                indices trend persistently, so they need a stricter range filter.
+//   slopeMax     EMA50-slope ceiling (ATR/bar) for the regime gate, same logic.
 // ─────────────────────────────────────────────────────────────────────────────
 
 float bbMult = switch profile
-    "Natural Gas"       => 2.3
-    "Oil"               => 2.2
+    "Natural Gas"       => 2.5
+    "Oil"               => 2.3
     "Gold / Silver"     => 2.0
-    "Broad Commodities" => 2.1
-    "Stocks / Indices"  => 2.0
+    "Broad Commodities" => 2.2
+    "Stocks / Indices"  => 1.9
     => 2.1
 
 float nearAtrMult = switch profile
-    "Natural Gas"       => 0.90
+    "Natural Gas"       => 0.95
     "Oil"               => 0.85
     "Gold / Silver"     => 0.75
-    "Broad Commodities" => 0.80
-    "Stocks / Indices"  => 0.70
+    "Broad Commodities" => 0.82
+    "Stocks / Indices"  => 0.68
     => 0.80
+
+float adxMax = switch profile
+    "Natural Gas"       => 28.0
+    "Oil"               => 26.0
+    "Gold / Silver"     => 23.0
+    "Broad Commodities" => 25.0
+    "Stocks / Indices"  => 20.0
+    => 24.0
+
+float slopeMax = switch profile
+    "Natural Gas"       => 0.55
+    "Oil"               => 0.50
+    "Gold / Silver"     => 0.42
+    "Broad Commodities" => 0.48
+    "Stocks / Indices"  => 0.35
+    => 0.45
 
 // Exhaustion thresholds — note: weighted exhaustion scores top out lower than a
 // trend score, so these are deliberately below the old 76–88 band.
@@ -110,15 +135,18 @@ f_safeDiv(float a, float b) =>
 f_score01(float x) =>
     f_clamp(x, 0.0, 1.0) * 100.0
 
-f_grade(float score) =>
+// Grade is relative to the active trigger threshold: B = triggerable (>= base),
+// A/A+ progressively above it, C just below. Keeps the dashboard consistent with
+// whatever strictness preset (and thus scoreMin) is selected.
+f_grade(float score, float base) =>
     string g = "—"
-    if score >= 75
+    if score >= base + 24
         g := "A+"
-    else if score >= 62
+    else if score >= base + 12
         g := "A"
-    else if score >= 50
+    else if score >= base
         g := "B"
-    else if score >= 38
+    else if score >= base - 10
         g := "C"
     g
 
@@ -135,7 +163,16 @@ float upper = basis + dev * bbMult
 float lower = basis - dev * bbMult
 
 float distAtr = f_safeDiv(close - ema, atr)
-float bbZ     = f_safeDiv(close - basis, dev)
+float bbZ     = f_clamp(f_safeDiv(close - basis, dev), -4.0, 4.0)   // clamp so a tiny dev can't spike the score
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regime gate — the tool only fades when the market is actually ranging.
+// A strong trend turns every pullback into a "false edge"; this stands it down.
+// ─────────────────────────────────────────────────────────────────────────────
+
+[diPlus, diMinus, adx] = ta.dmi(14, 14)
+float emaSlope = f_safeDiv(ema - ema[10], atr)
+bool rangeOk = adx < adxMax and math.abs(emaSlope) < slopeMax
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Momentum — overbought/oversold readings (feed the exhaustion score, not a gate)
@@ -157,15 +194,22 @@ float wt1 = ta.ema(ci, 21)
 
 float recentHigh = ta.highest(high, 80)
 float recentLow  = ta.lowest(low, 80)
-bool nearHigh = recentHigh - close <= atr * nearAtrMult
-bool nearLow  = close - recentLow <= atr * nearAtrMult
+float rangeSize  = recentHigh - recentLow
+float rangePos   = f_safeDiv(close - recentLow, rangeSize)   // 0 = at low, 1 = at high
+// Edge = near the extreme AND in the outer fifth of the 80-bar range (not just
+// "close to a trending high" — that is true constantly in a trend).
+bool nearHigh = rangePos > 0.80 and recentHigh - close <= atr * nearAtrMult
+bool nearLow  = rangePos < 0.20 and close - recentLow <= atr * nearAtrMult
 
 float upperWick = f_safeDiv(high - math.max(open, close), high - low)
 float lowerWick = f_safeDiv(math.min(open, close) - low, high - low)
 
-// Candle rejection — closes back off the edge
-bool topCandleReject = close < low[1] or (close < open and upperWick >= 0.35 and close < hl2)
-bool botCandleReject = close > high[1] or (close > open and lowerWick >= 0.35 and close > hl2)
+// Candle rejection — sweep the prior bar's extreme and close back inside it
+// (liquidity-grab style), or a strong opposing wick that closes off the edge.
+bool sweptHigh = high > high[1] and close < high[1]
+bool sweptLow  = low < low[1] and close > low[1]
+bool topCandleReject = sweptHigh or (close < open and upperWick >= 0.40 and close < hl2)
+bool botCandleReject = sweptLow or (close > open and lowerWick >= 0.40 and close > hl2)
 
 // Pivot reference — control overlay only. NOT used in any signal/grade/gate.
 int pivotLen = 5
@@ -207,9 +251,12 @@ float edgeScore = edgeDir == 1 ? botScore : edgeDir == -1 ? topScore : math.max(
 bool botExtreme = botScore >= scoreMin and botScore >= topScore
 bool topExtreme = topScore >= scoreMin and topScore > botScore
 
-// An extreme stays "armed" for confirmWindow bars so the rejection need not be same-bar
-bool botArmed = ta.barssince(botExtreme) <= confirmWindow
-bool topArmed = ta.barssince(topExtreme) <= confirmWindow
+// An extreme stays "armed" for confirmWindow bars so the rejection need not be same-bar.
+// barssince() is na until the first occurrence — guard it explicitly.
+int barsSinceBotExtreme = ta.barssince(botExtreme)
+int barsSinceTopExtreme = ta.barssince(topExtreme)
+bool botArmed = not na(barsSinceBotExtreme) and barsSinceBotExtreme <= confirmWindow
+bool topArmed = not na(barsSinceTopExtreme) and barsSinceTopExtreme <= confirmWindow
 
 // Setup (gray): exhaustion building, not yet at the extreme threshold
 bool longSetup  = edgeDir == 1  and botScore >= setupMin and not botExtreme
@@ -221,8 +268,10 @@ var int lastShortBar = na
 bool longCooldownOk = na(lastLongBar) or bar_index - lastLongBar > cooldownBars
 bool shortCooldownOk = na(lastShortBar) or bar_index - lastShortBar > cooldownBars
 
-bool finalLong = botArmed and botCandleReject and longCooldownOk
-bool finalShort = topArmed and topCandleReject and shortCooldownOk
+// Trigger requires the structure side to still hold (price still in the lower/upper
+// portion of the range), so a stale armed extreme alone can't fire off the edge.
+bool finalLong = rangeOk and botArmed and rangePos < 0.35 and botCandleReject and longCooldownOk
+bool finalShort = rangeOk and topArmed and rangePos > 0.65 and topCandleReject and shortCooldownOk
 
 if finalLong
     lastLongBar := bar_index
@@ -230,14 +279,14 @@ if finalShort
     lastShortBar := bar_index
 
 // Watch (yellow): extreme reached / armed, rejection still pending
-bool longWatch  = botArmed and not finalLong
-bool shortWatch = topArmed and not finalShort
+bool longWatch  = rangeOk and botArmed and not finalLong
+bool shortWatch = rangeOk and topArmed and not finalShort
 
 // Markers — only the run-up that has NOT yet triggered
-bool showLongSetup  = showStates and longSetup and not longWatch and not finalLong
-bool showLongWatch  = showStates and longWatch
-bool showShortSetup = showStates and shortSetup and not shortWatch and not finalShort
-bool showShortWatch = showStates and shortWatch
+bool showLongSetup  = showStates and rangeOk and longSetup and not longWatch and not finalLong
+bool showLongWatch  = showStates and rangeOk and longWatch
+bool showShortSetup = showStates and rangeOk and shortSetup and not shortWatch and not finalShort
+bool showShortWatch = showStates and rangeOk and shortWatch
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Risk levels — SL beyond the edge, TP toward the mean
@@ -250,6 +299,24 @@ float longTP2 = upper
 float shortSL = high + atr * 1.2
 float shortTP1 = basis
 float shortTP2 = lower
+
+// Latch the last trigger's levels so SL/TP stay visible for a window of bars,
+// not just on the single trigger candle.
+var float activeSL    = na
+var float activeTP1   = na
+var float activeTP2   = na
+var int   activeUntil = na
+if finalLong
+    activeSL := longSL
+    activeTP1 := longTP1
+    activeTP2 := longTP2
+    activeUntil := bar_index + 20
+if finalShort
+    activeSL := shortSL
+    activeTP1 := shortTP1
+    activeTP2 := shortTP2
+    activeUntil := bar_index + 20
+bool showActiveRisk = showRiskLevels and not na(activeUntil) and bar_index <= activeUntil
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Visuals
@@ -277,13 +344,9 @@ plotshape(showPivots and pivotHighConfirmed, title="Pivot High", style=shape.tri
 
 barcolor(colorBars ? finalLong ? color.lime : finalShort ? color.red : na : na)
 
-plot(showRiskLevels and finalLong ? longSL : na, "Long SL", color=color.new(color.red, 0), style=plot.style_linebr)
-plot(showRiskLevels and finalLong ? longTP1 : na, "Long TP1", color=color.new(color.green, 0), style=plot.style_linebr)
-plot(showRiskLevels and finalLong ? longTP2 : na, "Long TP2", color=color.new(color.green, 30), style=plot.style_linebr)
-
-plot(showRiskLevels and finalShort ? shortSL : na, "Short SL", color=color.new(color.red, 0), style=plot.style_linebr)
-plot(showRiskLevels and finalShort ? shortTP1 : na, "Short TP1", color=color.new(color.green, 0), style=plot.style_linebr)
-plot(showRiskLevels and finalShort ? shortTP2 : na, "Short TP2", color=color.new(color.green, 30), style=plot.style_linebr)
+plot(showActiveRisk ? activeSL : na, "Active SL", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(showActiveRisk ? activeTP1 : na, "Active TP1", color=color.new(color.green, 0), style=plot.style_linebr)
+plot(showActiveRisk ? activeTP2 : na, "Active TP2", color=color.new(color.green, 30), style=plot.style_linebr)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Table (light theme — repo standard)
@@ -303,7 +366,10 @@ if showTable and barstate.islast
     // Status — the "why no trigger" line, top tier first
     string status = "Mid-range"
     string action = "Wait"
-    if finalLong or finalShort
+    if not rangeOk
+        status := "Trending — fade off"
+        action := "Stand aside"
+    else if finalLong or finalShort
         status := "Trigger active"
         action := "Fade it"
     else if longWatch or shortWatch
@@ -313,7 +379,7 @@ if showTable and barstate.islast
         status := "Exhaustion building"
         action := "Watch"
 
-    string grade = f_grade(edgeScore)
+    string grade = f_grade(edgeScore, scoreMin)
     bool pass = edgeScore >= scoreMin
     string edgeTxt = edgeDir == 1 ? "Low -> Long" : edgeDir == -1 ? "High -> Short" : "Mid-range"
     color edgeColor = edgeDir == 1 ? #00c853 : edgeDir == -1 ? #d50000 : tc
@@ -344,7 +410,7 @@ if showTable and barstate.islast
     table.cell(t, 1, 7, str.tostring(distAtr, "#.##"), text_color=tc, text_size=size.small)
 
     table.cell(t, 0, 8, "TF Hint", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 8, timeframe.period == "240" ? "4H OK" : "Use 4H preferred", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 8, timeframe.isintraday and timeframe.multiplier < 60 ? "Low TF noisy" : timeframe.period == "240" ? "4H OK" : "Check context", text_color=tc, text_size=size.small)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Alerts
@@ -353,4 +419,4 @@ if showTable and barstate.islast
 alertcondition(finalLong, "SQE Long Signal", "SQE Long Signal: exhausted-low fade (long) detected.")
 alertcondition(finalShort, "SQE Short Signal", "SQE Short Signal: exhausted-high fade (short) detected.")
 alertcondition(finalLong or finalShort, "SQE Any Signal", "SQE Signal: check this instrument.")
-alertcondition(longWatch or shortWatch, "SQE Watch", "SQE Watch: an edge is exhausting — rejection may be near.")
+alertcondition(rangeOk and (longWatch or shortWatch), "SQE Watch", "SQE Watch: an edge is exhausting — rejection may be near.")

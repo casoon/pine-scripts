@@ -19,7 +19,7 @@ Quality columns (★ 1–5):
 | [tweezer_kangaroo_zones](indicators/market_structure/tweezer_kangaroo_zones/) | 3.1.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [jma_struct](indicators/market_structure/jma_struct/) | 2.3.1 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [time_to_react_volatility_time](indicators/volatility/time_to_react_volatility_time/) | 1.1.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [coilforge_zones](indicators/market_structure/coilforge_zones/) | 1.2.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [coilforge_zones](indicators/market_structure/coilforge_zones/) | 1.2.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [market_structure_advanced](indicators/market_structure/market_structure_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | HH/HL/LH/LL Pivot-Klassifizierung → gebundener Score-Oszillator [−100, +100]; Signal-Line, Gradient, Shadow-Fills, optionale Chart-Labels |
 | [market_structure_pivot_map](indicators/market_structure/market_structure_pivot_map/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Location-Tool: HTF Pivots/CPR/Projektionen (D/W/M, Classic/Fib), Cross-TF-Confluence via Greedy-Clustering, Nearest-S/R mit ATR-Distanz; bewusst kein Signalgenerator; ungetestet |
 | [structure_break_risk](indicators/market_structure/structure_break_risk/) | 1.2 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Forward-looking 0–100 Break-Risk-Gauge, symmetrisch (Top-Break im Auf-, Bottom-Break im Abtrend); Risk steigt schon bei Annäherung ans Break-Level (Near-Level-Sensor), nicht erst nach dem Bruch; latchender Trend-Kontext; 5 gewichtete Sensoren (Near Level, Confirmed BOS, Failed Breakout, Structure Erosion, Pivot-Divergenz) + Reason-Status; Pivots nur als Level-Referenz; Companion zu TPS; ungetestet |
@@ -28,7 +28,7 @@ Quality columns (★ 1–5):
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [adaptive_supertrend](indicators/trend_direction/adaptive_supertrend/) | 1.5 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Conviction-adaptive band width; MTF confluence layer; Familie wie chandelier_flip_radar (Abgrenzung siehe READMEs) — Archiv-Kandidat falls Tests nicht überzeugen |
+| [adaptive_supertrend](indicators/trend_direction/adaptive_supertrend/) | 1.7 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Conviction-adaptive band width; MTF confluence layer; Familie wie chandelier_flip_radar (Abgrenzung siehe READMEs) — Archiv-Kandidat falls Tests nicht überzeugen |
 | [chandelier_flip_radar](indicators/trend_direction/chandelier_flip_radar/) | 1.4 | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | Promising PF 1.22 |
 | [smooth_trend_radar](indicators/trend_direction/smooth_trend_radar/) | 3.3.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [auto_trendlines](indicators/market_structure/auto_trendlines/) | 1.1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | |
@@ -52,19 +52,20 @@ Quality columns (★ 1–5):
 | [cci_advanced](indicators/momentum/cci_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | CCI mit pluggablem Smoothing, 3 Scale-Modes, OB/OS-Zone-Filter, Gradient + Shadow-Fills |
 | [wavetrend](indicators/momentum/wavetrend/) | 1.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Core, best PF in repo |
 | [wavetrend_advanced_smoothing](indicators/momentum/wavetrend_advanced_smoothing/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | WaveTrend mit 8 Smoothing-Kernels + reichhaltige Visualisierung (Gradient, Shadow-Fill, 4-State-Histogramm) |
-| [mtf_wavetrend_opportunity_hunter](indicators/momentum/mtf_wavetrend_opportunity_hunter/) | 2.1.1 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Konfluenz-Pane + Heat-Ribbons; v2.1: RRG-Rotation-Map (Polyline), Ehlers Ultimate Smoother Core (TASC 2024), Entropie-Noise-Floor; ungetestet |
+| [mtf_wavetrend_opportunity_hunter](indicators/momentum/mtf_wavetrend_opportunity_hunter/) | 2.6 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Konfluenz-Pane + Heat-Ribbons; v2.1: RRG-Rotation-Map (Polyline), Ehlers Ultimate Smoother Core (TASC 2024), Entropie-Noise-Floor; ungetestet |
+| [mtf_wavetrend_confluence](indicators/momentum/mtf_wavetrend_confluence/) | 0.7 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Tide/Wave/Ripple — WT über drei feste Horizonte; Ripple-Cross auf Chart-TF IST das Signal, GRADED 0–5 (kein Gate), Reversal/Continuation-Read; v0.7: Two-Tier-Alerts (Watch→Signal), Deep-Tier von Exhaustion entkoppelt, Divergenz +1, Horizon Fixed/Relative, MTF Auto-Off >4h; ungetestet |
 | [commodity_flow_trend](indicators/money_flow/commodity_flow_trend/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | MFI + CCI Composite für Rohstoffe; 4-State-Flow-Background, Extreme-Zone-Signale, CCI-Gate |
-| [market_pressure_scale](indicators/momentum/market_pressure_scale/) | 1.2.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Regime Map + Market Character Score |
+| [market_pressure_scale](indicators/momentum/market_pressure_scale/) | 1.2.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Regime Map + Market Character Score |
 | [oscillator_divergence_zones](indicators/momentum/oscillator_divergence_zones/) | 1.4.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | v1.4: STC + DPO + Ehlers Roofing + Cyber Cycle als zusätzliche Divergenz-Quellen (Tier-3-Bewertung); v1.3 Fisher + TSI — Reversal-Pipeline Stufe 2 |
-| [mtf_stochrsi_pair_score](indicators/momentum/mtf_stochrsi_pair_score/) | 1.7.1 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | Fractal Alignment + Compression Detector |
+| [mtf_stochrsi_pair_score](indicators/momentum/mtf_stochrsi_pair_score/) | 1.8.0 | Draft | ★★★☆☆ | ★★★★☆ | ★☆☆☆☆ | Fractal Alignment + Compression Detector |
 | [market_exhaustion](indicators/momentum/market_exhaustion/) | 1.1.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
-| [market_stress_oscillator](indicators/momentum/market_stress_oscillator/) | 1.0.1 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [market_stress_oscillator](indicators/momentum/market_stress_oscillator/) | 1.0.2 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 
 ## Reversal & Entry
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [reversal_engine_score](indicators/momentum/reversal_engine_score/) | 1.5 | Aktiv | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Score logic needs rework (test131) |
+| [reversal_engine_score](indicators/momentum/reversal_engine_score/) | 1.6 | Aktiv | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Score logic needs rework (test131) |
 | [reversal_type_classifier](indicators/market_structure/reversal_type_classifier/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [commodity_heat_reversal](indicators/composite/commodity_heat_reversal/) | 1.4.3 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [exhaustion_scanner](indicators/momentum/exhaustion_scanner/) | 2.1 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Rollen-getrennt: Stretch/Exhaustion/Reaction-Scores, Vola als Multiplikator, Regime-Klassifikator (Continuation Risk / Trend Exhaustion / Range Fade); Exhaustion-Zonen (Box) + fette Labels mit Hover-Breakdown; ein Score für Dashboard+Label; ungetestet |
@@ -77,13 +78,13 @@ Quality columns (★ 1–5):
 | [money_flow_delta_profile](indicators/money_flow/money_flow_delta_profile/) | 2.0 | Aktiv | ★★★★★ | ★★★★☆ | ★★★☆☆ | HVN/LVN/AVN + LVN-Zonen; v2.0: Intrabar-Delta (LTF) + Absorption-Profil/-Zonen — neue Features ungetestet |
 | [vwap_cross_visuals](indicators/mean_reversion/vwap_cross_visuals/) | 2.1.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | v2.1: auf VWAP-Cross-Kernsignal fokussiert (Signal Scope default), Cross-Marker als Hover-Labels; Runtime-/Limit-Fixes |
 | [anchored_vwap](indicators/mean_reversion/anchored_vwap/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Reversal-Pipeline Stufe 4 (Location): AVWAP ankerbar an Swing-Pivot/Session/Periode/Datum, volumengewichtete σ-Bänder, Distanz-zu-Value in σ als symmetrischer Location-Output (kein Trigger); ungetestet |
-| [liquidity_hunter](indicators/market_structure/liquidity_hunter/) | 3.2.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | BSL/SSL scoring + Gaps + Stop Hunts + Exhaustion Events |
+| [liquidity_hunter](indicators/market_structure/liquidity_hunter/) | 3.2.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | BSL/SSL scoring + Gaps + Stop Hunts + Exhaustion Events |
 
 ## Pattern & Wave
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [zigzag_patterns_framework](indicators/market_structure/zigzag_patterns_framework/) | 1.0.1 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
+| [zigzag_patterns_framework](indicators/market_structure/zigzag_patterns_framework/) | 1.0.2 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [zigzag_fibo_pullback_map](indicators/market_structure/zigzag_fibo_pullback_map/) | 1.2.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [elliott_wave_radar](indicators/market_structure/elliott_wave_radar/) | 1.2 | Draft | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | Regelvalidierte EW-Zählung inkl. Zigzag/Flat-Korrekturen + C-Setup; v1.2: Wellenpunkte auf echte Extreme verankert (Praxistest-Feedback) |
 
@@ -97,8 +98,8 @@ Quality columns (★ 1–5):
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [commodity_pulse_matrix](indicators/composite/commodity_pulse_matrix/) | 3.1.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Published, v4 in progress |
-| [signal_quality_engine](indicators/composite/signal_quality_engine/) | 3.1 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Range-Fader (eine Logik): fadet Range-Ränder — Long an erschöpften Tiefs, Short an erschöpften Hochs. Exhaustion-Score (Distance+Struktur+Momentum, aus Exhaustion Scanner), Edge→Setup→Watch→Trigger, Candle-Rejection. Für Ranges; im Trend bewusst still. Pivots nur Control-Overlay; ungetestet |
+| [commodity_pulse_matrix](indicators/composite/commodity_pulse_matrix/) | 3.1.2 / 4.0.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | v3 published; v4.0.1 in progress (separate file) |
+| [signal_quality_engine](indicators/composite/signal_quality_engine/) | 3.2 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Range-Fader (eine Logik): fadet Range-Ränder — Long an erschöpften Tiefs, Short an erschöpften Hochs. Exhaustion-Score (Distance+Struktur+Momentum, aus Exhaustion Scanner), Edge→Setup→Watch→Trigger, Candle-Rejection. Für Ranges; im Trend bewusst still. Pivots nur Control-Overlay; ungetestet |
 
 ## Momentum Intelligence Suite
 
@@ -123,16 +124,16 @@ Quality columns (★ 1–5):
 
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
-| [vein_trend](indicators/trend_direction/vein/) | 2.0 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
-| [vein_pullback](indicators/trend_direction/vein/) | 2.0 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
-| [vein_exhaustion](indicators/trend_direction/vein/) | 2.0.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
-| [vein_accumulation_phase](indicators/trend_direction/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | NatGas focused |
-| [vein_reversal_score](indicators/trend_direction/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [vein_structure_zones](indicators/trend_direction/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [vein_execution](indicators/trend_direction/vein/) | 2.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | 15m timing overlay |
-| [vein_spread_context](indicators/trend_direction/vein/) | 2.0.1 | Stabil | ★★★☆☆ | ★★★★☆ | ★★★☆☆ | Commodity spread modifier |
-| [vein_feature_exporter](indicators/trend_direction/vein/) | 2.0.1 | Stabil | ★★★★★ | ★★★★☆ | ★★★★★ | Research tooling |
-| [vein_reversal_labeler](indicators/trend_direction/vein/) | 2.0.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | ML labeling only |
+| [vein_trend](indicators/trend_direction/vein/) | 0.1.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
+| [vein_pullback](indicators/trend_direction/vein/) | 0.2 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
+| [vein_exhaustion](indicators/trend_direction/vein/) | 0.2.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★☆ | Core |
+| [vein_accumulation_phase](indicators/trend_direction/vein/) | 0.1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | NatGas focused |
+| [vein_reversal_score](indicators/trend_direction/vein/) | 0.1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [vein_structure_zones](indicators/trend_direction/vein/) | 0.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [vein_execution](indicators/trend_direction/vein/) | 0.1.3 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | 15m timing overlay |
+| [vein_spread_context](indicators/trend_direction/vein/) | 0.1.1 | Stabil | ★★★☆☆ | ★★★★☆ | ★★★☆☆ | Commodity spread modifier |
+| [vein_feature_exporter](indicators/trend_direction/vein/) | 0.1.1 | Stabil | ★★★★★ | ★★★★☆ | ★★★★★ | Research tooling |
+| [vein_reversal_labeler](indicators/trend_direction/vein/) | 0.1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★★☆ | ML labeling only |
 | [vein_reversal_zones](indicators/trend_direction/vein/vein_reversal_zones/) | 2.0.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 
 ---
@@ -164,7 +165,7 @@ Nicht mehr aktiv gepflegt. Dateien liegen unter `archive/` und können wiederher
 | [wave_navigator](archive/indicators/wave_navigator/) | Elliott-Wave-Autoerkennung konzeptionell schwach |
 | [rj_wave](archive/indicators/rj_wave/) | Zu nische, State-Machine fragil |
 | [fib_retracement_quality](archive/indicators/fib_retracement_quality/) | Nur sinnvoll im Elliott-Wellen-Kontext — standalone kein Mehrwert |
-| [relative_leg_efficiency_panel_chart](archive/indicators/relative_strength/relative_leg_efficiency_panel_chart/) | Visualisierungs-Experiment → reimpl. als swing_conviction_radar |
+| [relative_leg_efficiency_panel_chart](archive/indicators/relative_leg_efficiency_panel_chart/) | Visualisierungs-Experiment → reimpl. als swing_conviction_radar |
 | [flow_bias](archive/indicators/flow_bias/) | Überschneidung mit market_pressure_scale → reimpl. als candle_pressure_index |
 | [candle_pressure_response_jma](archive/indicators/candle_pressure_response_jma/) | Candle-Metriken bereits in Vein suite (vein_exhaustion, vein_feature_exporter) |
 | [wavetrend_strategy.pine](archive/strategies/wavetrend/) | Superseded durch v4 |

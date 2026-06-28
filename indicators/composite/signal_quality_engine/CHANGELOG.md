@@ -1,3 +1,17 @@
+## v3.2 — 2026-06-28
+- **Market profiles now actually differentiate asset classes.** Instead of nudging only two near-identical band constants, each profile sets four levers with a meaningful spread: band width (`bbMult` 1.9–2.5), edge proximity, and — the lever that really separates assets for a fade tool — regime tolerance (`adxMax` 20–28, `slopeMax` 0.35–0.55). Commodities (esp. Natural Gas) mean-revert through choppy trends, so they fade readily and use wider bands; Stocks/Indices trend persistently, so they get a stricter range filter and tighter bands.
+- **Trigger re-checks structure** — a fade now also requires price still in the lower/upper third of the range (`rangePos < 0.35` / `> 0.65`), so a stale armed extreme can't fire once price has left the edge.
+- **Consistent Watch state** — `longWatch`/`shortWatch` are now gated by the regime, so the internal state matches the chart/alerts instead of being only visually hidden in trends.
+- **Safer arming** — `barssince()` is explicitly `na`-guarded before the confirmation-window comparison.
+- **Clamped Bollinger-Z** (`±4`) so a very small stdev can't briefly distort the exhaustion score.
+- **Leaner default chart** — the pivot reference and the dashboard table are now off by default (toggle them on in Visuals when needed). Trigger labels, Setup/Watch markers, mean & bands, and ATR risk levels stay on.
+- **Range regime gate** — the tool now verifies the market is actually ranging before it fades an edge (`ADX < 24` and `|EMA50 slope| < 0.45 ATR/bar`). Previously it would fade pullbacks in strong trends; in a trend it now stands down (dashboard status `Trending — fade off`, no chart markers, no alerts).
+- **Sharper edge detection** — "near high/low" now also requires price in the outer fifth of the 80-bar range (`rangePos > 0.80` / `< 0.20`), not just proximity to a trending extreme.
+- **Sweep-and-reclaim rejection** — the candle trigger now requires a liquidity sweep of the prior bar's extreme with a close back inside (or a stronger 0.40 wick), replacing the looser `close < low[1]` breakdown that could mark trend continuation.
+- **Risk levels persist** — SL/TP1/TP2 stay plotted for 20 bars after a trigger instead of only on the signal candle.
+- **Grade coupled to strictness** — A+/A/B/C are now relative to the active score threshold, so a triggerable setup always reads at least B regardless of preset.
+- **TF hint** softened — intraday < 1H reads `Low TF noisy`, 4H `4H OK`, otherwise `Check context`.
+
 ## v3.1 — 2026-06-28
 - **More signals: removed the separate momentum gate.** v3.0 stacked an extra momentum-turn requirement (Watch) on top of the exhaustion score *and* the candle rejection, which starved the triggers (many yellow/gray markers, almost no labels — and almost no longs). Momentum is already a component of the exhaustion score, so the gate was redundant. Now the trigger mirrors the Exhaustion Scanner: score-extreme + candle rejection, nothing else.
 - **Confirmation window** — a candle rejection within `Confirmation Window` bars (default 3) after an exhaustion extreme still triggers, so the rejection need not be exactly on the extreme bar.

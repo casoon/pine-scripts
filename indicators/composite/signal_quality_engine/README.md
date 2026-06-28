@@ -1,10 +1,10 @@
 # Signal Quality Engine
 
-A range-fade signal engine for commodities, futures, stocks and indices. One thing done well: it fades the range edges — long the exhausted lows, short the exhausted highs — when price is stretched from the mean, structure says "edge", and a candle rejects. Built for ranging markets, where a trend-pullback tool stays quiet. No regime switching, no MTF, no divergence, no pivot-based signals — a single, legible logic with an **Edge → Setup → Watch → Trigger** read.
+A range-fade signal engine for commodities, futures, stocks and indices. One thing done well: it fades the range edges — long the exhausted lows, short the exhausted highs — when the market is ranging, price is stretched from the mean, structure says "edge", and a candle rejects. A regime gate (ADX + EMA slope) stands the tool down in strong trends, so it never fades a trend pullback. No regime switching, no MTF, no divergence, no pivot-based signals — a single, legible logic with an **Edge → Setup → Watch → Trigger** read.
 
 ## The one logic (mirrored both sides)
 
-Price stretched to an edge (distance + structure) → momentum turns back off the edge → candle rejects → score high enough → **Trigger** (fade).
+Range regime ok → price stretched to an edge (distance + structure) → momentum turns back off the edge → candle rejects → score high enough → **Trigger** (fade).
 
 1. **Edge** — which side is exhausted (the dominant of the top/bottom exhaustion scores). Situation-driven: being stretched to the low *is* a long-fade situation. Shown as `Low → Long`, `High → Short`, or `Mid-range`.
 2. **Setup** (gray circle) — exhaustion is building at an edge (score over the setup threshold).
@@ -25,10 +25,13 @@ Computed for both edges; the dominant side is the Edge. A Trigger fires only on 
 
 ## Features
 
+- **Range regime gate** — triggers, markers and alerts are suppressed unless `ADX < 24` and the EMA50 slope is flat (`< 0.45 ATR/bar`); in a trend the dashboard reads `Trending — fade off`.
+- **Edge detection** — "near high/low" requires both proximity to the 80-bar extreme and price in the outer fifth of that range, so a trending extreme alone is not an edge.
+- **Sweep-and-reclaim rejection** — the candle trigger looks for a liquidity sweep of the prior bar's extreme that closes back inside, or a strong opposing wick.
 - **Edge bias from the situation** — the exhausted side, not a trend guess; stable because it reflects where price actually sits in the range.
 - **Candle-rejection confirmation** — the trigger waits for price to close back off the edge.
 - **Confirmation window** — a rejection within `Confirmation Window` bars (default 3) of the exhaustion extreme still triggers, so a one-bar timing miss doesn't void the setup.
-- **Market profiles** — tune band width (edge distance) and high/low proximity per instrument.
+- **Market profiles (asset-aware)** — each profile sets band width, edge proximity, and the regime tolerance (`adxMax` / `slopeMax`) that decides how trendy the tape can be and still be faded. Commodities (esp. Natural Gas) mean-revert through choppy trends, so they fade readily with wider bands; Stocks/Indices trend persistently and get a stricter range filter with tighter bands.
 - **Strictness presets** — Very Strict / Strict / Balanced set both the exhaustion threshold and the cooldown.
 - **ATR risk levels** — SL beyond the edge, TP1 at the mean, TP2 at the opposite band (mean-reversion oriented).
 - **Pivot reference markers** — control overlay only; never feed any signal, grade or gate.
