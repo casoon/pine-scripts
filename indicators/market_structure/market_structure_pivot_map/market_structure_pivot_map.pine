@@ -1,0 +1,403 @@
+//@version=6
+// ============================================================================
+// Market Structure Pivot Map [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-27 00:00:00
+// ============================================================================
+// Location-role structure map: draws pivot levels for any timeframe (or the
+// chart's own), CPR, previous range, and ADR/ATR projections, then reports
+// where price sits.
+//
+// This is a LOCATION tool, not a signal generator — it answers "where are we"
+// (nearest support/resistance, CPR context, confluence), never "buy/sell now".
+//
+// Features:
+//   ✓ Classic / Fibonacci pivots (P, R1-R4, S1-S4) on any timeframe
+//   ✓ Central Pivot Range (CPR) with width regime (Narrow/Normal/Wide vs ATR)
+//   ✓ Previous high/low and current-day open
+//   ✓ ADR / Previous-Range / ATR projections (0.25 / 0.50 / 1.00)
+//   ✓ Confluence zones — greedy clustering of nearby levels across timeframes
+//   ✓ Nearest support/resistance readout with ATR-normalized distance
+//   ✓ Free timeframe choice (blank = chart's own) plus two optional overlays
+//   ✓ Light-theme status table + CPR-cross / context alerts
+//
+// ============================================================================
+
+indicator("Market Structure Pivot Map [WavesUnchained]", "MS Pivot Map", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=100)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+groupMode = "Timeframe"
+pivotTf = input.timeframe("", "Pivot Timeframe", tooltip="Blank = the chart's currently selected timeframe applies. Set a fixed timeframe (D, W, M, 240, 60 …) to lock the pivots regardless of the chart.", group=groupMode)
+tf2Show = input.bool(false, "Show 2nd Timeframe", group=groupMode)
+tf2     = input.timeframe("W", "2nd Timeframe", group=groupMode)
+tf3Show = input.bool(false, "Show 3rd Timeframe", group=groupMode)
+tf3     = input.timeframe("M", "3rd Timeframe", group=groupMode)
+
+groupLevels = "Levels"
+showCPR      = input.bool(true, "Show CPR", group=groupLevels)
+showPivots   = input.bool(true, "Show Pivot Levels S/R", group=groupLevels)
+showPrevHL   = input.bool(true, "Show Previous High/Low", group=groupLevels)
+showOpen     = input.bool(true, "Show Current Day Open", group=groupLevels)
+showProj     = input.bool(true, "Show ADR/Range Projections", group=groupLevels)
+showConfl    = input.bool(true, "Show Confluence Zones", group=groupLevels)
+
+pivotType = input.string("Classic", "Pivot Formula", options=["Classic", "Fibonacci"], group=groupLevels)
+
+groupProjection = "Projection"
+projectionBase = input.string("Day Open", "Projection Base", options=["Day Open", "Previous Close", "Pivot"], group=groupProjection)
+projectionRange = input.string("ADR", "Projection Range", options=["ADR", "Previous Day Range", "ATR"], group=groupProjection)
+adrLen = input.int(14, "ADR/ATR Length", minval=1, group=groupProjection)
+
+show025 = input.bool(true, "Show 0.25", group=groupProjection)
+show050 = input.bool(true, "Show 0.50", group=groupProjection)
+show100 = input.bool(true, "Show 1.00", group=groupProjection)
+
+groupVisual = "Visual"
+wPrimary = input.int(2, "Primary Line Width", minval=1, maxval=4, group=groupVisual)
+wOverlay = input.int(1, "Overlay Line Width", minval=1, maxval=4, group=groupVisual)
+overlayTransp = input.int(25, "Overlay Transparency", minval=0, maxval=80, tooltip="Extra transparency for 2nd/3rd timeframe overlays so the primary stands out", group=groupVisual)
+
+xShift = input.int(10, "Horizontal Shift (bars)", minval=0, maxval=200, tooltip="Shift the whole level/label block to the right, away from the candles", group=groupVisual)
+linePad = input.int(6, "Line Length Past Labels (bars)", minval=0, maxval=60, tooltip="Levels are bounded — they stop this many bars past the label columns instead of running to the chart edge", group=groupVisual)
+showLabels = input.bool(true, "Show Price Labels", group=groupVisual)
+labelGap = input.int(15, "Label Stagger (bars)", minval=0, maxval=60, tooltip="Horizontal offset between label columns so overlapping levels stay readable", group=groupVisual)
+labelSize = input.string("Normal", "Label Size", options=["Tiny", "Small", "Normal", "Large"], group=groupVisual)
+labelTransp = input.int(40, "Label Background Transparency", minval=0, maxval=100, group=groupVisual)
+showTable = input.bool(true, "Show Status Table", group=groupVisual)
+tablePos = input.string("Top Right", "Table Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=groupVisual)
+
+groupConfl = "Confluence"
+conflAtrMult = input.float(0.15, "Confluence Distance ATR Mult", minval=0.01, step=0.01, group=groupConfl)
+conflMinCount = input.int(2, "Minimum Levels in Zone", minval=2, maxval=6, group=groupConfl)
+
+// ============================================================================
+// Palette — one hue per role so the map reads at a glance
+// ============================================================================
+
+color colPivot = #5c6bc0   // CPR pivot point — indigo
+color colBand  = #9575cd   // CPR top/bottom band — light purple
+color colRes   = #ef5350   // resistance pivots — red
+color colSup   = #26a69a   // support pivots — teal
+color colPrev  = #fb8c00   // previous high/low — orange
+color colOpen  = #1e88e5   // current-day open — blue
+color colProj  = #78909c   // projections — muted blue-gray
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+f_lineRight() =>
+    bar_index + 2 + xShift + 6 * labelGap + linePad
+
+f_labelSize() =>
+    labelSize == "Tiny" ? size.tiny : labelSize == "Small" ? size.small : labelSize == "Large" ? size.large : size.normal
+
+f_resolveTf(tf) =>
+    tf == "" ? timeframe.period : tf
+
+f_tfLabel(tf) =>
+    t = f_resolveTf(tf)
+    out = t
+    mins = str.tonumber(t)
+    if t == "D" or t == "W" or t == "M"
+        out := t
+    else if not na(mins)
+        if mins >= 1440 and mins % 1440 == 0
+            out := str.tostring(mins / 1440, "#") + "D"
+        else if mins >= 60 and mins % 60 == 0
+            out := str.tostring(mins / 60, "#") + "H"
+        else
+            out := str.tostring(mins, "#") + "m"
+    out
+
+f_drawLine(_y, _txt, _col, _width, _style, _labCol) =>
+    var line ln = na
+    var label lb = na
+    if barstate.islast
+        line.delete(ln)
+        label.delete(lb)
+        atEnd = _labCol < 0
+        lx = atEnd ? f_lineRight() : bar_index + 2 + xShift + _labCol * labelGap
+        // Line stops at the label anchor so it never runs through the text
+        lineEnd = showLabels ? lx : f_lineRight()
+        ln := line.new(bar_index - 1 + xShift, _y, lineEnd, _y, color=_col, width=_width, style=_style)
+        if showLabels
+            lb := label.new(lx, _y, _txt + "  " + str.tostring(_y, format.mintick), style=label.style_label_left, textcolor=color.white, color=color.new(_col, labelTransp), size=f_labelSize())
+    [ln, lb]
+
+// ============================================================================
+// HTF Data
+// ============================================================================
+
+f_prevData(tf) =>
+    h = request.security(syminfo.tickerid, tf, high[1], barmerge.gaps_off, barmerge.lookahead_on)
+    l = request.security(syminfo.tickerid, tf, low[1], barmerge.gaps_off, barmerge.lookahead_on)
+    c = request.security(syminfo.tickerid, tf, close[1], barmerge.gaps_off, barmerge.lookahead_on)
+    [h, l, c]
+
+// ============================================================================
+// Pivot Calculation
+// ============================================================================
+
+f_pivots(h, l, c, kind) =>
+    p = (h + l + c) / 3.0
+    rng = h - l
+
+    bcRaw = (h + l) / 2.0
+    tcRaw = p + (p - bcRaw)
+    tc = math.max(tcRaw, bcRaw)
+    bc = math.min(tcRaw, bcRaw)
+
+    r1 = kind == "Classic" ? 2.0 * p - l : p + rng * 0.382
+    s1 = kind == "Classic" ? 2.0 * p - h : p - rng * 0.382
+
+    r2 = kind == "Classic" ? p + rng : p + rng * 0.618
+    s2 = kind == "Classic" ? p - rng : p - rng * 0.618
+
+    r3 = kind == "Classic" ? h + 2.0 * (p - l) : p + rng * 1.000
+    s3 = kind == "Classic" ? l - 2.0 * (h - p) : p - rng * 1.000
+
+    r4 = kind == "Classic" ? r3 + rng : p + rng * 1.618
+    s4 = kind == "Classic" ? s3 - rng : p - rng * 1.618
+
+    [p, tc, bc, r1, r2, r3, r4, s1, s2, s3, s4]
+
+// ============================================================================
+// Draw Pivot Set + collect levels into shared arrays (by reference)
+// ============================================================================
+
+f_drawSet(tf, prefix, w, transp, enabled, levelArr, nameArr) =>
+    [ph, pl, pc] = f_prevData(tf)
+    [p, tc, bc, r1, r2, r3, r4, s1, s2, s3, s4] = f_pivots(ph, pl, pc, pivotType)
+
+    if enabled and barstate.islast
+        if showCPR
+            f_drawLine(p,  prefix + " P",  color.new(colPivot, transp), w, line.style_solid, 0)
+            f_drawLine(tc, prefix + " TC", color.new(colBand, transp), w, line.style_solid, 1)
+            f_drawLine(bc, prefix + " BC", color.new(colBand, transp), w, line.style_solid, 2)
+            array.push(levelArr, p),  array.push(nameArr, prefix + " P")
+            array.push(levelArr, tc), array.push(nameArr, prefix + " TC")
+            array.push(levelArr, bc), array.push(nameArr, prefix + " BC")
+
+        if showPivots
+            f_drawLine(r1, prefix + " R1", color.new(colRes, transp), w, line.style_solid, 0)
+            f_drawLine(r2, prefix + " R2", color.new(colRes, transp), w, line.style_solid, 0)
+            f_drawLine(r3, prefix + " R3", color.new(colRes, transp), w, line.style_dotted, 0)
+            f_drawLine(r4, prefix + " R4", color.new(colRes, transp), w, line.style_dotted, 0)
+
+            f_drawLine(s1, prefix + " S1", color.new(colSup, transp), w, line.style_solid, 0)
+            f_drawLine(s2, prefix + " S2", color.new(colSup, transp), w, line.style_solid, 0)
+            f_drawLine(s3, prefix + " S3", color.new(colSup, transp), w, line.style_dotted, 0)
+            f_drawLine(s4, prefix + " S4", color.new(colSup, transp), w, line.style_dotted, 0)
+
+            array.push(levelArr, r1), array.push(nameArr, prefix + " R1")
+            array.push(levelArr, r2), array.push(nameArr, prefix + " R2")
+            array.push(levelArr, r3), array.push(nameArr, prefix + " R3")
+            array.push(levelArr, r4), array.push(nameArr, prefix + " R4")
+            array.push(levelArr, s1), array.push(nameArr, prefix + " S1")
+            array.push(levelArr, s2), array.push(nameArr, prefix + " S2")
+            array.push(levelArr, s3), array.push(nameArr, prefix + " S3")
+            array.push(levelArr, s4), array.push(nameArr, prefix + " S4")
+
+        if showPrevHL
+            f_drawLine(ph, prefix + " Prev High", color.new(colPrev, transp), w, line.style_dashed, -1)
+            f_drawLine(pl, prefix + " Prev Low",  color.new(colPrev, transp), w, line.style_dashed, -1)
+            array.push(levelArr, ph), array.push(nameArr, prefix + " PrevH")
+            array.push(levelArr, pl), array.push(nameArr, prefix + " PrevL")
+
+    [p, tc, bc, ph, pl, pc]
+
+// ============================================================================
+// Active Timeframe Logic
+// ============================================================================
+
+ptf = f_resolveTf(pivotTf)
+activeTf = f_tfLabel(pivotTf)
+
+var float[] levelPrices = array.new_float()
+var string[] levelNames = array.new_string()
+if barstate.islast
+    array.clear(levelPrices)
+    array.clear(levelNames)
+
+// Primary timeframe drives the CPR context, projections and table
+[pP, pTC, pBC, pPH, pPL, pPC] = f_drawSet(ptf, activeTf, wPrimary, 0, true, levelPrices, levelNames)
+// Optional overlays — drawn and fed into nearest-S/R + confluence, returns unused
+[_2P, _2TC, _2BC, _2PH, _2PL, _2PC] = f_drawSet(f_resolveTf(tf2), f_tfLabel(tf2), wOverlay, overlayTransp, tf2Show, levelPrices, levelNames)
+[_3P, _3TC, _3BC, _3PH, _3PL, _3PC] = f_drawSet(f_resolveTf(tf3), f_tfLabel(tf3), wOverlay, overlayTransp, tf3Show, levelPrices, levelNames)
+
+// ============================================================================
+// Current Day Open + Projections
+// ============================================================================
+
+dayOpen = request.security(syminfo.tickerid, "D", open, barmerge.gaps_off, barmerge.lookahead_on)
+prevClose = request.security(syminfo.tickerid, "D", close[1], barmerge.gaps_off, barmerge.lookahead_on)
+prevRange = request.security(syminfo.tickerid, "D", high[1] - low[1], barmerge.gaps_off, barmerge.lookahead_on)
+adr = request.security(syminfo.tickerid, "D", ta.sma(high - low, adrLen), barmerge.gaps_off, barmerge.lookahead_on)
+atrD = request.security(syminfo.tickerid, "D", ta.atr(adrLen), barmerge.gaps_off, barmerge.lookahead_on)
+
+activeP = pP
+activeTC = pTC
+activeBC = pBC
+
+projBase = projectionBase == "Day Open" ? dayOpen : projectionBase == "Previous Close" ? prevClose : activeP
+projRange = projectionRange == "ADR" ? adr : projectionRange == "Previous Day Range" ? prevRange : atrD
+
+if showOpen
+    f_drawLine(dayOpen, "Day Open", colOpen, 1, line.style_dashed, -1)
+
+if showProj
+    if show025
+        f_drawLine(projBase + projRange * 0.25, "+0.25R", color.new(colProj, 30), 1, line.style_dotted, 5)
+        f_drawLine(projBase - projRange * 0.25, "-0.25R", color.new(colProj, 30), 1, line.style_dotted, 5)
+    if show050
+        f_drawLine(projBase + projRange * 0.50, "+0.50R", color.new(colProj, 15), 1, line.style_dotted, 5)
+        f_drawLine(projBase - projRange * 0.50, "-0.50R", color.new(colProj, 15), 1, line.style_dotted, 5)
+    if show100
+        f_drawLine(projBase + projRange * 1.00, "+1.00R", color.new(colProj, 0), 2, line.style_solid, 5)
+        f_drawLine(projBase - projRange * 1.00, "-1.00R", color.new(colProj, 0), 2, line.style_solid, 5)
+
+// ============================================================================
+// CPR Context (Location readouts — no trade logic)
+// ============================================================================
+
+cprWidth = math.abs(activeTC - activeBC)
+relCpr = cprWidth / atrD
+
+cprType = "Normal"
+if relCpr < 0.20
+    cprType := "Narrow"
+else if relCpr > 0.55
+    cprType := "Wide"
+
+// CPR context state — used only for alerts (see alertcondition below)
+bias = "Neutral"
+if close > activeTC and dayOpen > activeTC
+    bias := "Bullish"
+else if close < activeBC and dayOpen < activeBC
+    bias := "Bearish"
+
+// ============================================================================
+// Nearest Support / Resistance (from collected levels)
+// ============================================================================
+
+atrLocal = ta.atr(14)
+
+var float nearAbove = na
+var float nearBelow = na
+var string nameAbove = ""
+var string nameBelow = ""
+
+if barstate.islast
+    nearAbove := na
+    nearBelow := na
+    nameAbove := ""
+    nameBelow := ""
+    for i = 0 to (array.size(levelPrices) > 0 ? array.size(levelPrices) - 1 : 0)
+        if array.size(levelPrices) > 0
+            px = array.get(levelPrices, i)
+            nm = array.get(levelNames, i)
+            if px >= close
+                if na(nearAbove) or px < nearAbove
+                    nearAbove := px
+                    nameAbove := nm
+            else
+                if na(nearBelow) or px > nearBelow
+                    nearBelow := px
+                    nameBelow := nm
+
+distAbove = na(nearAbove) ? na : (nearAbove - close) / atrLocal
+distBelow = na(nearBelow) ? na : (close - nearBelow) / atrLocal
+
+// ============================================================================
+// Confluence Zones — greedy clustering of all collected levels
+// ============================================================================
+
+var box[] conflBoxes = array.new_box()
+
+f_clearBoxes() =>
+    if array.size(conflBoxes) > 0
+        for i = 0 to array.size(conflBoxes) - 1
+            box.delete(array.get(conflBoxes, i))
+        array.clear(conflBoxes)
+
+if barstate.islast and showConfl
+    f_clearBoxes()
+    conflDist = atrLocal * conflAtrMult
+
+    sorted = array.copy(levelPrices)
+    if array.size(sorted) > 0
+        array.sort(sorted, order.ascending)
+
+        clusterMin = array.get(sorted, 0)
+        clusterMax = clusterMin
+        clusterSum = clusterMin
+        clusterCnt = 1
+
+        for i = 1 to array.size(sorted) - 1
+            px = array.get(sorted, i)
+            if px - clusterMax <= conflDist
+                clusterMax := px
+                clusterSum += px
+                clusterCnt += 1
+            else
+                if clusterCnt >= conflMinCount
+                    center = clusterSum / clusterCnt
+                    b = box.new(bar_index - 50, center + conflDist, bar_index + 50, center - conflDist, bgcolor=color.new(color.yellow, 85), border_color=color.new(color.yellow, 40))
+                    array.push(conflBoxes, b)
+                clusterMin := px
+                clusterMax := px
+                clusterSum := px
+                clusterCnt := 1
+
+        if clusterCnt >= conflMinCount
+            center = clusterSum / clusterCnt
+            b = box.new(bar_index - 50, center + conflDist, bar_index + 50, center - conflDist, bgcolor=color.new(color.yellow, 85), border_color=color.new(color.yellow, 40))
+            array.push(conflBoxes, b)
+else if barstate.islast and not showConfl
+    f_clearBoxes()
+
+// ============================================================================
+// Status Table (light theme — see CLAUDE.md)
+// ============================================================================
+
+f_tablePos() =>
+    tablePos == "Top Right" ? position.top_right : tablePos == "Top Left" ? position.top_left : tablePos == "Bottom Right" ? position.bottom_right : position.bottom_left
+
+color tc = color.new(color.gray, 20)   // standard text color
+color hd = color.new(color.gray, 90)   // header row background
+
+var table t = table.new(f_tablePos(), 2, 4,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+if barstate.islast and showTable
+    table.cell(t, 0, 0, "MS Pivot Map", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, activeTf, text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 1, "CPR Width", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, cprType + " (" + str.tostring(relCpr, "#.##") + ")", text_color=tc, text_size=size.small)
+
+    resTxt = na(nearAbove) ? "—" : nameAbove + " " + str.tostring(distAbove, "#.##") + "atr"
+    supTxt = na(nearBelow) ? "—" : nameBelow + " " + str.tostring(distBelow, "#.##") + "atr"
+    table.cell(t, 0, 2, "Resistance", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, resTxt, text_color=color.new(#d50000, 0), text_size=size.tiny)
+
+    table.cell(t, 0, 3, "Support", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 3, supTxt, text_color=color.new(#00c853, 0), text_size=size.tiny)
+
+// ============================================================================
+// Alerts (informational context — not trade signals)
+// ============================================================================
+
+alertcondition(ta.crossover(close, activeTC), "Cross Above CPR", "Price crossed above active CPR top.")
+alertcondition(ta.crossunder(close, activeBC), "Cross Below CPR", "Price crossed below active CPR bottom.")
+alertcondition(bias == "Bullish" and bias[1] != "Bullish", "Context Bullish", "Pivot context turned bullish.")
+alertcondition(bias == "Bearish" and bias[1] != "Bearish", "Context Bearish", "Pivot context turned bearish.")

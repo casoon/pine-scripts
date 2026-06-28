@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.2 — 2026-06-27
+- ADX demoted to a quality/strength grade only — it never suppresses a WVF stress/reversal event. Added a continuous `adxGrade` (0..1) surfaced on peak-label tooltips; the reversal stress trigger now fires regardless of ADX, including in strong-trend phases
+- JMA trend alignment is no longer a hard requirement on the trigger. New "Require trend alignment for trigger" input (default off): by default a stress extreme triggers on its own (a trend filter must not block the reversal); turn on for with-trend pullback mode
+
 ## v1.0.1 — 2026-06-11
 - Fix: bias line color rewritten from a multi-line ternary to a single line (Pine v6 compile error CE10156)
 - Preset summary table restyled to the standard light theme; cleared via table.clear when hidden instead of writing empty cells

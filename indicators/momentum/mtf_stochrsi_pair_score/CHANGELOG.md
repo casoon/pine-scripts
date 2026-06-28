@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.0 — 2026-06-27
+- Stripped back to the core role: a multi-timeframe StochRSI pair score. The total score is now driven only by the StochRSI pair across the configured timeframes.
+- Removed the Squeeze Momentum subsystem (inputs, BB/KC compression state, momentum histogram, state dot, compress-phase background) — it was a visual-only bolt-on detached from the score
+- Removed stale header feature bullets advertising subsystems no longer in the file (Williams VIX Fix, QQE agreement/scoring, breadth discrepancy, fractal momentum alignment, oscillator compression detector)
+
 ## v1.7.1 — 2026-06-11
 - Fix: multi-line ternaries with series types (cell background, QQE trailing stop, QQE score weighting, squeeze momentum color) rewritten to if/else (Pine v6 compile error CE10156)
 - Removed unused f_state() helper

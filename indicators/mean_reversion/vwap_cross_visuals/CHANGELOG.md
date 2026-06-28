@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.1.1 — 2026-06-27
+- **Aggregated Long/Short signals isolated behind a toggle**: new "Emit aggregated Long/Short signals" input (Visual Settings, default OFF). When off, the module is pure VWAP cross visuals — only the core Price×VWAP cross markers render. Turning it on (with Signal Scope = "All signals") re-enables the aggregated structure-cross, cluster, entry, zone, volume-profile and HTF-stack trade markers, including the volume-profile event that previously rendered as a trade marker.
+
 ## v2.1.0 — 2026-06-11
 - Focused on the core signal: new "Signal Scope" input defaults to **VWAP Cross only** — out of the box the chart shows just the Price×VWAP cross markers. "All signals" brings back structure-cross, cluster, entry and (if their modules are enabled) zone/volume/HTF markers.
 - Price×VWAP cross markers are now **labels with hover tooltips** (price, VWAP, bias, confluence, cross strength) instead of plain triangles — cleaner and informative on hover. Frees two plot outputs (now ~27).

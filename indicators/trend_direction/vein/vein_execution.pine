@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Vein Execution 15m [WavesUnchained]
-// Version: 0.1.1
+// Version: 0.1.3
 // Author: WavesUnchained
-// Build: 2026-06-11 00:00:00
+// Build: 2026-06-27 00:00:00
 // ============================================================================
 // Lean 15m execution/timing overlay that works WITH the 4H system.
 // 4H = Context (where to look). 15m = Timing (when to act).
@@ -42,6 +42,7 @@ float engBodyRatio   = input.float(0.6, "Engulfing: Min Body Ratio", minval=0.3,
 var gTempo = "Follow-Through"
 int   ftWindow       = input.int(4, "Follow-Through Window (Bars)", minval=2, maxval=8, group=gTempo)
 float ftMinMove      = input.float(0.3, "Follow-Through Min Move (ATR)", minval=0.1, maxval=1.0, step=0.1, group=gTempo)
+float entryScoreThresh = input.float(7.0, "Entry Min Micro Score", minval=1.0, maxval=10.0, step=0.5, group=gTempo, tooltip="Role-weighted micro score required to emit an entry (with a structure trigger). Behaviour/FT contribute weight rather than acting as a hard gate.")
 
 var gDisplay = "Display"
 string displayMode   = input.string("Light", "Display Mode", options=["Light", "Debug"], group=gDisplay)
@@ -70,7 +71,9 @@ htfBearSetup = input.source(close, "Vein Bear Setup Score Source", group=g_score
 // Reference levels pivots requested from HTF
 htf_pivHi_raw = ta.pivothigh(high, 3, 3)
 htf_pivLo_raw = ta.pivotlow(low, 3, 3)
-[htfPivHi, htfPivLo] = request.security("", htfTimeframe, [htf_pivHi_raw, htf_pivLo_raw], lookahead=barmerge.lookahead_off)
+htf_ema20_raw = ta.ema(close, 20)
+htf_rsi_raw   = ta.rsi(close, 14)
+[htfPivHi, htfPivLo, htfEma20, htfRsi] = request.security("", htfTimeframe, [htf_pivHi_raw, htf_pivLo_raw, htf_ema20_raw, htf_rsi_raw], lookahead=barmerge.lookahead_off)
 
 // Persist last known 4H swing levels (pivots are sparse)
 var float htfSwingHi = na
@@ -230,57 +233,65 @@ bool bearFT = bearTriggerAge > 0 and bearTriggerAge <= ftWindow and not na(bearT
 // MODULE: micro score (0-10)
 // ============================================================================
 
-// --- Setup component (max 3) — from 4H context ---
-float setupScore = 0.0
-float activeSetup = bias == 1 ? nz(htfBullSetup) : bias == -1 ? nz(htfBearSetup) : math.max(nz(htfBullSetup), nz(htfBearSetup))
-setupScore += activeSetup >= activationThresh ? 1.0 : 0.0
-setupScore += activeSetup >= activationThresh + 1.0 ? 1.0 : 0.0
-
-// Near 4H zone bonus
+// Distance to the 4H swing levels — kept as a control/diagnosis reference for the
+// dashboard only. Per the role ruleset, proximity to a (HTF) pivot does NOT feed the
+// micro score; it is shown but never scored.
 float distToHTFSup = not na(htfSwingLo) and atr15m > 0 ? math.abs(close - htfSwingLo) / atr15m : 999.0
 float distToHTFRes = not na(htfSwingHi) and atr15m > 0 ? math.abs(close - htfSwingHi) / atr15m : 999.0
 bool nearHTFZone = (bias >= 0 and distToHTFSup <= zoneProximityATR) or (bias <= 0 and distToHTFRes <= zoneProximityATR)
-setupScore += nearHTFZone ? 1.0 : 0.0
-setupScore := math.min(setupScore, 3.0)
 
-// --- Structure component (max 4) — from 15m micro events ---
-float structScore = 0.0
+// This module has ONE score: the 15m timing evidence. The 4H setup is consumed as the
+// activation/context evidence (single score path) — it is NOT re-built into a parallel
+// internal setup score. microScore = Evidence(4H) + Structure + Behaviour + Tempo,
+// each computed 0..1 within its role, then combined with role weights (total ≈ 0..10).
+
+// --- Evidence role (0..1) — strength of the gating 4H setup ---
+float activeSetup = bias == 1 ? nz(htfBullSetup) : bias == -1 ? nz(htfBearSetup) : math.max(nz(htfBullSetup), nz(htfBearSetup))
+float evidenceRole = activationThresh > 0 ? math.min(activeSetup / (activationThresh * 2.0), 1.0) : 0.0
+
+// --- Structure role (0..1) — 15m micro events ---
+float structRaw = 0.0
 if bias >= 0
-    structScore += sweepBull ? 1.0 : 0.0
-    structScore += sweepBullConfirmed ? 1.0 : 0.0
-    structScore += microBullBOS ? 1.0 : 0.0
-    structScore += higherLow ? 1.0 : 0.0
+    structRaw += sweepBull ? 1.0 : 0.0
+    structRaw += sweepBullConfirmed ? 1.0 : 0.0
+    structRaw += microBullBOS ? 1.0 : 0.0
+    structRaw += higherLow ? 1.0 : 0.0
 if bias <= 0
-    structScore += sweepBear ? 1.0 : 0.0
-    structScore += sweepBearConfirmed ? 1.0 : 0.0
-    structScore += microBearBOS ? 1.0 : 0.0
-    structScore += lowerHigh ? 1.0 : 0.0
+    structRaw += sweepBear ? 1.0 : 0.0
+    structRaw += sweepBearConfirmed ? 1.0 : 0.0
+    structRaw += microBearBOS ? 1.0 : 0.0
+    structRaw += lowerHigh ? 1.0 : 0.0
 if bias == 0
-    structScore := structScore / 2.0  // dampen during conflict
-structScore := math.min(structScore, 4.0)
+    structRaw := structRaw / 2.0  // dampen during conflict
+float structRole = math.min(structRaw / 4.0, 1.0)
 
-// --- Behaviour component (max 2) — candle character ---
-float behScore = 0.0
+// --- Behaviour role (0..1) — candle character ---
+float behRaw = 0.0
 if bias >= 0
-    behScore += (bullRejection or bullEngulfing) ? 1.0 : 0.0
-    behScore += (isBullBar and rangeExpansion) ? 1.0 : 0.0
+    behRaw += (bullRejection or bullEngulfing) ? 1.0 : 0.0
+    behRaw += (isBullBar and rangeExpansion) ? 1.0 : 0.0
 if bias <= 0
-    behScore += (bearRejection or bearEngulfing) ? 1.0 : 0.0
-    behScore += (isBearBar and rangeExpansion) ? 1.0 : 0.0
+    behRaw += (bearRejection or bearEngulfing) ? 1.0 : 0.0
+    behRaw += (isBearBar and rangeExpansion) ? 1.0 : 0.0
 if bias == 0
-    behScore := behScore / 2.0
-behScore := math.min(behScore, 2.0)
+    behRaw := behRaw / 2.0
+float behRole = math.min(behRaw / 2.0, 1.0)
 
-// --- Tempo component (max 1) — follow-through ---
-float tempoScore = 0.0
+// --- Tempo role (0..1) — follow-through ---
+float tempoRole = 0.0
 if bias >= 0 and bullFT
-    tempoScore += 1.0
+    tempoRole := 1.0
 if bias <= 0 and bearFT
-    tempoScore += 1.0
-tempoScore := math.min(tempoScore, 1.0)
+    tempoRole := 1.0
 
-// --- Total micro score ---
-float microScore = isActive ? setupScore + structScore + behScore + tempoScore : 0.0
+// --- Role-weighted micro score (≈0..10): Evidence 3 · Structure 4 · Behaviour 2 · Tempo 1 ---
+float microScore = isActive ? 3.0 * evidenceRole + 4.0 * structRole + 2.0 * behRole + 1.0 * tempoRole : 0.0
+
+// Component scores retained on the original scales for the status table / data window.
+float setupScore  = 3.0 * evidenceRole
+float structScore = 4.0 * structRole
+float behScore    = 2.0 * behRole
+float tempoScore  = 1.0 * tempoRole
 
 // ============================================================================
 // MODULE: status logic
@@ -307,9 +318,16 @@ int signalDir = bias == 1 ? 1 : bias == -1 ? -1 : (nz(htfBullSetup) > nz(htfBear
 // MODULE: entry & invalidation signals
 // ============================================================================
 
-// Entry conditions
-bool entryBull = enableEntries and microStatus == "TRIGGER" and signalDir == 1 and (sweepBull or sweepBullConfirmed or microBullBOS) and (bullRejection or bullEngulfing or bullFT)
-bool entryBear = enableEntries and microStatus == "TRIGGER" and signalDir == -1 and (sweepBear or sweepBearConfirmed or microBearBOS) and (bearRejection or bearEngulfing or bearFT)
+// Entry conditions — evidence scoring, not a hard AND chain.
+// Trigger = a 15m structure event firing in the bias direction (timing).
+// Weight   = the role-weighted micro score must clear entryScoreThresh.
+// Behaviour/follow-through now contribute weight (via microScore) instead of acting
+// as a separate mandatory gate, so a strong-structure entry is no longer vetoed by a
+// single missing candle-character condition.
+bool bullTrigger = signalDir == 1 and (sweepBull or sweepBullConfirmed or microBullBOS)
+bool bearTrigger = signalDir == -1 and (sweepBear or sweepBearConfirmed or microBearBOS)
+bool entryBull = enableEntries and isActive and bullTrigger and microScore >= entryScoreThresh
+bool entryBear = enableEntries and isActive and bearTrigger and microScore >= entryScoreThresh
 
 // Track active entries for invalidation
 var bool  bullEntryActive = false
@@ -441,9 +459,9 @@ if showTable and barstate.islast
     // Interpretation line
     string interpStr = ""
     if not isActive
-        if htfTrendDown and nz(htfRsi) > 40
+        if nz(htfTrendDown) > 0 and nz(htfRsi) > 40
             interpStr := "4H downtrend, no exhaustion — wait"
-        else if htfTrendUp and nz(htfRsi) < 60
+        else if nz(htfTrendUp) > 0 and nz(htfRsi) < 60
             interpStr := "4H uptrend, no overheating — wait"
         else if nz(htfBullSetup) > 0 or nz(htfBearSetup) > 0
             interpStr := "4H building (" + str.tostring(math.max(nz(htfBullSetup), nz(htfBearSetup)), "#.0") + ") — not yet active"

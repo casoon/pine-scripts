@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.1 — 2026-06-27
+- **Trade engine isolated behind a toggle**: new "Show Trade Engine (entries/exits/TP/SL + performance)" input (Signal Management group, default OFF). When off, RDP behaves as a pure regime classifier/visual — only regime bands, heatmap, candle tint, context labels and warnings render. When on, it re-enables the RDP entry/exit markers, tier/quality labels, MA-zone entry/SL engine, trade-entry/exit alerts and the performance statistics rows.
+
 ## v1.1.0 — 2026-06-11
 - **Volatility dimension**: a second axis (Quiet / Normal / Volatile) from ATR percentile + Bollinger-width percentile, turning "Bull" into "Quiet Bull" / "Volatile Bull" etc. New "Regime Context" input group (lookback, quiet/volatile thresholds).
 - **Regime maturity + transition warning**: tracks bars-in-regime and peak strength, then classifies Fresh / Mature / Mature-strong / Aging-weakening (slope turning against the regime, efficiency below exit threshold, or fade below 50% of peak).

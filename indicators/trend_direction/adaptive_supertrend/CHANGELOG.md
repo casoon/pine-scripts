@@ -1,3 +1,14 @@
+## v1.7 — 2026-06-28
+- ATR Rank's chop fallback is now an input (`ATR Conviction in Chop`, default 0.50) instead of a hardcoded 0.35 — unconfirmed volatility counts as neutral rather than near-zero, avoiding a double chop penalty alongside the chop multiplier
+
+## v1.6 — 2026-06-28
+- Adaptive multiplier now symmetric around base: high conviction tightens the band *below* the base multiplier (previously base was the floor), neutral conviction = base, low conviction widens it — clamped to `baseMult × 0.60 … 1.80`
+- ATR Rank only adds conviction when trend force confirms a real move; otherwise contributes a neutral value so volatility spikes (panic, news, blow-off) no longer score as conviction
+- Trend force now maps to conviction against an absolute cap (`Trend Force Full Conviction`, default 2.0) instead of a rolling 100-bar percentile — no longer over-scores "less weak" moves in persistently weak markets
+- Softened the chop penalty from ×0.35 to ×0.50 so ranges still widen the band without crushing conviction (the ATR-rank gate already handles part of the chop case)
+- Conviction table now clears when the table is toggled off (no stale last-state)
+- Clarified tooltips: HTF layer is a fixed-multiplier reference Supertrend (not adaptive), overextension is a late-entry / trail-risk warning (not a reversal signal), JMA is a JMA-like approximation
+
 ## v1.5 — 2026-06-10
 - RSI filter reworked: now blocks flips when RSI is already overextended in the flip direction (RSI > threshold for longs, RSI < 100−threshold for shorts) — default threshold 70
 

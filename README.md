@@ -58,14 +58,16 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`smc_structure_expectation.pine`](indicators/market_structure/smc_structure_expectation/smc_structure_expectation.pine) | BOS, CHoCH, order blocks, fair value gaps |
 | [`wyckoff_schematics.pine`](indicators/market_structure/wyckoff_schematics/wyckoff_schematics.pine) | Wyckoff phases and events — accumulation, distribution, spring, UTAD |
 | [`sr_zones_mtf_v2.pine`](indicators/market_structure/sr_zones_mtf_v2/sr_zones_mtf_v2.pine) | Multi-timeframe support and resistance zones |
+| [`market_structure_pivot_map.pine`](indicators/market_structure/market_structure_pivot_map/market_structure_pivot_map.pine) | HTF pivot/CPR/projection map with cross-timeframe confluence zones and nearest-S/R readout — a location tool, not a signal generator |
 | [`tweezer_kangaroo_zones.pine`](indicators/market_structure/tweezer_kangaroo_zones/tweezer_kangaroo_zones.pine) | Tweezer tops/bottoms and kangaroo tails mapped to supply/demand zones |
 | [`jma_struct.pine`](indicators/market_structure/jma_struct/jma_struct.pine) | JMA entry clusters with Wyckoff and SMC structure context |
 | [`time_to_react_volatility_time.pine`](indicators/volatility/time_to_react_volatility_time/time_to_react_volatility_time.pine) | BOS and sweep timing with volatility-adjusted candle coloring |
 | [`coilforge_zones_v1.pine`](indicators/market_structure/coilforge_zones/coilforge_zones_v1.pine) | Compression zone detection with multi-module scoring and post-zone breakout watch |
 | [`reversal_engine_score_v1.pine`](indicators/momentum/reversal_engine_score/reversal_engine_score_v1.pine) | Score-based liquidity sweep reversal signals with HTF trend filter and configurable evidence threshold |
 | [`reversal_type_classifier_v1.pine`](indicators/market_structure/reversal_type_classifier/reversal_type_classifier_v1.pine) | Ex-post diagnostic: classifies confirmed pivot reversals as Snapback / Grind / Fake / Chop with WT context and R-outcome scoring |
+| [`structure_break_risk.pine`](indicators/market_structure/structure_break_risk/structure_break_risk.pine) | Forward-looking 0–100 gauge of how close the prevailing trend's structure is to breaking — risk rises on approach to the break level, not only after it; symmetric top-/bottom-break scoring from five weighted sensors (near level, confirmed BOS, failed breakout, structure erosion, pivot divergence) with a Reason readout; companion to Trend Persistence Score |
 | [`commodity_heat_reversal.pine`](indicators/composite/commodity_heat_reversal/commodity_heat_reversal.pine) | Score-based mean-reversion reversal signals for commodity futures — ATR distance, expansion, RSI extreme, wick pressure, BB breach |
-| [`exhaustion_scanner.pine`](indicators/momentum/exhaustion_scanner/exhaustion_scanner.pine) | Weighted top/bottom exhaustion score (0–100) from distance/momentum/flow/volatility/structure with per-market presets (stocks, commodities, forex, crypto) |
+| [`exhaustion_scanner.pine`](indicators/momentum/exhaustion_scanner/exhaustion_scanner.pine) | Role-separated overextension context (0–100): Stretch + Exhaustion + Reaction scores, volatility as multiplier, regime classifier framing each signal as Continuation Risk / Trend Exhaustion / Range Fade; per-market presets |
 
 ### Trend & Regime
 
@@ -73,6 +75,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 |--------|--------------|
 | [`adx_advanced.pine`](indicators/trend_strength/adx_advanced/adx_advanced.pine) | ADX with DI± display, pluggable signal smoothing, 4-state histogram, gradient line, and DI crossover / threshold alerts |
 | [`regime_classifier.pine`](indicators/trend_strength/regime_classifier/regime_classifier.pine) | Stage-1 reversal-pipeline filter — fuses Fractal Dimension, Kaufman Efficiency Ratio and Choppiness into a Trend / Range / Chaos classification with hysteresis, symmetric reversal/trend permission outputs (no triggers) and an optional HTF regime line |
+| [`trend_persistence_score.pine`](indicators/trend_strength/trend_persistence_score/trend_persistence_score.pine) | Graded 0–100 trend-strength oscillator — fuses Regression R², Kaufman Efficiency Ratio, ADX strength+slope and Fractal Dimension into one persistence axis with a Strong/Healthy/Transition/Weak/Dead state, hysteresis, calibration-anchor inputs and visual-only directional context |
 | [`commodity_pulse_matrix_v3.pine`](indicators/composite/commodity_pulse_matrix/commodity_pulse_matrix_v3.pine) | Multi-timeframe confluence scoring matrix across instruments — [published on TradingView](https://de.tradingview.com/script/aJmdpe8H/) |
 | [`signal_quality_engine.pine`](indicators/composite/signal_quality_engine/signal_quality_engine.pine) | Range-fade signal engine — fades exhausted range edges (long the lows, short the highs) via a Distance+Structure+Momentum exhaustion score, with an Edge → Setup → Watch → Trigger read and candle-rejection confirmation |
 | [`regime_detector.pine`](indicators/trend_strength/regime_detector/regime_detector.pine) | MA-zone based trend regime overlay |

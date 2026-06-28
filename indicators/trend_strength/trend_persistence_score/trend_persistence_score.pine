@@ -1,0 +1,317 @@
+//@version=6
+// ============================================================================
+// Trend Persistence Score [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-28 00:00:00
+// ============================================================================
+// Single-role trend-strength oscillator: how persistent, clean and durable is
+// the current trend? Fuses four trend-efficiency sensors (Regression R²,
+// Kaufman Efficiency Ratio, ADX strength+slope, Fractal Dimension) onto one
+// graded 0-100 persistence axis. Direction-agnostic by design — it grades the
+// magnitude of trendiness; direction is shown as visual context only.
+//
+// Features:
+//   ✓ 4-sensor trend-persistence score (R² · ER · ADX · FDI) on a 0-100 axis
+//   ✓ Role-level weights — see which sensor drives the verdict (sub-score lines)
+//   ✓ State read: Strong / Healthy / Transition / Weak / Dead with hysteresis
+//   ✓ Calibration anchors exposed as inputs (no hardcoded thresholds in logic)
+//   ✓ Directional context (▲/▼/•) from regression sign — visual only, not scored
+//   ✓ Light-theme dashboard + debug log on every state change (why it changed)
+//   ✓ Weakening / Transition / Recovery alerts
+//
+// ============================================================================
+
+indicator("Trend Persistence Score [WavesUnchained]", "TPS", overlay=false, max_labels_count=500)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+src       = input.source(close, "Source", group="Core")
+len       = input.int(34, "Main Length", minval=10, group="Core")
+adxLen    = input.int(14, "ADX Length", minval=5, group="Core")
+smoothLen = input.int(5, "Score Smoothing", minval=1, group="Core")
+
+wR2  = input.float(40.0, "Weight: Regression R²", minval=0, group="Sensor Weights")
+wER  = input.float(25.0, "Weight: Efficiency Ratio", minval=0, group="Sensor Weights")
+wADX = input.float(20.0, "Weight: ADX / Slope", minval=0, group="Sensor Weights")
+wFDI = input.float(15.0, "Weight: Fractal Dimension", minval=0, group="Sensor Weights")
+
+// Role-level calibration: each anchor pair maps a sensor's full-range vs.
+// full-trend reading onto 0..1. These are the "trend is strong / dead"
+// thresholds — kept as inputs, never hardcoded into the signal logic.
+adxLo   = input.float(12.0, "ADX: range anchor", group="Calibration", tooltip="ADX at/below this reads as no trend strength")
+adxHi   = input.float(35.0, "ADX: trend anchor", group="Calibration", tooltip="ADX at/above this reads as full trend strength")
+fdiTrnd = input.float(1.20, "FDI: trend anchor", group="Calibration", tooltip="Fractal Dimension at/below this reads as a clean trend")
+fdiRng  = input.float(1.65, "FDI: range anchor", group="Calibration", tooltip="Fractal Dimension at/above this reads as choppy/range")
+
+// ADX measures movement/strength, not directional cleanliness. When BOTH the
+// structure sensors (R², ER) are weak, ADX must not be allowed to "rescue" the
+// score — its sub-score is damped so the composite reflects the dead structure.
+deadThresh = input.float(20.0, "ADX damp: structure-dead threshold", group="Calibration", tooltip="If both R² Score and Efficiency Score are below this, ADX is damped")
+adxDamp    = input.float(0.35, "ADX damp: factor", minval=0.0, maxval=1.0, group="Calibration", tooltip="ADX sub-score multiplier while structure is dead")
+
+lvlStrong = input.int(75, "State: Strong ≥", group="State Levels")
+lvlHealthy= input.int(60, "State: Healthy ≥", group="State Levels")
+lvlTrans  = input.int(45, "State: Transition ≥", group="State Levels")
+lvlWeak   = input.int(30, "State: Weak ≥", group="State Levels")
+
+colorMode = input.string("Direction × Strength", "Oscillator Color", options=["Direction × Strength", "Persistence State"], group="Display", tooltip="Direction × Strength: line/fill colored by trend direction (corr sign), faded by how weak the trend is. Persistence State: the Strong/Healthy/Transition/Weak/Dead band colors.")
+showFill  = input.bool(true, "Show Heat Column (fill to 0)", group="Display")
+showZones = input.bool(false, "Show Background Zones", group="Display")
+showLines = input.bool(false, "Show Sensor Lines", group="Display")
+showTable = input.bool(false, "Show Table", group="Display")
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+f_clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_norm(x, lo, hi) =>
+    hi == lo ? 0.0 : f_clamp((x - lo) / (hi - lo), 0.0, 1.0)
+
+// ============================================================================
+// 1. Linear Regression R²  (magnitude of fit — direction stripped by squaring)
+// ============================================================================
+
+corr    = ta.correlation(src, bar_index, len)
+r2Raw   = math.pow(nz(corr), 2.0)
+r2Score = r2Raw * 100.0
+
+// ============================================================================
+// 2. Kaufman Efficiency Ratio
+// ============================================================================
+
+change     = math.abs(src - src[len])
+volatility = math.sum(math.abs(src - src[1]), len)
+erRaw      = volatility == 0.0 ? 0.0 : change / volatility
+erScore    = erRaw * 100.0
+
+// ============================================================================
+// 3. ADX Strength + ADX Slope
+// ============================================================================
+
+[plusDI, minusDI, adx] = ta.dmi(adxLen, adxLen)
+
+adxStrength  = f_norm(adx, adxLo, adxHi)
+adxSlope     = ta.ema(adx - adx[1], 3)
+adxSlopeNorm = f_norm(adxSlope, -1.0, 1.5)
+
+adxScore = ((adxStrength * 0.7) + (adxSlopeNorm * 0.3)) * 100.0
+
+// Damp ADX when price structure is dead (R² and ER both weak) — ADX activity
+// without directional cleanliness should not prop up the persistence score.
+structureDead = r2Score < deadThresh and erScore < deadThresh
+adxScoreFinal = structureDead ? adxScore * adxDamp : adxScore
+
+// ============================================================================
+// 4. Fractal Dimension Index
+// Lower FDI = cleaner trend (~1.0 trend, ~1.5 random, ~2.0 noisy/choppy)
+// ============================================================================
+
+highestHigh = ta.highest(high, len)
+lowestLow   = ta.lowest(low, len)
+rangeHL     = highestHigh - lowestLow
+pathLength  = math.sum(math.abs(src - src[1]), len)
+
+float fdiRaw = 1.5
+if rangeHL > 0.0 and pathLength > 0.0
+    fdiRaw := math.log(pathLength / rangeHL) / math.log(len) + 1.0
+
+fdiTrendScore = (1.0 - f_norm(fdiRaw, fdiTrnd, fdiRng)) * 100.0
+
+// ============================================================================
+// Composite Score
+// ============================================================================
+
+weightSum = wR2 + wER + wADX + wFDI
+
+float tpsRaw = na
+if weightSum > 0.0
+    tpsRaw := (r2Score * wR2 + erScore * wER + adxScoreFinal * wADX + fdiTrendScore * wFDI) / weightSum
+
+tps = ta.ema(tpsRaw, smoothLen)
+
+// Transition Risk — derived inverse of TPS (NOT a structure-break detector;
+// that is a separate reversal module). Blends inverse-TPS with inverse-ER so a
+// low-efficiency tape reads as elevated risk even when ADX lingers.
+transitionRisk = (100.0 - tps) * 0.7 + (100.0 - erScore) * 0.3
+
+// ============================================================================
+// State (with one-band hysteresis so it does not flip on score noise)
+// ============================================================================
+
+f_stateIdx(v) =>
+    int idx = 0
+    if v >= lvlStrong
+        idx := 4
+    else if v >= lvlHealthy
+        idx := 3
+    else if v >= lvlTrans
+        idx := 2
+    else if v >= lvlWeak
+        idx := 1
+    idx
+
+rawIdx = f_stateIdx(tps)
+var int stateIdx = rawIdx
+// upgrade immediately; downgrade only after a clear overshoot below the band
+// edge (hysteresis), so the state does not flip on score noise
+if rawIdx > stateIdx
+    stateIdx := rawIdx
+else if rawIdx < stateIdx
+    edge = stateIdx == 4 ? lvlStrong : stateIdx == 3 ? lvlHealthy : stateIdx == 2 ? lvlTrans : lvlWeak
+    if tps < edge - 3.0
+        stateIdx := rawIdx
+
+string state = "Trend Dead"
+if stateIdx == 4
+    state := "Trend Strong"
+else if stateIdx == 3
+    state := "Trend Healthy"
+else if stateIdx == 2
+    state := "Transition"
+else if stateIdx == 1
+    state := "Weak / Range"
+
+// Project accent palette
+color cBull = #00c853
+color cWarn = #ff6f00
+color cBear = #d50000
+
+color stateColor = cBear
+if stateIdx == 4
+    stateColor := cBull
+else if stateIdx == 3
+    stateColor := #43a047
+else if stateIdx == 2
+    stateColor := cWarn
+else if stateIdx == 1
+    stateColor := #e53935
+
+// ============================================================================
+// Directional context — VISUAL ONLY, never fed into the score
+// ============================================================================
+
+dirUp = corr > 0.15
+dirDn = corr < -0.15
+
+// Compression — MEASURED (not inferred from low TPS, which can also be high-vol
+// chop). Bollinger-width percentile rank; a low rank = volatility contraction.
+basis    = ta.sma(src, len)
+dev      = ta.stdev(src, len)
+bbWidth  = basis == 0.0 ? 0.0 : (4.0 * dev) / basis
+compress = ta.percentrank(bbWidth, 100) < 30
+
+flatTxt = compress ? "• Compress" : "• Flat"
+biasTxt = dirUp ? "▲ Up" : dirDn ? "▼ Down" : flatTxt
+biasCol = dirUp ? cBull : dirDn ? cBear : (compress ? cWarn : color.new(color.gray, 20))
+
+// ============================================================================
+// Plot
+// ============================================================================
+
+// Two-dimensional read: HEIGHT = persistence (tps), COLOR = direction (corr
+// sign), SATURATION = strength (faded when the trend is weak/dead). One color
+// language driven by colorMode.
+useDir  = colorMode == "Direction × Strength"
+dirBase = dirUp ? cBull : dirDn ? cBear : color.gray
+
+// transparency scaled by tps: strong trend = vivid, dead market = pale
+lineT = f_clamp(60.0 - tps * 0.55, 0.0, 60.0)
+fillT = f_clamp(93.0 - tps * 0.35, 55.0, 93.0)
+
+oscCol  = useDir ? color.new(dirBase, lineT) : stateColor
+heatCol = useDir ? color.new(dirBase, fillT) : color.new(stateColor, 80)
+
+pTps  = plot(tps, "Trend Persistence Score", color=oscCol, linewidth=3)
+pZero = plot(0, "", color=color.new(color.gray, 100), display=display.none, editable=false)
+fill(pTps, pZero, color=showFill ? heatCol : na, title="Heat Column")
+
+plot(showLines ? r2Score : na, "R² Score", color=color.new(color.blue, 50))
+plot(showLines ? erScore : na, "Efficiency Ratio", color=color.new(color.teal, 50))
+plot(showLines ? adxScoreFinal : na, "ADX Score (effective)", color=color.new(color.orange, 50))
+plot(showLines ? fdiTrendScore : na, "FDI Trend Score", color=color.new(color.purple, 50))
+
+hline(lvlStrong, "Strong Trend", color=color.new(color.green, 40))
+hline(lvlHealthy, "Healthy Trend", color=color.new(color.green, 70))
+hline(lvlTrans, "Transition", color=color.new(color.orange, 50))
+hline(lvlWeak, "Weak", color=color.new(color.red, 60))
+
+bgcolor(showZones ? color.new(useDir ? dirBase : stateColor, 90) : na)
+
+// ============================================================================
+// Table (light-theme dashboard — see CLAUDE.md)
+// ============================================================================
+
+color tc = color.new(color.gray, 20)   // standard text color
+color hd = color.new(color.gray, 90)   // header row background
+
+var table t = table.new(position.top_right, 2, 11,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+// Transition Risk accent — high inverse-trend reads as warning/alert
+trCol = transitionRisk >= 70 ? cBear : transitionRisk >= 50 ? cWarn : tc
+
+if showTable and barstate.islast
+    // --- Summary block: the four reads that matter at a glance ---
+    table.cell(t, 0, 0, "Trend Persistence", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, str.tostring(tps, "#.0"), text_color=color.white, bgcolor=stateColor, text_size=size.small)
+
+    table.cell(t, 0, 1, "State", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, state, text_color=color.white, bgcolor=stateColor, text_size=size.small)
+
+    table.cell(t, 0, 2, "Transition Risk", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(transitionRisk, "#.0"), text_color=trCol, text_size=size.small)
+
+    table.cell(t, 0, 3, "FDI Score", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(fdiTrendScore, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 4, "Bias", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 4, biasTxt, text_color=biasCol, text_size=size.small)
+
+    table.cell(t, 0, 5, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 5, "", bgcolor=color.new(color.gray, 80))
+
+    // --- Sensor breakdown ---
+    table.cell(t, 0, 6, "R²", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(r2Score, "#.0"), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 7, "Efficiency", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(erScore, "#.0"), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 8, structureDead ? "ADX ↓ damped" : "ADX", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 8, str.tostring(adxScoreFinal, "#.0"), text_color=structureDead ? cWarn : tc, text_size=size.tiny)
+
+    table.cell(t, 0, 9, "FDI", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 9, str.tostring(fdiRaw, "#.00"), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 10, "Compression", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 10, compress ? "Yes" : "No", text_color=compress ? cWarn : tc, text_size=size.tiny)
+
+// ============================================================================
+// Debug — log on every state change: WHY it changed (which sensor drove it)
+// ============================================================================
+
+if barstate.isconfirmed and stateIdx != stateIdx[1]
+    log.info("TPS STATE {0} -> {1} | tps={2} TR={3} R2={4} ER={5} ADX={6}{7} FDI={8} bias={9}",
+         state[1], state, str.tostring(tps, "#.0"), str.tostring(transitionRisk, "#.0"),
+         str.tostring(r2Score, "#.0"), str.tostring(erScore, "#.0"),
+         str.tostring(adxScoreFinal, "#.0"), structureDead ? "(damped)" : "",
+         str.tostring(fdiTrendScore, "#.0"), biasTxt)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertcondition(ta.crossunder(tps, lvlHealthy), "TPS Weakening", "Trend Persistence fell below Healthy")
+alertcondition(ta.crossunder(tps, lvlTrans), "TPS Transition", "Trend Persistence fell into Transition")
+alertcondition(ta.crossover(tps, lvlHealthy), "TPS Recovery", "Trend Persistence recovered above Healthy")
+alertcondition(ta.crossover(transitionRisk, 70), "TPS Transition Risk High", "Transition Risk crossed above 70 — trend structure deteriorating")

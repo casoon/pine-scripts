@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Adaptive Supertrend [WavesUnchained]
-// Version: 1.5
+// Version: 1.7
 // Author: WavesUnchained
-// Build: 2026-06-10 00:00:00
+// Build: 2026-06-28 00:00:00
 // ============================================================================
 // Supertrend with conviction-adaptive band width. Bands narrow in strong,
 // expanding-volatility trends and widen in chop or low-volatility regimes.
@@ -30,15 +30,19 @@ baseMult   = input.float(2.0,   "Base Multiplier",   minval=0.1, step=0.1, group
 adaptivity  = input.float(0.7,  "Adaptivity",        minval=0.0, maxval=2.0, step=0.1, group="Supertrend",
   tooltip="How much conviction modulates the band width. 0 = plain Supertrend. Higher = stronger adaptation.")
 smoothType  = input.string("EMA", "Smoothing",      options=["None", "EMA", "WMA", "SMA", "JMA"], group="Supertrend",
-  tooltip="MA applied to the source before computing bands. Reduces wick-driven false flips without affecting the conviction or ratchet logic.")
+  tooltip="MA applied to the source before computing bands. Reduces wick-driven false flips without affecting the conviction or ratchet logic. JMA is a JMA-like (Jurik-style) low-lag approximation, not the licensed Jurik MA.")
 smoothLen   = input.int(3,      "Smooth Length",     minval=1, maxval=50, group="Supertrend", active=smoothType != "None")
 
 useAtrRank    = input.bool(true,  "ATR Rank",       group="Conviction",
-  tooltip="High ATR percentile rank (expanding volatility) raises conviction.")
+  tooltip="High ATR percentile rank (expanding volatility) raises conviction — but only when trend force confirms a move.")
+atrChopNeutral = input.float(0.50, "ATR Conviction in Chop", minval=0.0, maxval=1.0, step=0.05, group="Conviction",
+  tooltip="What ATR Rank contributes when trend force does NOT confirm (choppy/unconfirmed). 0.5 = neutral: volatility without trend is neither bullish nor bearish for conviction. Lower = treat unconfirmed volatility as low conviction.")
 useTrendForce = input.bool(true,  "Trend Force",    group="Conviction",
   tooltip="Strong EMA separation relative to ATR raises conviction.")
 tfFast        = input.int(5,      "Fast EMA",       minval=2, group="Conviction")
 tfSlow        = input.int(50,     "Slow EMA",       minval=5, group="Conviction")
+tfNormCap     = input.float(2.0,  "Trend Force Full Conviction", minval=0.5, step=0.1, group="Conviction",
+  tooltip="Trend force value (|emaFast − emaSlow| / ATR) that maps to full conviction. Absolute cap — independent of recent history, unlike a rolling percentile.")
 useChop       = input.bool(true,  "Chop Penalty",   group="Conviction",
   tooltip="Lowers conviction when trend force falls below the cutoff.")
 chopCut       = input.float(0.5,  "Chop Cutoff",    minval=0.05, step=0.05, group="Conviction",
@@ -55,7 +59,7 @@ rsiThreshold = input.float(70.0, "RSI Block Above", minval=50, maxval=99, step=1
 showMtf  = input.bool(true,   "MTF Confluence",     group="MTF Confluence",
   tooltip="Show higher-TF Supertrend direction, pullback zones, and confluence entry signals.")
 htfTF    = input.timeframe("240", "Higher Timeframe", group="MTF Confluence",
-  tooltip="Timeframe of the reference Supertrend. Should be higher than the current chart TF. Uses the same ATR Length and Base Multiplier.")
+  tooltip="Timeframe of the HTF reference Supertrend. This is a plain fixed-multiplier Supertrend (same ATR Length and Base Multiplier) — it does NOT use the adaptive conviction logic. Should be higher than the current chart TF.")
 
 showFlips    = input.bool(true,  "Flip Markers",        group="Style")
 showTraps    = input.bool(true,  "Trap Markers",        group="Style",
@@ -64,7 +68,7 @@ paintCandles = input.bool(false, "Candle Coloring",     group="Style")
 showCloud    = input.bool(true,  "Trend Cloud",         group="Style")
 showGlow     = input.bool(true,  "Stop Glow",           group="Style")
 showOvext    = input.bool(true,  "Overextension Alert", group="Style",
-  tooltip="Amber candles and background when price-to-stop distance is in the top percentile.")
+  tooltip="Amber candles and background when price-to-stop distance is in the top percentile. This is a late-entry / trail-risk warning (price is stretched far from the stop) — not a reversal signal. In strong trends it can stay active for a while.")
 ovextPct     = input.int(85,     "Ovext Threshold",     minval=50, maxval=99, group="Style", active=showOvext,
   tooltip="Percentile rank of stop-distance. 85 = top 15% of historical extension.")
 showTable    = input.bool(true,  "Conviction Table",    group="Style")
@@ -75,11 +79,6 @@ colDn        = input.color(#d50000, "Down", inline="col", group="Style")
 // }
 
 // ~~ Helpers {
-scale01(float v, int len) =>
-    lo = ta.lowest(v, len)
-    hi = ta.highest(v, len)
-    hi == lo ? 0.5 : (v - lo) / (hi - lo)
-
 f_smooth(series float src, simple string mtype, simple int len) =>
     switch mtype
         "EMA" => ta.ema(src, len)
@@ -120,24 +119,32 @@ atrRankPct    = ta.percentrank(atrVal, 100)
 fastEma       = ta.ema(stSrc, tfFast)
 slowEma       = ta.ema(stSrc, tfSlow)
 trendForceRaw  = atrVal > 0 ? math.abs(fastEma - slowEma) / atrVal : 0.0
-trendForceNorm = scale01(trendForceRaw, 100)
+trendForceNorm = math.min(trendForceRaw / tfNormCap, 1.0)
 chopNow        = trendForceRaw < chopCut
 
 float convSum = 0.0
 int   convN   = 0
 if useAtrRank
-    convSum += math.min(atrRankPct / 100.0, 0.85)
+    // ATR rank only counts as conviction when trend force confirms a real move —
+    // otherwise high volatility (panic, news spike, blow-off) would score as conviction.
+    atrConv = trendForceRaw > chopCut ? math.min(atrRankPct / 100.0, 0.85) : atrChopNeutral
+    convSum += atrConv
     convN   += 1
 if useTrendForce
     convSum += trendForceNorm
     convN   += 1
 
 convBase   = convN > 0 ? convSum / convN : 0.5
-conviction = convN > 0 and useChop and chopNow ? convBase * 0.35 : convBase
+conviction = convN > 0 and useChop and chopNow ? convBase * 0.50 : convBase
 // }
 
 // ~~ Adaptive Multiplier {
-adaptMult = baseMult * (1.0 + adaptivity * (1.0 - conviction))
+// Symmetric around baseMult at conviction 0.5: high conviction tightens BELOW base,
+// low conviction widens above. Clamped so the band never collapses or runs away.
+rawAdapt  = baseMult * (1.0 + adaptivity * (0.5 - conviction))
+minMult   = baseMult * 0.60
+maxMult   = baseMult * 1.80
+adaptMult = math.max(minMult, math.min(maxMult, rawAdapt))
 // }
 
 // ~~ Supertrend {
@@ -265,6 +272,8 @@ var table tbl = table.new(tblPosition, 2, 12,
   border_color=color.new(color.gray, 60), border_width=1,
   frame_color=color.new(color.gray, 40), frame_width=1)
 
+if barstate.islast and not showTable
+    table.clear(tbl, 0, 0, 1, 11)
 if barstate.islast and showTable
     table.cell(tbl, 0, 0, "Conviction",  text_color=tc, bgcolor=hd, text_size=size.small)
     table.cell(tbl, 1, 0, str.tostring(math.round(conviction * 100)) + "%", text_color=tc, bgcolor=hd, text_size=size.small)

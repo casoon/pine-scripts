@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.2.2 — 2026-06-27
+- Decoupled momentum from the sweep/reclaim signal: WaveTrend + MFI exhaustion bonuses in the event score now apply only when the Momentum Hybrid toggle is enabled (default off) — the sweep trigger and reclaim event remain purely structural
+- Directional bias is now a dashboard-only summary (computed inside the dashboard block) rather than a standalone aggregator in the main path; it never feeds sweeps, reclaims, hunts, or alerts
+
 ## v3.2.1 — 2026-06-11
 - Internal: multi-line ternaries (armed-level background, dashboard WT state) rewritten as if/else for Pine v6 compatibility — no behavior change
 - Header brought in line with repo convention

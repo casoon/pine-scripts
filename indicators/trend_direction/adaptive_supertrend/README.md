@@ -19,19 +19,23 @@ A Supertrend indicator with conviction-adaptive band width. Instead of a fixed A
 Conviction is a 0–1 score that modulates how much the base multiplier expands or contracts:
 
 ```
-adaptiveMult = baseMult × (1 + adaptivity × (1 − conviction))
+rawMult = baseMult × (1 + adaptivity × (0.5 − conviction))
+adaptiveMult = clamp(rawMult, baseMult × 0.60, baseMult × 1.80)
 ```
 
-At conviction = 1 (maximum), the multiplier equals `baseMult` (tightest stop).  
-At conviction = 0 (minimum), the multiplier reaches `baseMult × (1 + adaptivity)` (widest stop).
+The formula is symmetric around `baseMult` at conviction = 0.5:
+
+- conviction = 1 (maximum) → multiplier tightens **below** `baseMult` (tightest stop, floored at `baseMult × 0.60`)
+- conviction = 0.5 (neutral) → multiplier equals `baseMult`
+- conviction = 0 (minimum) → multiplier widens **above** `baseMult` (widest stop, capped at `baseMult × 1.80`)
 
 **Components:**
 
 | Component | What it measures | Effect when high |
 |---|---|---|
-| ATR Rank | ATR percentile over 100 bars (capped at 85%) | Raises conviction — expanding volatility suggests a real move |
-| Trend Force | `\|emaFast − emaSlow\| / ATR`, normalized over 100 bars | Raises conviction — strong directional EMA separation |
-| Chop Penalty | Trend force below chop cutoff | Multiplies conviction by 0.35 — forces wider bands during ranges |
+| ATR Rank | ATR percentile over 100 bars (capped at 85%) | Raises conviction — but only when trend force confirms a real move; otherwise it contributes a neutral value (`ATR Conviction in Chop`, default 0.50) so volatility spikes (panic, news, blow-off) don't count as conviction |
+| Trend Force | `\|emaFast − emaSlow\| / ATR`, mapped to 0–1 against an absolute cap (`Trend Force Full Conviction`, default 2.0) | Raises conviction — strong directional EMA separation |
+| Chop Penalty | Trend force below chop cutoff | Multiplies conviction by 0.50 — widens bands during ranges |
 
 When both ATR Rank and Trend Force are enabled, conviction is their simple average before the chop penalty is applied. If only one component is on, it contributes alone.
 
@@ -46,7 +50,7 @@ A Min Body filter (off by default) additionally ignores flips whose flip-bar can
 
 ## MTF Confluence
 
-The MTF layer runs a fixed-multiplier Supertrend on a higher timeframe (default 4H, same ATR length and base multiplier as the LTF) and derives three display elements:
+The MTF layer runs a plain **fixed-multiplier reference Supertrend** on a higher timeframe (default 4H, same ATR length and base multiplier as the LTF). Note this HTF reference does **not** use the adaptive conviction logic — it is a stable structural anchor, not a second adaptive instance. It derives three display elements:
 
 **Pullback zone** — when the LTF trend opposes the HTF trend, the background takes a subtle tint in the HTF direction. When the LTF is also overextended against the HTF (price stretched far from the LTF stop), the tint intensifies. This is the "ripe pullback" state where a reversal back into HTF direction is most likely.
 
@@ -68,6 +72,7 @@ The HTF stop uses `lookahead=off` — values update only on confirmed HTF bar cl
 | Parameter | Lower | Higher |
 |---|---|---|
 | Base Multiplier | Tighter stop, more flips | Looser stop, fewer flips |
-| Adaptivity | Less difference between regimes | Strong narrowing in trends, strong widening in chop |
+| Adaptivity | Less difference between regimes (0 = plain Supertrend at base) | Strong narrowing in high-conviction trends, strong widening in chop |
 | Chop Cutoff | Only flags extreme chop | Flags moderate ranges too |
 | Fast/Slow EMA | Controls trend force sensitivity | Longer slow EMA = smoother trend force signal |
+| Trend Force Full Conviction | Reaches full trend-force conviction sooner | Requires stronger EMA separation before conviction maxes out |

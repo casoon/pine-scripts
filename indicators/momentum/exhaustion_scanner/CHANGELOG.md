@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.1 — 2026-06-28
+- Added exhaustion zones: each signal draws a box over the overextended price area (band-to-extreme) that keeps extending until price reclaims it or it ages out
+- Labels are now bold (▼/▲ headline + score + reason) and carry the full role breakdown — Score/threshold, Stretch/Exhaustion/Reaction, regime+ADX, vol multiplier — on hover instead of crowding the chart
+
+## v2.0 — 2026-06-28
+- Restructured the score into three separately-attributable role scores — Stretch (location), Exhaustion (momentum + flow + divergence), Reaction (trigger) — instead of one flat five-component mix
+- Added a regime classifier (EMA stack + ADX): signals are now framed as Continuation Risk / Trend Exhaustion / Range Fade rather than blind buy/sell, and countertrend signals require more evidence via a threshold penalty
+- Volatility is now a multiplier on the combined score, not a directionless component that inflated both sides equally
+- One score drives both the dashboard and the label — removed the Total/Trigger discrepancy
+- Reaction trigger hardened: reclaim-fail (poke beyond band/extreme then close back inside) and WT cross only when WT was actually extreme, instead of a bare close < low[1]
+- Divergences now invalidate when price breaks beyond the divergence pivot, not just on the validity timer
+- Dashboard shows role breakdown, regime + ADX, signal reason (Stretch / Momentum / Rejection / Divergence) and the volatility multiplier
+- Replaced "Pivot Confirmed" confirmation mode; custom weights are now per-role with a Money Flow toggle
+- Renamed alerts to Top/Bottom/Any Risk to match the risk-context framing
+
 ## v1.3 — 2026-06-11
 - Added a dedicated trigger score for labels so strong distance/structure/divergence evidence can produce signals even when the weighted total is low
 - Recalibrated signal thresholds to Early 30 / Normal 40 / Conservative 50

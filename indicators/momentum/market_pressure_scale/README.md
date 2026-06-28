@@ -12,7 +12,7 @@ Classic volatility indicators (ATR, Bollinger Width) measure compression but go 
 
 | Curve | Color | What drives it |
 |---|---|---|
-| Setup Pressure | Orange (thick) | ATR compression, BB compression, S/R proximity, relative volume |
+| Setup Pressure | Orange (thick) | ATR compression, BB compression, S/R proximity, volume drying up |
 | Impulse Pressure | Green (thick) | Range expansion vs ATR, relative volume, candle body ratio |
 | StochRSI K | Blue (thin, optional) | Standard StochRSI K line |
 | StochRSI D | Orange-red (thin, optional) | Standard StochRSI D line |

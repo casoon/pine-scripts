@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.2 — 2026-06-27
+- Fix: Setup Pressure now rises when volume is drying up (inverted volume term), matching genuine squeeze logic — previously high volume wrongly increased Setup Pressure and blurred the separation from Impulse Pressure
+
 ## v1.2.1 — 2026-06-11
 - Fix: all multi-line ternaries with series types (regime/character/phase colors and texts) rewritten to if/else (Pine v6 compile error CE10156)
 - Bias row now shows "Flat" when fast and slow MA are exactly equal (previously fell back to "Bearish")

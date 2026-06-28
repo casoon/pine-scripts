@@ -21,6 +21,8 @@ Quality columns (★ 1–5):
 | [time_to_react_volatility_time](indicators/volatility/time_to_react_volatility_time/) | 1.1.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [coilforge_zones](indicators/market_structure/coilforge_zones/) | 1.2.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [market_structure_advanced](indicators/market_structure/market_structure_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | HH/HL/LH/LL Pivot-Klassifizierung → gebundener Score-Oszillator [−100, +100]; Signal-Line, Gradient, Shadow-Fills, optionale Chart-Labels |
+| [market_structure_pivot_map](indicators/market_structure/market_structure_pivot_map/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Location-Tool: HTF Pivots/CPR/Projektionen (D/W/M, Classic/Fib), Cross-TF-Confluence via Greedy-Clustering, Nearest-S/R mit ATR-Distanz; bewusst kein Signalgenerator; ungetestet |
+| [structure_break_risk](indicators/market_structure/structure_break_risk/) | 1.2 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Forward-looking 0–100 Break-Risk-Gauge, symmetrisch (Top-Break im Auf-, Bottom-Break im Abtrend); Risk steigt schon bei Annäherung ans Break-Level (Near-Level-Sensor), nicht erst nach dem Bruch; latchender Trend-Kontext; 5 gewichtete Sensoren (Near Level, Confirmed BOS, Failed Breakout, Structure Erosion, Pivot-Divergenz) + Reason-Status; Pivots nur als Level-Referenz; Companion zu TPS; ungetestet |
 
 ## Trend & Regime
 
@@ -35,6 +37,7 @@ Quality columns (★ 1–5):
 | [relative_leg_efficiency](indicators/relative_strength/relative_leg_efficiency/) | 1.0.1 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | |
 | [adx_advanced](indicators/trend_strength/adx_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | ADX + DI± mit pluggablem Smoothing, 4-State-Histogramm, Gradient-Linie, DI-Crossover-Signale |
 | [regime_classifier](indicators/trend_strength/regime_classifier/) | 1.1 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Reversal-Pipeline Stufe 1: FDI + Kaufman Efficiency Ratio + Choppiness → Trend/Range/Chaos mit Hysterese; symmetrische Reversal-/Trend-Permission als Quality-Output (kein Trigger); v1.1 optionale HTF-Regime-Linie (visuell, kein Veto); ungetestet |
+| [trend_persistence_score](indicators/trend_strength/trend_persistence_score/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Graded-Score-Komplement zu regime_classifier: R² + Kaufman ER + ADX-Stärke/Slope + FDI → ein 0–100 Trend-Persistenz-Oszillator (Magnitude, richtungsneutral); State Strong/Healthy/Transition/Weak/Dead mit Hysterese, Kalibrier-Anker als Inputs, Richtung nur visuell; ungetestet |
 
 ## Volatility
 
@@ -64,7 +67,7 @@ Quality columns (★ 1–5):
 | [reversal_engine_score](indicators/momentum/reversal_engine_score/) | 1.5 | Aktiv | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Score logic needs rework (test131) |
 | [reversal_type_classifier](indicators/market_structure/reversal_type_classifier/) | 1.2 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
 | [commodity_heat_reversal](indicators/composite/commodity_heat_reversal/) | 1.4.3 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
-| [exhaustion_scanner](indicators/momentum/exhaustion_scanner/) | 1.3 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Gewichteter 0–100-Score mit Markt-Presets; Verallgemeinerung von commodity_heat_reversal; ungetestet |
+| [exhaustion_scanner](indicators/momentum/exhaustion_scanner/) | 2.1 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Rollen-getrennt: Stretch/Exhaustion/Reaction-Scores, Vola als Multiplikator, Regime-Klassifikator (Continuation Risk / Trend Exhaustion / Range Fade); Exhaustion-Zonen (Box) + fette Labels mit Hover-Breakdown; ein Score für Dashboard+Label; ungetestet |
 
 ## Liquidity & Volume
 
