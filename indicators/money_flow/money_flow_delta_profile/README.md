@@ -2,6 +2,8 @@
 
 **TradingView:** https://de.tradingview.com/script/NUAePC98/
 
+> **Related profiles:** This is the *directional flow* profile (who dominated at each level — net delta, HVN/LVN/AVN, absorption). For plain volume distribution (where volume traded, naked-POC, profile shape) use [volume_strata](../volume_strata/); for oscillator momentum per price zone use [momentum_profile](../../momentum/momentum_profile/).
+
 A directional volume/money flow profile. Every price row shows two bars anchored on the left, both extending to the right: a faint gray **reference bar** (total flow at that level) and a colored **delta bar** on top (green = net buying, red = net selling). The width of the delta bar relative to the gray bar shows how decisively one side dominated — a row where the delta bar almost fills the reference bar is a high-conviction level; a row where it barely appears despite wide gray is a contested zone.
 
 ## Features

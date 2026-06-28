@@ -15,12 +15,13 @@
 // stacks up — not only after the break is confirmed. A Reason read names the
 // dominant driver so the score explains itself.
 //
-// Five evidence sensors across the roles (weighted, never an AND-chain):
+// Four pre-break evidence sensors across the roles (weighted, never an
+// AND-chain) plus BOS as a separate confirmed structure event:
 //   ✓ Near Break Level (Location→Trigger) — distance-to-BOS in ATR
-//   ✓ Confirmed BOS (Trigger) — close beyond the opposite swing level
 //   ✓ Failed Breakout / SFP (Trigger+Location) — swing sweep that closes back
 //   ✓ Structure Erosion (Structure) — lower high (up) / higher low (down)
 //   ✓ Pivot Divergence (Momentum) — price pivot extends, RSI at the pivot does not
+//   ✓ Confirmed BOS (Event) — close beyond the opposite swing level
 //
 // Pivots provide swing LEVELS only (Location reference); the break event is the
 // Trigger — pivots never act as the signal themselves.
@@ -37,11 +38,10 @@ biasLen   = input.int(50, "Trend Bias Length", minval=10, group="Trend Context",
 pivLen    = input.int(5, "Swing Pivot Length", minval=2, group="Structure", tooltip="Left/right bars for swing high/low detection — these are LEVEL references, not signals")
 nearAtr   = input.float(1.5, "Near Break Level ATR Distance", minval=0.2, group="Structure", tooltip="Distance to the break level (in ATR) at which Near-Level risk reaches full")
 rsiLen    = input.int(14, "RSI Length", minval=5, group="Momentum")
-holdBars  = input.int(10, "Evidence Hold Bars", minval=1, group="Core", tooltip="Each transient sensor stays active for this many bars so the gauge reflects recent structural evidence")
+holdBars  = input.int(10, "Evidence Memory Bars", minval=1, group="Core", tooltip="Transient evidence decays over this many bars so old structure pressure fades instead of sticking as a hard hold")
 smoothLen = input.int(3, "Risk Smoothing", minval=1, group="Core")
 
 wNear   = input.float(25.0, "Weight: Near Break Level", minval=0, group="Sensor Weights")
-wBos    = input.float(30.0, "Weight: Confirmed BOS", minval=0, group="Sensor Weights")
 wSfp    = input.float(20.0, "Weight: Failed Breakout", minval=0, group="Sensor Weights")
 wStruct = input.float(15.0, "Weight: Structure Erosion", minval=0, group="Sensor Weights")
 wDiv    = input.float(10.0, "Weight: Pivot Divergence", minval=0, group="Sensor Weights")
@@ -51,7 +51,11 @@ lvlHigh = input.int(60, "State: High ≥", group="State Levels")
 lvlCrit = input.int(80, "State: Critical ≥", group="State Levels")
 
 showFill    = input.bool(true, "Show Heat Column", group="Display")
-showMarkers = input.bool(false, "Show BOS Markers", group="Display")
+showZones   = input.bool(true, "Show Background Zones", group="Display")
+showTrail   = input.bool(true, "Show Risk Trail", group="Display")
+showMarkers = input.bool(true, "Show Key Event Labels", group="Display", tooltip="Shows compact structure-risk events: Watch, Pressure, Break and Reset. These are context events, not trade signals.")
+markerCooldown = input.int(10, "Event Label Cooldown", minval=0, group="Display", tooltip="Minimum bars between visible non-BOS event labels")
+requireContextFlip = input.bool(true, "Require Context Flip for X", group="Display", tooltip="Only prints X when the swing break also reclaims the EMA context. Otherwise the event stays Pressure instead of calling the trend broken.")
 showLabel   = input.bool(true, "Show Info Label", group="Display", tooltip="Single compact label (mobile-friendly) with risk, state, direction, reason and the five sensor values — replaces the old table")
 labelSize   = input.string("Normal", "Label Size", options=["Small", "Normal", "Large"], group="Display")
 
@@ -65,8 +69,12 @@ f_clamp(x, lo, hi) =>
 f_norm(x, lo, hi) =>
     hi == lo ? 0.0 : f_clamp((x - lo) / (hi - lo), 0.0, 1.0)
 
-color cBull = #00c853
-color cBear = #d50000
+color cBull = #16a34a
+color cWarn = #f59e0b
+color cBear = #dc2626
+color cMute = #64748b
+color cGrid = #94a3b8
+color cInk  = #1f2937
 
 // ============================================================================
 // Stable trend context — latches the last clear direction through transitions
@@ -133,12 +141,15 @@ float sBos    = 0.0   // confirmed break of structure
 float sSfp    = 0.0   // failed breakout / stop-run that closes back
 float sStruct = 0.0   // structure erosion (lower high / higher low)
 float sDiv    = 0.0   // pivot RSI divergence
+float distToBreak = na
+bool approachingBreak = false
 
 if trendDir == 1
     // --- top-break risk (uptrend losing its structure) ---
     if not na(lastPL)
-        distToBreak = (close - lastPL) / atr
-        sNear := 1.0 - f_norm(distToBreak, 0.0, nearAtr)
+        distToBreak := (close - lastPL) / atr
+        approachingBreak := not na(distToBreak[1]) and distToBreak < distToBreak[1]
+        sNear := distToBreak >= 0.0 and approachingBreak ? 1.0 - f_norm(distToBreak, 0.0, nearAtr) : 0.0
         if close < lastPL
             sBos := math.max(0.65, f_norm((lastPL - close) / atr, 0.0, 1.5))
     if not na(lastPH) and high > lastPH and close < lastPH
@@ -151,8 +162,9 @@ if trendDir == 1
 else if trendDir == -1
     // --- bottom-break risk (downtrend losing its structure) ---
     if not na(lastPH)
-        distToBreak = (lastPH - close) / atr
-        sNear := 1.0 - f_norm(distToBreak, 0.0, nearAtr)
+        distToBreak := (lastPH - close) / atr
+        approachingBreak := not na(distToBreak[1]) and distToBreak < distToBreak[1]
+        sNear := distToBreak >= 0.0 and approachingBreak ? 1.0 - f_norm(distToBreak, 0.0, nearAtr) : 0.0
         if close > lastPH
             sBos := math.max(0.65, f_norm((close - lastPH) / atr, 0.0, 1.5))
     if not na(lastPL) and low < lastPL and close > lastPL
@@ -163,25 +175,38 @@ else if trendDir == -1
         if lastPricePL < prevPricePL and lastRsiPL > prevRsiPL
             sDiv := 1.0
 
-// Hold transient evidence for a window so the gauge reads recent structure
-sNearH   = ta.highest(sNear, holdBars)
-sBosH    = ta.highest(sBos, holdBars)
-sSfpH    = ta.highest(sSfp, holdBars)
-sStructH = ta.highest(sStruct, holdBars)
-sDivH    = ta.highest(sDiv, holdBars)
+// Transient evidence decays so old pressure fades instead of sticking as a
+// rectangular hold window.
+decayFactor = holdBars <= 1 ? 0.0 : 1.0 - 1.0 / holdBars
+var float sNearH = 0.0
+var float sBosH = 0.0
+var float sSfpH = 0.0
+var float sStructH = 0.0
+var float sDivH = 0.0
+sNearH := math.max(sNear, nz(sNearH[1]) * decayFactor)
+sBosH := math.max(sBos, nz(sBosH[1]) * decayFactor)
+sSfpH := math.max(sSfp, nz(sSfpH[1]) * decayFactor)
+sStructH := math.max(sStruct, nz(sStructH[1]) * decayFactor)
+sDivH := math.max(sDiv, nz(sDivH[1]) * decayFactor)
 
-// Confirmed BOS this bar (real structural event) — for markers/alerts
-bosNow = (trendDir == 1 and not na(lastPL) and close < lastPL and close[1] >= lastPL) or (trendDir == -1 and not na(lastPH) and close > lastPH and close[1] <= lastPH)
+// Confirmed BOS this bar (real structural event). Swing breaks are only called
+// X when the broader EMA context is also reclaimed/flipped; otherwise they stay
+// pressure events so local counter-swing breaks do not read as trend breaks.
+rawBosUpBreak = trendDir == 1 and not na(lastPL) and close < lastPL and close[1] >= lastPL
+rawBosDnBreak = trendDir == -1 and not na(lastPH) and close > lastPH and close[1] <= lastPH
+bosContextOk = not requireContextFlip or (rawBosUpBreak and close < ema and emaSlope < 0) or (rawBosDnBreak and close > ema and emaSlope > 0)
+bosNow = (rawBosUpBreak or rawBosDnBreak) and bosContextOk
+bosPressureNow = (rawBosUpBreak or rawBosDnBreak) and not bosContextOk
 
 // ============================================================================
 // Composite risk
 // ============================================================================
 
-weightSum = wNear + wBos + wSfp + wStruct + wDiv
+weightSum = wNear + wSfp + wStruct + wDiv
 
 float riskRaw = 0.0
 if trendDir != 0 and weightSum > 0.0
-    riskRaw := (sNearH * wNear + sBosH * wBos + sSfpH * wSfp + sStructH * wStruct + sDivH * wDiv) / weightSum * 100.0
+    riskRaw := (sNearH * wNear + sSfpH * wSfp + sStructH * wStruct + sDivH * wDiv) / weightSum * 100.0
 
 risk = ta.ema(riskRaw, smoothLen)
 
@@ -189,19 +214,25 @@ risk = ta.ema(riskRaw, smoothLen)
 // State / explanation
 // ============================================================================
 
-string state = "Low"
+string state = "Quiet"
 if trendDir == 0
     state := "No Context"
+else if bosNow
+    state := "Break"
+else if bosPressureNow
+    state := "Pressure"
 else if risk >= lvlCrit
-    state := "Critical"
+    state := "Critical Pressure"
 else if risk >= lvlHigh
-    state := "High"
+    state := "Pressure"
 else if risk >= lvlElev
-    state := "Elevated"
+    state := "Watch"
 
 string reason = "No Clear Evidence"
-if sBosH > 0.5
+if bosNow
     reason := "Confirmed BOS"
+else if bosPressureNow
+    reason := "Local Swing Break"
 else if sNearH > 0.7
     reason := "Near Break Level"
 else if sSfpH > 0.5
@@ -212,7 +243,9 @@ else if sDivH > 0.5
     reason := "RSI Divergence"
 
 dirTxt = trendDir == 1 ? "Bearish break risk" : trendDir == -1 ? "Bullish break risk" : "—"
-dirCol = trendDir == 1 ? cBear : trendDir == -1 ? cBull : color.gray
+dirCol = trendDir == 1 ? cBear : trendDir == -1 ? cBull : cMute
+stateCol = state == "Break" ? dirCol : state == "Critical Pressure" ? cBear : state == "Pressure" ? cWarn : state == "Watch" ? #f97316 : state == "No Context" ? cMute : cBull
+breakTxt = trendDir == 1 ? "Uptrend" : trendDir == -1 ? "Downtrend" : "No trend"
 
 // ============================================================================
 // Plot — height = risk, colour = implied direction, saturation = risk level
@@ -221,16 +254,72 @@ dirCol = trendDir == 1 ? cBear : trendDir == -1 ? cBull : color.gray
 lineT = f_clamp(65.0 - risk * 0.55, 0.0, 65.0)
 fillT = f_clamp(94.0 - risk * 0.35, 55.0, 94.0)
 
+trailCol = color.new(dirCol, 82)
+
+plot(showTrail ? risk : na, "Risk Trail", color=trailCol, linewidth=7)
 pRisk = plot(risk, "Structure Break Risk", color=color.new(dirCol, lineT), linewidth=3)
 pZero = plot(0, "", color=color.new(color.gray, 100), display=display.none, editable=false)
 fill(pRisk, pZero, color=showFill ? color.new(dirCol, fillT) : na, title="Heat Column")
 
-hline(lvlCrit, "Critical", color=color.new(color.red, 40))
-hline(lvlHigh, "High", color=color.new(color.orange, 50))
-hline(lvlElev, "Elevated", color=color.new(color.gray, 60))
+hTop  = hline(100, "Top", color=color.new(cGrid, 92), linestyle=hline.style_dotted)
+hCrit = hline(lvlCrit, "Critical", color=color.new(cBear, 35), linestyle=hline.style_dashed)
+hHigh = hline(lvlHigh, "High", color=color.new(cWarn, 45), linestyle=hline.style_dashed)
+hElev = hline(lvlElev, "Elevated", color=color.new(cMute, 55), linestyle=hline.style_dashed)
+hBase = hline(0, "Base", color=color.new(cGrid, 88), linestyle=hline.style_dotted)
 
-plotshape(showMarkers and bosNow and trendDir == 1 ? risk : na, "Top Break", shape.triangledown, location.absolute, color=cBear, size=size.tiny)
-plotshape(showMarkers and bosNow and trendDir == -1 ? risk : na, "Bottom Break", shape.triangleup, location.absolute, color=cBull, size=size.tiny)
+fill(hTop, hCrit, color=showZones ? color.new(cBear, 93) : na, title="Critical Zone")
+fill(hCrit, hHigh, color=showZones ? color.new(cWarn, 94) : na, title="High Zone")
+fill(hHigh, hElev, color=showZones ? color.new(#f97316, 96) : na, title="Elevated Zone")
+fill(hElev, hBase, color=showZones ? color.new(cMute, 95) : na, title="Low Zone")
+
+watchEvent = ta.crossover(risk, lvlElev)
+pressureEvent = ta.crossover(risk, lvlHigh) or ta.crossover(risk, lvlCrit)
+resetEvent = ta.crossunder(risk, lvlElev)
+
+string eventText = ""
+string eventTip = ""
+color eventColor = cMute
+
+if bosNow
+    eventText := "X"
+    eventColor := dirCol
+    eventTip := rawBosUpBreak
+         ? "Break\nUptrend structure broke: close below last swing low.\nThis confirms structural damage after risk was building."
+         : "Break\nDowntrend structure broke: close above last swing high.\nThis confirms structural damage after risk was building."
+else if bosPressureNow
+    eventText := "P"
+    eventColor := cWarn
+    eventTip := rawBosUpBreak
+         ? "Pressure\nLocal swing low broke, but trend context did not flip.\nTreat as pressure, not confirmed trend break."
+         : "Pressure\nLocal swing high broke, but trend context did not flip.\nTreat as pressure, not confirmed trend break."
+else if pressureEvent
+    eventText := "P"
+    eventColor := risk >= lvlCrit ? cBear : cWarn
+    eventTip := (risk >= lvlCrit ? "Critical pressure\n" : "Pressure\n") + breakTxt + ": break pressure is active.\nReason: " + reason + ". Continuation is vulnerable."
+else if watchEvent
+    eventText := "W"
+    eventColor := cWarn
+    eventTip := "Watch\n" + breakTxt + ": price is moving toward a structure-break condition.\nReason: " + reason + ". Watch the break level; this is not confirmation."
+else if resetEvent
+    eventText := "R"
+    eventColor := cBull
+    eventTip := "Reset\n" + breakTxt + ": break pressure faded.\nThe structure-break setup is off unless pressure rebuilds."
+
+hasKeyEvent = eventText != ""
+var int lastEventBar = na
+eventReady = bosNow or bosPressureNow or pressureEvent or resetEvent or na(lastEventBar) or bar_index - lastEventBar >= markerCooldown
+
+if showMarkers and barstate.isconfirmed and hasKeyEvent and eventReady
+    label.new(bar_index, risk, eventText,
+         xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_center,
+         color=color.new(eventColor, 8), textcolor=color.white, size=size.tiny,
+         tooltip=eventTip + "\nPressure: " + str.tostring(risk, "#.0") +
+              "\nNear " + str.tostring(sNearH * 100, "#.0") +
+              " · BOS " + str.tostring(sBosH * 100, "#.0") +
+              " · SFP " + str.tostring(sSfpH * 100, "#.0") +
+              " · Erode " + str.tostring(sStructH * 100, "#.0") +
+              " · Div " + str.tostring(sDivH * 100, "#.0"))
+    lastEventBar := bar_index
 
 // ============================================================================
 // Info label — one compact, mobile-friendly box carrying the full read
@@ -244,17 +333,24 @@ f_lblSize(s) =>
 var label infoLbl = na
 if showLabel and barstate.islast
     label.delete(infoLbl)
-    txt = "Break Risk " + str.tostring(risk, "#.0") + "  ·  " + state + "\n" +
+    txt = "Break Pressure " + str.tostring(risk, "#.0") + "  ·  " + state + "\n" +
          dirTxt + "  ·  " + reason + "\n" +
          "Near " + str.tostring(sNearH * 100, "#") +
          "   BOS " + str.tostring(sBosH * 100, "#") +
          "   SFP " + str.tostring(sSfpH * 100, "#") +
          "   Erode " + str.tostring(sStructH * 100, "#") +
          "   Div " + str.tostring(sDivH * 100, "#")
+    tip = "Structure Break Risk\n" +
+         "Line: pre-break structure pressure.\n" +
+         "BOS is not mixed into the pressure score; it appears as X when confirmed.\n" +
+         "W/P/X/R = Watch, Pressure, Break, Reset.\n" +
+         "Reason names the dominant evidence sensor."
     infoLbl := label.new(bar_index + 3, 100, txt,
          xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left,
-         color=color.new(color.white, 10), textcolor=dirCol,
-         size=f_lblSize(labelSize), textalign=text.align_left)
+         color=color.new(color.white, 8), textcolor=stateCol,
+         size=f_lblSize(labelSize), textalign=text.align_left, tooltip=tip)
+else if not showLabel and barstate.islast
+    label.delete(infoLbl)
 
 // ============================================================================
 // Debug — log on every state change (why it changed)
@@ -270,7 +366,7 @@ if barstate.isconfirmed and state != state[1]
 // Alerts
 // ============================================================================
 
-alertcondition(ta.crossover(risk, lvlHigh), "SBR High", "Structure Break Risk crossed into High")
-alertcondition(ta.crossover(risk, lvlCrit), "SBR Critical", "Structure Break Risk crossed into Critical")
+alertcondition(ta.crossover(risk, lvlHigh), "SBR Pressure", "Structure Break Pressure crossed into Pressure")
+alertcondition(ta.crossover(risk, lvlCrit), "SBR Critical Pressure", "Structure Break Pressure crossed into Critical Pressure")
 alertcondition(bosNow and trendDir == 1, "SBR Top Break", "Confirmed break below swing low in an uptrend")
 alertcondition(bosNow and trendDir == -1, "SBR Bottom Break", "Confirmed break above swing high in a downtrend")

@@ -1,8 +1,17 @@
 # Chandelier Flip Radar — Strategy Backtest Assessment
 
+> ⚠️ **STALE — pending re-validation (2026-06-28).** All results below were measured
+> on the **pre-v1.6** indicator logic. v1.6 changed the core ratchet (the active stop
+> now holds until an *accepted* flip instead of releasing on a raw price break past the
+> trigger), which alters `buySignal` / `sellSignal` / `longStop` / `shortStop` on the
+> default path (bodyFilter 0.80 is active). The strategy file has been regenerated to
+> v1.6, but the PF 1.60 / Return-DD 5.87 figures here no longer reflect the shipped
+> logic. **Re-run the NatGas 4H backtest in TradingView before relying on these numbers.**
+> Historical record retained below for comparison.
+
 **Instrument:** CAPITALCOM:NATURALGAS  
 **Strategy file:** `chandelier_flip_radar_strategy.pine`  
-**Assessment date:** 2026-04-29 (updated 2026-04-29)
+**Assessment date:** 2026-04-29 (results pre-v1.6; flagged stale 2026-06-28)
 
 ---
 

@@ -1,25 +1,26 @@
 //@version=6
 // ============================================================================
 // Chandelier Flip Radar [WavesUnchained]
-// Version: 1.4
+// Version: 1.6
 // Author: WavesUnchained
-// Build: 2026-04-29 00:00:00
+// Build: 2026-06-28 00:00:00
 // ============================================================================
-// ATR-based trailing stop with five-level trend state classification. Trend
+// ATR-based trailing stop with a directional, multi-level trend state. Trend
 // weakening becomes visible before the actual direction change through
 // progressive bar coloring and configurable warning/danger zones.
 //
 // Features:
-//   ✓ Ratchet trailing stop (long stop ratchets up, short stop ratchets down)
+//   ✓ Ratchet trailing stop — holds until an accepted flip, never loosened by a body-rejected break
 //   ✓ Close-based or wick-based extremum mode
 //   ✓ Body filter gates actual dir change — weak flips are ignored, not hidden
-//   ✓ Five-level state: strong / softening / warning (yellow) / danger (orange)
+//   ✓ Directional state: strong / soft / danger per side — direction kept even in the danger zone
 //   ✓ Distance measured to the real flip trigger (longStopPrev / shortStopPrev)
 //   ✓ Inactive stop visible in gray (see where the flip trigger sits)
-//   ✓ Bull trap / bear trap markers: wick crossed trigger but close held
-//   ✓ Three adaptive modes: Off / Simple (vol-regime) / AI (K-means self-selects best factor)
-//   ✓ AI cluster selector: Best / Average / Worst cluster as multiplier source
-//   ✓ AI Performance AMA: adaptive smoothed stop line weighted by cluster performance index
+//   ✓ Three flip qualities: confirmed flip / weak flip (body too weak) / trap (wick crossed, close held)
+//   ✓ Four adaptive modes: Off / Simple (vol-regime) / K-means (best Chandelier factor) / Conviction (trend-aware)
+//   ✓ K-means cluster selector: Best / Average / Worst cluster as multiplier source
+//   ✓ Performance AMA: adaptive smoothed stop line weighted by cluster performance index
+//   ✓ Optional MTF confluence: HTF Chandelier direction, pullback zones, diamond confluence flips
 //   ✓ Alert conditions and alert() calls for flips and traps
 //
 // ============================================================================
@@ -33,16 +34,24 @@ atrMult      = input.float(4.5, "ATR Multiplier",  minval=0.1, step=0.1, group=g
 useClose     = input.bool(true,  "Use Close for Extremums", group=g_calc,
      tooltip="On: highest/lowest close over the ATR period. Off: highest high / lowest low (wick-based).")
 adaptMode  = input.string("Off", "Adaptive Multiplier",
-     options=["Off", "Simple", "AI (K-means)"], group=g_calc,
-     tooltip="Off: fixed multiplier. Simple: scales with volatility regime. AI: K-means clustering selects the best-performing factor automatically.")
-aiRange    = input.float(0.5, "AI Factor Range (±)", minval=0.5, step=0.5, group=g_calc,
-     tooltip="Search range around the ATR Multiplier. E.g. ±1.5 with multiplier 3.5 searches factors 2.0–5.0.")
-aiStep     = input.float(0.5, "AI Factor Step",      minval=0.1, step=0.1, group=g_calc,
-     tooltip="Step between factor candidates. Smaller = finer resolution, more CPU.")
-perfAlpha  = input.float(10,  "AI Performance Memory", minval=2, step=1, group=g_calc,
-     tooltip="EMA smoothing for each factor's performance tracking. Higher = slower adaptation.")
-aiCluster  = input.string("Best", "AI Cluster", options=["Best", "Average", "Worst"], group=g_calc,
-     tooltip="Which K-means cluster to use as the multiplier source. Best = highest recent performance. Average = middle cluster. Worst = lowest.")
+     options=["Off", "Simple", "K-means", "Conviction"], group=g_calc,
+     tooltip="Off: fixed multiplier. Simple: volatility-regime scaler — widens the stop in high volatility, tightens in low (NOT trend strength). K-means: adaptive K-means selection of the best-performing Chandelier factor. Conviction: trend-aware — tightens in strong trends, widens in chop.")
+aiRange    = input.float(0.5, "K-means Factor Range (±)", minval=0.5, step=0.5, group=g_calc,
+     tooltip="Search range around the ATR Multiplier. E.g. ±1.5 with multiplier 3.5 searches factors 2.0–5.0.", active=adaptMode == "K-means")
+aiStep     = input.float(0.5, "K-means Factor Step",      minval=0.1, step=0.1, group=g_calc,
+     tooltip="Step between factor candidates. Smaller = finer resolution, more CPU.", active=adaptMode == "K-means")
+perfAlpha  = input.float(10,  "K-means Performance Memory", minval=2, step=1, group=g_calc,
+     tooltip="EMA smoothing for each factor's performance tracking. Higher = slower adaptation.", active=adaptMode == "K-means")
+aiCluster  = input.string("Best", "K-means Cluster", options=["Best", "Average", "Worst"], group=g_calc,
+     tooltip="Which performance cluster to use as the multiplier source. Best = highest recent performance. Average = middle cluster. Worst = lowest.", active=adaptMode == "K-means")
+convAdapt   = input.float(0.7, "Conviction Adaptivity", minval=0.0, maxval=2.0, step=0.1, group=g_calc, active=adaptMode == "Conviction",
+     tooltip="Conviction mode only. How strongly trend conviction modulates the multiplier. 0 = fixed at ATR Multiplier. Higher = stronger tightening in trends / widening in chop.")
+convFast    = input.int(5,  "Conviction Fast EMA", minval=2, group=g_calc, active=adaptMode == "Conviction")
+convSlow    = input.int(50, "Conviction Slow EMA", minval=5, group=g_calc, active=adaptMode == "Conviction")
+convNormCap = input.float(2.0, "Conviction Trend-Force Cap", minval=0.5, step=0.1, group=g_calc, active=adaptMode == "Conviction",
+     tooltip="Trend force (|fastEMA − slowEMA| / ATR) that maps to full conviction.")
+convChopCut = input.float(0.5, "Conviction Chop Cutoff", minval=0.05, step=0.05, group=g_calc, active=adaptMode == "Conviction",
+     tooltip="Trend force below this counts as chop and halves conviction (widening the stop).")
 bodyFilter   = input.float(0.80, "Min Body for Flip (ATR×)", minval=0.0, step=0.05, group=g_calc,
      tooltip="Direction only changes when the flipping candle has a minimum body relative to ATR. Set 0 to disable. Prevents doji and inside-bar flips from changing the trend state.")
 
@@ -58,10 +67,12 @@ showInactive   = input.bool(true,  "Show Inactive Stop",  group=g_vis,
 showLabels     = input.bool(true,  "Show Flip Labels",    group=g_vis)
 showTraps      = input.bool(true,  "Show Traps",          group=g_vis,
      tooltip="Marks bars where a wick crossed the flip trigger but the close held — often a stop hunt or liquidity grab.")
-showAMA        = input.bool(true,  "Show AI AMA",         group=g_vis,
-     tooltip="Adaptive Moving Average of the active stop, weighted by cluster performance index. Only visible in AI (K-means) mode.")
-showAIFactor   = input.bool(true,  "Show AI Factor Label", group=g_vis,
-     tooltip="Displays the current K-means selected multiplier as a label on the last bar. Only visible in AI (K-means) mode.")
+showWeakFlips  = input.bool(true,  "Show Weak Flips",     group=g_vis,
+     tooltip="Marks bars where the close broke the flip trigger but the body was too weak to confirm a flip (body filter rejected it). Distinct from a trap, where only the wick crossed and the close held.")
+showAMA        = input.bool(true,  "Show Performance AMA", group=g_vis,
+     tooltip="Adaptive Moving Average of the active stop, weighted by cluster performance index. Only visible in K-means mode.")
+showAIFactor   = input.bool(true,  "Show K-means Factor Label", group=g_vis,
+     tooltip="Displays the current K-means selected multiplier as a label on the last bar. Only visible in K-means mode.")
 colorBars      = input.bool(true,  "Color Bars by State", group=g_vis)
 highlightState = input.bool(true,  "Highlight Fill",      group=g_vis)
 
@@ -71,18 +82,61 @@ bearCol   = input.color(#ef5350, "Bearish", group=g_col)
 warnCol   = input.color(#ffd600, "Warning", group=g_col)
 dangerCol = input.color(#ff6f00, "Danger",  group=g_col)
 
+g_mtf = "MTF Confluence"
+showMtf = input.bool(false, "Enable MTF Confluence", group=g_mtf,
+     tooltip="Higher-timeframe Chandelier direction as a structural filter: pullback-zone background, diamond confluence markers on flips aligned with the HTF trend, and an HTF stop step-line. Off by default — the base signal path is unchanged.")
+htfTF   = input.timeframe("240", "Higher Timeframe", group=g_mtf,
+     tooltip="Timeframe of the HTF reference stop. Same ATR Period, Multiplier and extremum mode as the chart, with a fixed multiplier (no adaptive mode) — a stable structural anchor. Should be higher than the chart TF.")
+
 g_alert = "Alerts"
 awaitConfirm = input.bool(true, "Await Bar Confirmation", group=g_alert,
      tooltip="When enabled, alerts only fire on confirmed (closed) bars.")
 
+// ─── HTF reference Chandelier stop — fixed multiplier, structural anchor ───────
+f_htfChandelier(simple int aLen, simple float mult, simple bool useCl) =>
+    var float _ls = na
+    var float _ss = na
+    var int   _d  = 1
+    _atr = ta.atr(aLen)
+    _lsR = (useCl ? ta.highest(close, aLen) : ta.highest(high, aLen)) - mult * _atr
+    _ssR = (useCl ? ta.lowest(close, aLen)  : ta.lowest(low, aLen))  + mult * _atr
+    _lsp = nz(_ls[1], _lsR)
+    _ssp = nz(_ss[1], _ssR)
+    _ls := close[1] > _lsp ? math.max(_lsR, _lsp) : _lsR
+    _ss := close[1] < _ssp ? math.min(_ssR, _ssp) : _ssR
+    _d  := close > _ssp ? 1 : close < _lsp ? -1 : _d
+    _line = _d == 1 ? _ls : _ss
+    [_line, _d]
+
 // ─── Calculation ─────────────────────────────────────────────────────────────
 atrRaw = ta.atr(atrLen)
+
+// Chandelier extremum bands — computed every bar; reused by the stops and the
+// K-means performance instances (so the factor is optimized on the real model).
+chHi = useClose ? ta.highest(close, atrLen) : ta.highest(high, atrLen)
+chLo = useClose ? ta.lowest(close, atrLen)  : ta.lowest(low, atrLen)
 
 // ── Simple adaptive: scale with volatility regime vs. 100-bar average ─────────
 atrAvg   = nz(ta.sma(atrRaw, 100), atrRaw)
 volRatio = atrRaw / atrAvg
 
-// ── AI (K-means): run multiple ST instances, cluster by performance ────────────
+// ── Conviction adaptive: trend-aware band — tighten in strong trends, widen in chop ──
+// Unlike "Simple" (volatility only), this reads trend strength: ATR percentile
+// rank + EMA-separation trend force, with a chop penalty. High conviction → the
+// multiplier drops below base (tighter stop); low conviction → above base (wider).
+convFastEma = ta.ema(close, convFast)
+convSlowEma = ta.ema(close, convSlow)
+convTfRaw   = atrRaw > 0 ? math.abs(convFastEma - convSlowEma) / atrRaw : 0.0
+convTfNorm  = math.min(convTfRaw / convNormCap, 1.0)
+convChop    = convTfRaw < convChopCut
+convAtrPct  = ta.percentrank(atrRaw, 100)
+convAtrPart = convTfRaw > convChopCut ? math.min(convAtrPct / 100.0, 0.85) : 0.50
+convBase    = (convAtrPart + convTfNorm) / 2.0
+conviction  = convChop ? convBase * 0.50 : convBase
+convRawMult = atrMult * (1.0 + convAdapt * (0.5 - conviction))
+convMult    = math.max(atrMult * 0.60, math.min(atrMult * 1.80, convRawMult))
+
+// ── K-means: run multiple Chandelier instances, cluster by performance ─────────
 type _STPerf
     float upper
     float lower
@@ -105,11 +159,12 @@ var float aiMult     = atrMult
 var float aiPerfIdx  = 0.0
 var float aiAMA      = na
 
-if adaptMode == "AI (K-means)" and _stInst.size() > 0
-    // Update each instance
+if adaptMode == "K-means" and _stInst.size() > 0
+    // Update each instance — a real Chandelier stop per factor (HH/LL ± k·ATR),
+    // so the clustered performance reflects the model actually traded, not a proxy.
     for _inst in _stInst
-        _up  = hl2 + atrRaw * _inst.factor
-        _dn  = hl2 - atrRaw * _inst.factor
+        _up  = chLo + atrRaw * _inst.factor
+        _dn  = chHi - atrRaw * _inst.factor
         _inst.upper  := na(_inst.upper)  ? _up : (close[1] < _inst.upper  ? math.min(_up, _inst.upper)  : _up)
         _inst.lower  := na(_inst.lower)  ? _dn : (close[1] > _inst.lower  ? math.max(_dn, _inst.lower)  : _dn)
         _inst.trend  := close > _inst.upper ? 1 : close < _inst.lower ? 0 : _inst.trend
@@ -186,30 +241,53 @@ if adaptMode == "AI (K-means)" and _stInst.size() > 0
     aiPerfIdx := _tPerfs.size() > 0 ? math.min(math.max(_tPerfs.avg(), 0.0) / _den, 1.0) : 0.0
 
 dynMult = switch adaptMode
-    "Simple"       => volRatio > 1.3 ? atrMult * 1.2 : volRatio < 0.8 ? atrMult * 0.85 : atrMult
-    "AI (K-means)" => aiMult
+    "Simple"     => volRatio > 1.3 ? atrMult * 1.2 : volRatio < 0.8 ? atrMult * 0.85 : atrMult
+    "K-means"    => aiMult
+    "Conviction" => convMult
     => atrMult
 atr = dynMult * atrRaw
 
-// Trailing stops with ratchet mechanism
-longStop     = (useClose ? ta.highest(close, atrLen) : ta.highest(high, atrLen)) - atr
-longStopPrev = nz(longStop[1], longStop)
-longStop    := close[1] > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+// Direction state — declared before the stops so the ratchet can read the prior
+// accepted direction (the stop must not loosen until a flip is actually accepted).
+var int dir = 1
 
-shortStop     = (useClose ? ta.lowest(close, atrLen) : ta.lowest(low, atrLen)) + atr
-shortStopPrev = nz(shortStop[1], shortStop)
-shortStop    := close[1] < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+// Trailing stops with ratchet mechanism. The ratchet holds while the accepted
+// direction persists and only re-seeds when dir flips — so a weak (body-rejected)
+// close past the trigger can never loosen the still-active stop.
+longStopRaw   = chHi - atr
+shortStopRaw  = chLo + atr
+longStop      = longStopRaw
+longStopPrev  = nz(longStop[1], longStopRaw)
+longStop     := dir[1] == 1  ? math.max(longStopRaw, longStopPrev) : longStopRaw
+
+shortStop     = shortStopRaw
+shortStopPrev = nz(shortStop[1], shortStopRaw)
+shortStop    := dir[1] == -1 ? math.min(shortStopRaw, shortStopPrev) : shortStopRaw
 
 // Body filter gates the actual dir change — weak flips don't alter state
 bodyOk    = bodyFilter <= 0.0 or math.abs(close - open) >= atrRaw * bodyFilter
 flipLong  = close > shortStopPrev and bodyOk
 flipShort = close < longStopPrev  and bodyOk
 
-var int dir = 1
 dir := flipLong ? 1 : flipShort ? -1 : dir
 
 buySignal  = dir == 1  and dir[1] == -1
 sellSignal = dir == -1 and dir[1] == 1
+
+// Weak flip: close broke the trigger but the body was too weak to confirm (body
+// filter rejected) — direction holds. Distinct from a trap (wick crossed, close held).
+weakLong  = dir == -1 and close > shortStopPrev and not bodyOk
+weakShort = dir == 1  and close < longStopPrev  and not bodyOk
+
+// MTF confluence: HTF reference direction filters/grades flips (no effect when off)
+[htfLine, htfDir] = request.security(syminfo.tickerid, htfTF,
+     f_htfChandelier(atrLen, atrMult, useClose), lookahead=barmerge.lookahead_off)
+pullbackBull = showMtf and htfDir == 1  and dir == -1
+pullbackBear = showMtf and htfDir == -1 and dir == 1
+confLong     = buySignal  and htfDir == 1
+confShort    = sellSignal and htfDir == -1
+plainBuy     = buySignal  and not (showMtf and confLong)
+plainSell    = sellSignal and not (showMtf and confShort)
 
 // Distance to the real flip trigger in ATR units
 // Long mode: flips when close < longStopPrev → measure to longStopPrev
@@ -217,8 +295,9 @@ sellSignal = dir == -1 and dir[1] == 1
 triggerStop = dir == 1 ? longStopPrev : shortStopPrev
 distAtr     = math.abs(close - triggerStop) / atrRaw
 
-// State levels (+2 strong … 0 danger … -2 strong short)
-// Warning is a bar-color layer on top of state +1/-1, not a separate state.
+// Directional state levels — danger keeps its sign so the trend direction is never lost:
+//   +3 strong long · +2 soft long · +1 danger long · -1 danger short · -2 soft short · -3 strong short
+// Warning/danger are also a bar-color layer (yellow/orange) on top, as imminent-flip flags.
 warnLevel = math.max(warnDist, dangerDist + 0.05)
 danger = distAtr < dangerDist
 warn   = not danger and distAtr < warnLevel
@@ -228,69 +307,79 @@ pullbackLong  = dir == 1  and close < ema5
 pullbackShort = dir == -1 and close > ema5
 
 int state = 0
-if not danger
-    if dir == 1
-        state := (warn or pullbackLong)  ? 1 : 2
-    else
-        state := (warn or pullbackShort) ? -1 : -2
+if dir == 1
+    state := danger ? 1 : (warn or pullbackLong)  ? 2 : 3
+else
+    state := danger ? -1 : (warn or pullbackShort) ? -2 : -3
 
 // Trap markers: wick crossed the flip trigger intrabar but close held
 bullTrap = dir == -1 and high > shortStopPrev and close <= shortStopPrev
 bearTrap = dir == 1  and low  < longStopPrev  and close >= longStopPrev
 
-// Performance AMA: stop smoothed by cluster perf index (AI mode only)
+// Performance AMA: stop smoothed by cluster perf index (K-means mode only)
 _activeStop = dir == 1 ? longStop : shortStop
 if na(aiAMA)
     aiAMA := _activeStop
-else if adaptMode == "AI (K-means)"
+else if adaptMode == "K-means"
     aiAMA += aiPerfIdx * (_activeStop - aiAMA)
 
 // ─── Colors ──────────────────────────────────────────────────────────────────
-color stateCol = bearCol
-if state == 2
-    stateCol := bullCol
-else if state == 1
-    stateCol := color.new(bullCol, 50)
-else if state == 0
-    stateCol := dangerCol
-else if state == -1
-    stateCol := color.new(bearCol, 50)
+// The stop line/fill stay directional (green/red) even in the danger zone — full
+// at strong (±3), faded at soft/danger — so direction is never lost.
+color dirCol = color.new(bearCol, 45)
+if dir == 1
+    dirCol := math.abs(state) >= 3 ? bullCol : color.new(bullCol, 45)
+else
+    dirCol := math.abs(state) >= 3 ? bearCol : color.new(bearCol, 45)
 
-barCol = warn ? warnCol : stateCol
+// Bars layer the imminent-flip warning on top: yellow (warning) → orange (danger).
+barCol = danger ? dangerCol : warn ? warnCol : dirCol
 
 // ─── Plots ───────────────────────────────────────────────────────────────────
 inactiveCol = color.new(color.gray, 55)
 
+// HTF reference stop: step line, drawn first so it sits behind the active stop
+htfUpLine = showMtf and htfDir == 1  ? htfLine : na
+htfDnLine = showMtf and htfDir == -1 ? htfLine : na
+plot(htfUpLine, "HTF Stop Up",   color=color.new(bullCol, 60), linewidth=1, style=plot.style_stepline)
+plot(htfDnLine, "HTF Stop Down", color=color.new(bearCol, 60), linewidth=1, style=plot.style_stepline)
+
 longStopPlot  = plot(dir == 1  ? longStop  : na, "Long Stop",
-     color=stateCol, linewidth=2, style=plot.style_linebr)
+     color=dirCol, linewidth=2, style=plot.style_linebr)
 shortStopPlot = plot(dir == -1 ? shortStop : na, "Short Stop",
-     color=stateCol, linewidth=2, style=plot.style_linebr)
+     color=dirCol, linewidth=2, style=plot.style_linebr)
 
 plot(showInactive and dir == -1 ? longStop  : na, "Long Stop (inactive)",
      color=inactiveCol, linewidth=1, style=plot.style_linebr)
 plot(showInactive and dir == 1  ? shortStop : na, "Short Stop (inactive)",
      color=inactiveCol, linewidth=1, style=plot.style_linebr)
 
-plot(showAMA and adaptMode == "AI (K-means)" ? aiAMA : na, "AI AMA",
+plot(showAMA and adaptMode == "K-means" ? aiAMA : na, "Performance AMA",
      color=ta.cross(close, aiAMA) ? na : close > aiAMA ? color.new(bullCol, 45) : color.new(bearCol, 45),
      linewidth=1, style=plot.style_linebr)
 
 midPricePlot = plot(ohlc4, display=display.none, editable=false)
 fill(midPricePlot, longStopPlot,  title="Long Fill",
-     color=highlightState and dir == 1  ? color.new(stateCol, 88) : na)
+     color=highlightState and dir == 1  ? color.new(dirCol, 88) : na)
 fill(midPricePlot, shortStopPlot, title="Short Fill",
-     color=highlightState and dir == -1 ? color.new(stateCol, 88) : na)
+     color=highlightState and dir == -1 ? color.new(dirCol, 88) : na)
 
-plotshape(buySignal  ? longStop  : na, "Buy Dot",
+plotshape(plainBuy  ? longStop  : na, "Buy Dot",
      style=shape.circle, location=location.absolute, size=size.tiny, color=bullCol)
-plotshape(sellSignal ? shortStop : na, "Sell Dot",
+plotshape(plainSell ? shortStop : na, "Sell Dot",
      style=shape.circle, location=location.absolute, size=size.tiny, color=bearCol)
-plotshape(showLabels and buySignal  ? longStop  : na, "Buy Label",
+plotshape(showLabels and plainBuy  ? longStop  : na, "Buy Label",
      style=shape.labelup,   location=location.absolute, size=size.tiny,
      color=bullCol, textcolor=color.white, text="Buy")
-plotshape(showLabels and sellSignal ? shortStop : na, "Sell Label",
+plotshape(showLabels and plainSell ? shortStop : na, "Sell Label",
      style=shape.labeldown, location=location.absolute, size=size.tiny,
      color=bearCol, textcolor=color.white, text="Sell")
+
+// HTF confluence flips: diamond replaces the plain dot when the flip aligns with the HTF trend
+plotshape(showMtf and confLong  ? longStop  : na, "HTF Confluence Buy",
+     style=shape.diamond, location=location.absolute, size=size.tiny, color=bullCol)
+plotshape(showMtf and confShort ? shortStop : na, "HTF Confluence Sell",
+     style=shape.diamond, location=location.absolute, size=size.tiny, color=bearCol)
 
 // Bull trap: buyers caught at the top — mark at the high, pointing down
 // Bear trap: sellers caught at the bottom — mark at the low, pointing up
@@ -301,11 +390,25 @@ plotshape(showTraps and bearTrap ? low  : na, "Bear Trap",
      style=shape.triangleup,   location=location.absolute,
      color=color.new(bullCol, 30), size=size.tiny)
 
+// Weak flips: close broke the trigger but the body was too weak to confirm
+plotshape(showWeakFlips and weakLong  ? shortStopPrev : na, "Weak Long Flip",
+     style=shape.cross, location=location.absolute, color=color.new(bullCol, 35), size=size.tiny)
+plotshape(showWeakFlips and weakShort ? longStopPrev  : na, "Weak Short Flip",
+     style=shape.cross, location=location.absolute, color=color.new(bearCol, 35), size=size.tiny)
+
 barcolor(colorBars ? barCol : na)
 
-// AI factor label: shows selected multiplier on the last bar
+// MTF pullback zone: LTF trend opposes HTF trend — subtle tint in the HTF direction
+color mtfZone = na
+if pullbackBull
+    mtfZone := color.new(bullCol, 90)
+else if pullbackBear
+    mtfZone := color.new(bearCol, 90)
+bgcolor(mtfZone, title="MTF Pullback Zone")
+
+// K-means factor label: shows selected multiplier on the last bar
 var label _aiFactorLbl = na
-if showAIFactor and adaptMode == "AI (K-means)" and barstate.islast
+if showAIFactor and adaptMode == "K-means" and barstate.islast
     label.delete(_aiFactorLbl)
     _aiFactorLbl := label.new(bar_index, _activeStop,
          "×" + str.tostring(aiMult, "#.##"),
@@ -322,6 +425,8 @@ alertcondition(buySignal  and await,    "CFR Buy Signal",       "Chandelier Flip
 alertcondition(sellSignal and await,    "CFR Sell Signal",      "Chandelier Flip Radar sell — {{ticker}} ({{interval}})")
 alertcondition(bullTrap   and await,    "CFR Bull Trap",        "Chandelier Flip Radar bull trap — {{ticker}} ({{interval}})")
 alertcondition(bearTrap   and await,    "CFR Bear Trap",        "Chandelier Flip Radar bear trap — {{ticker}} ({{interval}})")
+alertcondition(confLong   and await,    "CFR HTF Confluence Buy",  "Chandelier Flip Radar HTF confluence buy — {{ticker}} ({{interval}})")
+alertcondition(confShort  and await,    "CFR HTF Confluence Sell", "Chandelier Flip Radar HTF confluence sell — {{ticker}} ({{interval}})")
 
 _ticker = syminfo.tickerid + " (" + timeframe.period + ")"
 if buySignal and await

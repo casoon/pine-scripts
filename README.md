@@ -76,14 +76,14 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`adx_advanced.pine`](indicators/trend_strength/adx_advanced/adx_advanced.pine) | ADX with DI± display, pluggable signal smoothing, 4-state histogram, gradient line, and DI crossover / threshold alerts |
 | [`regime_classifier.pine`](indicators/trend_strength/regime_classifier/regime_classifier.pine) | Stage-1 reversal-pipeline filter — fuses Fractal Dimension, Kaufman Efficiency Ratio and Choppiness into a Trend / Range / Chaos classification with hysteresis, symmetric reversal/trend permission outputs (no triggers) and an optional HTF regime line |
 | [`trend_persistence_score.pine`](indicators/trend_strength/trend_persistence_score/trend_persistence_score.pine) | Graded 0–100 trend-strength oscillator — fuses Regression R², Kaufman Efficiency Ratio, ADX strength+slope and Fractal Dimension into one persistence axis with a Strong/Healthy/Transition/Weak/Dead state, hysteresis, calibration-anchor inputs and visual-only directional context |
+| [`markov_state_engine.pine`](indicators/trend_strength/markov_state_engine/markov_state_engine.pine) | Six-state regime resolution map with an exit-conditional Markov model ("when this regime breaks, where did similar states resolve?") — extremes-first debounced classification, a robust Timing axis (Persistence + coiled-spring Maturity) split from the thin Direction axis, a net resolution line whose fill encodes Reliability, a hysteresis Bias and Reversal/Breakout/Continuation-typed edges |
 | [`commodity_pulse_matrix_v3.pine`](indicators/composite/commodity_pulse_matrix/commodity_pulse_matrix_v3.pine) | Multi-timeframe confluence scoring matrix across instruments — [published on TradingView](https://de.tradingview.com/script/aJmdpe8H/) |
 | [`signal_quality_engine.pine`](indicators/composite/signal_quality_engine/signal_quality_engine.pine) | Range-fade signal engine — fades exhausted range edges (long the lows, short the highs) via a Distance+Structure+Momentum exhaustion score, with an Edge → Setup → Watch → Trigger read and candle-rejection confirmation |
 | [`regime_detector.pine`](indicators/trend_strength/regime_detector/regime_detector.pine) | MA-zone based trend regime overlay |
 | [`ma_regime_bands.pine`](indicators/trend_direction/ma_regime_bands/ma_regime_bands.pine) | Moving average regime classification bands |
 | [`relative_leg_efficiency.pine`](indicators/relative_strength/relative_leg_efficiency/relative_leg_efficiency.pine) | Efficiency ratio per price leg — how directional each move is |
 | [`auto_trendlines.pine`](indicators/market_structure/auto_trendlines/auto_trendlines.pine) | Combinatorial trendline detection with OLS refinement, quality scoring, and greedy selection |
-| [`adaptive_supertrend.pine`](indicators/trend_direction/adaptive_supertrend/adaptive_supertrend.pine) | Supertrend with conviction-adaptive band width — narrows in strong trends, widens in chop |
-| [`chandelier_flip_radar.pine`](indicators/trend_direction/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips |
+| [`chandelier_flip_radar.pine`](indicators/trend_direction/chandelier_flip_radar/chandelier_flip_radar.pine) | ATR trailing stop with five-level trend state — progressive bar coloring, trap markers, body-filtered flips, optional MTF confluence |
 | [`smooth_trend_radar.pine`](indicators/trend_direction/smooth_trend_radar/smooth_trend_radar.pine) | Double-smoothed Supertrend baseline — auto-scaled per timeframe, pivot-based rejections, statistical overextension via candle coloring, automatic SL/TP setup on flips |
 
 ### Volatility
@@ -91,6 +91,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | Script | What it does |
 |--------|--------------|
 | [`atr_advanced.pine`](indicators/volatility/atr_advanced/atr_advanced.pine) | ATR in four display modes (Raw, ATR%, Normalized, Percentile Rank) with pluggable smoothing, gradient visualization, and expansion/contraction signals |
+| [`compression_fractal_release.pine`](indicators/volatility/compression_fractal_release/compression_fractal_release.pine) | Detects a compressed corrective coil inside an HTF trend and trades its release; band break is the trigger, coil strength + release dynamics are scored, choppiness vetoes low-quality breaks; classifies Release (with trend) vs Base Break (against trend) |
 
 ### Momentum & Oscillators
 
@@ -116,6 +117,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`money_flow_delta_profile.pine`](indicators/money_flow/money_flow_delta_profile/money_flow_delta_profile.pine) | Center-out diverging profile — green (right) = net buying, red (left) = net selling at each price level; POC, Value Area, optional recency weighting |
 | [`vwap_cross_visuals.pine`](indicators/mean_reversion/vwap_cross_visuals/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
 | [`anchored_vwap.pine`](indicators/mean_reversion/anchored_vwap/anchored_vwap.pine) | Stage-4 fair-value location sensor — VWAP anchored to swing pivot / session / period / manual date, volume-weighted σ bands, distance-from-value in σ as a symmetric Location output (no triggers) |
+| [`midas_curves.pine`](indicators/mean_reversion/midas_curves/midas_curves.pine) | MIDAS 2.0 — anchored MIDAS support/resistance curve (launch-anchored VWAP) plus a true topfinder/bottomfinder accelerated curve with closed-form auto-fit that forecasts trend exhaustion (d/D progress); Location + Exhaustion sensor, context markers not entries |
 | [`liquidity_hunter.pine`](indicators/market_structure/liquidity_hunter/liquidity_hunter.pine) | Ranked equal highs/lows — quality-scored BSL/SSL levels, sweep markers, reclaim detection with event scoring |
 
 ### Pattern & Wave Analysis

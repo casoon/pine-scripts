@@ -1,0 +1,360 @@
+//@version=6
+// ============================================================================
+// Compression Fractal Release [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-28 00:00:00
+// ============================================================================
+// Detects a compressed, corrective coil inside a higher-timeframe trend and
+// trades the moment it resolves into a clean directional break (the "release").
+// The band break is the only trigger; coil strength and release dynamics are
+// scored as weighted evidence (not a hard AND-chain), and a single choppiness
+// veto gates low-quality breaks. The HTF regime decides whether a break is a
+// continuation (Release) or a structural change out of a base (Base Break).
+//
+// Roles (one sensor per role — see indicator-design skill):
+//   Trend     HTF EMA slope (continuation vs. counter-trend classification)
+//   Location  Compression complexity + box-counting fractal dimension (the coil)
+//   Momentum  Release dynamics — complexity falling + efficiency rising
+//   Trigger   Break of the prior correction band (timing only)
+//   Quality   Choppiness Index veto (no clean break in extreme chop)
+//
+// Features:
+//   ✓ Symbolic-entropy compression proxy + box-counting fractal dimension + efficiency
+//   ✓ Multiplicative Setup Score (coil ceiling × release dynamics) — release required, no AND-chain
+//   ✓ Regime-classified break: Release (with HTF) vs Base Break (against HTF)
+//   ✓ Watch → Setup → Trigger signal staging with per-direction cooldown
+//   ✓ Single choppiness quality veto (no per-sensor blocking)
+//   ✓ Light-theme dashboard with role-score breakdown
+//   ✓ Debug log on every break — including why a break was blocked
+//
+// ============================================================================
+
+indicator("Compression Fractal Release [WavesUnchained]", "CFR", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+g_an = "1 · Analysis"
+len           = input.int(34, "Analysis Length", minval=10, maxval=150, group=g_an,
+     tooltip="Lookback for compression, fractal dimension and efficiency.")
+breakLen      = input.int(12, "Correction Break Length", minval=3, maxval=50, group=g_an,
+     tooltip="Window whose high/low forms the break band the release must clear.")
+symbolAtrMult = input.float(0.15, "Compression Symbol ATR Step", minval=0.01, maxval=1.0, step=0.01, group=g_an,
+     tooltip="Bar return is symbolised in ATR steps; larger = coarser symbols.")
+
+g_tr = "2 · Trend Context"
+htf      = input.timeframe("240", "Higher Timeframe", group=g_tr)
+emaLen   = input.int(55, "Trend EMA Length", minval=10, maxval=300, group=g_tr)
+slopeLen = input.int(5, "EMA Slope Length", minval=1, maxval=30, group=g_tr)
+
+g_rg = "3 · Regime Thresholds"
+complexHigh = input.float(62.0, "High Complexity Threshold", minval=40, maxval=90, group=g_rg)
+complexLow  = input.float(48.0, "Low Complexity Threshold", minval=20, maxval=70, group=g_rg)
+effHigh     = input.float(42.0, "High Efficiency Threshold", minval=20, maxval=80, group=g_rg)
+effLow      = input.float(25.0, "Low Efficiency Threshold", minval=5, maxval=60, group=g_rg)
+
+g_sc = "4 · Signal Scoring"
+relFloor   = input.float(0.35, "Min Release Share", minval=0.05, maxval=0.9, step=0.05, group=g_sc,
+     tooltip="Coil sets the score ceiling; release dynamics scale it from this floor up to 1. Lower = release dynamics matter more — a high coil alone can no longer fire.")
+thrCont    = input.float(0.45, "Release Score Threshold", minval=0, maxval=1, step=0.05, group=g_sc,
+     tooltip="Min Setup Score for a continuation break (with the HTF trend).")
+thrBase    = input.float(0.55, "Base Break Score Threshold", minval=0, maxval=1, step=0.05, group=g_sc,
+     tooltip="Min Setup Score for a counter-trend base break (needs more evidence).")
+cooldownBars = input.int(8, "Signal Cooldown (bars)", minval=0, maxval=100, group=g_sc,
+     tooltip="Minimum bars between two signals in the same direction.")
+chopLen    = input.int(14, "Choppiness Length", minval=2, maxval=50, group=g_sc)
+chopVetoMax= input.float(61.8, "Choppiness Veto (max)", minval=30, maxval=80, step=0.1, group=g_sc,
+     tooltip="Breaks above this choppiness are vetoed as low quality.")
+
+g_di = "5 · Display"
+showBg     = input.bool(true, "Show Regime Background", group=g_di)
+showTable  = input.bool(true, "Show Dashboard", group=g_di)
+showBands  = input.bool(true, "Show Break Bands", group=g_di)
+showLabels = input.bool(true, "Show Signal Labels", group=g_di)
+
+g_db = "6 · Debug"
+logBreaks = input.bool(true, "Log Breaks", group=g_db,
+     tooltip="Emit one parseable CFR BREAK row per confirmed band break (with raw metrics + block reason).")
+logBars   = input.bool(false, "Log Every Bar (distribution)", group=g_db,
+     tooltip="Emit one CFR BAR row per confirmed bar — the full metric distribution for offline threshold calibration. Heavy; enable only while exporting logs.")
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_symbol(r, unit) =>
+    r > unit ? 2 : r > 0 ? 1 : r < -unit ? -2 : r < 0 ? -1 : 0
+
+f_entropy_component(c, total) =>
+    p = total > 0 ? c / total : 0.0
+    p > 0 ? -p * math.log(p) : 0.0
+
+// Compression proxy: symbolise returns into 5 states, combine state entropy
+// with the state-transition rate. Not true LZ compression — a Pine-tractable
+// approximation of how "busy"/corrective the path is.
+f_compression_complexity(n, atrMult) =>
+    atrS = ta.atr(14)
+    float cM2 = 0.0
+    float cM1 = 0.0
+    float cZ = 0.0
+    float cP1 = 0.0
+    float cP2 = 0.0
+    float transitions = 0.0
+    int prev = na
+    float total = math.max(n - 1, 1)
+    for i = 0 to n - 2
+        r = close[i] - close[i + 1]
+        unit = atrS[i] * atrMult
+        s = f_symbol(r, unit)
+        if s == -2
+            cM2 += 1
+        else if s == -1
+            cM1 += 1
+        else if s == 0
+            cZ += 1
+        else if s == 1
+            cP1 += 1
+        else
+            cP2 += 1
+        if not na(prev) and s != prev
+            transitions += 1
+        prev := s
+    entropyRaw = f_entropy_component(cM2, total) + f_entropy_component(cM1, total) + f_entropy_component(cZ, total) + f_entropy_component(cP1, total) + f_entropy_component(cP2, total)
+    entropyNorm = entropyRaw / math.log(5)
+    transitionRate = transitions / math.max(total - 1, 1)
+    f_clamp((entropyNorm * 0.70 + transitionRate * 0.30) * 100, 0, 100)
+
+// Fractal Dimension Index (box-counting, 1..2). High = jagged/range (coiled),
+// low = smooth/trend. Robust on price data — does not saturate like Katz FD.
+f_fdi(n) =>
+    int half = int(math.max(2, n / 2))
+    float r1 = (ta.highest(high, half) - ta.lowest(low, half)) / half
+    float r2 = (ta.highest(high, half)[half] - ta.lowest(low, half)[half]) / half
+    float r3 = (ta.highest(high, n) - ta.lowest(low, n)) / n
+    float d = na
+    if r1 + r2 > 0.0 and r3 > 0.0
+        d := (math.log(r1 + r2) - math.log(r3)) / math.log(2.0)
+    f_clamp(nz(d, 1.5), 1.0, 2.0)
+
+f_efficiency(n) =>
+    float path = 0.0
+    for i = 0 to n - 2
+        path += math.abs(close[i] - close[i + 1])
+    direct = math.abs(close - close[n - 1])
+    path > 0 ? f_clamp(direct / path * 100, 0, 100) : 0.0
+
+// Choppiness Index (range-based) — independent quality sensor.
+f_chop(n) =>
+    atrSum = math.sum(ta.tr(true), n)
+    rng = ta.highest(high, n) - ta.lowest(low, n)
+    rng > 0 ? f_clamp(100 * math.log10(atrSum / rng) / math.log10(n), 0, 100) : 0.0
+
+// ============================================================================
+// TREND CONTEXT (Trend role)
+// ============================================================================
+[htfEma, htfEmaPast] = request.security(syminfo.tickerid, htf, [ta.ema(close, emaLen), ta.ema(close, emaLen)[slopeLen]], barmerge.gaps_off, barmerge.lookahead_off)
+htfDir = htfEma > htfEmaPast ? 1 : htfEma < htfEmaPast ? -1 : 0
+
+emaLocal = ta.ema(close, emaLen)
+
+// ============================================================================
+// METRICS (Location + Momentum roles)
+// ============================================================================
+complexity = f_compression_complexity(len, symbolAtrMult)
+fd      = f_fdi(len)
+fdScore = (fd - 1.0) * 100.0
+eff     = f_efficiency(len)
+chop    = f_chop(chopLen)
+
+cmpN = complexity / 100.0
+fdN  = fdScore / 100.0
+effN = eff / 100.0
+
+// Coil strength (Location): busy + jagged + inefficient = wound spring (0..1).
+coilStrength = f_clamp(cmpN * 0.5 + fdN * 0.3 + (1.0 - effN) * 0.2, 0.0, 1.0)
+coilRecent   = ta.highest(coilStrength, breakLen)[1]
+
+// Release dynamics (Momentum): complexity dropping + efficiency rising now (0..1).
+cmpDrop    = f_clamp((complexity[1] - complexity) / 8.0, 0.0, 1.0)
+effGain    = f_clamp((eff - eff[1]) / 8.0, 0.0, 1.0)
+releaseDyn = (cmpDrop + effGain) / 2.0
+
+// Setup Score — coil sets the ceiling, release dynamics scale it. Multiplicative
+// so a high coil alone cannot fire: a real release is required, not just a coil.
+releaseMult = relFloor + (1.0 - relFloor) * releaseDyn
+setupScore  = f_clamp(coilRecent * releaseMult, 0.0, 1.0)
+
+// ============================================================================
+// REGIME STATES (for background + base-break precondition)
+// ============================================================================
+cleanTrend = complexity < complexLow and fdScore < complexLow and eff > effHigh
+base       = complexity > complexHigh and eff < effLow
+correction = (htfDir != 0) and not base and coilStrength > 0.55
+
+wasBase = ta.highest(base ? 1.0 : 0.0, breakLen)[1] > 0
+
+// ============================================================================
+// TRIGGER + QUALITY VETO  →  SIGNALS
+// ============================================================================
+corrHigh = ta.highest(high, breakLen)[1]
+corrLow  = ta.lowest(low, breakLen)[1]
+
+breakUp = close > corrHigh
+breakDn = close < corrLow
+firstUp = breakUp and not breakUp[1]
+firstDn = breakDn and not breakDn[1]
+
+quality = chop < chopVetoMax   // Quality veto (§3): only structural state, not a sensor value
+
+// Raw candidates (pre-cooldown). Continuation = break with HTF; Base Break = against HTF out of a base.
+releaseLongRaw  = firstUp and htfDir == 1  and setupScore >= thrCont and quality
+releaseShortRaw = firstDn and htfDir == -1 and setupScore >= thrCont and quality
+baseBreakLongRaw  = firstUp and htfDir == -1 and wasBase and setupScore >= thrBase and quality
+baseBreakShortRaw = firstDn and htfDir == 1  and wasBase and setupScore >= thrBase and quality
+
+// Cooldown per direction — covers both signal types in that direction.
+var int lastUp = na
+var int lastDn = na
+upCdOk = na(lastUp) or (bar_index - lastUp) >= cooldownBars
+dnCdOk = na(lastDn) or (bar_index - lastDn) >= cooldownBars
+
+releaseLong    = releaseLongRaw    and upCdOk
+baseBreakLong  = baseBreakLongRaw  and upCdOk
+releaseShort   = releaseShortRaw   and dnCdOk
+baseBreakShort = baseBreakShortRaw and dnCdOk
+
+if releaseLong or baseBreakLong
+    lastUp := bar_index
+if releaseShort or baseBreakShort
+    lastDn := bar_index
+
+// Watch / Setup staging (§7).
+coiled  = coilStrength > 0.60
+nearUp  = high >= corrHigh * 0.995
+nearDn  = low  <= corrLow  * 1.005
+setupUp = coiled and htfDir == 1  and nearUp
+setupDn = coiled and htfDir == -1 and nearDn
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+plot(emaLocal, "Local EMA", color=color.new(color.gray, 20), linewidth=1)
+plot(showBands ? corrHigh : na, "Break High", color=color.new(color.green, 65), style=plot.style_linebr)
+plot(showBands ? corrLow  : na, "Break Low",  color=color.new(color.red, 65),   style=plot.style_linebr)
+
+color bgC = na
+if cleanTrend
+    bgC := color.new(color.green, 88)
+else if correction
+    bgC := color.new(color.orange, 86)
+else if base
+    bgC := color.new(color.blue, 88)
+bgcolor(showBg ? bgC : na)
+
+plotshape(showLabels and releaseLong,  title="Release Long",  style=shape.labelup,   text="REL↑",  location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+plotshape(showLabels and releaseShort, title="Release Short", style=shape.labeldown, text="REL↓",  location=location.abovebar, color=color.new(color.red, 0),   textcolor=color.white, size=size.small)
+plotshape(showLabels and baseBreakLong,  title="Base Break Long",  style=shape.triangleup,   text="BASE↑", location=location.belowbar, color=color.new(color.teal, 0),   textcolor=color.white, size=size.tiny)
+plotshape(showLabels and baseBreakShort, title="Base Break Short", style=shape.triangledown, text="BASE↓", location=location.abovebar, color=color.new(color.purple, 0), textcolor=color.white, size=size.tiny)
+
+// Subordinate watch markers — information without logic weight (§9).
+plotshape(showLabels and (setupUp or setupDn) and not (releaseLong or releaseShort), title="Setup Watch", style=shape.circle, location=location.bottom, color=color.new(color.gray, 55), size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(releaseLong,  "CFR Release Long",  "Coil released upward in HTF trend direction.")
+alertcondition(releaseShort, "CFR Release Short", "Coil released downward in HTF trend direction.")
+alertcondition(baseBreakLong,  "CFR Base Break Long",  "Base broke upward against prior downtrend.")
+alertcondition(baseBreakShort, "CFR Base Break Short", "Base broke downward against prior uptrend.")
+
+// ============================================================================
+// DEBUG (§10) — parseable key=value rows for offline calibration (scripts/analyze_cfr.py).
+//   CFR BREAK …  one row per confirmed band break: raw metrics + block reason.
+//   CFR BAR   …  one row per confirmed bar (toggle): full metric distribution.
+// ============================================================================
+regimeStr = cleanTrend ? "clean" : correction ? "corr" : base ? "base" : "mixed"
+
+if logBreaks and (firstUp or firstDn) and barstate.isconfirmed
+    dir = firstUp ? "UP" : "DN"
+    aligned = (firstUp and htfDir == 1) or (firstDn and htfDir == -1)
+    typeStr = aligned ? "cont" : "base"
+    thr = aligned ? thrCont : thrBase
+    cdOk = firstUp ? upCdOk : dnCdOk
+    reason = not quality ? "veto:chop" : (not aligned and not wasBase) ? "no-regime" : setupScore < thr ? "score<thr" : not cdOk ? "cooldown" : "ok"
+    log.info("CFR BREAK dir={0} type={1} htf={2} score={3} coil={4} dyn={5} cmp={6} eff={7} fd={8} chop={9} regime={10} wasBase={11} reason={12}",
+         dir, typeStr, htfDir, str.tostring(setupScore, "#.00"), str.tostring(coilRecent, "#.00"), str.tostring(releaseDyn, "#.00"),
+         str.tostring(complexity, "#.0"), str.tostring(eff, "#.0"), str.tostring(fd, "#.000"), str.tostring(chop, "#.0"),
+         regimeStr, wasBase ? 1 : 0, reason)
+
+if logBars and barstate.isconfirmed
+    log.info("CFR BAR cmp={0} eff={1} fd={2} chop={3} coil={4} dyn={5} htf={6} regime={7}",
+         str.tostring(complexity, "#.0"), str.tostring(eff, "#.0"), str.tostring(fd, "#.000"), str.tostring(chop, "#.0"),
+         str.tostring(coilStrength, "#.00"), str.tostring(releaseDyn, "#.00"), htfDir, regimeStr)
+
+// ============================================================================
+// DASHBOARD (light-theme style — see CLAUDE.md)
+// ============================================================================
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table t = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+string state = "Mixed"
+color stateBg = color.new(color.gray, 80)
+if releaseLong
+    state := "Release ↑"
+    stateBg := #00c853
+else if releaseShort
+    state := "Release ↓"
+    stateBg := #d50000
+else if baseBreakLong
+    state := "Base Break ↑"
+    stateBg := color.teal
+else if baseBreakShort
+    state := "Base Break ↓"
+    stateBg := color.purple
+else if cleanTrend
+    state := "Clean Trend"
+    stateBg := color.new(color.gray, 80)
+else if coiled
+    state := "Coiled (watch)"
+    stateBg := #ff6f00
+else if base
+    state := "Base"
+    stateBg := color.new(color.gray, 80)
+
+bool stateActive = releaseLong or releaseShort or baseBreakLong or baseBreakShort or coiled
+htfText = htfDir == 1 ? "Up" : htfDir == -1 ? "Down" : "Flat"
+
+if showTable and barstate.islast
+    table.cell(t, 0, 0, "CFR", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, state, text_color=stateActive ? color.white : tc, bgcolor=stateActive ? stateBg : color.new(color.gray, 80), text_size=size.small)
+
+    table.cell(t, 0, 1, "HTF Trend", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, htfText, text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 2, "Setup Score", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(setupScore, "#.00"), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 3, "Coil", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(coilStrength, "#.00"), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 4, "Release Dyn", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(releaseDyn, "#.00"), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 5, "Compression", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(complexity, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 6, "Fractal Dim", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 6, str.tostring(fd, "#.000"), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 7, "Chop", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(chop, "#.0"), text_color=chop < chopVetoMax ? tc : #d50000, text_size=size.small)

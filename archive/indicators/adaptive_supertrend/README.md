@@ -2,7 +2,7 @@
 
 A Supertrend indicator with conviction-adaptive band width. Instead of a fixed ATR multiplier, the band narrows when the market is trending strongly and widens when conditions are choppy or volatility is contracting. This means the stop trails price more tightly during high-conviction moves and gives more room during uncertain regimes — without requiring any manual parameter adjustment per timeframe.
 
-> **Relation to [chandelier_flip_radar](../chandelier_flip_radar/):** same family — ATR trailing-stop flip with ratchet, body filter and trap markers — but different anchor and focus. This indicator adds conviction-adaptive band width and an MTF confluence layer; Chandelier Flip Radar adds five-level early-warning states, AI factor selection and has a validated strategy behind it.
+> **Archived.** Superseded by [chandelier_flip_radar](../../../indicators/trend_direction/chandelier_flip_radar/) — same family (ATR trailing-stop flip with ratchet, body filter, trap markers). The MTF confluence layer from this indicator was absorbed into Chandelier Flip Radar (v1.5) as an optional overlay; this conviction-adaptive / hl2-anchored variant remained untested and is kept here for reference only.
 
 ## Features
 

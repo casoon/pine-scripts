@@ -2,6 +2,8 @@
 
 Fixed-range volume profile anchored to the right edge of the lookback window, showing where volume actually traded across price levels — split by up and down volume, with the value area, Point of Control, high/low-volume node markers, and an expanded context table.
 
+> **Related profiles:** This is a classic *volume distribution* profile (where volume traded). For directional money flow / net delta per level use [money_flow_delta_profile](../money_flow_delta_profile/); for oscillator momentum per price zone use [momentum_profile](../../momentum/momentum_profile/). Volume Strata's distinguishing features are **naked-POC tracking** and **profile-shape classification** (D/P/b/B).
+
 ## Features
 
 - **Right-anchored profile** — bars grow leftward into the candle range; up-volume occupies the right (inner) side, down-volume extends further left
