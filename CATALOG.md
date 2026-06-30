@@ -53,6 +53,10 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [cci_advanced](indicators/momentum/cci_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | CCI mit pluggablem Smoothing, 3 Scale-Modes, OB/OS-Zone-Filter, Gradient + Shadow-Fills |
+| [fisher_transform_advanced](indicators/momentum/fisher_transform_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Fisher Transform mit Trend-Kontext, Stall/Absorption, Cross-Conviction, Divergenz-Wedge und reversal-lastiger Extremwert-Lesart; ungetestet |
+| [rsi_advanced](indicators/momentum/rsi_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | RSI mit Signal-Line, Trend-Kontext, Stall/Absorption, Cross-Conviction, Divergenz-Wedge und Long/Short-Farbsprache; ungetestet |
+| [stoch_rsi_advanced](indicators/momentum/stoch_rsi_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Stoch RSI K/D mit Trend-Kontext, Stall/Absorption, Cross-Conviction, Divergenz-Wedge und Long/Short-Farbsprache; ungetestet |
+| [tsi_advanced](indicators/momentum/tsi_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | True Strength Index mit sauberer Signal-Line, Trend-Kontext, Stall/Absorption, Cross-Conviction, Divergenz-Wedge und Long/Short-Farbsprache; ungetestet |
 | [wavetrend](indicators/momentum/wavetrend/) | 1.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | Core, best PF in repo |
 | [wavetrend_advanced_smoothing](indicators/momentum/wavetrend_advanced_smoothing/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | WaveTrend mit 8 Smoothing-Kernels + reichhaltige Visualisierung (Gradient, Shadow-Fill, 4-State-Histogramm) |
 | [mtf_wavetrend_opportunity_hunter](indicators/momentum/mtf_wavetrend_opportunity_hunter/) | 2.6 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | Konfluenz-Pane + Heat-Ribbons; v2.1: RRG-Rotation-Map (Polyline), Ehlers Ultimate Smoother Core (TASC 2024), Entropie-Noise-Floor; ungetestet |
@@ -79,6 +83,7 @@ Quality columns (★ 1–5):
 |---|---|---|---|---|---|---|
 | [volume_strata](indicators/money_flow/volume_strata/) | 1.9 | Stabil | ★★★★★ | ★★★★☆ | ★★★☆☆ | |
 | [money_flow_delta_profile](indicators/money_flow/money_flow_delta_profile/) | 2.0 | Aktiv | ★★★★★ | ★★★★☆ | ★★★☆☆ | HVN/LVN/AVN + LVN-Zonen; v2.0: Intrabar-Delta (LTF) + Absorption-Profil/-Zonen — neue Features ungetestet |
+| [mfi_advanced](indicators/money_flow/mfi_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | MFI mit Signal-Line, No-Volume-Fallback, Trend-Kontext, Stall/Absorption, Cross-Conviction, Divergenz-Wedge und Long/Short-Farbsprache; ungetestet |
 | [vwap_cross_visuals](indicators/mean_reversion/vwap_cross_visuals/) | 2.1.0 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | v2.1: auf VWAP-Cross-Kernsignal fokussiert (Signal Scope default), Cross-Marker als Hover-Labels; Runtime-/Limit-Fixes |
 | [midas_curves](indicators/mean_reversion/midas_curves/) | 2.3 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | MIDAS S/R-Kurve (launch-anchored VWAP) + echter Topfinder/Bottomfinder mit Closed-Form-Auto-Fit; Location (Distanz/Band) + Exhaustion 4-stufig (no fit/running/late/expired); Auto-Last-Swing-Anker, Hybrid-Bänder, Reclaim nur nach Stretch, entdirektionalisierte Alerts, TBF-Linienbruch bei Re-Anker; v2.3: Element\|Wert\|Deutung-Dashboard mit TF-abhängiger Read-Zeile; Kontext-Marker statt Trigger; TBF auf Daily-Legs Log-validiert, intraday ungetestet |
 | [anchored_vwap](indicators/mean_reversion/anchored_vwap/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Reversal-Pipeline Stufe 4 (Location): AVWAP ankerbar an Swing-Pivot/Session/Periode/Datum, volumengewichtete σ-Bänder, Distanz-zu-Value in σ als symmetrischer Location-Output (kein Trigger); ungetestet |

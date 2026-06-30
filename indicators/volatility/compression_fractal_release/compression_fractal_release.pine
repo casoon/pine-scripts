@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Compression Fractal Release [WavesUnchained]
-// Version: 1.0.2
+// Version: 1.1.4
 // Author: WavesUnchained
 // Build: 2026-06-30 00:00:00
 // ============================================================================
@@ -30,7 +30,7 @@
 //
 // ============================================================================
 
-indicator("Compression Fractal Release [WavesUnchained]", "CFR", overlay=true, max_labels_count=500)
+indicator("Compression Fractal Release [WavesUnchained]", "CFR", overlay=true, max_labels_count=500, max_boxes_count=50)
 
 // ============================================================================
 // INPUTS
@@ -47,6 +47,8 @@ g_tr = "2 · Trend Context"
 htf      = input.timeframe("240", "Higher Timeframe", group=g_tr)
 emaLen   = input.int(55, "Trend EMA Length", minval=10, maxval=300, group=g_tr)
 slopeLen = input.int(5, "EMA Slope Length", minval=1, maxval=30, group=g_tr)
+htfSlopeMin = input.float(0.10, "Min HTF Slope (ATR)", minval=0.0, maxval=2.0, step=0.01, group=g_tr,
+     tooltip="Minimum EMA slope, normalized by HTF ATR. Values inside +/- this threshold are treated as flat.")
 
 g_rg = "3 · Regime Thresholds"
 complexHigh = input.float(62.0, "High Complexity Threshold", minval=40, maxval=90, group=g_rg)
@@ -57,10 +59,16 @@ effLow      = input.float(25.0, "Low Efficiency Threshold", minval=5, maxval=60,
 g_sc = "4 · Signal Scoring"
 relFloor   = input.float(0.35, "Min Release Share", minval=0.05, maxval=0.9, step=0.05, group=g_sc,
      tooltip="Coil sets the score ceiling; release dynamics scale it from this floor up to 1. Lower = release dynamics matter more — a high coil alone can no longer fire.")
+coilNowMin = input.float(0.45, "Current Coil Floor", minval=0.0, maxval=1.0, step=0.05, group=g_sc,
+     tooltip="Recent coil evidence is down-weighted when the current bar is no longer compressed.")
 thrCont    = input.float(0.45, "Release Score Threshold", minval=0, maxval=1, step=0.05, group=g_sc,
      tooltip="Min Setup Score for a continuation break (with the HTF trend).")
 thrBase    = input.float(0.55, "Base Break Score Threshold", minval=0, maxval=1, step=0.05, group=g_sc,
      tooltip="Min Setup Score for a counter-trend base break (needs more evidence).")
+baseMinShare = input.float(0.35, "Min Base Bars Share", minval=0.05, maxval=1.0, step=0.05, group=g_sc,
+     tooltip="Share of the break window that must have been a base before a counter-trend Base Break is allowed.")
+breakAtrMin = input.float(0.10, "Min Break Impulse (ATR)", minval=0.0, maxval=2.0, step=0.01, group=g_sc,
+     tooltip="Minimum close distance beyond the broken band, measured in ATR. Filters tiny one-tick band breaks.")
 cooldownBars = input.int(8, "Signal Cooldown (bars)", minval=0, maxval=100, group=g_sc,
      tooltip="Minimum bars between two signals in the same direction.")
 chopLen    = input.int(14, "Choppiness Length", minval=2, maxval=50, group=g_sc)
@@ -68,10 +76,15 @@ chopVetoMax= input.float(61.8, "Choppiness Veto (max)", minval=30, maxval=80, st
      tooltip="Breaks above this choppiness are vetoed as low quality.")
 
 g_di = "5 · Display"
-showBg     = input.bool(true, "Show Regime Background", group=g_di)
+showBg     = input.bool(false, "Show Regime Background", group=g_di)
 showTable  = input.bool(true, "Show Dashboard", group=g_di)
 showBands  = input.bool(true, "Show Break Bands", group=g_di)
+showBox    = input.bool(true, "Show Compression Box", group=g_di)
 showLabels = input.bool(true, "Show Signal Labels", group=g_di)
+showSetups = input.bool(false, "Show Watch/Setup Markers", group=g_di,
+     tooltip="Optional early-stage markers. They are not entry signals; BRK/REV remains the only trigger.")
+setupMarkerShare = input.float(0.80, "Setup Marker Score Share", minval=0.0, maxval=1.0, step=0.05, group=g_di,
+     tooltip="Show setup markers only when the setup score reaches this share of the release threshold.")
 
 g_db = "6 · Debug"
 logBreaks = input.bool(true, "Log Breaks", group=g_db,
@@ -155,8 +168,9 @@ f_chop(n) =>
 // ============================================================================
 // TREND CONTEXT (Trend role)
 // ============================================================================
-[htfEma, htfEmaPast] = request.security(syminfo.tickerid, htf, [ta.ema(close, emaLen), ta.ema(close, emaLen)[slopeLen]], barmerge.gaps_off, barmerge.lookahead_off)
-htfDir = htfEma > htfEmaPast ? 1 : htfEma < htfEmaPast ? -1 : 0
+[htfEma, htfEmaPast, htfAtr] = request.security(syminfo.tickerid, htf, [ta.ema(close, emaLen), ta.ema(close, emaLen)[slopeLen], ta.atr(14)], barmerge.gaps_off, barmerge.lookahead_off)
+htfSlopeAtr = htfAtr > 0 ? (htfEma - htfEmaPast) / htfAtr : 0.0
+htfDir = htfSlopeAtr > htfSlopeMin ? 1 : htfSlopeAtr < -htfSlopeMin ? -1 : 0
 
 emaLocal = ta.ema(close, emaLen)
 
@@ -176,16 +190,19 @@ effN = eff / 100.0
 // Coil strength (Location): busy + jagged + inefficient = wound spring (0..1).
 coilStrength = f_clamp(cmpN * 0.5 + fdN * 0.3 + (1.0 - effN) * 0.2, 0.0, 1.0)
 coilRecent   = ta.highest(coilStrength, breakLen)[1]
+coilBlend     = f_clamp(coilRecent * 0.70 + coilStrength * 0.30, 0.0, 1.0)
+coilCurrentOk = coilStrength >= coilNowMin
+coilScore     = coilCurrentOk ? coilBlend : coilBlend * f_clamp(coilStrength / math.max(coilNowMin, 0.01), 0.0, 1.0)
 
-// Release dynamics (Momentum): complexity dropping + efficiency rising now (0..1).
-cmpDrop    = f_clamp((complexity[1] - complexity) / 8.0, 0.0, 1.0)
-effGain    = f_clamp((eff - eff[1]) / 8.0, 0.0, 1.0)
+// Release dynamics (Momentum): complexity falling + efficiency rising, smoothed to avoid one-bar jumps (0..1).
+cmpDrop    = f_clamp((ta.sma(complexity, 3)[1] - complexity) / 8.0, 0.0, 1.0)
+effGain    = f_clamp((eff - ta.sma(eff, 3)[1]) / 8.0, 0.0, 1.0)
 releaseDyn = (cmpDrop + effGain) / 2.0
 
 // Setup Score — coil sets the ceiling, release dynamics scale it. Multiplicative
 // so a high coil alone cannot fire: a real release is required, not just a coil.
 releaseMult = relFloor + (1.0 - relFloor) * releaseDyn
-setupScore  = f_clamp(coilRecent * releaseMult, 0.0, 1.0)
+setupScore  = f_clamp(coilScore * releaseMult, 0.0, 1.0)
 
 // ============================================================================
 // REGIME STATES (for background + base-break precondition)
@@ -194,20 +211,28 @@ cleanTrend = complexity < complexLow and fdScore < complexLow and eff > effHigh
 base       = complexity > complexHigh and eff < effLow
 correction = (htfDir != 0) and not base and coilStrength > 0.55
 
-wasBase = ta.highest(base ? 1.0 : 0.0, breakLen)[1] > 0
+baseBars = math.sum(base ? 1.0 : 0.0, breakLen)[1]
+wasBase = baseBars >= math.round(breakLen * baseMinShare)
 
 // ============================================================================
 // TRIGGER + QUALITY VETO  →  SIGNALS
 // ============================================================================
 corrHigh = ta.highest(high, breakLen)[1]
 corrLow  = ta.lowest(low, breakLen)[1]
+bandMid  = (corrHigh + corrLow) / 2.0
 
 breakUp = close > corrHigh
 breakDn = close < corrLow
 firstUp = breakUp and not breakUp[1]
 firstDn = breakDn and not breakDn[1]
 
-quality = chop < chopVetoMax   // Quality veto (§3): only structural state, not a sensor value
+atrNow = ta.atr(14)
+breakAtrUp = atrNow > 0 ? math.abs(close - corrHigh) / atrNow : 0.0
+breakAtrDn = atrNow > 0 ? math.abs(close - corrLow) / atrNow : 0.0
+breakImpulse = firstUp ? breakAtrUp : firstDn ? breakAtrDn : 0.0
+chopOk = chop < chopVetoMax
+breakQuality = breakImpulse >= breakAtrMin
+quality = chopOk and breakQuality   // Quality veto (§3): structural chop + minimum break impulse.
 
 // Raw candidates (pre-cooldown). Continuation = break with HTF; Base Break = against HTF out of a base.
 releaseLongRaw  = firstUp and htfDir == 1  and setupScore >= thrCont and quality
@@ -237,6 +262,8 @@ nearUp  = high >= corrHigh * 0.995
 nearDn  = low  <= corrLow  * 1.005
 setupUp = coiled and htfDir == 1  and nearUp
 setupDn = coiled and htfDir == -1 and nearDn
+setupMarkerUp = setupUp and setupScore >= thrCont * setupMarkerShare
+setupMarkerDn = setupDn and setupScore >= thrCont * setupMarkerShare
 
 // ============================================================================
 // VISUALS
@@ -244,23 +271,44 @@ setupDn = coiled and htfDir == -1 and nearDn
 plot(emaLocal, "Local EMA", color=color.new(color.gray, 20), linewidth=1)
 plot(showBands ? corrHigh : na, "Break High", color=color.new(color.green, 65), style=plot.style_linebr)
 plot(showBands ? corrLow  : na, "Break Low",  color=color.new(color.red, 65),   style=plot.style_linebr)
+plot(showBands ? bandMid  : na, "Band Mid",   color=color.new(color.gray, 82),  style=plot.style_linebr)
 
 color bgC = na
 if cleanTrend
-    bgC := color.new(color.green, 88)
+    bgC := color.new(color.green, 97)
 else if correction
-    bgC := color.new(color.orange, 86)
+    bgC := color.new(color.orange, 96)
 else if base
-    bgC := color.new(color.blue, 88)
+    bgC := color.new(color.blue, 97)
 bgcolor(showBg ? bgC : na)
 
-plotshape(showLabels and releaseLong,  title="Release Long",  style=shape.labelup,   text="REL↑",  location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
-plotshape(showLabels and releaseShort, title="Release Short", style=shape.labeldown, text="REL↓",  location=location.abovebar, color=color.new(color.red, 0),   textcolor=color.white, size=size.small)
-plotshape(showLabels and baseBreakLong,  title="Base Break Long",  style=shape.triangleup,   text="BASE↑", location=location.belowbar, color=color.new(color.teal, 0),   textcolor=color.white, size=size.tiny)
-plotshape(showLabels and baseBreakShort, title="Base Break Short", style=shape.triangledown, text="BASE↓", location=location.abovebar, color=color.new(color.purple, 0), textcolor=color.white, size=size.tiny)
+boxActive = showBox and (coiled or base or firstUp or firstDn) and not na(corrHigh) and not na(corrLow)
+boxBg = base ? color.new(color.blue, 90) : coiled ? color.new(color.orange, 90) : color.new(color.gray, 94)
+boxBorder = firstUp ? color.new(color.green, 10) : firstDn ? color.new(color.red, 10) : base ? color.new(color.blue, 62) : color.new(color.orange, 62)
+var box compressionBox = na
+if boxActive
+    if na(compressionBox)
+        compressionBox := box.new(left=bar_index - breakLen, top=corrHigh, right=bar_index, bottom=corrLow, bgcolor=boxBg, border_color=boxBorder, border_width=1)
+    else
+        box.set_left(compressionBox, bar_index - breakLen)
+        box.set_right(compressionBox, bar_index)
+        box.set_top(compressionBox, corrHigh)
+        box.set_bottom(compressionBox, corrLow)
+        box.set_bgcolor(compressionBox, boxBg)
+        box.set_border_color(compressionBox, boxBorder)
+else if not na(compressionBox)
+    box.delete(compressionBox)
+    compressionBox := na
+
+plotshape(showLabels and releaseLong,  title="Release Long",  style=shape.triangleup,   text="BRK↑",  location=location.belowbar, color=color.new(color.orange, 18), textcolor=color.new(color.orange, 0), size=size.small)
+plotshape(showLabels and releaseShort, title="Release Short", style=shape.triangledown, text="BRK↓",  location=location.abovebar, color=color.new(color.orange, 18), textcolor=color.new(color.orange, 0), size=size.small)
+plotshape(showLabels and baseBreakLong,  title="Base Break Long",  style=shape.triangleup,   text="REV↑", location=location.belowbar, color=color.new(color.blue, 16), textcolor=color.new(color.blue, 0), size=size.small)
+plotshape(showLabels and baseBreakShort, title="Base Break Short", style=shape.triangledown, text="REV↓", location=location.abovebar, color=color.new(color.blue, 16), textcolor=color.new(color.blue, 0), size=size.small)
 
 // Subordinate watch markers — information without logic weight (§9).
-plotshape(showLabels and (setupUp or setupDn) and not (releaseLong or releaseShort), title="Setup Watch", style=shape.circle, location=location.bottom, color=color.new(color.gray, 55), size=size.tiny)
+plotshape(showLabels and showSetups and coiled and not (setupMarkerUp or setupMarkerDn) and not (releaseLong or releaseShort or baseBreakLong or baseBreakShort), title="Watch", style=shape.circle, location=location.bottom, color=color.new(color.gray, 70), size=size.tiny)
+plotshape(showLabels and showSetups and setupMarkerUp and not (releaseLong or baseBreakLong), title="Setup Long", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 62), size=size.tiny)
+plotshape(showLabels and showSetups and setupMarkerDn and not (releaseShort or baseBreakShort), title="Setup Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 62), size=size.tiny)
 
 // ============================================================================
 // ALERTS
@@ -283,27 +331,33 @@ regimeStr = cleanTrend ? "clean" : correction ? "corr" : base ? "base" : "mixed"
 if logBreaks and (firstUp or firstDn) and barstate.isconfirmed
     dir = firstUp ? "UP" : "DN"
     aligned = (firstUp and htfDir == 1) or (firstDn and htfDir == -1)
-    typeStr = aligned ? "cont" : "base"
+    typeStr = aligned ? "cont" : htfDir == 0 ? "flat" : "base"
     thr = aligned ? thrCont : thrBase
     cdOk = firstUp ? upCdOk : dnCdOk
-    reason = not quality ? "veto:chop" : (not aligned and not wasBase) ? "no-regime" : setupScore < thr ? "score<thr" : not cdOk ? "cooldown" : "ok"
-    log.info("CFR BREAK dir={0} type={1} htf={2} score={3} coil={4} dyn={5} cmp={6} eff={7} fd={8} chop={9} regime={10} wasBase={11} reason={12}",
-         dir, typeStr, htfDir, str.tostring(setupScore, "#.00"), str.tostring(coilRecent, "#.00"), str.tostring(releaseDyn, "#.00"),
+    reason = not chopOk ? "veto:chop" : not breakQuality ? "veto:weak-break" : htfDir == 0 ? "no-htf-trend" : (not aligned and not wasBase) ? "no-regime" : setupScore < thr ? "score<thr" : not cdOk ? "cooldown" : "ok"
+    log.info("CFR BREAK dir={0} type={1} htf={2} htfSlopeAtr={3} score={4} coilScore={5} coilNow={6} coilRecent={7} dyn={8} breakAtr={9} cmp={10} eff={11} fd={12} chop={13} regime={14} baseBars={15} wasBase={16} reason={17}",
+         dir, typeStr, htfDir, str.tostring(htfSlopeAtr, "#.00"), str.tostring(setupScore, "#.00"), str.tostring(coilScore, "#.00"),
+         str.tostring(coilStrength, "#.00"), str.tostring(coilRecent, "#.00"), str.tostring(releaseDyn, "#.00"), str.tostring(breakImpulse, "#.00"),
          str.tostring(complexity, "#.0"), str.tostring(eff, "#.0"), str.tostring(fd, "#.000"), str.tostring(chop, "#.0"),
-         regimeStr, wasBase ? 1 : 0, reason)
+         regimeStr, str.tostring(baseBars, "#"), wasBase ? 1 : 0, reason)
 
 if logBars and barstate.isconfirmed
-    log.info("CFR BAR cmp={0} eff={1} fd={2} chop={3} coil={4} dyn={5} htf={6} regime={7}",
+    log.info("CFR BAR cmp={0} eff={1} fd={2} chop={3} coilNow={4} coilScore={5} dyn={6} htf={7} htfSlopeAtr={8} regime={9}",
          str.tostring(complexity, "#.0"), str.tostring(eff, "#.0"), str.tostring(fd, "#.000"), str.tostring(chop, "#.0"),
-         str.tostring(coilStrength, "#.00"), str.tostring(releaseDyn, "#.00"), htfDir, regimeStr)
+         str.tostring(coilStrength, "#.00"), str.tostring(coilScore, "#.00"), str.tostring(releaseDyn, "#.00"),
+         htfDir, str.tostring(htfSlopeAtr, "#.00"), regimeStr)
 
 // ============================================================================
 // DASHBOARD (light-theme style — see CLAUDE.md)
 // ============================================================================
 color tc = color.new(color.gray, 20)
 color hd = color.new(color.gray, 90)
+color okBg = color.new(color.green, 82)
+color warnBg = color.new(color.orange, 82)
+color badBg = color.new(color.red, 86)
+color neutralBg = color.new(color.gray, 90)
 
-var table t = table.new(position.top_right, 2, 8,
+var table t = table.new(position.top_right, 2, 10,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -335,7 +389,17 @@ else if base
     stateBg := color.new(color.gray, 80)
 
 bool stateActive = releaseLong or releaseShort or baseBreakLong or baseBreakShort or coiled
-htfText = htfDir == 1 ? "Up" : htfDir == -1 ? "Down" : "Flat"
+htfText = htfDir == 1 ? "Up " + str.tostring(htfSlopeAtr, "#.00") : htfDir == -1 ? "Down " + str.tostring(htfSlopeAtr, "#.00") : "Flat " + str.tostring(htfSlopeAtr, "#.00")
+
+longThr = htfDir == 1 ? thrCont : htfDir == -1 and wasBase ? thrBase : na
+shortThr = htfDir == -1 ? thrCont : htfDir == 1 and wasBase ? thrBase : na
+longText = na(longThr) ? "n/a" : str.tostring(setupScore, "#.00") + "/" + str.tostring(longThr, "#.00")
+shortText = na(shortThr) ? "n/a" : str.tostring(setupScore, "#.00") + "/" + str.tostring(shortThr, "#.00")
+longBg = na(longThr) ? neutralBg : setupScore >= longThr and chopOk ? okBg : setupScore >= longThr * 0.80 ? warnBg : badBg
+shortBg = na(shortThr) ? neutralBg : setupScore >= shortThr and chopOk ? okBg : setupScore >= shortThr * 0.80 ? warnBg : badBg
+coilBg = coilCurrentOk ? color.new(color.orange, 80) : warnBg
+dynBg = releaseDyn >= 0.35 ? okBg : releaseDyn >= 0.20 ? warnBg : neutralBg
+chopBg = chopOk ? neutralBg : badBg
 
 if showTable and barstate.islast
     table.cell(t, 0, 0, "CFR", text_color=tc, bgcolor=hd, text_size=size.small)
@@ -344,20 +408,26 @@ if showTable and barstate.islast
     table.cell(t, 0, 1, "HTF Trend", text_color=tc, text_size=size.small)
     table.cell(t, 1, 1, htfText, text_color=tc, text_size=size.small)
 
-    table.cell(t, 0, 2, "Setup Score", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 2, str.tostring(setupScore, "#.00"), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 2, "Long Setup", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, longText, text_color=tc, bgcolor=longBg, text_size=size.small)
 
-    table.cell(t, 0, 3, "Coil", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 3, str.tostring(coilStrength, "#.00"), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 3, "Short Setup", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 3, shortText, text_color=tc, bgcolor=shortBg, text_size=size.small)
 
-    table.cell(t, 0, 4, "Release Dyn", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 4, str.tostring(releaseDyn, "#.00"), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 4, "Coil Score", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(coilScore, "#.00") + " (" + str.tostring(coilStrength, "#.00") + ")", text_color=tc, bgcolor=coilBg, text_size=size.small)
 
-    table.cell(t, 0, 5, "Compression", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 5, str.tostring(complexity, "#.0"), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 5, "Release Dyn", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(releaseDyn, "#.00"), text_color=tc, bgcolor=dynBg, text_size=size.small)
 
-    table.cell(t, 0, 6, "Fractal Dim", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 6, str.tostring(fd, "#.000"), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 6, "Base Bars", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 6, str.tostring(baseBars, "#") + "/" + str.tostring(math.round(breakLen * baseMinShare), "#"), text_color=tc, bgcolor=wasBase ? color.new(color.blue, 84) : neutralBg, text_size=size.small)
 
-    table.cell(t, 0, 7, "Chop", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 7, str.tostring(chop, "#.0"), text_color=chop < chopVetoMax ? tc : #d50000, text_size=size.small)
+    table.cell(t, 0, 7, "Break ATR", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(breakImpulse, "#.00") + "/" + str.tostring(breakAtrMin, "#.00"), text_color=tc, bgcolor=(firstUp or firstDn) and breakQuality ? okBg : neutralBg, text_size=size.small)
+
+    table.cell(t, 0, 8, "Cmp / FD", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 8, str.tostring(complexity, "#.0") + " / " + str.tostring(fd, "#.000"), text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 9, "Chop", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 9, str.tostring(chop, "#.0"), text_color=chopOk ? tc : #d50000, bgcolor=chopBg, text_size=size.small)

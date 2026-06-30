@@ -100,6 +100,10 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | Script | What it does |
 |--------|--------------|
 | [`cci_advanced.pine`](indicators/momentum/cci_advanced/cci_advanced.pine) | CCI with pluggable smoothing, three scale modes, OB/OS extreme-zone filter, gradient line, and shadow fills |
+| [`fisher_transform_advanced.pine`](indicators/momentum/fisher_transform_advanced/fisher_transform_advanced.pine) | Fisher Transform with reversal-heavy extreme reads, trend context, stall/absorption markers, cross conviction, and divergence wedge |
+| [`rsi_advanced.pine`](indicators/momentum/rsi_advanced/rsi_advanced.pine) | RSI with smoothed signal, trend context, stall/absorption markers, cross conviction, divergence wedge, and long/short directional coloring |
+| [`stoch_rsi_advanced.pine`](indicators/momentum/stoch_rsi_advanced/stoch_rsi_advanced.pine) | Stoch RSI K/D with trend context, stall/absorption markers, cross conviction, divergence wedge, and long/short directional coloring |
+| [`tsi_advanced.pine`](indicators/momentum/tsi_advanced/tsi_advanced.pine) | True Strength Index with clean signal crosses, trend context, stall/absorption markers, cross conviction, and divergence wedge |
 | [`wavetrend.pine`](indicators/momentum/wavetrend/wavetrend.pine) | WaveTrend oscillator — cross signals, divergence, overextension duration, slope quality filter, zone persistence |
 | [`wavetrend_advanced_smoothing.pine`](indicators/momentum/wavetrend_advanced_smoothing/wavetrend_advanced_smoothing.pine) | WaveTrend with 8 pluggable smoothing kernels, gradient line coloring, shadow fills, 4-state histogram, and configurable scale modes |
 | [`commodity_flow_trend.pine`](indicators/money_flow/commodity_flow_trend/commodity_flow_trend.pine) | MFI + CCI composite oscillator for commodities — 4-state flow background, extreme-zone reversal signals, optional CCI gate, normalized CCI overlay |
@@ -117,6 +121,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 |--------|--------------|
 | [`volume_strata.pine`](indicators/money_flow/volume_strata/volume_strata.pine) | Fixed-range volume profile — right-anchored bars, POC, VAH/VAL, HVN/LVN zones, naked POC tracking |
 | [`money_flow_delta_profile.pine`](indicators/money_flow/money_flow_delta_profile/money_flow_delta_profile.pine) | Center-out diverging profile — green (right) = net buying, red (left) = net selling at each price level; POC, Value Area, optional recency weighting |
+| [`mfi_advanced.pine`](indicators/money_flow/mfi_advanced/mfi_advanced.pine) | MFI with smoothed signal, no-volume fallback, trend context, stall/absorption markers, divergence wedge, and long/short directional coloring |
 | [`vwap_cross_visuals.pine`](indicators/mean_reversion/vwap_cross_visuals/vwap_cross_visuals.pine) | VWAP with multi-band deviation analysis |
 | [`anchored_vwap.pine`](indicators/mean_reversion/anchored_vwap/anchored_vwap.pine) | Stage-4 fair-value location sensor — VWAP anchored to swing pivot / session / period / manual date, volume-weighted σ bands, distance-from-value in σ as a symmetric Location output (no triggers) |
 | [`midas_curves.pine`](indicators/mean_reversion/midas_curves/midas_curves.pine) | MIDAS 2.0 — anchored MIDAS support/resistance curve (launch-anchored VWAP) plus a true topfinder/bottomfinder accelerated curve with closed-form auto-fit that forecasts trend exhaustion (d/D progress); Location + Exhaustion sensor, context markers not entries |

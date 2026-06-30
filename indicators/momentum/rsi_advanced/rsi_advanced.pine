@@ -1,0 +1,273 @@
+//@version=6
+// ============================================================================
+// RSI Advanced [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-06-30 15:00:00
+// ============================================================================
+// RSI with trend context, stall/absorption, conviction markers, and directional
+// long/short coloring on a bounded 0-100 oscillator core.
+//
+// Features:
+//   ✓ RSI core with pluggable smoothing and signal line
+//   ✓ Bounded 0-100 panel with 50 midline and configurable OB/OS zones
+//   ✓ Stall/absorption context: marks crosses contradicted by flat price as weak
+//   ✓ Trend context line (slow RSI): support the fast line rests on
+//   ✓ Trend↔RSI divergence wedge: fast and trend move opposite
+//   ✓ Long/Short coloring for trend context, histogram, and divergence wedge
+//   ✓ Gradient line color, shadow fills, OB/OS zone fills, and alerts
+//
+// ============================================================================
+
+indicator("RSI Advanced [WavesUnchained]", "RSI·ADV", overlay=false, max_labels_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+g_core = "1 · Core"
+src    = input.source(close, "Source",         group=g_core)
+rsiLen = input.int(14,     "RSI Length",       minval=1, group=g_core)
+avgLen = input.int(3,      "Average Length",   minval=1, group=g_core)
+sigLen = input.int(3,      "Signal Length",    minval=1, group=g_core)
+smoothType = input.string("EMA", "Smoothing Type",
+     options=["EMA", "SMA", "RMA", "WMA", "SuperSmoother", "T3", "KAMA", "JMA Approx"],
+     group=g_core)
+jmaPhase = input.int(50,    "  JMA Phase", minval=-100, maxval=100,             group=g_core)
+jmaPower = input.float(2.0, "  JMA Power", minval=1.0,  maxval=4.0, step=0.25, group=g_core)
+
+g_levels = "2 · Mid / Levels"
+midLine = input.float(50, "Midline",    minval=0,  maxval=100, group=g_levels)
+obLevel = input.float(70, "Overbought", minval=50, maxval=100, group=g_levels)
+osLevel = input.float(30, "Oversold",   minval=0,  maxval=50,  group=g_levels)
+
+g_stall = "3 · Stall / Absorption"
+useStall     = input.bool(true, "Detect Stall (RSI moves, price holds)", group=g_stall)
+stallLen     = input.int(5,     "Stall Lookback (bars)", minval=1, group=g_stall)
+stallFlatATR = input.float(0.5, "Max Price Move (ATR)",  minval=0.0, step=0.1, group=g_stall)
+stallRsiMin  = input.float(15,  "Min RSI Move",          minval=0,   step=1,   group=g_stall)
+
+g_ctx = "4 · Trend Context"
+useCtx = input.bool(true, "Show Trend Context Line", group=g_ctx)
+ctxLen = input.int(100, "Trend RSI Length", minval=2, group=g_ctx)
+
+g_conv = "5 · Conviction"
+useExtremeOnly  = input.bool(true, "Extreme Signals: require OB/OS zone", group=g_conv)
+lookbackExtreme = input.int(5,     "OB/OS Lookback (bars)",               minval=1, group=g_conv)
+showMidCross    = input.bool(true, "Show 50-Cross Markers",               group=g_conv)
+
+g_div = "6 · Divergence"
+showDiv = input.bool(true, "Highlight Trend ↔ RSI Divergence", group=g_div)
+divLen  = input.int(4,    "Divergence Slope Lookback", minval=1, group=g_div)
+divMin  = input.float(10, "Min Fast Slope",            minval=0, step=1, group=g_div)
+
+g_plots = "7 · Plots"
+showShadow   = input.bool(true, "Shadow Fill (RSI vs 50)", group=g_plots)
+showFill     = input.bool(true, "Fill RSI / Signal",       group=g_plots)
+showZoneFill = input.bool(true, "Fill OB / OS Zones",      group=g_plots)
+showHist     = input.bool(true, "Show Histogram",          group=g_plots)
+showSignals  = input.bool(true, "Show Signal Markers",     group=g_plots)
+
+g_col = "7 · Plots · Colors"
+colBull   = input.color(#00bcd4,                "Bull (level)",           group=g_col)
+colBear   = input.color(#f06292,                "Bear (level)",           group=g_col)
+colLong   = input.color(#00c853,                "Long (trend/momentum)",  group=g_col)
+colShort  = input.color(#d50000,                "Short (trend/momentum)", group=g_col)
+colZoneOB = input.color(color.new(#f06292, 90), "OB Zone Fill",           group=g_col)
+colZoneOS = input.color(color.new(#00bcd4, 90), "OS Zone Fill",           group=g_col)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMOOTHING FUNCTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+f_supersmoother(series float x, simple int len) =>
+    float a1 = math.exp(-1.414 * math.pi / len)
+    float b1 = 2.0 * a1 * math.cos(1.414 * math.pi / len)
+    float c2 = b1
+    float c3 = -(a1 * a1)
+    float c1 = 1.0 - c2 - c3
+    var float ss = na
+    ss := c1 * (x + nz(x[1])) / 2.0 + c2 * nz(ss[1]) + c3 * nz(ss[2])
+    ss
+
+f_t3(series float x, simple int len) =>
+    float b = 0.7
+    float e1 = ta.ema(x, len)
+    float e2 = ta.ema(e1, len)
+    float e3 = ta.ema(e2, len)
+    float e4 = ta.ema(e3, len)
+    float e5 = ta.ema(e4, len)
+    float e6 = ta.ema(e5, len)
+    -(b * b * b) * e6 + (3.0 * b * b + 3.0 * b * b * b) * e5 + (-6.0 * b * b - 3.0 * b - 3.0 * b * b * b) * e4 + (1.0 + 3.0 * b + b * b * b + 3.0 * b * b) * e3
+
+f_kama(series float x, simple int len) =>
+    float change = math.abs(x - x[len])
+    float vol = math.sum(math.abs(x - x[1]), len)
+    float er = vol != 0.0 ? change / vol : 0.0
+    float sc = math.pow(er * (2.0 / 3.0 - 2.0 / 31.0) + 2.0 / 31.0, 2)
+    var float kama = na
+    kama := nz(kama[1], x) + sc * (x - nz(kama[1], x))
+    kama
+
+f_jma(series float x, simple int len, simple int phase, simple float power) =>
+    var float jma = na
+    var float e0 = na
+    var float e1 = na
+    var float e2 = na
+    float phaseRatio = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100.0 + 1.5
+    float beta = 0.45 * (len - 1) / (0.45 * (len - 1) + 2.0)
+    float alpha = math.pow(beta, power)
+    e0 := (1.0 - alpha) * x + alpha * nz(e0[1], x)
+    e1 := (x - e0) * (1.0 - beta) + beta * nz(e1[1], 0.0)
+    e2 := (e0 + phaseRatio * e1 - nz(jma[1], x)) * math.pow(1.0 - alpha, 2.0) + math.pow(alpha, 2.0) * nz(e2[1], 0.0)
+    jma := nz(jma[1], x) + e2
+    jma
+
+f_smooth(series float x, simple int len, simple string mode) =>
+    switch mode
+        "SMA"           => ta.sma(x, len)
+        "RMA"           => ta.rma(x, len)
+        "WMA"           => ta.wma(x, len)
+        "SuperSmoother" => f_supersmoother(x, len)
+        "T3"            => f_t3(x, len)
+        "KAMA"          => f_kama(x, len)
+        "JMA Approx"    => f_jma(x, len, jmaPhase, jmaPower)
+        =>                 ta.ema(x, len)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RSI CORE
+// ─────────────────────────────────────────────────────────────────────────────
+
+rsiRaw  = ta.rsi(src, rsiLen)
+rsiLine = f_smooth(rsiRaw, avgLen, smoothType)
+signal  = f_smooth(rsiLine, sigLen, smoothType)
+hist    = rsiLine - signal
+
+ctxRaw  = ta.rsi(src, ctxLen)
+ctxLine = f_smooth(ctxRaw, avgLen, smoothType)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MID / LEVELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+wasOversold   = ta.lowest(rsiLine,  lookbackExtreme) <= osLevel
+wasOverbought = ta.highest(rsiLine, lookbackExtreme) >= obLevel
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STALL / ABSORPTION
+// ─────────────────────────────────────────────────────────────────────────────
+
+bullCross    = ta.crossover(rsiLine, signal)
+bearCross    = ta.crossunder(rsiLine, signal)
+bullExtreme  = bullCross and (not useExtremeOnly or wasOversold)
+bearExtreme  = bearCross and (not useExtremeOnly or wasOverbought)
+bullMidCross = ta.crossover(rsiLine, midLine)
+bearMidCross = ta.crossunder(rsiLine, midLine)
+
+float atrRef = ta.atr(14)
+float rsiChg = rsiLine - rsiLine[stallLen]
+float priceChg = atrRef != 0.0 ? (close - close[stallLen]) / atrRef : 0.0
+bool flatPx = math.abs(priceChg) < stallFlatATR
+bool stallBull = useStall and rsiChg < -stallRsiMin and flatPx
+bool stallBear = useStall and rsiChg >  stallRsiMin and flatPx
+bool stallNow = stallBull or stallBear
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TREND CONTEXT
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool ctxBull = ctxLine > midLine
+bool ctxBear = ctxLine < midLine
+bool bearCounter = useCtx and bearExtreme and ctxBull
+bool bullCounter = useCtx and bullExtreme and ctxBear
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONVICTION
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool bearStrong = bearExtreme and not (stallBull or bearCounter)
+bool bearWeak = bearExtreme and (stallBull or bearCounter)
+bool bullStrong = bullExtreme and not (stallBear or bullCounter)
+bool bullWeak = bullExtreme and (stallBear or bullCounter)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DIVERGENCE
+// ─────────────────────────────────────────────────────────────────────────────
+
+float fastDir = rsiLine - rsiLine[divLen]
+float slowDir = ctxLine - ctxLine[divLen]
+bool divBull = useCtx and showDiv and fastDir < -divMin and slowDir > 0.0
+bool divBear = useCtx and showDiv and fastDir >  divMin and slowDir < 0.0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLORS
+// ─────────────────────────────────────────────────────────────────────────────
+
+color lineCol = color.from_gradient(rsiLine, osLevel, obLevel, colBull, colBear)
+color lineCol2 = color.from_gradient(signal, osLevel, obLevel, color.new(colBull, 40), color.new(colBear, 40))
+color ctxCol = ctxLine >= midLine ? color.new(colLong, 55) : color.new(colShort, 55)
+
+histRising = hist >= hist[1]
+histColor = hist >= 0.0
+     ? (histRising ? colLong : color.new(colLong, 55))
+     : (not histRising ? colShort : color.new(colShort, 55))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HLINES + ZONE FILLS
+// ─────────────────────────────────────────────────────────────────────────────
+
+hTop = hline(100, "Top", color=color.new(color.gray, 85))
+hMid = hline(midLine, "50", color=color.new(color.gray, 60), linestyle=hline.style_dotted, linewidth=1)
+hBot = hline(0, "Bottom", color=color.new(color.gray, 85))
+hOB  = hline(obLevel, "Overbought", color=color.new(color.red, 65), linestyle=hline.style_dashed, linewidth=1)
+hOS  = hline(osLevel, "Oversold", color=color.new(#00bcd4, 65), linestyle=hline.style_dashed, linewidth=1)
+
+fill(hOB, hTop, color=showZoneFill ? colZoneOB : na, title="OB Zone")
+fill(hBot, hOS, color=showZoneFill ? colZoneOS : na, title="OS Zone")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+color histColorFinal = stallNow ? color.new(histColor, 78) : histColor
+plot(showHist ? hist : na, "Histogram", style=plot.style_columns, color=histColorFinal)
+
+pMid = plot(midLine, display=display.none)
+pCtx = plot(useCtx ? ctxLine : na, "Trend Context", color=ctxCol, linewidth=2)
+pSig = plot(signal, "RSI Signal", color=lineCol2, linewidth=1)
+pRSI = plot(rsiLine, "RSI", color=lineCol, linewidth=2)
+
+fill(pRSI, pCtx, color=divBull ? color.new(colLong, 80) : divBear ? color.new(colShort, 80) : na,
+     title="Trend Divergence")
+
+fill(pRSI, pMid, obLevel, midLine, color.new(colBear, 78), color.new(colBear, 100),
+     title="Bear Shadow", display=showShadow ? display.all : display.none)
+fill(pRSI, pMid, midLine, osLevel, color.new(colBull, 100), color.new(colBull, 78),
+     title="Bull Shadow", display=showShadow ? display.all : display.none)
+
+fill(pRSI, pSig, color=showFill ? (rsiLine >= signal ? color.new(colBull, 88) : color.new(colBear, 88)) : na,
+     title="RSI Fill")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNAL MARKERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+plotshape(showSignals and bullStrong, "Bull Extreme", style=shape.triangleup, location=location.bottom, color=colBull, size=size.small)
+plotshape(showSignals and bullWeak, "Bull Extreme (absorbed)", style=shape.triangleup, location=location.bottom, color=color.new(colBull, 65), size=size.tiny)
+plotshape(showSignals and bearStrong, "Bear Extreme", style=shape.triangledown, location=location.top, color=colBear, size=size.small)
+plotshape(showSignals and bearWeak, "Bear Extreme (absorbed)", style=shape.triangledown, location=location.top, color=color.new(colBear, 65), size=size.tiny)
+
+plotshape(showSignals and showMidCross and bullMidCross ? rsiLine : na, "Bull 50 Cross", style=shape.circle, location=location.absolute, color=color.new(colBull, 20), size=size.tiny)
+plotshape(showSignals and showMidCross and bearMidCross ? rsiLine : na, "Bear 50 Cross", style=shape.circle, location=location.absolute, color=color.new(colBear, 20), size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="8 · Alerts")
+bool alertOk = not alertsOnBarClose or barstate.isconfirmed
+
+alertcondition(alertOk and bullExtreme,  "RSI Bull Signal",    "RSIA · BULL CROSS OVERSOLD · {{ticker}} {{interval}}")
+alertcondition(alertOk and bearExtreme,  "RSI Bear Signal",    "RSIA · BEAR CROSS OVERBOUGHT · {{ticker}} {{interval}}")
+alertcondition(alertOk and bullMidCross, "RSI Cross Above 50", "RSIA · CROSS ABOVE 50 · {{ticker}} {{interval}}")
+alertcondition(alertOk and bearMidCross, "RSI Cross Below 50", "RSIA · CROSS BELOW 50 · {{ticker}} {{interval}}")
