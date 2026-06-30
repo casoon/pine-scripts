@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.1.2 — 2026-06-30
+- Alerts: added VWAP cross alerts (price cross up/down, structure cross up/down) with a bar-close confirmation toggle — `VXV · EVENT · {{ticker}} {{interval}}`
+
 ## v2.1.1 — 2026-06-27
 - **Aggregated Long/Short signals isolated behind a toggle**: new "Emit aggregated Long/Short signals" input (Visual Settings, default OFF). When off, the module is pure VWAP cross visuals — only the core Price×VWAP cross markers render. Turning it on (with Signal Scope = "All signals") re-enables the aggregated structure-cross, cluster, entry, zone, volume-profile and HTF-stack trade markers, including the volume-profile event that previously rendered as a trade marker.
 

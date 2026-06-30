@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.4.3 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.4.2 — 2026-06-30
+- Alerts: messages standardized to `ODZ · EVENT · {{ticker}} {{interval}}` for a uniform format across the library (titles unchanged)
+
+## v1.4.1 — 2026-06-29
+- Fix: combined `alert()` divergence calls no longer repaint intrabar — now fire once per bar close instead of once per bar (the named alertcondition() alerts were already user-controlled)
+
 ## v1.4.0 — 2026-06-27
 - Add four oscillator sources for divergence evaluation: Schaff Trend Cycle (STC, bounded 0–100, auto 75/25), Detrended Price Oscillator (DPO), Ehlers Roofing Filter, Ehlers Cyber Cycle
 - DPO/Roofing/Cyber are unbounded/centered — auto OB/OS uses a rolling ±1.5σ band; prefer the Dynamic Zones level filter for them

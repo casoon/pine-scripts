@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.4.1 — 2026-06-29
+- Alerts: messages standardized to `MSE · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.4 — 2026-06-28
 - **Maturity / coiled-spring gauge**: surfaces the well-sampled TIMING axis the indicator was hiding. Typical dwell = `1/(1−Persistence)`; current dwell ÷ typical → Fresh / Mature / Extended / Overdue (with a ⚠). "Overdue" is descriptive (unusually long vs history), not a claim an exit is due. New "Markov State Extended" alert.
 - **Timing vs direction split**: the readout now separates the robust TIMING signal (Maturity, from every in-state bar) from the thin DIRECTION signal (exit distribution, from few exits). The thin flag is relabelled `dir thin/ok`.

@@ -1,5 +1,17 @@
 # Changelog
 
+## v4.0.3 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v3.1.4 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v4.0.2 — 2026-06-29
+- Alerts: messages standardized to `CPM4 · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
+## v3.1.3 — 2026-06-29
+- Alerts: messages standardized to `CPM3 · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v4.0.1 — 2026-06-27
 - Final signal gate: the timing trigger (Emit Entry + Entry Direction) is now always required and can no longer be out-voted by context; supporting evidence (Quality Gate / Trend Alignment / Heat) became a graded confidence score with a clamped threshold, and dead-volatility / low-volume remains the only hard structural veto. Replaces the previous 5-point AND-style confluence gate.
 

@@ -1,3 +1,11 @@
+# Changelog
+
+## v1.1.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.1.1 — 2026-06-29
+- Alerts: messages standardized to `RGC · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.1 — 2026-06-27
 - Optional higher-timeframe regime line via `request.security` — visual context only, never a veto/gate (default off)
 - HTF source selectable: Auto (4× chart timeframe) or a manual timeframe

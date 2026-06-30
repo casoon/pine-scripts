@@ -1,3 +1,18 @@
+# Changelog
+
+## v2.1.0 — 2026-06-30
+- **Moved to a dedicated RSI pane** (`overlay=false`) so momentum divergence is shown where it is actually readable — against the RSI itself. A divergence is price-vs-momentum and cannot be conveyed on a price-only chart; drawing lines between price pivots only looked like trendlines
+- **Divergence lines drawn on the RSI** in the pane: when price makes a higher high while RSI makes a lower high (uptrend), or price a lower low while RSI a higher low (downtrend), a line marks the failing momentum. Read against the price above (shared time axis), the divergence is unmistakable. Compact "Div" label, RSI values in the tooltip
+- **RSI plotted with 70 / 50 / 30 reference levels**
+- **All price-chart elements kept on the price chart** via `force_overlay` — break-level line, risk-shaded cushion zone, thin EMA trend-context line, word event labels and the compact info label: nothing lost from the overlay version
+- New **Show Trend Context Line** toggle — a thin EMA whose level + slope defines which trend is at risk (colour stays risk-coded, not buy/sell)
+
+## v2.0.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v2.0.1 — 2026-06-29
+- Alerts: messages standardized to `SBR · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v2.0 — 2026-06-28
 - **Rebuilt as a chart overlay** (`overlay=true`) — the primary read now lives on the price chart instead of a separate oscillator pane
 - New **break-level line** drawn in price: the decisive swing the prevailing trend must hold, coloured by the current risk band

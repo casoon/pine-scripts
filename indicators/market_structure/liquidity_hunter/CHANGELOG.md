@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.2.4 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v3.2.3 — 2026-06-29
+- Alerts: messages standardized to `LQH · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v3.2.2 — 2026-06-27
 - Decoupled momentum from the sweep/reclaim signal: WaveTrend + MFI exhaustion bonuses in the event score now apply only when the Momentum Hybrid toggle is enabled (default off) — the sweep trigger and reclaim event remain purely structural
 - Directional bias is now a dashboard-only summary (computed inside the dashboard block) rather than a standalone aggregator in the main path; it never feeds sweeps, reclaims, hunts, or alerts

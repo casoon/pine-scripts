@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.1.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v2.1.1 — 2026-06-30
+- Alerts: messages standardized to `<KÜRZEL> · EVENT · {{ticker}} {{interval}}` for a uniform format across the library (titles unchanged)
+
 ## v2.1 — 2026-06-28
 - Added exhaustion zones: each signal draws a box over the overextended price area (band-to-extreme) that keeps extending until price reclaims it or it ages out
 - Labels are now bold (▼/▲ headline + score + reason) and carry the full role breakdown — Score/threshold, Stretch/Exhaustion/Reaction, regime+ADX, vol multiplier — on hover instead of crowding the chart

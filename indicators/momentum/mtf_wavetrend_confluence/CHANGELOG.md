@@ -1,3 +1,11 @@
+# Changelog
+
+## v0.7.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v0.7.1 — 2026-06-30
+- Alerts: messages standardized to `TWR · EVENT · {{ticker}} {{interval}}` for a uniform format across the library (titles unchanged)
+
 ## v0.7 — 2026-06-27
 - **Two-tier alerts (⚠️ Watch → ✅ Signal)** — new early-warning tier fires when WT reaches its deep extreme (a reversal setup is forming), giving lead time on 1h/4h before the trigger cross. Shown on the PRICE chart (long below the bar, short above) via a selectable "Watch Marker Style" (Label ⚠ / Dot / Triangle / Background / Off), so the warning is visible, not alert-only. One combined `alert()` ("any alert() function call", once per bar close) now carries both tiers with full data (direction, grade/max, ★, type, ticker, TF, price), forced to bar close so it never repaints on intrabar HTF updates. Named alerts added for Watch Long/Short, plus the existing signal/high-grade alerts, all with `{{interval}}`/`{{close}}` placeholders.
 - **Auto-shorten WT length above 4h** — over daily bars the base channel/average/signal lengths (10/21/4) make WaveTrend too slow and the crosses unusable (smoothing only adds lag). New toggle (default on) swaps in shorter lengths — "Channel Length (>4h)" / "Average Length (>4h)" / "Signal Length (>4h)", default 5/11/3 — automatically on Daily+ charts. Tunable.

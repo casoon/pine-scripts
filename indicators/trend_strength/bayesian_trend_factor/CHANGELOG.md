@@ -1,3 +1,11 @@
+# Changelog
+
+## v1.7.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.7.1 — 2026-06-29
+- Alerts: messages standardized to `BTF · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.7 — 2026-06-28
 - Rebuilt the pullback module as an explicit state machine (Idle → Armed → Mature → Triggered / Invalidated) for clear signal attribution
 - Maturity now requires the pullback to be both old enough and deep enough (≥ Min Pullback Depth); shallow pullbacks stay Armed and cannot trigger a continuation

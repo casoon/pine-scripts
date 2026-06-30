@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.0.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v2.0.1 — 2026-06-30
+- Alerts: messages standardized to `<KÜRZEL> · EVENT · {{ticker}} {{interval}}` for a uniform format across the library (titles unchanged)
+
 ## v2.0 — 2026-06-11
 - Signals are now confluence-based and actionable: a LONG mark fires only when the stock both outperforms the benchmark (Mansfield > 0) AND is in its own uptrend (price above the trend EMA); SHORT requires both weak. This structurally rules out the old contradiction where a bullish mark appeared while price was falling (pure relative strength is decoupled from the chart).
 - Markers follow standard trading convention again (now that they are real entries): long = green up-triangle below the line, short = red down-triangle above.

@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.1.1 — 2026-06-29
+- Alerts: messages standardized to `OTOP · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.1 — 2026-06-11
 - 2 alert conditions added: V-Spike Peak, V-Spike Trough
 - Docs corrected: curvature is normalized by the recent WT range, not ATR

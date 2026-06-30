@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.5 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.1.4 — 2026-06-29
+- Alerts: the three context alerts (Regime Weakening, Volatility Compression, Volatility Expansion) are now gated by the "Smart Alerts" toggle, consistent with the other alerts — previously they fired even when Smart Alerts was off
+
+## v1.1.3 — 2026-06-29
+- Alerts: messages standardized to `RDP · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
+## v1.1.2 — 2026-06-29
+- Docs: clarified that the named `alertcondition()` alerts and the combined `alert()` webhook rule are an either/or — enable one, not both, or each event fires twice. No behaviour change.
+
 ## v1.1.1 — 2026-06-27
 - **Trade engine isolated behind a toggle**: new "Show Trade Engine (entries/exits/TP/SL + performance)" input (Signal Management group, default OFF). When off, RDP behaves as a pure regime classifier/visual — only regime bands, heatmap, candle tint, context labels and warnings render. When on, it re-enables the RDP entry/exit markers, tier/quality labels, MA-zone entry/SL engine, trade-entry/exit alerts and the performance statistics rows.
 

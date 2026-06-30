@@ -1,22 +1,27 @@
 //@version=6
 // ============================================================================
 // Structure Break Risk [WavesUnchained]
-// Version: 2.0
+// Version: 2.1.0
 // Author: WavesUnchained
-// Build: 2026-06-28 00:00:00
+// Build: 2026-06-30 00:00:00
 // ============================================================================
-// Chart overlay that answers: how close is the PREVAILING trend's structure to
+// Indicator that answers: how close is the PREVAILING trend's structure to
 // breaking — and against WHICH level? Symmetric by design — in an uptrend it
 // reads top-break risk, in a downtrend bottom-break risk; the asymmetry comes
 // from the situation (which trend is active), never from a hardcoded long/short.
 //
-// The primary read lives ON the price chart, not in an oscillator pane:
-//   ✓ Break-Level line — the decisive swing the trend must hold, drawn in price
-//   ✓ Risk Zone — the cushion between price and that level, shaded by risk
-//   ✓ Event labels — Watch / Break Pressure / Structure Broken / Pressure Faded
-//   ✓ Compact info label — mobile-friendly text (not a table): score, state,
-//     direction, break level, distance, reason and a mini-bar per sensor
-//     (carries the risk MAGNITUDE, since a single overlay cannot host a pane)
+// Two coordinated panes make the read intuitive:
+//   ✓ RSI pane (this pane) — the RSI with momentum-divergence lines drawn directly
+//     on it: when price makes a higher high while RSI makes a LOWER high (uptrend),
+//     or price a lower low while RSI a higher low (downtrend), a line marks the
+//     failing momentum. Read against the price above — sharing the same time axis —
+//     the divergence is unmistakable: the earliest structural crack. A divergence
+//     is price-vs-momentum and is only readable where BOTH are visible
+//   ✓ Price chart (drawn via force_overlay) — the decisive break-level line the
+//     trend must hold, a risk-shaded cushion zone between price and that level, a
+//     thin EMA trend-context line, word event labels (Watch / Break Pressure /
+//     Structure Broken / Pressure Faded) and a compact info label carrying score,
+//     state, direction, break level, distance and a mini-bar per sensor
 //
 // Risk magnitude is the same 0-100 composite as before — colour encodes the RISK
 // band (neutral → orange → red → dark red), never the trade direction, so it
@@ -35,7 +40,7 @@
 //
 // ============================================================================
 
-indicator("Structure Break Risk [WavesUnchained]", "SBR", overlay=true, max_labels_count=500)
+indicator("Structure Break Risk [WavesUnchained]", "SBR", overlay=false, max_labels_count=500, max_lines_count=100)
 
 // ============================================================================
 // Inputs
@@ -57,8 +62,10 @@ lvlElev = input.int(35, "State: Watch ≥", group="State Levels")
 lvlHigh = input.int(60, "State: Break Pressure ≥", group="State Levels")
 lvlCrit = input.int(80, "State: Critical ≥", group="State Levels")
 
-showLevel   = input.bool(true, "Show Break-Level Line", group="Chart", tooltip="The decisive swing the prevailing trend must hold; colour = current risk band")
-showZone    = input.bool(true, "Show Risk Zone", group="Chart", tooltip="Shades the cushion between price and the break level; the fill intensifies as risk rises")
+showDiv     = input.bool(true, "Show Divergence Lines", group="RSI Pane", tooltip="Draw momentum-divergence lines on the RSI: price extends but RSI does not (uptrend: price higher high / RSI lower high — downtrend: price lower low / RSI higher low). The earliest structural crack, shown where it is actually readable — against the price above.")
+showEma     = input.bool(true, "Show Trend Context Line", group="Chart", tooltip="Thin EMA line on the price chart whose level + slope defines the prevailing trend that is at risk")
+showLevel   = input.bool(true, "Show Break-Level Line", group="Chart", tooltip="The decisive swing the prevailing trend must hold, drawn on the price chart; colour = current risk band")
+showZone    = input.bool(true, "Show Risk Zone", group="Chart", tooltip="Shades the cushion between price and the break level on the price chart; the fill intensifies as risk rises")
 showMarkers = input.bool(true, "Show Event Labels", group="Chart", tooltip="Compact structure-risk events: Watch, Break Pressure, Structure Broken, Pressure Faded. Context events, not trade signals.")
 markerCooldown = input.int(10, "Event Label Cooldown", minval=0, group="Chart", tooltip="Minimum bars between visible non-BOS event labels")
 requireContextFlip = input.bool(true, "Require Context Flip for Break", group="Chart", tooltip="Only calls Structure Broken when the swing break also reclaims the EMA context. Otherwise the event stays Break Pressure instead of calling the trend broken.")
@@ -150,16 +157,26 @@ var float lastPricePL = na
 var float prevPricePL = na
 var float lastRsiPL   = na
 var float prevRsiPL   = na
+// Bar index of each pivot (the swing occurred pivLen bars before confirmation) —
+// the endpoints the divergence line connects.
+var int lastPHbar = na
+var int prevPHbar = na
+var int lastPLbar = na
+var int prevPLbar = na
 if not na(ph)
     prevPricePH := lastPricePH
     lastPricePH := ph
     prevRsiPH   := lastRsiPH
     lastRsiPH   := rsi[pivLen]
+    prevPHbar   := lastPHbar
+    lastPHbar   := bar_index - pivLen
 if not na(pl)
     prevPricePL := lastPricePL
     lastPricePL := pl
     prevRsiPL   := lastRsiPL
     lastRsiPL   := rsi[pivLen]
+    prevPLbar   := lastPLbar
+    lastPLbar   := bar_index - pivLen
 
 // ============================================================================
 // Evidence sensors — each 0..1, selected symmetrically by the prevailing trend
@@ -280,18 +297,54 @@ riskCol = f_riskCol(risk)
 stateCol = state == "Structure Broken" or state == "Critical" ? cDarkRed : state == "Break Pressure" ? cRed : state == "Watch" ? cOrange : cNeutral
 
 // ============================================================================
-// Chart overlay — break-level line + risk zone (the primary read)
+// Price chart overlay — drawn via force_overlay (this indicator lives in its own
+// RSI pane). Break-level line, risk-shaded cushion zone, thin trend-context EMA.
 // ============================================================================
 
 hasCtx = trendDir != 0 and not na(breakLevel)
-// Plot the level whenever there is context so the zone fill always has an anchor;
-// the LINE's visibility is controlled by its colour (na = hidden) independent of the zone.
-pLevel = plot(hasCtx ? breakLevel : na, "Break Level", color=showLevel ? riskCol : na, linewidth=2, style=plot.style_linebr)
-pPrice = plot(hasCtx ? close : na, "", color=color.new(color.gray, 100), display=display.none, editable=false)
+
+// Thin EMA trend-context line — neutral colour (direction is read from slope + the
+// info text, never from a buy/sell-coloured line).
+plot(showEma ? ema : na, "Trend Context", color=color.new(cNeutral, 25), linewidth=1, force_overlay=true)
+
+// Break-level line + cushion zone. Plot the level whenever there is context so the
+// zone fill always has an anchor; the LINE's visibility is controlled by its colour
+// (na = hidden) independent of the zone.
+pLevel = plot(hasCtx ? breakLevel : na, "Break Level", color=showLevel ? riskCol : na, linewidth=2, style=plot.style_linebr, force_overlay=true)
+pPrice = plot(hasCtx ? close : na, "", color=color.new(color.gray, 100), display=display.none, editable=false, force_overlay=true)
 
 // Zone fill intensifies as risk rises; only shown once risk is at least Watch.
 zoneAlpha = f_clamp(92.0 - risk * 0.3, 70.0, 92.0)
 fill(pLevel, pPrice, color=showZone and hasCtx and risk >= lvlElev ? color.new(riskCol, zoneAlpha) : na, title="Risk Zone")
+
+// ============================================================================
+// RSI pane (this pane) — the RSI with momentum-divergence lines drawn on it. A
+// divergence is price-vs-momentum, so it is only readable where BOTH are visible:
+// the RSI here and the price above, sharing the same time axis. When price makes a
+// higher high while RSI makes a LOWER high (uptrend) — or price a lower low while
+// RSI a higher low (downtrend) — a line marks the failing momentum: the earliest
+// structural crack. Drawn in the warning (orange) risk band, never buy/sell.
+// ============================================================================
+
+plot(rsi, "RSI", color=color.new(#3179f5, 0), linewidth=1)
+hline(70, "RSI Overbought", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+hline(50, "RSI Midline", color=color.new(color.gray, 85), linestyle=hline.style_dotted)
+hline(30, "RSI Oversold", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+bearDivEvent = trendDir == 1 and not na(ph) and not na(prevPricePH) and not na(prevRsiPH) and lastPricePH > prevPricePH and lastRsiPH < prevRsiPH
+bullDivEvent = trendDir == -1 and not na(pl) and not na(prevPricePL) and not na(prevRsiPL) and lastPricePL < prevPricePL and lastRsiPL > prevRsiPL
+
+if showDiv and barstate.isconfirmed and bearDivEvent and not na(prevPHbar)
+    line.new(prevPHbar, prevRsiPH, lastPHbar, lastRsiPH, xloc=xloc.bar_index, color=cOrange, width=2)
+    label.new(lastPHbar, lastRsiPH, "Div", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_down,
+         color=color.new(cOrange, 8), textcolor=color.white, size=size.tiny,
+         tooltip="Bearish momentum divergence\nPrice: higher high — RSI: lower high (" + str.tostring(prevRsiPH, "#.0") + " → " + str.tostring(lastRsiPH, "#.0") + ")\nThe upthrust is weakening — the uptrend's structure is at risk.")
+
+if showDiv and barstate.isconfirmed and bullDivEvent and not na(prevPLbar)
+    line.new(prevPLbar, prevRsiPL, lastPLbar, lastRsiPL, xloc=xloc.bar_index, color=cOrange, width=2)
+    label.new(lastPLbar, lastRsiPL, "Div", xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_up,
+         color=color.new(cOrange, 8), textcolor=color.white, size=size.tiny,
+         tooltip="Bullish momentum divergence\nPrice: lower low — RSI: higher low (" + str.tostring(prevRsiPL, "#.0") + " → " + str.tostring(lastRsiPL, "#.0") + ")\nThe down-thrust is weakening — the downtrend's structure is at risk.")
 
 // ============================================================================
 // Event labels — words on the chart, placed on the side that is at risk
@@ -347,7 +400,7 @@ evStyle = isRelief ? label.style_label_up : label.style_label_down
 
 if showMarkers and barstate.isconfirmed and hasKeyEvent and eventReady
     label.new(bar_index, evAnchor, eventText,
-         xloc=xloc.bar_index, yloc=yloc.price, style=evStyle,
+         xloc=xloc.bar_index, yloc=yloc.price, style=evStyle, force_overlay=true,
          color=color.new(eventColor, 8), textcolor=color.white, size=size.tiny,
          tooltip=eventTip + "\nRisk: " + str.tostring(risk, "#.0") +
               "\nNear " + str.tostring(sNearH * 100, "#.0") +
@@ -385,7 +438,7 @@ if showLabel and barstate.islast
          "BOS is NOT mixed into the score — it is a separate confirmed event.\n" +
          "Bars show each sensor's current contribution; Reason names the dominant one."
     infoLbl := label.new(bar_index + labelOffset, close, txt,
-         xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left,
+         xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, force_overlay=true,
          color=color.new(color.white, 8), textcolor=stateCol,
          size=f_lblSize(labelSize), textalign=text.align_left, tooltip=tip)
 else if not showLabel and barstate.islast
@@ -405,7 +458,10 @@ if barstate.isconfirmed and state != state[1]
 // Alerts
 // ============================================================================
 
-alertcondition(ta.crossover(risk, lvlHigh), "SBR Break Pressure", "Structure Break Pressure crossed into Break Pressure")
-alertcondition(ta.crossover(risk, lvlCrit), "SBR Critical", "Structure break risk crossed into Critical")
-alertcondition(bosNow and trendDir == 1, "SBR Top Break", "Confirmed break below swing low in an uptrend")
-alertcondition(bosNow and trendDir == -1, "SBR Bottom Break", "Confirmed break above swing high in a downtrend")
+bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="Alerts")
+bool alertOk = not alertsOnBarClose or barstate.isconfirmed
+
+alertcondition(alertOk and (ta.crossover(risk, lvlHigh)), "SBR Break Pressure", "SBR · BREAK PRESSURE HIGH · {{ticker}} {{interval}}")
+alertcondition(alertOk and (ta.crossover(risk, lvlCrit)), "SBR Critical", "SBR · RISK CRITICAL · {{ticker}} {{interval}}")
+alertcondition(alertOk and (bosNow and trendDir == 1), "SBR Top Break", "SBR · TOP BREAK · {{ticker}} {{interval}}")
+alertcondition(alertOk and (bosNow and trendDir == -1), "SBR Bottom Break", "SBR · BOTTOM BREAK · {{ticker}} {{interval}}")

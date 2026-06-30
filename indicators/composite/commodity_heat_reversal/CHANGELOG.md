@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.5 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.4.4 — 2026-06-30
+- Alerts: messages standardized to `<KÜRZEL> · EVENT · {{ticker}} {{interval}}` for a uniform format across the library (titles unchanged)
+
 ## v1.4.3 — 2026-06-11
 - Change weak countertrend reversal display default from Mark to Hide for a cleaner chart
 

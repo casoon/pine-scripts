@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.1.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v3.1.1 — 2026-06-29
+- Alerts: messages standardized to `TKZ · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v3.1.0 — 2026-06-11
 - HTF Stack panel and Metrics panel restyled to the light-theme table convention (readable on both TradingView themes)
 - Metrics panel "Active" zone count now counts only active zones (previously showed the total number of zones ever created)

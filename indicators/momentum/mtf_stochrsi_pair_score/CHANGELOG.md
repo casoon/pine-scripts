@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.8.1 — 2026-06-29
+- Alerts: messages standardized to `MSRP · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.8.0 — 2026-06-27
 - Stripped back to the core role: a multi-timeframe StochRSI pair score. The total score is now driven only by the StochRSI pair across the configured timeframes.
 - Removed the Squeeze Momentum subsystem (inputs, BB/KC compression state, momentum histogram, state dot, compress-phase background) — it was a visual-only bolt-on detached from the score

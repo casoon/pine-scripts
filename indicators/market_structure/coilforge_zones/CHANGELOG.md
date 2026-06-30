@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.4 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.2.3 — 2026-06-29
+- Alerts: messages standardized to `CFZ · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.2.2 — 2026-06-27
 - Zone bias direction now derives from price structure (touch pressure + EMA stack) instead of DI+/DI− comparison — ADX/DI is demoted to a strength weight that only tightens the pressure needed, never the direction decider
 - Breakout direction is set purely by price closing beyond the zone edge — removed the `adx > 20 or DI` hard direction veto that could suppress valid breakouts

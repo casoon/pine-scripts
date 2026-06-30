@@ -1,3 +1,16 @@
+# Changelog
+
+## v1.1.1 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.1.0 — 2026-06-30
+- Color rework: green/red is now reserved for trend **direction** only. Trend strength (State, zones, hlines) uses a neutral cool ramp — Strong/Healthy in blue, Transition in amber, Weak/Dead in grey — so color no longer carries two meanings at once
+- Info-label text is now grey (amber only at high Transition Risk), no longer tinted by state color
+- Recovery (R) marker recolored from green to blue (it grades strength returning, not direction)
+
+## v1.0.1 — 2026-06-29
+- Alerts: messages standardized to `TPS · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.0 — 2026-06-28
 - Initial release — 4-sensor trend-persistence oscillator (Regression R², Kaufman Efficiency Ratio, ADX strength+slope, Fractal Dimension) on a 0–100 axis
 - State read (Strong / Healthy / Transition / Weak / Dead) with one-band hysteresis

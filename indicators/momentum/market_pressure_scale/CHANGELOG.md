@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.4 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.2.3 — 2026-06-29
+- Alerts: messages standardized to `MPS · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.2.2 — 2026-06-27
 - Fix: Setup Pressure now rises when volume is drying up (inverted volume term), matching genuine squeeze logic — previously high volume wrongly increased Setup Pressure and blurred the separation from Impulse Pressure
 

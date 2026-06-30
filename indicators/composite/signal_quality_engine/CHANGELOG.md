@@ -1,3 +1,11 @@
+# Changelog
+
+## v3.2.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v3.2.1 — 2026-06-29
+- Alerts: messages standardized to `SQE · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v3.2 — 2026-06-28
 - **Market profiles now actually differentiate asset classes.** Instead of nudging only two near-identical band constants, each profile sets four levers with a meaningful spread: band width (`bbMult` 1.9–2.5), edge proximity, and — the lever that really separates assets for a fade tool — regime tolerance (`adxMax` 20–28, `slopeMax` 0.35–0.55). Commodities (esp. Natural Gas) mean-revert through choppy trends, so they fade readily and use wider bands; Stocks/Indices trend persistently, so they get a stricter range filter and tighter bands.
 - **Trigger re-checks structure** — a fade now also requires price still in the lower/upper third of the range (`rangePos < 0.35` / `> 0.65`), so a stale armed extreme can't fire once price has left the edge.

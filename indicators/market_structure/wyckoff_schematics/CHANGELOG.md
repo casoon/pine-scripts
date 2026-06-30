@@ -1,5 +1,11 @@
 # Changelog
 
+## v4.8.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v4.8.1 — 2026-06-29
+- Alerts: messages standardized to `WYS · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v4.8.0 — 2026-06-28
 - Stricter breakout release — Markup/Markdown now require Phase D **plus** a confirmed internal structure (Spring/UTAD test, in-range SOS/SOW, or pivot-confirmed LPS/LPSY) **and** a minimum setup score, instead of any Phase-D state. The floor is a new input, **Min Breakout Score (Markup/Markdown)** (default 50)
 - Sequence validation in the setup score: Test is only credited when it follows its Spring/UTAD, and in-range SOS/SOW only when it follows the Test (Schematic #1); a clean Spring → Test → SOS order earns an extra structure bonus

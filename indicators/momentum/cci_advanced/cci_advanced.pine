@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // CCI Advanced [WavesUnchained]
-// Version: 1.0
+// Version: 1.2.0
 // Author: WavesUnchained
-// Build: 2026-06-18 00:00:00
+// Build: 2026-06-30 13:00:00
 // ============================================================================
 // CCI with pluggable smoothing, adaptive scaling, and rich visualization.
 // Designed as a standalone oscillator and as context layer for hybrid setups.
@@ -17,6 +17,9 @@
 //   ✓ Gradient shadow fills between CCI and zero
 //   ✓ OB/OS zone fills
 //   ✓ Extreme zone and zero-line cross signal markers
+//   ✓ Stall/absorption context: marks crosses contradicted by flat price as weak
+//   ✓ Trend context line (slow CCI): support the fast line rests on; counter-trend crosses marked weak
+//   ✓ Trend↔CCI divergence wedge: lights up when fast and trend move opposite (supported dip vs weak bounce)
 //   ✓ Alert conditions
 //
 // ============================================================================
@@ -59,8 +62,12 @@ lookbackExtreme = input.int(5,     "OB/OS Lookback (bars)",                 minv
 showZeroCross   = input.bool(true, "Show Zero-Line Cross Markers",          group=g_filter)
 
 g_col = "6 · Colors"
-colBull = input.color(#00bcd4,                "Bull",         group=g_col)
-colBear = input.color(#f06292,                "Bear",         group=g_col)
+colBull  = input.color(#00bcd4,               "Bull (CCI level)",  group=g_col,
+     tooltip="Oscillator-level / mean-reversion gradient on the fast CCI line.")
+colBear  = input.color(#f06292,               "Bear (CCI level)",  group=g_col)
+colLong  = input.color(#00c853,               "Long (trend / momentum)",  group=g_col,
+     tooltip="Directional long/short coloring for the trend context line and the histogram.")
+colShort = input.color(#d50000,               "Short (trend / momentum)", group=g_col)
 colZoneOB = input.color(color.new(#f06292, 90), "OB Zone Fill", group=g_col)
 colZoneOS = input.color(color.new(#00bcd4, 90), "OS Zone Fill", group=g_col)
 
@@ -70,6 +77,25 @@ showFill     = input.bool(true,  "Fill CCI / Signal",         group=g_disp)
 showZoneFill = input.bool(true,  "Fill OB / OS Zones",        group=g_disp)
 showHist     = input.bool(true,  "Show Histogram",            group=g_disp)
 showSignals  = input.bool(true,  "Show Signal Markers",       group=g_disp)
+
+g_stall = "8 · Stall / Absorption"
+useStall     = input.bool(true, "Detect Stall (CCI moves, price holds)", group=g_stall,
+     tooltip="Flags bars where the CCI cools/heats sharply but price barely moves — momentum decoupled from price (absorption). Annotates crosses and fades the histogram; never changes the cross logic itself.")
+stallLen     = input.int(5,     "Stall Lookback (bars)",   minval=1, group=g_stall)
+stallFlatATR = input.float(0.5, "Max Price Move (ATR)",    minval=0.0, step=0.1, group=g_stall,
+     tooltip="Price counts as 'holding' if it moved less than this many ATR over the lookback.")
+stallCciMin  = input.float(40,  "Min CCI Move",            minval=0,   step=5,   group=g_stall,
+     tooltip="The CCI line must cool/heat by at least this much over the lookback to count as a stall.")
+
+g_ctx = "9 · Trend Context"
+useCtx = input.bool(true, "Show Trend Context Line", group=g_ctx,
+     tooltip="A slow CCI (longer length, same smoothing) plotted faint in the panel — the trend the fast CCI rests on. While it holds its side of zero, an opposite fast cross is treated as counter-trend (weak). Single-timeframe, no MTF.")
+ctxLen = input.int(100, "Trend CCI Length", minval=10, group=g_ctx)
+showDiv = input.bool(true, "Highlight Trend ↔ CCI Divergence", group=g_ctx,
+     tooltip="Fills the wedge between the fast CCI and the trend context line when they move in opposite directions: fast cooling into a rising trend (supported dip, long color) or fast heating into a falling trend (unsupported bounce, short color).")
+divLen  = input.int(4,    "Divergence Slope Lookback", minval=1, group=g_ctx)
+divMin  = input.float(25, "Min Fast Slope",            minval=0, step=5, group=g_ctx,
+     tooltip="The fast CCI must move at least this much over the lookback to count — noise guard for low timeframes. The slow line is already smooth, so its direction (sign) alone is used.")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SMOOTHING FUNCTIONS
@@ -143,6 +169,10 @@ cciLine = f_smooth(cciRaw, avgLen, smoothType)
 signal  = f_smooth(cciLine, sigLen, smoothType)
 hist    = cciLine - signal
 
+// Slow CCI = the trend the fast line rests on (same kernel, longer length).
+ctxRaw  = ta.cci(src, ctxLen)
+ctxLine = f_smooth(ctxRaw, avgLen, smoothType)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SCALE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,6 +189,7 @@ f_scale(series float x, float sharedMax) =>
 
 cciDisp = f_scale(cciLine, scaleAbs)
 sigDisp = f_scale(signal,  scaleAbs)
+ctxDisp = f_scale(ctxLine, scaleAbs)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SIGNALS (on raw / unscaled values)
@@ -174,6 +205,39 @@ bearExtreme  = bearCross and (not useExtremeOnly or wasOverbought)
 bullZeroCross = ta.crossover(cciLine,  0.0)
 bearZeroCross = ta.crossunder(cciLine, 0.0)
 
+// Stall: CCI moves sharply over the lookback while price barely follows (momentum
+// decoupled from price). Symmetric — direction comes from the situation, not a side.
+float atrRef   = ta.atr(14)
+float cciChg   = cciLine - cciLine[stallLen]
+float priceChg = atrRef != 0.0 ? (close - close[stallLen]) / atrRef : 0.0
+bool  flatPx   = math.abs(priceChg) < stallFlatATR
+bool  stallBull = useStall and cciChg < -stallCciMin and flatPx   // CCI cools, price holds → absorption
+bool  stallBear = useStall and cciChg >  stallCciMin and flatPx   // CCI heats, price holds → distribution
+bool  stallNow  = stallBull or stallBear
+
+// Trend context: the slow CCI is the side the fast line rests on. An extreme cross
+// against the context's side of zero is counter-trend.
+bool ctxBull = ctxLine > 0.0
+bool ctxBear = ctxLine < 0.0
+bool bearCounter = useCtx and bearExtreme and ctxBull
+bool bullCounter = useCtx and bullExtreme and ctxBear
+
+// Trend↔CCI divergence: fast and slow travel in opposite directions. The fast line
+// needs a minimum slope (noise guard on low TFs); the slow line is smooth, so its
+// sign alone is stable. Directional — flavor tells supported dip from weak bounce.
+float fastDir = cciLine - cciLine[divLen]
+float slowDir = ctxLine - ctxLine[divLen]
+bool  divBull = useCtx and showDiv and fastDir < -divMin and slowDir > 0.0   // fast cools into a rising trend → supported dip
+bool  divBear = useCtx and showDiv and fastDir >  divMin and slowDir < 0.0   // fast heats into a falling trend → unsupported bounce
+
+// Cross conviction: a cross is "weak" when its move is contradicted by a flat price
+// (absorbed) or runs against the trend context (counter). The cross still fires —
+// only its rendering changes.
+bool bearStrong = bearExtreme and not (stallBull or bearCounter)
+bool bearWeak   = bearExtreme and (stallBull or bearCounter)
+bool bullStrong = bullExtreme and not (stallBear or bullCounter)
+bool bullWeak   = bullExtreme and (stallBear or bullCounter)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // COLORS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,10 +245,14 @@ bearZeroCross = ta.crossunder(cciLine, 0.0)
 color lineCol  = color.from_gradient(cciDisp, os1, ob1, colBull, colBear)
 color lineCol2 = color.from_gradient(sigDisp, os1, ob1, color.new(colBull, 40), color.new(colBear, 40))
 
+// Trend context line = long/short regime color (green above zero, red below).
+color ctxCol = ctxLine >= 0.0 ? color.new(colLong, 55) : color.new(colShort, 55)
+
+// Histogram = long/short momentum; rising/falling drives full vs faded opacity.
 histRising = hist >= hist[1]
 histColor  = hist >= 0.0
-     ? (histRising     ? colBull                     : color.new(colBull, 55))
-     : (not histRising ? colBear                     : color.new(colBear, 55))
+     ? (histRising     ? colLong                     : color.new(colLong, 55))
+     : (not histRising ? colShort                    : color.new(colShort, 55))
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HLINES + ZONE FILLS
@@ -203,11 +271,17 @@ fill(hOS2, hOS1, color=showZoneFill ? colZoneOS : na, title="OS Zone")
 // PLOTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-plot(showHist ? hist : na, "Histogram", style=plot.style_columns, color=histColor)
+color histColorFinal = stallNow ? color.new(histColor, 78) : histColor
+plot(showHist ? hist : na, "Histogram", style=plot.style_columns, color=histColorFinal)
 
 pZero = plot(0.0, display=display.none)
+pCtx  = plot(useCtx ? ctxDisp : na, "Trend Context", color=ctxCol, linewidth=2)
 pSig  = plot(sigDisp,  "CCI Signal", color=lineCol2, linewidth=1)
 pCCI  = plot(cciDisp,  "CCI",        color=lineCol,  linewidth=2)
+
+// Divergence wedge: lights up only when fast CCI and trend context disagree.
+fill(pCCI, pCtx, color=divBull ? color.new(colLong, 80) : divBear ? color.new(colShort, 80) : na,
+     title="Trend Divergence")
 
 fill(pCCI, pZero, ob1,  0.0, color.new(colBear, 78), color.new(colBear, 100),
      title="Bear Shadow", display=showShadow ? display.all : display.none)
@@ -222,13 +296,21 @@ fill(pCCI, pSig,
 // SIGNAL MARKERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-plotshape(showSignals and bullExtreme, "Bull Extreme",
+plotshape(showSignals and bullStrong, "Bull Extreme",
      style=shape.triangleup, location=location.bottom,
-     color=colBull, size=size.small, text="CCI↑", textcolor=colBull)
+     color=colBull, size=size.small)
 
-plotshape(showSignals and bearExtreme, "Bear Extreme",
+plotshape(showSignals and bullWeak, "Bull Extreme (absorbed)",
+     style=shape.triangleup, location=location.bottom,
+     color=color.new(colBull, 65), size=size.tiny)
+
+plotshape(showSignals and bearStrong, "Bear Extreme",
      style=shape.triangledown, location=location.top,
-     color=colBear, size=size.small, text="CCI↓", textcolor=colBear)
+     color=colBear, size=size.small)
+
+plotshape(showSignals and bearWeak, "Bear Extreme (absorbed)",
+     style=shape.triangledown, location=location.top,
+     color=color.new(colBear, 65), size=size.tiny)
 
 plotshape(showSignals and showZeroCross and bullZeroCross ? cciDisp : na, "Bull Zero",
      style=shape.circle, location=location.absolute,
@@ -242,7 +324,10 @@ plotshape(showSignals and showZeroCross and bearZeroCross ? cciDisp : na, "Bear 
 // ALERTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-alertcondition(bullExtreme,   "CCI Bull Signal",      "CCI bullish cross from oversold zone")
-alertcondition(bearExtreme,   "CCI Bear Signal",      "CCI bearish cross from overbought zone")
-alertcondition(bullZeroCross, "CCI Cross Above Zero", "CCI crossed above zero")
-alertcondition(bearZeroCross, "CCI Cross Below Zero", "CCI crossed below zero")
+bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="Alerts")
+bool alertOk = not alertsOnBarClose or barstate.isconfirmed
+
+alertcondition(alertOk and bullExtreme,   "CCI Bull Signal",      "CCIA · BULL CROSS OVERSOLD · {{ticker}} {{interval}}")
+alertcondition(alertOk and bearExtreme,   "CCI Bear Signal",      "CCIA · BEAR CROSS OVERBOUGHT · {{ticker}} {{interval}}")
+alertcondition(alertOk and bullZeroCross, "CCI Cross Above Zero", "CCIA · CROSS ABOVE ZERO · {{ticker}} {{interval}}")
+alertcondition(alertOk and bearZeroCross, "CCI Cross Below Zero", "CCIA · CROSS BELOW ZERO · {{ticker}} {{interval}}")

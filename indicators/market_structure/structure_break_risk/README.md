@@ -1,8 +1,13 @@
 # Structure Break Risk
 
-A **chart overlay** that answers one question: *how close is the prevailing trend's structure to breaking — and against which level?* It is the companion to [Trend Persistence Score](../../trend_strength/trend_persistence_score/) — where TPS measures how *clean* a trend is, Structure Break Risk (SBR) measures how *close it is to breaking*.
+An indicator that answers one question: *how close is the prevailing trend's structure to breaking — and against which level?* It is the companion to [Trend Persistence Score](../../trend_strength/trend_persistence_score/) — where TPS measures how *clean* a trend is, Structure Break Risk (SBR) measures how *close it is to breaking*.
 
-The primary read lives **on the price chart**: the decisive **break-level line** the trend must hold, a shaded **risk zone** for the cushion between price and that level, and word **event labels** (Watch / Break Pressure / Structure Broken / Pressure Faded). The risk *magnitude* — the same 0–100 composite — is reported in a single compact, mobile-friendly **info label** rather than a separate oscillator pane (a single Pine indicator cannot host both a price overlay and a sub-pane). Colour encodes the **risk band** (neutral → orange → red → dark red), never the trade direction, so it never reads as buy/sell; direction is stated in words.
+It lives in a dedicated **RSI pane** and draws onto the **price chart** above it (via `force_overlay`), because the read needs both:
+
+- **RSI pane** — the RSI with **momentum-divergence lines** drawn on it. When price makes a higher high while RSI makes a *lower* high (uptrend), or price a lower low while RSI a *higher* low (downtrend), a line marks the failing momentum. Read against the price above — sharing the same time axis — the divergence is unmistakable: the earliest structural crack. A divergence is *price vs. momentum* and is only readable where both are visible, which is why it lives here rather than as an abstract line on price. A compact **"Div"** label carries the RSI values in its tooltip.
+- **Price chart** — the decisive **break-level line** the trend must hold, a shaded **risk zone** for the cushion between price and that level, a thin **Trend Context** EMA line, word **event labels** (Watch / Break Pressure / Structure Broken / Pressure Faded) and the info label.
+
+The risk *magnitude* — the same 0–100 composite — is reported in a single compact, mobile-friendly **info label**. Colour encodes the **risk band** (neutral → orange → red → dark red), never the trade direction, so it never reads as buy/sell; direction is stated in words.
 
 SBR is **symmetric by design**: in an uptrend it scores **top-break** risk, in a downtrend **bottom-break** risk. The asymmetry comes entirely from the situation (which trend is active), never from a hardcoded long/short. The trend context **latches** — it holds the last clear direction through transition zones, so risk can build *before* the trend formally flips (exactly where the break is forming). Until a first direction is established the gauge reads `No trend` and sits at zero.
 
@@ -14,8 +19,9 @@ Pivots are used as **swing-level references only** (Location); the *break event*
 
 - Five evidence sensors across the roles, weighted into one score — never an AND-chain
 - Symmetric top-/bottom-break scoring driven by a **latching** prevailing-trend context
-- **Break-level line** drawn in price — the decisive swing the trend must hold, coloured by the current risk band
-- **Risk zone** shading the cushion between price and the break level; the fill intensifies as risk rises (shown from Watch upward)
+- **RSI pane** with 70 / 50 / 30 reference levels and **momentum-divergence lines** drawn on the RSI (price extends but RSI does not), with a compact "Div" label and RSI values in the tooltip — divergence shown where it is actually readable
+- **Break-level line** drawn on price (the decisive swing the trend must hold, coloured by the current risk band) + a **risk zone** shading the cushion between price and that level, intensifying as risk rises (shown from Watch upward)
+- Thin **Trend Context line** (EMA) on price showing which trend is at risk — colour stays risk-coded, not buy/sell
 - Word **event labels** placed on the side at risk — Watch / Break Pressure / Structure Broken / Pressure Faded — with cooldown; confirmed breaks require an EMA context flip
 - **State** read — No trend / Quiet / Watch / Break Pressure / Critical / Structure Broken — plus a plain-language **Reason** naming the dominant driver
 - Compact, mobile-friendly **info label** (text, not a table; sized Small/Normal/Large): score, state, direction, break level, distance-in-ATR, reason and a **mini-bar per sensor** (BOS shown separately as a confirmed event, not mixed into the score)

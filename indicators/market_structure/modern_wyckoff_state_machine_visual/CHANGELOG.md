@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.3.1 — 2026-06-29
+- Alerts: messages standardized to `MWSM · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.3 — 2026-06-28
 - Reset stuck Accumulation/Distribution back to Neutral when the trading-range context is lost or the phase dwells past a configurable bar cap, so the state machine no longer freezes in Phase B indefinitely.
 - Refresh the locked range while still building cause (Phase A/B) so the phase zone tracks current structure; it freezes once a Spring/UTAD advances to Phase C.

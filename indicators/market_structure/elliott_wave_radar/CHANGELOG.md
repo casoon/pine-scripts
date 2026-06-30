@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v1.2.1 — 2026-06-29
+- Alerts: messages standardized to `EWR · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v1.2 — 2026-06-11
 - Fix: wave points now anchor to the TRUE extreme since the previous pivot. Sharp counter-swings that never confirm as pivots (shorter than Pivot Length on either side) were invisible to the engine, so e.g. Wave 2 could land on a later, lower high instead of the strongest pullback. Each accepted pivot now scans the actual high/low of the gap and uses that price/bar.
 

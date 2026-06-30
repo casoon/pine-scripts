@@ -1,3 +1,11 @@
+# Changelog
+
+## v2.6.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v2.6.1 — 2026-06-30
+- Alerts: messages standardized to `WTOH · EVENT · {{ticker}} {{interval}}` for a uniform format across the library (titles unchanged)
+
 ## v2.6 — 2026-06-19
 - **Rich WT oscillator visualization** — gradient line color on WT1 and WT2 (teal at OS → red at OB, instead of flat cyan/gray); gradient shadow fills between WT1 and the zero line (bull tint below, bear tint above); momentum fill between WT1 and WT2 (bull/bear tint based on which line leads); OB/OS zone fills at ±wtExtreme (55 default) to ±80 (hard clamp). All fills are highly transparent so the confluence histogram beneath remains legible.
 - **WT cross dots** — small circles on the WT1 line at every bull/bear cross. Entry signals continue to show as the larger triangles; dots mark all other crosses (zone-filtered, in cooldown, etc.) so the oscillator cadence is visible at a glance. Toggle via "Show WT Cross Dots".

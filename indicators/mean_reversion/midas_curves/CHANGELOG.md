@@ -1,3 +1,11 @@
+# Changelog
+
+## v2.3.2 — 2026-06-30
+- Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+
+## v2.3.1 — 2026-06-29
+- Alerts: messages standardized to `MIDAS · EVENT · {{ticker}} {{interval}}` so they identify symbol/timeframe on multi-chart setups (titles unchanged)
+
 ## v2.3 — 2026-06-28
 - Dashboard rebuilt as **Element | Value | Read** — every row carries a plain-language interpretation, plus a synthesised TF-aware **Read** headline (e.g. "Overextended from value → mean-reversion to MIDAS likely")
 - Stretch thresholds and the Read conclusion are **timeframe-aware**: intraday uses a wider σ bar (noisier) and softer reversion language than Swing/Position

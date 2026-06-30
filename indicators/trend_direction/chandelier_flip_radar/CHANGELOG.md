@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.6.1 — 2026-06-30
+- Alerts: messages standardized to `<KÜRZEL> · EVENT · {{ticker}} {{interval}}` for a uniform format across the library (titles unchanged)
+
 ## v1.6 — 2026-06-28
 - Ratchet fix: the active stop now holds until an accepted flip and is no longer loosened by a body-rejected close past the trigger (ratchet keyed to the accepted direction, not raw price)
 - New **Conviction** adaptive mode: trend-aware multiplier (ATR rank + EMA-separation trend force + chop penalty) — tightens in strong trends, widens in chop
