@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.5 — 2026-06-30
+- Alerts: renamed duplicate "Signal: Breakout Watch" (sigIgnit) to "Signal: Ignition" / `MPS · IGNITION` to distinguish it from the state-level "Breakout Watch" alert
+
 ## v1.2.4 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

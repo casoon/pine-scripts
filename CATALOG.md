@@ -46,6 +46,7 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [atr_advanced](indicators/volatility/atr_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ★☆☆☆☆ | ATR in 4 Anzeigemodi (Raw, ATR%, Normalized, Percentile Rank), pluggables Smoothing, Gradient, Expansion/Contraction-Signale |
+| [williams_vix_fix_advanced](indicators/volatility/williams_vix_fix_advanced/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Synthetischer Fear-Gauge (Williams VIX Fix): Bull-WVF + Bear-WVF-Spiegel, StdDev/Percentile-Bänder, Stall/Absorption, Slow-WVF-Kontext, Divergenz-Wedge, Histogram, Gradient-Coloring; ungetestet |
 | [compression_fractal_release](indicators/volatility/compression_fractal_release/) | 1.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Coil→Release-Detektor: Symbol-Entropie-Komplexität + Box-Counting-FDI + Efficiency erkennen eine komprimierte Korrektur im HTF-Trend; Band-Break = einziger Trigger, Setup-Score multiplikativ (Coil-Ceiling × Release-Dynamik → hoher Coil allein feuert nicht), Chop-Veto, Per-Direction-Cooldown; HTF-Regime klassifiziert Release (Continuation) vs Base Break (Counter-Trend); Watch→Setup→Trigger-Staging, Debug-Log; ungetestet |
 
 ## Momentum & Oscillators

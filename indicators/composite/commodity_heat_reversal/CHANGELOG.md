@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.4.6 — 2026-06-30
+- Alerts: fixed alert messages to ALL CAPS format for consistency with library canon (`CHR · LONG`, `CHR · SHORT`, `CHR · COUNTER-TREND LONG/SHORT`, `CHR · PULLBACK CONTINUATION LONG/SHORT`, `CHR · REVERSAL SIGNAL`, `CHR · SIGNAL`)
+
 ## v1.4.5 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

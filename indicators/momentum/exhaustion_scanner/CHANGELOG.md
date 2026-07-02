@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.1.3 — 2026-06-30
+- Alerts: fixed alert messages to ALL CAPS format (`EXS · TOP RISK`, `EXS · BOTTOM RISK`, `EXS · REVERSAL RISK`)
+
 ## v2.1.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

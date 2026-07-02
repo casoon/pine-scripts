@@ -37,6 +37,7 @@ Message-Kanon: `<Kürzel> · <EVENT> · {{ticker}} {{interval}}` (optionaler Sta
 | mtf_stochrsi_pair_score | MSRP |
 | oscillator_topology | OTOP |
 | wavetrend_advanced_smoothing | WTAS |
+| williams_vix_fix_advanced | WVFA |
 | candle_pressure_index | CPI |
 | commodity_flow_trend | CFT |
 | cvd_bias | CVDB |
