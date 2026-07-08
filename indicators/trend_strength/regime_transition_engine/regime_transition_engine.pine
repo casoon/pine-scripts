@@ -1,0 +1,386 @@
+//@version=6
+// ============================================================================
+// Regime Transition Engine [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-07-04 00:00:00
+// ============================================================================
+// Classifies the market into one of seven regime states (Noise, Compression,
+// Expansion, Trend Up, Trend Down, Exhaustion, Reversion) and derives a
+// directional transition-pressure oscillator toward the next expected state.
+//
+// Features:
+//   ✓ Seven-state regime classifier with dwell/hysteresis debouncing
+//   ✓ Directional transition pressure oscillator
+//   ✓ State-change events (Compression→Expansion, Expansion→Trend, Trend→Exhaustion, Exhaustion→Reversion)
+//   ✓ Optional internal role-score plots for diagnostics
+//   ✓ Dashboard with state, next-bias, transition %, state age, vol/efficiency/VR readouts
+//
+// ============================================================================
+
+indicator("Regime Transition Engine [WavesUnchained]", "RTE [WU]", overlay=false, max_labels_count=100)
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+src = input.source(close, "Source")
+
+lenFast = input.int(20, "Fast Length", minval=8)
+lenMid  = input.int(50, "Medium Length", minval=20)
+lenSlow = input.int(100, "Slow Length", minval=40)
+
+atrLen  = input.int(14, "ATR Length", minval=5)
+pctLen  = input.int(120, "Volatility Percentile Length", minval=40)
+
+dwellBars = input.int(4, "Minimum State Dwell Bars", minval=1)
+hysteresis = input.float(0.08, "State Hysteresis", step=0.01)
+
+showStateTrack = input.bool(true, "Show State Track")
+showScores = input.bool(false, "Show Internal Scores")
+showDashboard = input.bool(true, "Show Dashboard")
+
+g_alert = "Alerts"
+alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group=g_alert)
+
+//------------------------------------------------------------------------------
+// Helpers
+//------------------------------------------------------------------------------
+f_clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_safeDiv(a, b, fallback) =>
+    b != 0.0 and not na(b) ? a / b : fallback
+
+f_score01(x) =>
+    f_clamp(x, 0.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Core Features
+//------------------------------------------------------------------------------
+ret = math.log(src / src[1])
+atr = ta.atr(atrLen)
+
+atrLow = ta.percentile_nearest_rank(atr, pctLen, 20)
+atrHigh = ta.percentile_nearest_rank(atr, pctLen, 80)
+volPct = f_safeDiv(atr - atrLow, atrHigh - atrLow, 0.5)
+volPct := f_clamp(volPct, 0.0, 1.0)
+
+volSlope = ta.ema(volPct - volPct[1], 5)
+
+direct = math.abs(src - src[lenMid])
+path = ta.sma(math.abs(src - src[1]), lenMid) * lenMid
+efficiency = f_safeDiv(direct, path, 0.0)
+
+hh = ta.highest(high, lenMid)
+ll = ta.lowest(low, lenMid)
+chopRange = hh - ll
+chop = chopRange != 0.0 ? 100.0 * math.log10((ta.sma(ta.tr(true), lenMid) * lenMid) / chopRange) / math.log10(lenMid) : 50.0
+chopScore = f_clamp((chop - 45.0) / 25.0, 0.0, 1.0)
+
+basis = ta.linreg(src, lenMid, 0)
+basisPrev = ta.linreg(src, lenMid, 1)
+slope = atr != 0.0 ? (basis - basisPrev) / atr : 0.0
+
+trendDir = slope > 0 ? 1.0 : slope < 0 ? -1.0 : 0.0
+trendPower = f_clamp(math.abs(slope) * 1.8 + efficiency * 1.2, 0.0, 1.0)
+
+retMean = ta.sma(ret, lenMid)
+retSd = ta.stdev(ret, lenMid)
+retZ = f_safeDiv(ret - retMean, retSd, 0.0)
+
+closeZ = f_safeDiv(src - ta.sma(src, lenMid), ta.stdev(src, lenMid), 0.0)
+extension = f_clamp(math.abs(closeZ) / 2.7, 0.0, 1.0)
+
+vrK = 5
+rk = math.log(src / src[vrK])
+var1 = ta.variance(ret, lenMid)
+vark = ta.variance(rk, lenMid)
+vr = f_safeDiv(vark, vrK * var1, 1.0)
+
+vrMomentum = f_clamp((vr - 1.0) / 0.45, 0.0, 1.0)
+vrReversion = f_clamp((1.0 - vr) / 0.35, 0.0, 1.0)
+
+ac = ta.correlation(ret, ret[1], lenMid)
+acMomentum = f_clamp(nz(ac) * 3.0, 0.0, 1.0)
+acReversion = f_clamp(-nz(ac) * 3.0, 0.0, 1.0)
+
+//------------------------------------------------------------------------------
+// State Scores
+//------------------------------------------------------------------------------
+compressionScore =
+     f_score01(1.0 - volPct) * 0.45 +
+     chopScore * 0.35 +
+     f_score01(1.0 - efficiency * 3.0) * 0.20
+
+expansionScore =
+     volPct * 0.40 +
+     f_score01(volSlope * 8.0) * 0.30 +
+     f_clamp(math.abs(retZ) / 2.5, 0.0, 1.0) * 0.30
+
+trendUpScore =
+     trendDir > 0 ? trendPower * 0.45 + vrMomentum * 0.25 + acMomentum * 0.15 + f_score01(1.0 - chopScore) * 0.15 : 0.0
+
+trendDownScore =
+     trendDir < 0 ? trendPower * 0.45 + vrMomentum * 0.25 + acMomentum * 0.15 + f_score01(1.0 - chopScore) * 0.15 : 0.0
+
+exhaustionScore =
+     extension * 0.35 +
+     f_score01(1.0 - efficiency * 2.5) * 0.25 +
+     f_score01(-volSlope * 6.0) * 0.20 +
+     vrReversion * 0.20
+
+reversionScore =
+     vrReversion * 0.35 +
+     acReversion * 0.25 +
+     chopScore * 0.20 +
+     extension * 0.20
+
+noiseScore =
+     chopScore * 0.35 +
+     f_score01(1.0 - math.abs(vr - 1.0) * 2.0) * 0.30 +
+     f_score01(1.0 - efficiency * 3.0) * 0.25 +
+     f_score01(1.0 - volPct) * 0.10
+
+//------------------------------------------------------------------------------
+// Dominant State
+// 0 Noise, 1 Compression, 2 Expansion, 3 Trend Up, 4 Trend Down, 5 Exhaustion, 6 Reversion
+//------------------------------------------------------------------------------
+bestScore = noiseScore
+bestState = 0
+
+if compressionScore > bestScore
+    bestScore := compressionScore
+    bestState := 1
+
+if expansionScore > bestScore
+    bestScore := expansionScore
+    bestState := 2
+
+if trendUpScore > bestScore
+    bestScore := trendUpScore
+    bestState := 3
+
+if trendDownScore > bestScore
+    bestScore := trendDownScore
+    bestState := 4
+
+if exhaustionScore > bestScore
+    bestScore := exhaustionScore
+    bestState := 5
+
+if reversionScore > bestScore
+    bestScore := reversionScore
+    bestState := 6
+
+var int state = 0
+var int stateAge = 0
+var float activeScore = na
+
+stateAge += 1
+
+if state == 0
+    activeScore := noiseScore
+else if state == 1
+    activeScore := compressionScore
+else if state == 2
+    activeScore := expansionScore
+else if state == 3
+    activeScore := trendUpScore
+else if state == 4
+    activeScore := trendDownScore
+else if state == 5
+    activeScore := exhaustionScore
+else
+    activeScore := reversionScore
+
+canSwitch = stateAge >= dwellBars and bestScore > activeScore + hysteresis
+
+if canSwitch
+    state := bestState
+    stateAge := 0
+
+//------------------------------------------------------------------------------
+// Transition Pressure
+//------------------------------------------------------------------------------
+float toExpansion = na
+if state == 1
+    toExpansion := expansionScore * 0.45 + f_score01(volSlope * 10.0) * 0.30 + f_clamp(math.abs(retZ) / 2.0, 0.0, 1.0) * 0.25
+
+float toTrend = na
+if state == 2
+    toTrend := math.max(trendUpScore, trendDownScore) * 0.55 + vrMomentum * 0.25 + efficiency * 0.20
+
+float toExhaustion = na
+if state == 3 or state == 4
+    toExhaustion := exhaustionScore * 0.60 + extension * 0.25 + f_score01(-volSlope * 6.0) * 0.15
+
+float toReversion = na
+if state == 5
+    toReversion := reversionScore * 0.65 + vrReversion * 0.20 + acReversion * 0.15
+
+float transitionRaw = na
+if not na(toExpansion)
+    transitionRaw := toExpansion
+else if not na(toTrend)
+    transitionRaw := toTrend
+else if not na(toExhaustion)
+    transitionRaw := toExhaustion
+else if not na(toReversion)
+    transitionRaw := toReversion
+else
+    transitionRaw := bestScore
+
+transitionScore = ta.ema(transitionRaw * 100.0, 5)
+
+float directionalPressure = 0.0
+if state == 3
+    directionalPressure := transitionScore
+else if state == 4
+    directionalPressure := -transitionScore
+else if state == 5
+    directionalPressure := -trendDir * transitionScore
+else if state == 6
+    directionalPressure := -trendDir * transitionScore
+else if state == 2
+    directionalPressure := trendDir * transitionScore
+else
+    directionalPressure := 0.0
+
+//------------------------------------------------------------------------------
+// Labels / Colors
+//------------------------------------------------------------------------------
+string stateText = na
+if state == 0
+    stateText := "NOISE"
+else if state == 1
+    stateText := "COMPRESSION"
+else if state == 2
+    stateText := "EXPANSION"
+else if state == 3
+    stateText := "TREND UP"
+else if state == 4
+    stateText := "TREND DOWN"
+else if state == 5
+    stateText := "EXHAUSTION"
+else
+    stateText := "REVERSION"
+
+string nextText = na
+if state == 1
+    nextText := "EXPANSION RISK"
+else if state == 2
+    nextText := "TREND FORMING"
+else if state == 3
+    nextText := "EXHAUSTION RISK"
+else if state == 4
+    nextText := "EXHAUSTION RISK"
+else if state == 5
+    nextText := "REVERSION RISK"
+else if state == 6
+    nextText := "RESET / NOISE"
+else
+    nextText := "NO CLEAR EDGE"
+
+color stateColor = na
+if state == 0
+    stateColor := color.rgb(145, 145, 145)
+else if state == 1
+    stateColor := color.rgb(120, 130, 160)
+else if state == 2
+    stateColor := color.rgb(245, 170, 65)
+else if state == 3
+    stateColor := color.rgb(40, 180, 120)
+else if state == 4
+    stateColor := color.rgb(220, 75, 95)
+else if state == 5
+    stateColor := color.rgb(170, 100, 220)
+else
+    stateColor := color.rgb(80, 170, 220)
+
+pressureColor = color.from_gradient(directionalPressure, -100, 100, color.rgb(220, 75, 95), color.rgb(40, 180, 120))
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+h100 = hline(100, "Upper", color=color.new(color.gray, 92))
+h60 = hline(60, "High Transition", color=color.new(color.white, 84))
+h0 = hline(0, "Zero", color=color.new(color.white, 45))
+hm60 = hline(-60, "Negative Transition", color=color.new(color.white, 84))
+hm100 = hline(-100, "Lower", color=color.new(color.gray, 92))
+
+plot(directionalPressure, "Directional Transition Pressure", color=pressureColor, linewidth=3)
+plot(transitionScore, "Raw Transition Probability", color=color.new(color.aqua, 45), linewidth=1)
+
+plot(showStateTrack ? state * 12 - 42 : na, "State Track", style=plot.style_columns, color=color.new(stateColor, 38))
+
+plot(showScores ? compressionScore * 100 : na, "Compression Score", color=color.new(color.gray, 35))
+plot(showScores ? expansionScore * 100 : na, "Expansion Score", color=color.new(color.orange, 35))
+plot(showScores ? trendUpScore * 100 : na, "Trend Up Score", color=color.new(color.green, 35))
+plot(showScores ? -trendDownScore * 100 : na, "Trend Down Score", color=color.new(color.red, 35))
+plot(showScores ? exhaustionScore * 100 : na, "Exhaustion Score", color=color.new(color.purple, 35))
+plot(showScores ? -reversionScore * 100 : na, "Reversion Score", color=color.new(color.blue, 35))
+
+bgcolor(color.new(stateColor, 92))
+
+//------------------------------------------------------------------------------
+// Events
+//------------------------------------------------------------------------------
+stateChanged = state != state[1]
+compressionToExpansion = state[1] == 1 and state == 2
+expansionToTrend = state[1] == 2 and (state == 3 or state == 4)
+trendToExhaustion = (state[1] == 3 or state[1] == 4) and state == 5
+exhaustionToReversion = state[1] == 5 and state == 6
+
+plotshape(compressionToExpansion, title="Compression → Expansion", style=shape.circle, location=location.bottom, color=color.rgb(245, 170, 65), size=size.tiny, text="EXP")
+plotshape(expansionToTrend, title="Expansion → Trend", style=shape.circle, location=location.bottom, color=state == 3 ? color.rgb(40, 180, 120) : color.rgb(220, 75, 95), size=size.tiny, text="TR")
+plotshape(trendToExhaustion, title="Trend → Exhaustion", style=shape.circle, location=location.top, color=color.rgb(170, 100, 220), size=size.tiny, text="EX")
+plotshape(exhaustionToReversion, title="Exhaustion → Reversion", style=shape.circle, location=location.top, color=color.rgb(80, 170, 220), size=size.tiny, text="REV")
+
+//------------------------------------------------------------------------------
+// Dashboard
+//------------------------------------------------------------------------------
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table t = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+if showDashboard and barstate.islast
+    table.cell(t, 0, 0, "Regime Transition Engine", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, "", text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(t, 0, 1, "State", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, stateText, text_color=color.white, bgcolor=stateColor, text_size=size.small)
+
+    table.cell(t, 0, 2, "Next Bias", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, nextText, text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 3, "Transition", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(transitionScore, "#.0") + "%", text_color=tc, text_size=size.small)
+
+    table.cell(t, 0, 4, "State Age", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(stateAge), text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 5, "VolPct", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(volPct * 100, "#.0") + "%", text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 6, "Efficiency", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(efficiency * 100, "#.0") + "%", text_color=tc, text_size=size.tiny)
+
+    table.cell(t, 0, 7, "VR", text_color=tc, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(vr, "#.00"), text_color=tc, text_size=size.tiny)
+
+//------------------------------------------------------------------------------
+// Alerts
+//------------------------------------------------------------------------------
+alertOk = not alertsOnBarClose or barstate.isconfirmed
+
+alertcondition(alertOk and compressionToExpansion, "Compression to Expansion", "RTE · REGIME COMPRESSION→EXPANSION · {{ticker}} {{interval}}")
+alertcondition(alertOk and expansionToTrend, "Expansion to Trend", "RTE · REGIME EXPANSION→TREND · {{ticker}} {{interval}}")
+alertcondition(alertOk and trendToExhaustion, "Trend to Exhaustion", "RTE · REGIME TREND→EXHAUSTION · {{ticker}} {{interval}}")
+alertcondition(alertOk and exhaustionToReversion, "Exhaustion to Reversion", "RTE · REGIME EXHAUSTION→REVERSION · {{ticker}} {{interval}}")
+alertcondition(alertOk and stateChanged, "RTE State Change", "RTE · STATE CHANGE · {{ticker}} {{interval}}")

@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.3 — 2026-07-08
+- **Sweep now targets the actual range edge** — `sweptHigh`/`sweptLow` compared price against `recentHigh[1]`/`recentLow[1]` (the 80-bar extreme) instead of just the prior candle's high/low, so the rejection confirms a liquidity grab of the edge being faded, not arbitrary 1-bar noise near it.
+- **Range channel fill** — a subtle shade between the upper/lower bands so the fade channel reads at a glance (`Show Range Fill & Edge Zones`, on by default).
+- **Edge zone tint** — the outer 20% of the 80-bar range (where a fade can actually trigger) gets a light background tint while the regime is ranging.
+- **Setup and Watch now share one shape language** — both are triangles pointing the pending fade direction (previously Setup was a directionless gray circle), escalating from faint/tiny (Setup) to bright/small (Watch) to label (Trigger), so the buildup reads at a glance without opening the table.
+- **`Only Watch / Trigger` toggle** — hides the gray Setup markers for a cleaner chart in choppy ranges; Watch and Trigger are unaffected (off by default).
+
 ## v3.2.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

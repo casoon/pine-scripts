@@ -1,0 +1,139 @@
+//@version=6
+// ============================================================================
+// Kestrel Export · CCI [Kestrel]
+// ============================================================================
+// Not an indicator to trade off — a bar-by-bar reference generator for
+// Kestrel's CCI port (kestrel/crates/core/src/indicators/cci.rs), used two
+// ways:
+//
+//   Track A — "..." menu → Export chart data → CSV. One column per Kestrel
+//             output field, dropped into
+//             kestrel/crates/core/tests/fixtures/tradingview/ as a real
+//             parity fixture (replaces the brute-force reference test).
+//   Track B — Pine Logs panel (bottom toolbar). One log.info() line per
+//             confirmed bar close, for a quick live spot-check against
+//             Kestrel's own `indicator_values` table while it's running.
+//             Caveat: Kestrel's bars come from Capital.com's bid quote, not
+//             this chart's feed (see kestrel/todo.md §9) — expect
+//             ballpark/timing agreement here, not exact numeric parity.
+//             Exact parity is Track A's job.
+//
+// Restricted to exactly what Kestrel ported — not the full
+// pine-scripts/indicators/momentum/cci_advanced/cci_advanced.pine feature
+// set: EMA-only smoothing (the other 7 pluggable modes aren't ported),
+// hlc3 source only (no input.source), no scale mode (raw/"Classic" CCI
+// only). The "9 · Trend Context" divergence engine (slow CCI + fast/slow
+// slope divergence) *is* ported, unconditionally (no useCtx/showDiv
+// toggle — Kestrel always computes it).
+//
+// Defaults below = config.toml's `[[instrument.indicator]] name = "cci"`
+// block for NATURALGAS, with registry.rs fallbacks for the params
+// config.toml leaves unset (require_extreme_zone, ctx_length, div_length,
+// div_min — see crates/core/src/indicators/registry.rs). Same defaults
+// apply to every other CCI-driven instrument in config.toml, so this
+// script generalizes — just point the chart at a different symbol and
+// update the epic label input.
+//
+// Kestrel's `Bar.ts` is the bar's CLOSE time, epoch ms, UTC (see
+// crates/core/src/capital/model.rs) — matched here via Pine's `time_close`,
+// not `time` (which is bar OPEN).
+// ============================================================================
+
+indicator("Kestrel Export - CCI", "KST-CCI", overlay = false)
+
+// ─────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────
+
+g_id = "Instrument"
+epicLabel = input.string("NATURALGAS", "Epic (log line only)", group = g_id)
+
+g_cci = "Kestrel CCI Params (= config.toml)"
+cciLen          = input.int(20, "CCI Length", group = g_cci)
+avgLen          = input.int(3, "Average Length", group = g_cci)
+sigLen          = input.int(3, "Signal Length", group = g_cci)
+lookbackExtreme = input.int(5, "OB/OS Lookback (bars)", group = g_cci)
+os1             = input.float(-100.0, "Oversold", group = g_cci)
+ob1             = input.float(100.0, "Overbought", group = g_cci)
+useExtremeOnly  = input.bool(true, "Extreme signals require OB/OS zone", group = g_cci)
+
+g_ctx = "Trend Context (= registry.rs defaults)"
+ctxLen = input.int(100, "Trend CCI Length", group = g_ctx)
+divLen = input.int(4, "Divergence Slope Lookback", group = g_ctx)
+divMin = input.float(25.0, "Min Fast Slope", group = g_ctx)
+
+// ─────────────────────────────────────────────────────────────────────────
+// CCI core — identical formulas to Cci::on_bar (cci.rs)
+// ─────────────────────────────────────────────────────────────────────────
+
+src = hlc3
+
+cciRaw  = ta.cci(src, cciLen)
+cciLine = ta.ema(cciRaw, avgLen)
+signal  = ta.ema(cciLine, sigLen)
+
+ctxRaw  = ta.cci(src, ctxLen)
+ctxLine = ta.ema(ctxRaw, avgLen)
+
+// ─────────────────────────────────────────────────────────────────────────
+// Signals — identical logic to Cci::on_bar's alert block
+// ─────────────────────────────────────────────────────────────────────────
+
+lowestWin  = ta.lowest(cciLine, lookbackExtreme)
+highestWin = ta.highest(cciLine, lookbackExtreme)
+wasOversold   = lowestWin <= os1
+wasOverbought = highestWin >= ob1
+
+bullCross = ta.crossover(cciLine, signal)
+bearCross = ta.crossunder(cciLine, signal)
+bullExtreme = bullCross and (not useExtremeOnly or wasOversold)
+bearExtreme = bearCross and (not useExtremeOnly or wasOverbought)
+bullZeroCross = ta.crossover(cciLine, 0.0)
+bearZeroCross = ta.crossunder(cciLine, 0.0)
+
+extremeStrength = bullExtreme ? math.max(math.min((os1 - lowestWin) / math.abs(os1), 1.0), 0.0)
+     : bearExtreme ? math.max(math.min((highestWin - ob1) / math.abs(ob1), 1.0), 0.0)
+     : 0.0
+
+fastDir = cciLine - cciLine[divLen]
+slowDir = ctxLine - ctxLine[divLen]
+bullDivergence = fastDir < -divMin and slowDir > 0.0
+bearDivergence = fastDir > divMin and slowDir < 0.0
+divergenceStrength = (bullDivergence or bearDivergence) ? math.max(math.min((math.abs(fastDir) - divMin) / divMin, 1.0), 0.0) : 0.0
+
+// ─────────────────────────────────────────────────────────────────────────
+// Track A — data-window plots, one per Kestrel output field.
+// "..." → Export chart data pulls these into the CSV alongside OHLC + time.
+// ─────────────────────────────────────────────────────────────────────────
+
+plot(cciLine, "cci_line", display = display.data_window)
+plot(signal, "signal", display = display.data_window)
+plot(ctxLine, "ctx", display = display.data_window)
+plot(bullExtreme ? 1 : 0, "bull_extreme", display = display.data_window)
+plot(bearExtreme ? 1 : 0, "bear_extreme", display = display.data_window)
+plot(bullZeroCross ? 1 : 0, "bull_zero_cross", display = display.data_window)
+plot(bearZeroCross ? 1 : 0, "bear_zero_cross", display = display.data_window)
+plot(bullDivergence ? 1 : 0, "bull_divergence", display = display.data_window)
+plot(bearDivergence ? 1 : 0, "bear_divergence", display = display.data_window)
+plot(extremeStrength, "extreme_strength", display = display.data_window)
+plot(divergenceStrength, "divergence_strength", display = display.data_window)
+
+// ─────────────────────────────────────────────────────────────────────────
+// Track B — one Pine Logs line per confirmed bar close.
+// ─────────────────────────────────────────────────────────────────────────
+
+if barstate.isconfirmed
+    line = "KESTREL cci epic=" + epicLabel + " tf=" + timeframe.period +
+         " t_close=" + str.tostring(time_close) +
+         " cci_line=" + str.tostring(cciLine, "#.######") +
+         " signal=" + str.tostring(signal, "#.######") +
+         " ctx=" + str.tostring(ctxLine, "#.######") +
+         " bull_extreme=" + str.tostring(bullExtreme) +
+         " bear_extreme=" + str.tostring(bearExtreme) +
+         " bull_zero=" + str.tostring(bullZeroCross) +
+         " bear_zero=" + str.tostring(bearZeroCross) +
+         " bull_div=" + str.tostring(bullDivergence) +
+         " bear_div=" + str.tostring(bearDivergence) +
+         " extreme_strength=" + str.tostring(extremeStrength, "#.###") +
+         " div_strength=" + str.tostring(divergenceStrength, "#.###")
+    log.info(line)

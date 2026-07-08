@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.5.0 — 2026-07-08
+- Fix: zone break logic now checks the actual zone boundary (level ± half-width) instead of the bare pivot level; the default "full-candle" mode was requiring the entire candle to clear the level (effectively stricter than close-based), so it now breaks on a wick piercing the boundary as intended
+- Fix: retest counter no longer over-counts — a touch is only registered on the bar price re-enters the zone, not on every bar it stays inside; touch check now compares the full candle range against both zone edges symmetrically
+- Add optional Trend Context filter (off by default): when enabled, hidden bullish divergence only fires above the Trend EMA and hidden bearish only below it, since hidden divergences are continuation signals
+- Add Divergence Quality Score (0-100): combines pivot spacing, oscillator divergence magnitude, extremity relative to the active filter boundary, and trend context; shown in the signal tag, tooltip, and zone shading (stronger border/fill for higher scores) — informational only, never filters a signal
+- Add Dashboard: oscillator type, last signal + quality score, active zone count, filter mode, trend bias
+- Signal tags shortened: `RD+`/`RD-` for regular, `HD+`/`HD-` for hidden (was "Reversal"/"Cont.")
+
 ## v1.4.3 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

@@ -1,0 +1,250 @@
+//@version=6
+// ============================================================================
+// Predictability Regime Index [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-07-04 00:00:00
+// ============================================================================
+// Classifies whether price action currently rewards momentum/trend-following
+// or mean-reversion, by fusing four statistical predictability sensors onto
+// one signed axis.
+//
+// Features:
+//   ✓ Variance Ratio across three horizons (momentum vs. mean-reversion tendency)
+//   ✓ Return autocorrelation (persistence vs. reversal of consecutive moves)
+//   ✓ Hurst exponent approximation (persistent vs. anti-persistent path)
+//   ✓ Fractal efficiency ratio (directional vs. noisy path)
+//   ✓ Composite −100..+100 Predictability Regime Index with signal smoothing
+//   ✓ Confidence read (distance from random walk × sensor agreement)
+//   ✓ Momentum / Reversion / Noise / Mixed regime classification
+//   ✓ Regime-shift markers, background zones, and light-theme dashboard
+//
+// ============================================================================
+
+indicator("Predictability Regime Index [WavesUnchained]", "PRI [WU]", overlay=false, max_labels_count=100)
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+src = input.source(close, "Source")
+
+lenFast = input.int(24, "Fast Window", minval=8)
+lenMid  = input.int(48, "Medium Window", minval=16)
+lenSlow = input.int(96, "Slow Window", minval=32)
+
+vrKFast = input.int(3, "VR Fast Horizon", minval=2)
+vrKMid  = input.int(5, "VR Medium Horizon", minval=2)
+vrKSlow = input.int(8, "VR Slow Horizon", minval=2)
+
+smoothLen = input.int(8, "Score Smoothing", minval=1)
+signalLen = input.int(13, "Signal Smoothing", minval=1)
+
+showHistogram = input.bool(true, "Show Histogram")
+showSignal    = input.bool(true, "Show Signal Line")
+showZones     = input.bool(true, "Show Regime Zones")
+showDashboard = input.bool(true, "Show Dashboard")
+
+//------------------------------------------------------------------------------
+// Helpers
+//------------------------------------------------------------------------------
+f_clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_normCentered(x, scale) =>
+    f_clamp(x / scale, -1.0, 1.0)
+
+f_safeDiv(a, b, fallback) =>
+    b != 0.0 and not na(b) ? a / b : fallback
+
+//------------------------------------------------------------------------------
+// Returns
+//------------------------------------------------------------------------------
+ret1 = math.log(src / src[1])
+
+//------------------------------------------------------------------------------
+// Variance Ratio
+// VR > 1 = momentum tendency
+// VR < 1 = mean-reversion tendency
+//------------------------------------------------------------------------------
+f_varianceRatio(_src, _ret1, _len, _k) =>
+    rk = math.log(_src / _src[_k])
+    var1 = ta.variance(_ret1, _len)
+    vark = ta.variance(rk, _len)
+    vr = f_safeDiv(vark, _k * var1, 1.0)
+    vr
+
+vrFast = f_varianceRatio(src, ret1, lenFast, vrKFast)
+vrMid  = f_varianceRatio(src, ret1, lenMid,  vrKMid)
+vrSlow = f_varianceRatio(src, ret1, lenSlow, vrKSlow)
+
+vrScoreFast = f_normCentered(vrFast - 1.0, 0.45)
+vrScoreMid  = f_normCentered(vrMid  - 1.0, 0.45)
+vrScoreSlow = f_normCentered(vrSlow - 1.0, 0.45)
+
+vrScore = vrScoreFast * 0.45 + vrScoreMid * 0.35 + vrScoreSlow * 0.20
+
+//------------------------------------------------------------------------------
+// Return Autocorrelation
+// positive = momentum
+// negative = reversion
+//------------------------------------------------------------------------------
+acFast = ta.correlation(ret1, ret1[1], lenFast)
+acMid  = ta.correlation(ret1, ret1[1], lenMid)
+acSlow = ta.correlation(ret1, ret1[1], lenSlow)
+
+acScore = nz(acFast) * 0.45 + nz(acMid) * 0.35 + nz(acSlow) * 0.20
+acScore := f_clamp(acScore * 2.5, -1.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Hurst Approximation via log(range / stdev) / log(length)
+// H > 0.5 = persistent
+// H < 0.5 = anti-persistent
+//------------------------------------------------------------------------------
+f_hurstApprox(_src, _len) =>
+    hi = ta.highest(_src, _len)
+    lo = ta.lowest(_src, _len)
+    sd = ta.stdev(_src, _len)
+    rs = f_safeDiv(hi - lo, sd, 1.0)
+    h = math.log(math.max(rs, 1.0)) / math.log(_len)
+    f_clamp(h, 0.0, 1.0)
+
+hFast = f_hurstApprox(src, lenFast)
+hMid  = f_hurstApprox(src, lenMid)
+hSlow = f_hurstApprox(src, lenSlow)
+
+hurst = hFast * 0.40 + hMid * 0.40 + hSlow * 0.20
+hurstScore = f_clamp((hurst - 0.5) * 3.0, -1.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Fractal Efficiency
+// Efficient path = trend usable
+// Noisy path = low predictability
+//------------------------------------------------------------------------------
+f_efficiency(_src, _len) =>
+    direct = math.abs(_src - _src[_len])
+    path = math.sum(math.abs(_src - _src[1]), _len)
+    f_safeDiv(direct, path, 0.0)
+
+erFast = f_efficiency(src, lenFast)
+erMid  = f_efficiency(src, lenMid)
+erSlow = f_efficiency(src, lenSlow)
+
+efficiency = erFast * 0.45 + erMid * 0.35 + erSlow * 0.20
+efficiencyScore = f_clamp((efficiency - 0.25) * 2.2, -1.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Composite Predictability Regime Index
+// +100 = momentum/trend-following regime
+//  0   = random/noisy regime
+// -100 = mean-reversion regime
+//------------------------------------------------------------------------------
+rawScore =
+     vrScore         * 0.38 +
+     acScore         * 0.24 +
+     hurstScore      * 0.23 +
+     efficiencyScore * 0.15
+
+pri = ta.ema(rawScore * 100.0, smoothLen)
+signal = ta.ema(pri, signalLen)
+
+// Confidence: distance from random + agreement of sensors
+agreement =
+     1.0 -
+     (
+         math.abs(vrScore - acScore) +
+         math.abs(vrScore - hurstScore) +
+         math.abs(acScore - hurstScore)
+     ) / 6.0
+
+confidence = f_clamp((math.abs(pri) / 65.0) * agreement * 100.0, 0.0, 100.0)
+
+//------------------------------------------------------------------------------
+// Regime Logic
+//------------------------------------------------------------------------------
+momentumRegime = pri > 25 and confidence > 35
+reversionRegime = pri < -25 and confidence > 35
+noiseRegime = math.abs(pri) <= 20 or confidence < 25
+
+regimeText =
+     momentumRegime  ? "MOMENTUM" :
+     reversionRegime ? "REVERSION" :
+     noiseRegime     ? "NOISE" :
+                       "MIXED"
+
+biasColor =
+     pri > 0 ? color.rgb(40, 180, 120) :
+     pri < 0 ? color.rgb(220, 80, 95) :
+               color.rgb(150, 150, 150)
+
+scoreColor = color.from_gradient(pri, -100, 100, color.rgb(220, 70, 90), color.rgb(40, 180, 120))
+softColor = color.new(scoreColor, 78)
+histColor = color.new(scoreColor, 35)
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+h100 = hline(100,  "Upper Limit", color=color.new(color.gray, 92))
+h60  = hline(60,   "Strong Momentum", color=color.new(color.green, 75))
+h25  = hline(25,   "Momentum Threshold", color=color.new(color.green, 82))
+h0   = hline(0,    "Random Walk Line", color=color.new(color.white, 45))
+hm25 = hline(-25,  "Reversion Threshold", color=color.new(color.red, 82))
+hm60 = hline(-60,  "Strong Reversion", color=color.new(color.red, 75))
+hm100 = hline(-100, "Lower Limit", color=color.new(color.gray, 92))
+
+fill(h60, h100, color=showZones ? color.new(color.green, 91) : na, title="Momentum Zone")
+fill(h25, h60, color=showZones ? color.new(color.green, 95) : na, title="Soft Momentum Zone")
+fill(hm25, hm60, color=showZones ? color.new(color.red, 95) : na, title="Soft Reversion Zone")
+fill(hm60, hm100, color=showZones ? color.new(color.red, 91) : na, title="Reversion Zone")
+
+plot(showHistogram ? pri : na, "PRI Histogram", style=plot.style_columns, color=histColor)
+
+pPri = plot(pri, "Predictability Regime Index", color=scoreColor, linewidth=3)
+pSig = plot(showSignal ? signal : na, "Signal", color=color.new(color.white, 15), linewidth=2)
+
+fill(pPri, pSig, color=color.new(scoreColor, 84), title="PRI / Signal Fill")
+
+plot(confidence, "Confidence", color=color.new(color.aqua, 55), linewidth=1, display=display.pane)
+plot(-confidence, "Confidence Mirror", color=color.new(color.aqua, 82), linewidth=1, display=display.pane)
+
+bgcolor(momentumRegime ? color.new(color.green, 92) : reversionRegime ? color.new(color.red, 92) : noiseRegime ? color.new(color.gray, 94) : na)
+
+//------------------------------------------------------------------------------
+// Events
+//------------------------------------------------------------------------------
+bullShift = ta.crossover(pri, 25) and confidence > 35
+bearShift = ta.crossunder(pri, -25) and confidence > 35
+randomWalk = ta.cross(pri, 0)
+
+plotshape(bullShift, title="Momentum Shift", style=shape.circle, location=location.bottom, color=color.rgb(40, 180, 120), size=size.tiny, text="M")
+plotshape(bearShift, title="Reversion Shift", style=shape.circle, location=location.top, color=color.rgb(220, 80, 95), size=size.tiny, text="R")
+
+//------------------------------------------------------------------------------
+// Dashboard
+//------------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 6, border_width=1)
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "PRI", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 0, str.tostring(pri, "#.0"), text_color=color.white, bgcolor=color.new(scoreColor, 20))
+
+    table.cell(dash, 0, 1, "Regime", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 1, regimeText, text_color=color.white, bgcolor=color.new(biasColor, 25))
+
+    table.cell(dash, 0, 2, "Confidence", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 2, str.tostring(confidence, "#.0") + "%", text_color=color.white, bgcolor=color.new(color.aqua, 70))
+
+    table.cell(dash, 0, 3, "Variance Ratio", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 3, str.tostring(vrScore * 100, "#.0"), text_color=color.white, bgcolor=color.new(color.gray, 75))
+
+    table.cell(dash, 0, 4, "Hurst", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 4, str.tostring(hurst, "#.00"), text_color=color.white, bgcolor=color.new(color.gray, 75))
+
+    table.cell(dash, 0, 5, "Efficiency", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 5, str.tostring(efficiency * 100, "#.0") + "%", text_color=color.white, bgcolor=color.new(color.gray, 75))
+
+//------------------------------------------------------------------------------
+// Alerts
+//------------------------------------------------------------------------------
+alertcondition(bullShift, "PRI Momentum Regime", "PRI shifted into momentum/trend-following regime.")
+alertcondition(bearShift, "PRI Reversion Regime", "PRI shifted into mean-reversion regime.")
+alertcondition(randomWalk, "PRI Random Walk Cross", "PRI crossed the random-walk centerline.")

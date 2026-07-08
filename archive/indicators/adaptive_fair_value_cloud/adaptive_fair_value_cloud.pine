@@ -1,0 +1,276 @@
+//@version=6
+// ============================================================================
+// Adaptive Fair Value Cloud [WavesUnchained]
+// Version: 1.1
+// Author: WavesUnchained
+// Build: 2026-07-04 00:00:00
+// ============================================================================
+// Volatility-adaptive fair value channel around a configurable centerline.
+//
+// Features:
+//   ✓ Selectable Centerline (EMA, KAMA, Regression, VWMA)
+//   ✓ ATR + Mean-Deviation Blended Band Width
+//   ✓ Regime-Adaptive Width Multiplier (Compression / Expansion / Range / Trend)
+//   ✓ Trend Sensors (Slope, ADX, Efficiency Ratio, R²)
+//   ✓ Cloud Break and Fair Value Reclaim/Reject Signals
+//   ✓ Watch Layer: Regime-Acceleration, Squeeze-Release, Divergence-at-Edge
+//   ✓ Regime Dashboard
+//
+// ============================================================================
+
+indicator("Adaptive Fair Value Cloud [WavesUnchained]", shorttitle="AFVC", overlay=true, max_labels_count=300)
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+basisMode = input.string("KAMA", "Centerline", options=["EMA", "KAMA", "Regression", "VWMA"])
+basisLen  = input.int(50, "Basis Length", minval=5)
+
+atrLen    = input.int(14, "ATR Length", minval=1)
+devLen    = input.int(50, "Deviation Length", minval=5)
+pctLen    = input.int(100, "Volatility Percentile Length", minval=20)
+
+baseMult  = input.float(1.8, "Base Width Multiplier", step=0.1)
+minMult   = input.float(0.8, "Min Multiplier", step=0.1)
+maxMult   = input.float(3.5, "Max Multiplier", step=0.1)
+
+erLen     = input.int(20, "Efficiency Length", minval=5)
+adxLen    = input.int(14, "ADX Length", minval=5)
+r2Len     = input.int(50, "Regression Quality Length", minval=10)
+
+showSignals = input.bool(true, "Show Signals")
+showDashboard = input.bool(true, "Show Dashboard")
+
+g_watch = "Predictive / Watch Signals"
+showWatchSignals = input.bool(true, "Show Watch Signals (leading, unconfirmed)", group=g_watch)
+rsiLen           = input.int(14, "Divergence RSI Length", minval=2, group=g_watch)
+divPivLen        = input.int(5, "Divergence Pivot Confirmation", minval=2, group=g_watch)
+buildAccelThresh = input.float(0.08, "Regime Build Acceleration Threshold", step=0.01, group=g_watch)
+squeezeTolerance = input.float(1.15, "Squeeze Width Tolerance", step=0.05, group=g_watch)
+
+g_alert = "Alerts"
+alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group=g_alert)
+
+//------------------------------------------------------------------------------
+// Helper
+//------------------------------------------------------------------------------
+f_clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_kama(src, len, fastLen, slowLen) =>
+    change = math.abs(src - src[len])
+    volatility = ta.sma(math.abs(src - src[1]), len) * len
+    er = volatility != 0.0 ? change / volatility : 0.0
+    fastSC = 2.0 / (fastLen + 1.0)
+    slowSC = 2.0 / (slowLen + 1.0)
+    sc = math.pow(er * (fastSC - slowSC) + slowSC, 2)
+    var float kama = na
+    kama := na(kama[1]) ? src : kama[1] + sc * (src - kama[1])
+    kama
+
+//------------------------------------------------------------------------------
+// Centerline
+//------------------------------------------------------------------------------
+emaBasis = ta.ema(close, basisLen)
+kamaBasis = f_kama(close, basisLen, 2, 30)
+regBasis = ta.linreg(close, basisLen, 0)
+vwmaBasis = ta.vwma(close, basisLen)
+
+basis = switch basisMode
+    "EMA"        => emaBasis
+    "KAMA"       => kamaBasis
+    "Regression" => regBasis
+    => vwmaBasis
+
+//------------------------------------------------------------------------------
+// Volatility / Width
+//------------------------------------------------------------------------------
+atr = ta.atr(atrLen)
+meanAbsDev = ta.sma(math.abs(close - basis), devLen)
+rawWidth = atr * 0.65 + meanAbsDev * 0.35
+
+atrPct = ta.percentile_nearest_rank(atr, pctLen, 80)
+atrLow = ta.percentile_nearest_rank(atr, pctLen, 20)
+
+volScore = atrPct != atrLow ? f_clamp((atr - atrLow) / (atrPct - atrLow), 0.0, 1.0) : 0.5
+
+//------------------------------------------------------------------------------
+// Regime Sensors
+//------------------------------------------------------------------------------
+directionMove = math.abs(close - close[erLen])
+noiseMove = ta.sma(math.abs(close - close[1]), erLen) * erLen
+efficiency = noiseMove != 0.0 ? directionMove / noiseMove : 0.0
+
+[plusDI, minusDI, adx] = ta.dmi(adxLen, adxLen)
+
+corr = ta.correlation(close, bar_index, r2Len)
+r2 = math.pow(nz(corr), 2)
+
+regNow = ta.linreg(close, basisLen, 0)
+regPrev = ta.linreg(close, basisLen, 1)
+slope = atr != 0.0 ? (regNow - regPrev) / atr : 0.0
+
+hh = ta.highest(high, erLen)
+ll = ta.lowest(low, erLen)
+chopRange = hh - ll
+chop = chopRange != 0.0 ? 100.0 * math.log10(ta.sma(ta.tr(true), erLen) * erLen / chopRange) / math.log10(erLen) : 50.0
+
+trendUp = slope > 0 and adx > 18 and efficiency > 0.25 and r2 > 0.25
+trendDown = slope < 0 and adx > 18 and efficiency > 0.25 and r2 > 0.25
+compression = volScore < 0.35 and chop > 55
+expansion = volScore > 0.65 and efficiency > 0.35
+rangeMode = chop > 60 and adx < 20
+
+//------------------------------------------------------------------------------
+// Adaptive Multiplier
+//------------------------------------------------------------------------------
+regimeBoost = compression ? 0.75 : expansion ? 1.35 : rangeMode ? 1.05 : trendUp or trendDown ? 1.20 : 1.0
+
+qualityBoost = 1.0 + r2 * 0.35 + efficiency * 0.25
+dynamicMult = f_clamp(baseMult * regimeBoost * qualityBoost, minMult, maxMult)
+
+upper = basis + rawWidth * dynamicMult
+lower = basis - rawWidth * dynamicMult
+midUpper = basis + rawWidth * dynamicMult * 0.5
+midLower = basis - rawWidth * dynamicMult * 0.5
+
+//------------------------------------------------------------------------------
+// Color Logic
+//------------------------------------------------------------------------------
+regimeBase = compression ? color.gray : rangeMode ? color.silver : trendUp ? #00c853 : trendDown ? #d50000 : #2962ff
+
+cloudColor = color.new(regimeBase, 88)
+coreColor  = color.new(regimeBase, 94)
+innerLineColor = color.new(regimeBase, 65)
+edgeColor  = trendUp or trendDown ? color.new(regimeBase, 25) : color.new(color.gray, 45)
+
+//------------------------------------------------------------------------------
+// Plots
+//------------------------------------------------------------------------------
+pUpper = plot(upper, "Upper Edge", color=edgeColor, linewidth=1)
+pLower = plot(lower, "Lower Edge", color=edgeColor, linewidth=1)
+pBasis = plot(basis, "Fair Value", color=color.new(#37474f, 0), linewidth=2)
+
+pMidUpper = plot(midUpper, "Inner Upper", color=innerLineColor, linewidth=1)
+pMidLower = plot(midLower, "Inner Lower", color=innerLineColor, linewidth=1)
+
+fill(pUpper, pLower, color=cloudColor, title="Adaptive Cloud")
+fill(pMidUpper, pMidLower, color=coreColor, title="Fair Value Core")
+
+//------------------------------------------------------------------------------
+// Signals
+//------------------------------------------------------------------------------
+bullBreak = showSignals and ta.crossover(close, upper) and (trendUp or expansion)
+bearBreak = showSignals and ta.crossunder(close, lower) and (trendDown or expansion)
+
+bullReclaim = showSignals and ta.crossover(close, basis) and trendUp and close > lower
+bearReject = showSignals and ta.crossunder(close, basis) and trendDown and close < upper
+
+plotshape(bullBreak, title="Bullish Cloud Break", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=#00c853, text="Break", textcolor=#00c853)
+plotshape(bearBreak, title="Bearish Cloud Break", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=#d50000, text="Break", textcolor=#d50000)
+
+plotshape(bullReclaim, title="Bullish Reclaim", style=shape.circle, location=location.belowbar, size=size.tiny, color=color.new(#00c853, 0))
+plotshape(bearReject, title="Bearish Reject", style=shape.circle, location=location.abovebar, size=size.tiny, color=color.new(#d50000, 0))
+
+//------------------------------------------------------------------------------
+// Watch / Predictive Layer
+// Leading, unconfirmed early-warning signals — anticipate a regime shift or
+// volatility release before the confirmed Trigger above fires. None of these
+// predict direction with certainty; they flag a rising probability of a move.
+//------------------------------------------------------------------------------
+
+// --- A: Regime acceleration — efficiency/R² rising before the trend gate trips
+erAccel = efficiency - efficiency[3]
+r2Accel = r2 - r2[3]
+regimeBuilding = not trendUp and not trendDown and erAccel > buildAccelThresh and r2Accel > buildAccelThresh and adx > 12
+buildingUp   = showWatchSignals and regimeBuilding and slope > 0
+buildingDown = showWatchSignals and regimeBuilding and slope < 0
+
+// --- B: Squeeze release — band width was near a multi-bar low and is now widening
+bandWidth = upper - lower
+widthLowN = ta.lowest(bandWidth, pctLen)
+squeezeActive     = bandWidth <= widthLowN * squeezeTolerance
+squeezeReleasing  = showWatchSignals and squeezeActive[2] and ta.rising(bandWidth, 2)
+
+// --- C: Divergence at cloud edge — price extreme not confirmed by RSI at the band
+rsi = ta.rsi(close, rsiLen)
+
+plPiv = ta.pivotlow(low, divPivLen, divPivLen)
+phPiv = ta.pivothigh(high, divPivLen, divPivLen)
+plBar = not na(plPiv)
+phBar = not na(phPiv)
+
+lastPL    = ta.valuewhen(plBar, plPiv, 0)
+prevPL    = ta.valuewhen(plBar, plPiv, 1)
+lastPLRsi = ta.valuewhen(plBar, rsi[divPivLen], 0)
+prevPLRsi = ta.valuewhen(plBar, rsi[divPivLen], 1)
+
+lastPH    = ta.valuewhen(phBar, phPiv, 0)
+prevPH    = ta.valuewhen(phBar, phPiv, 1)
+lastPHRsi = ta.valuewhen(phBar, rsi[divPivLen], 0)
+prevPHRsi = ta.valuewhen(phBar, rsi[divPivLen], 1)
+
+bullDivAtEdge = showWatchSignals and plBar and lastPL < prevPL and lastPLRsi > prevPLRsi and lastPL <= lower[divPivLen] * 1.01
+bearDivAtEdge = showWatchSignals and phBar and lastPH > prevPH and lastPHRsi < prevPHRsi and lastPH >= upper[divPivLen] * 0.99
+
+watchColor = color.new(#ff6f00, 0)
+
+plotshape(buildingUp,   title="Watch: Trend Building Up",   style=shape.triangleup,   location=location.belowbar, size=size.tiny, color=watchColor, text="Build")
+plotshape(buildingDown, title="Watch: Trend Building Down", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=watchColor, text="Build")
+
+plotshape(squeezeReleasing, title="Watch: Squeeze Releasing", style=shape.square, location=location.belowbar, size=size.tiny, color=watchColor, text="Sqz")
+
+plotshape(bullDivAtEdge, title="Watch: Bullish Divergence", style=shape.xcross, location=location.belowbar, size=size.tiny, color=watchColor, text="Div")
+plotshape(bearDivAtEdge, title="Watch: Bearish Divergence", style=shape.xcross, location=location.abovebar, size=size.tiny, color=watchColor, text="Div")
+
+//------------------------------------------------------------------------------
+// Dashboard
+//------------------------------------------------------------------------------
+regimeText = compression ? "COMPRESSION" : expansion ? "EXPANSION" : rangeMode ? "RANGE" : trendUp ? "TREND UP" : trendDown ? "TREND DOWN" : "NEUTRAL"
+
+biasText = trendUp ? "Bullish" : trendDown ? "Bearish" : "Neutral"
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+watchText = buildingUp ? "Build ↑" : buildingDown ? "Build ↓" : squeezeReleasing ? "Squeeze" : bullDivAtEdge ? "Div ↑" : bearDivAtEdge ? "Div ↓" : "—"
+watchColorDash = watchText == "—" ? tc : watchColor
+
+var table dash = table.new(position.top_right, 2, 7,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "Regime", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 0, regimeText, text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 0, 1, "Bias", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, biasText, text_color=trendUp ? #00c853 : trendDown ? #d50000 : tc, text_size=size.small)
+    table.cell(dash, 0, 2, "ADX", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(adx, "#.0"), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 3, "Efficiency", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(efficiency * 100, "#.0") + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 4, "R²", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(r2 * 100, "#.0") + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 5, "Width Mult", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(dynamicMult, "#.00"), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 6, "Watch", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 6, watchText, text_color=watchColorDash, text_size=size.small)
+
+//------------------------------------------------------------------------------
+// Alerts
+//------------------------------------------------------------------------------
+alertOk = not alertsOnBarClose or barstate.isconfirmed
+
+alertcondition(alertOk and bullBreak, "Bullish Cloud Break", "AFVC · BREAK LONG · {{ticker}} {{interval}}")
+alertcondition(alertOk and bearBreak, "Bearish Cloud Break", "AFVC · BREAK SHORT · {{ticker}} {{interval}}")
+alertcondition(alertOk and compression, "Compression Regime", "AFVC · REGIME COMPRESSION · {{ticker}} {{interval}}")
+alertcondition(alertOk and expansion, "Expansion Regime", "AFVC · REGIME EXPANSION · {{ticker}} {{interval}}")
+
+alertcondition(alertOk and buildingUp, "Watch: Trend Building Up", "AFVC · WATCH BUILD UP · {{ticker}} {{interval}}")
+alertcondition(alertOk and buildingDown, "Watch: Trend Building Down", "AFVC · WATCH BUILD DOWN · {{ticker}} {{interval}}")
+alertcondition(alertOk and squeezeReleasing, "Watch: Squeeze Releasing", "AFVC · WATCH SQUEEZE · {{ticker}} {{interval}}")
+alertcondition(alertOk and bullDivAtEdge, "Watch: Bullish Divergence", "AFVC · WATCH DIV UP · {{ticker}} {{interval}}")
+alertcondition(alertOk and bearDivAtEdge, "Watch: Bearish Divergence", "AFVC · WATCH DIV DOWN · {{ticker}} {{interval}}")

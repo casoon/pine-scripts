@@ -1,0 +1,406 @@
+//@version=6
+// ============================================================================
+// Trading Range State Machine [WavesUnchained]
+// Version: 1.1
+// Author: WavesUnchained
+// Build: 2026-07-04 12:00:00
+// ============================================================================
+// Detects and classifies active trading ranges via a weighted, multi-factor
+// score and progresses them through a state machine (Inactive → Building →
+// Confirmed → Mature → Breaking).
+//
+// Features:
+//   ✓ Pivot-Cluster Range Detection (fallback to highest/lowest)
+//   ✓ 8-Factor Weighted Range Score (ER, Overlap, Chop, Structure, Regression,
+//     Boundary, ATR Compression, Mean Reversion)
+//   ✓ Range State Machine with Directional Breakout Detection
+//   ✓ Position-in-Range Readout (% + zone)
+//   ✓ Continuous Score-Scaled Background Heat
+//   ✓ Range Lines, Midline, Touch Markers, Bottom Ribbon
+//   ✓ Dashboard
+//
+// ============================================================================
+
+indicator("Trading Range State Machine [WavesUnchained]", overlay=true, max_lines_count=100, max_labels_count=300)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+grpCore = "Core"
+len         = input.int(60, "Range Lookback", minval=20, maxval=300, group=grpCore)
+pivotLen    = input.int(4, "Pivot Length", minval=2, maxval=20, group=grpCore)
+confirm     = input.float(68.0, "Confirmed Score", minval=1, maxval=100, group=grpCore)
+mature      = input.float(78.0, "Mature Score", minval=1, maxval=100, group=grpCore)
+breakBuffer = input.float(0.25, "Break Buffer ATR", minval=0.0, maxval=2.0, step=0.05, group=grpCore)
+clusterTol  = input.float(0.55, "Pivot Cluster Tolerance ATR", minval=0.1, maxval=2.0, step=0.05, group=grpCore)
+
+grpWeights = "Weights"
+wER      = input.float(20, "Efficiency Ratio", group=grpWeights)
+wOverlap = input.float(15, "Candle Overlap", group=grpWeights)
+wChop    = input.float(15, "Choppiness", group=grpWeights)
+wStruct  = input.float(15, "Structure Chaos", group=grpWeights)
+wReg     = input.float(10, "Regression Flatness", group=grpWeights)
+wBounds  = input.float(15, "Boundary Stability", group=grpWeights)
+wAtr     = input.float(5, "ATR Compression", group=grpWeights)
+wMean    = input.float(5, "Mean Reversion", group=grpWeights)
+
+grpVisual = "Visual"
+showLines     = input.bool(true, "Show Range Lines", group=grpVisual)
+showMidline   = input.bool(true, "Show Midline", group=grpVisual)
+showTouches   = input.bool(true, "Show Touch Markers", group=grpVisual)
+showBg        = input.bool(true, "Background Heat", group=grpVisual)
+showDashboard = input.bool(true, "Dashboard", group=grpVisual)
+showRibbon    = input.bool(true, "Bottom Ribbon", group=grpVisual)
+
+grpAlerts = "Alerts"
+alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group=grpAlerts)
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+safeDiv(a, b) =>
+    b == 0.0 ? 0.0 : a / b
+
+normalize01(x, lo, hi) =>
+    clamp(safeDiv(x - lo, hi - lo), 0.0, 1.0)
+
+f_phaseAlpha(score, lo, hi, aLo, aHi) =>
+    t = normalize01(score, lo, hi)
+    int(aLo + (aHi - aLo) * t)
+
+f_cluster_level(float[] prices, float tolerance) =>
+    float bestLevel = na
+    int bestCount = 0
+
+    int n = array.size(prices)
+
+    if n > 0
+        for i = 0 to n - 1
+            float base = array.get(prices, i)
+            float sum = 0.0
+            int count = 0
+
+            for j = 0 to n - 1
+                float p = array.get(prices, j)
+                if math.abs(p - base) <= tolerance
+                    sum += p
+                    count += 1
+
+            float avg = count > 0 ? sum / count : na
+
+            if count > bestCount
+                bestCount := count
+                bestLevel := avg
+
+    [bestLevel, bestCount]
+
+// ============================================================================
+// Base Data
+// ============================================================================
+
+atr = ta.atr(14)
+tol = atr * clusterTol
+
+fallbackHigh = ta.highest(high, len)
+fallbackLow  = ta.lowest(low, len)
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float[] highPivots = array.new_float()
+var int[]   highBars   = array.new_int()
+var float[] lowPivots  = array.new_float()
+var int[]   lowBars    = array.new_int()
+
+if not na(ph)
+    array.push(highPivots, ph)
+    array.push(highBars, bar_index - pivotLen)
+
+if not na(pl)
+    array.push(lowPivots, pl)
+    array.push(lowBars, bar_index - pivotLen)
+
+while array.size(highBars) > 0 and bar_index - array.get(highBars, 0) > len
+    array.shift(highBars)
+    array.shift(highPivots)
+
+while array.size(lowBars) > 0 and bar_index - array.get(lowBars, 0) > len
+    array.shift(lowBars)
+    array.shift(lowPivots)
+
+[clusterHigh, upperClusterCount] = f_cluster_level(highPivots, tol)
+[clusterLow, lowerClusterCount]  = f_cluster_level(lowPivots, tol)
+
+rangeHighRaw = na(clusterHigh) ? fallbackHigh : clusterHigh
+rangeLowRaw  = na(clusterLow) ? fallbackLow : clusterLow
+
+validClusterRange = rangeHighRaw > rangeLowRaw
+
+rangeHigh = validClusterRange ? rangeHighRaw : fallbackHigh
+rangeLow  = validClusterRange ? rangeLowRaw : fallbackLow
+rangeMid  = (rangeHigh + rangeLow) / 2.0
+rangeSize = math.max(rangeHigh - rangeLow, syminfo.mintick)
+
+// ============================================================================
+// Score Components
+// ============================================================================
+
+// 1. Efficiency Ratio
+netMove = math.abs(close - close[len])
+totalMove = math.sum(math.abs(close - close[1]), len)
+er = safeDiv(netMove, totalMove)
+erScore = (1.0 - clamp(er, 0.0, 1.0)) * 100.0
+
+// 2. Candle Overlap
+overlapHigh = math.min(high, high[1])
+overlapLow  = math.max(low, low[1])
+overlapSize = math.max(overlapHigh - overlapLow, 0.0)
+candleUnion = math.max(math.max(high, high[1]) - math.min(low, low[1]), syminfo.mintick)
+barOverlap = safeDiv(overlapSize, candleUnion)
+overlapScore = ta.sma(barOverlap, len) * 100.0
+
+// 3. Choppiness
+sumTR = math.sum(ta.tr(true), len)
+chopRaw = 100.0 * safeDiv(math.log10(safeDiv(sumTR, rangeSize)), math.log10(len))
+chopScore = clamp(chopRaw, 0.0, 100.0)
+
+// 4. Structure Chaos
+bosUp = high > ta.highest(high[1], pivotLen * 3)
+bosDn = low < ta.lowest(low[1], pivotLen * 3)
+bosCount = math.sum(bosUp or bosDn ? 1 : 0, len)
+structureScore = 100.0 - clamp(bosCount * 12.0, 0.0, 100.0)
+
+// 5. Regression Flatness
+regNow = ta.linreg(close, len, 0)
+regPrev = ta.linreg(close, len, 1)
+slope = regNow - regPrev
+slopeAtr = safeDiv(math.abs(slope), atr)
+
+corr = ta.correlation(close, bar_index, len)
+r2 = math.pow(nz(corr), 2.0)
+
+slopeFlatScore = (1.0 - normalize01(slopeAtr, 0.0, 0.15)) * 100.0
+r2WeakScore = (1.0 - clamp(r2, 0.0, 1.0)) * 100.0
+regScore = slopeFlatScore * 0.65 + r2WeakScore * 0.35
+
+// 6. Boundary Stability
+touchTolerance = atr * 0.45
+
+upperTouch = high >= rangeHigh - touchTolerance and close < rangeHigh
+lowerTouch = low <= rangeLow + touchTolerance and close > rangeLow
+
+upperTouches = math.sum(upperTouch ? 1 : 0, len)
+lowerTouches = math.sum(lowerTouch ? 1 : 0, len)
+
+touchBalance = math.min(upperTouches, lowerTouches)
+totalTouches = upperTouches + lowerTouches
+
+clusterQuality = normalize01(math.min(upperClusterCount, lowerClusterCount), 1.0, 4.0) * 45.0
+touchQuality   = normalize01(touchBalance, 1.0, 4.0) * 35.0
+totalQuality   = normalize01(totalTouches, 3.0, 10.0) * 20.0
+
+boundaryScore = clamp(clusterQuality + touchQuality + totalQuality, 0.0, 100.0)
+
+// 7. ATR Compression
+atrBase = ta.sma(atr, len * 2)
+atrRatio = safeDiv(atr, atrBase)
+atrScore = (1.0 - normalize01(atrRatio, 0.75, 1.35)) * 100.0
+
+// 8. Mean Reversion
+midTolerance = rangeSize * 0.12
+midTouch = math.abs(close - rangeMid) <= midTolerance
+midTouches = math.sum(midTouch ? 1 : 0, len)
+meanScore = normalize01(midTouches, 2.0, 10.0) * 100.0
+
+// ============================================================================
+// Weighted Score
+// ============================================================================
+
+weightSum = wER + wOverlap + wChop + wStruct + wReg + wBounds + wAtr + wMean
+
+rangeScore =
+     safeDiv(
+         erScore * wER +
+         overlapScore * wOverlap +
+         chopScore * wChop +
+         structureScore * wStruct +
+         regScore * wReg +
+         boundaryScore * wBounds +
+         atrScore * wAtr +
+         meanScore * wMean,
+         weightSum)
+
+rangeScore := clamp(rangeScore, 0.0, 100.0)
+
+// ============================================================================
+// State Machine
+// ============================================================================
+
+breakUp = close > rangeHigh + atr * breakBuffer
+breakDn = close < rangeLow - atr * breakBuffer
+breaking = rangeScore >= confirm and (breakUp or breakDn)
+breakingUp = breaking and breakUp
+breakingDn = breaking and breakDn
+
+string state = "Inactive"
+if breaking
+    state := "Breaking"
+else if rangeScore >= mature
+    state := "Mature"
+else if rangeScore >= confirm
+    state := "Confirmed"
+else if rangeScore >= confirm * 0.75
+    state := "Building"
+
+isRange = state == "Building" or state == "Confirmed" or state == "Mature"
+
+// Position-in-Range
+rangePos = clamp(safeDiv(close - rangeLow, rangeSize) * 100.0, 0.0, 100.0)
+
+string posZone = "Mid"
+if rangePos >= 80.0
+    posZone := "Upper"
+else if rangePos <= 20.0
+    posZone := "Lower"
+
+// ============================================================================
+// Visuals
+// ============================================================================
+
+colBullish = color.new(#00c853, 0)
+colBearish = color.new(#d50000, 0)
+
+color lineColor = color.new(color.gray, 85)
+if state == "Mature"
+    lineColor := color.new(color.teal, 0)
+else if state == "Confirmed"
+    lineColor := color.new(color.blue, 0)
+else if state == "Building"
+    lineColor := color.new(color.gray, 25)
+else if state == "Breaking"
+    lineColor := breakUp ? colBullish : colBearish
+
+midColor = color.new(color.gray, 50)
+
+var line upperLine = na
+var line lowerLine = na
+var line midLine = na
+
+if showLines and isRange
+    if na(upperLine)
+        upperLine := line.new(bar_index - len, rangeHigh, bar_index, rangeHigh, width=2, color=lineColor)
+        lowerLine := line.new(bar_index - len, rangeLow, bar_index, rangeLow, width=2, color=lineColor)
+    else
+        line.set_xy1(upperLine, bar_index - len, rangeHigh)
+        line.set_xy2(upperLine, bar_index, rangeHigh)
+        line.set_color(upperLine, lineColor)
+        line.set_width(upperLine, state == "Mature" ? 3 : 2)
+
+        line.set_xy1(lowerLine, bar_index - len, rangeLow)
+        line.set_xy2(lowerLine, bar_index, rangeLow)
+        line.set_color(lowerLine, lineColor)
+        line.set_width(lowerLine, state == "Mature" ? 3 : 2)
+
+    if showMidline
+        if na(midLine)
+            midLine := line.new(bar_index - len, rangeMid, bar_index, rangeMid, width=1, style=line.style_dashed, color=midColor)
+        else
+            line.set_xy1(midLine, bar_index - len, rangeMid)
+            line.set_xy2(midLine, bar_index, rangeMid)
+            line.set_color(midLine, midColor)
+else
+    if not na(upperLine)
+        line.delete(upperLine)
+        upperLine := na
+    if not na(lowerLine)
+        line.delete(lowerLine)
+        lowerLine := na
+    if not na(midLine)
+        line.delete(midLine)
+        midLine := na
+
+plotshape(showTouches and isRange and upperTouch, title="Upper Touch", style=shape.circle, location=location.abovebar, size=size.tiny, color=color.new(color.red, 10))
+plotshape(showTouches and isRange and lowerTouch, title="Lower Touch", style=shape.circle, location=location.belowbar, size=size.tiny, color=color.new(color.lime, 10))
+
+color bgCol = na
+if state == "Mature"
+    bgCol := color.new(color.teal, f_phaseAlpha(rangeScore, mature, 100.0, 55, 20))
+else if state == "Confirmed"
+    bgCol := color.new(color.blue, f_phaseAlpha(rangeScore, confirm, mature, 85, 55))
+else if state == "Building"
+    bgCol := color.new(color.gray, f_phaseAlpha(rangeScore, confirm * 0.75, confirm, 95, 85))
+else if state == "Breaking"
+    bgCol := breakUp ? color.new(colBullish, 78) : color.new(colBearish, 78)
+
+bgcolor(showBg ? bgCol : na)
+
+ribbonBase = ta.lowest(low, len) - atr * 1.2
+plot(showRibbon and isRange ? ribbonBase : na, title="Range Ribbon", style=plot.style_linebr, linewidth=5, color=lineColor)
+
+// ============================================================================
+// Dashboard
+// ============================================================================
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+color inactiveCol = color.new(color.gray, 80)
+
+var table dash = table.new(position.top_right, 2, 11,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+if barstate.islast and showDashboard
+    table.cell(dash, 0, 0, "Trading Range", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 0, state, text_color=state == "Inactive" ? tc : color.white, bgcolor=state == "Inactive" ? inactiveCol : lineColor, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Score", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(rangeScore, "#.0"), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Position", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(rangePos, "#.0") + "% · " + posZone, text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Direction", text_color=tc, text_size=size.small)
+    if state == "Breaking"
+        table.cell(dash, 1, 3, breakUp ? "Up" : "Down", text_color=color.white, bgcolor=breakUp ? colBullish : colBearish, text_size=size.small)
+    else
+        table.cell(dash, 1, 3, "—", text_color=tc, bgcolor=inactiveCol, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Upper Cluster", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(upperClusterCount), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Lower Cluster", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(lowerClusterCount), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Touches", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 6, str.tostring(int(upperTouches)) + " / " + str.tostring(int(lowerTouches)), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "Boundary", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 7, str.tostring(boundaryScore, "#.0"), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "ER", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 8, str.tostring(erScore, "#.0"), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 9, "Chop", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 9, str.tostring(chopScore, "#.0"), text_color=tc, text_size=size.tiny)
+
+    table.cell(dash, 0, 10, "Width ATR", text_color=tc, text_size=size.tiny)
+    table.cell(dash, 1, 10, str.tostring(safeDiv(rangeSize, atr), "#.0"), text_color=tc, text_size=size.tiny)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertOk = not alertsOnBarClose or barstate.isconfirmed
+
+alertcondition(alertOk and (state == "Confirmed" and state[1] != "Confirmed"), title="Range Confirmed", message="TRSM · RANGE CONFIRMED · {{ticker}} {{interval}}")
+alertcondition(alertOk and (state == "Mature" and state[1] != "Mature"), title="Range Mature", message="TRSM · RANGE MATURE · {{ticker}} {{interval}}")
+alertcondition(alertOk and (breakingUp and not breakingUp[1]), title="Range Breaking Up", message="TRSM · RANGE BREAKING UP · {{ticker}} {{interval}}")
+alertcondition(alertOk and (breakingDn and not breakingDn[1]), title="Range Breaking Down", message="TRSM · RANGE BREAKING DOWN · {{ticker}} {{interval}}")

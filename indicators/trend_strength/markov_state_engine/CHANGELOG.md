@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.5.0 — 2026-07-08
+- **EMA slope normalized by ATR**: `close vs EMA` context now uses `(ema − ema[5]) / ATR` against a new "EMA Slope Threshold (×ATR)" input, instead of a raw price-unit slope — makes up/down context scale-free across instruments and price levels.
+- **Compression requires ATR Rank AND BB Width Rank**: a new Bollinger-width rank (independent of ATR) must also be below the Compression threshold, so a slow drift with normal bar-to-bar range but still-wide multi-bar bands no longer misclassifies as Compression.
+- **Context-conditioned Compression matching**: the Markov row's historical source match is now keyed on a `contextState` that splits Compression into bullish/bearish/neutral flavors (by the same up/down context test), so exit history is drawn from analogous squeeze setups rather than "any Compression". The visible state and its label are unchanged (still six states) — only which historical bars count as a match got more specific. This further thins an already-thin sample on Compression, so expect Compression's exit count/Reliability to move (and possibly drop) versus v1.4.x.
+- **Path efficiency via `ta.cum`**: replaced the per-bar summation loop with a cumulative-sum difference (`ta.cum(...) - ta.cum(...)[n-1]`) — identical result, cheaper per bar.
+- **Readout restructured into Timing/Direction/Quality lines**: the headline now reads "No reliable direction" instead of naming a Bias/lean type whenever confidence or reliability falls short, so the text never implies more certainty than the color already shows. `dir thin/ok` relabelled to "below min sample"/"sample OK".
+- **Plot renamed "Net Forecast" → "Resolution Bias"** and rendered as a stepline (it only changes value on a state exit, so it should read as holding-then-jumping, not as a continuously evolving curve). Line color is now gated by actionability (confident AND reliable) — bold green/red only when both clear their thresholds, muted grey otherwise, so line color is itself the verdict.
+- **Background reworked**: tints only Compression/Chaos (not all six states, which flickered on every trend/weak change) and its intensity now scales with Maturity/`dwellRatio` instead of a fixed transparency — a fresh squeeze is barely tinted, an overdue one reads clearly more saturated.
+
 ## v1.4.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

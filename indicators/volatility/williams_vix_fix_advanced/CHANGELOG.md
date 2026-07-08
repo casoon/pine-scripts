@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.9 — 2026-07-07
+- Fixed: bearish stall/absorption used the bullish `stallNow` flag — added an independent `bStallNow` computed from `bwvf`, so bull-side stalls no longer suppress/soften bear spikes
+- Added Spike Quality (0–100): how far a spike pushed past its own band/context EMA, penalized by stall/absorption; captured per side into `lastBullQuality`/`lastBearQuality`
+- Added Reclaim: marks price reclaiming the range within N bars of a non-absorbed spike, with the originating spike's quality shown on the label; new "Reclaim Long"/"Reclaim Short" alerts
+- Fixed: Reclaim labels were placed at `low`/`high` (the underlying instrument's price) instead of `wvf`/`-bwvf` — blew up the oscillator panel's scale to the instrument's price range
+- Reclaim labels shrunk to a single tiny colored arrow (▲/▼) — the spike quality and description moved into the hover tooltip instead of being printed on the label
+- Added View Mode (Clean / Balanced / Full) to control how many layers show at once — addresses the panel being visually overloaded with WVF, Bear WVF, both band pairs, both context lines, zone fills, and the divergence fill all active by default
+
+## v1.8 — 2026-07-07
+- Replaced the per-bar Bull/Bear Spike arrow markers with a Sentiment Bar: a live ±100 bull/bear dominance score (`WVF ÷ its band − Bear-WVF ÷ its band`) with a mini bar, on the right edge of the panel — the arrows were easy to miss and didn't say how strong the current read was
+- Reworked the Sentiment Bar from a fixed Bullish/Bearish label to the graded score above, so it reflects the current WVF/Bear-WVF balance instead of asserting a discrete state
+- Input renamed: "Show Spike Markers" → "Show Sentiment Bar"
+- Removed the now-unused "Long context (weak)" color input
+
 ## v1.7 — 2026-07-02
 - Linienfarben: grün/rot entfernt (suggerierte fälschlich Long/Short-Richtung); Bull-WVF ist jetzt Cyan (hell = aktiv, gedimmt = inaktiv), Bear-WVF ist Lila — die Pfeile bleiben die eigentliche Signal-Aussage
 

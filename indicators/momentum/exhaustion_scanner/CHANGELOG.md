@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.2 — 2026-07-09
+- Continuation Risk signals now label in orange instead of red/green, so a countertrend fade against an established trend doesn't visually read as the same signal as a Range Fade / Trend Exhaustion reversal
+- Money Flow now actually auto-disables when the feed has no real volume (`hasRealVolume` check), matching the documented feature — previously the preset toggle alone controlled it
+- Wick rejection in the Reaction score now requires close-position confirmation (close back through the midpoint) before counting, instead of scoring wick size alone
+- Exhaustion zone boxes are now deleted on reclaim/age-out instead of just losing their variable reference, so stale boxes no longer linger on the chart
+- Signal thresholds are now clamped to 20–80 to guard against extreme custom Regime/Divergence input combinations pushing them out of range
+
 ## v2.1.3 — 2026-06-30
 - Alerts: fixed alert messages to ALL CAPS format (`EXS · TOP RISK`, `EXS · BOTTOM RISK`, `EXS · REVERSAL RISK`)
 

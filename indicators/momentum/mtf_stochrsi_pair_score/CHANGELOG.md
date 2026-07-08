@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.0.0 — 2026-07-07
+- Added Bias / Quality / Timing state engine — collapses the score/agreement/exhaustion data into a single-glance readout (e.g. "LONG CONFIRMED · CLEAN · FRESH") instead of requiring the viewer to interpret two lines and a raw table
+- Bias: NO EDGE / LONG or SHORT BUILDING / LONG or SHORT CONFIRMED / CONFLICT (score vs. agreement pointing opposite ways)
+- Quality: CLEAN / MIXED / WEAK, derived from the existing TF Agreement Index
+- Timing: FRESH (within N bars of the confirmed cross) / ACTIVE / LATE (majority of TFs already deep in the extreme zone) — surfaces the exhaustion dampening that `f_score()` already computed internally but never exposed
+- Table: now shows the Bias/Quality/Timing block by default; per-TF and per-pair breakdown moved behind a new "Show Debug Table" toggle (off by default)
+- Removed the Agreement Index line from the main plot — it now lives only in the dashboard, so the pane shows one score line instead of two competing oscillators
+- Pair labels renamed from raw TF strings ("P 15+30") to relative tier names (Fast / Mid / Slow / Macro / Macro+) in the debug table
+- No changes to trigger/alert logic — `longTrigger`/`shortTrigger` and both alertconditions are unchanged; all of the above is a read-only layer on top of the existing scores
+
+## v1.9.0 — 2026-07-06
+- Per-TF score: added continuous K/D-distance and K-momentum terms; halved the fresh-cross weight (±30 → ±15) so a cross no longer dominates the score for a single bar and then drops out
+- Signal markers: replaced edge-triggered state-change logic with direct threshold crossing (`ta.crossover`/`ta.crossunder` on the smoothed total) — fires exactly on zone entry instead of on any state flip
+
 ## v1.8.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

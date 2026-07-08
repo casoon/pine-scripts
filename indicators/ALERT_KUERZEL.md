@@ -76,6 +76,11 @@ Message-Kanon: `<Kürzel> · <EVENT> · {{ticker}} {{interval}}` (optionaler Sta
 | relative_strength_line | RSL |
 | mtf_structure_bias | MSB |
 | vwap_cross_visuals | VXV |
+| trading_range_state_machine | TRSM |
+| regime_transition_engine | RTE |
+| wolfe_wave_scanner_pro | WWSP |
+| triangle_compression_scanner_pro | TCS |
+| broadening_wedge_scanner_pro | BWS |
 
 **Kollisions-Hinweis `CFR` / `CHFR`:** `CFR` gehört `compression_fractal_release` (exaktes Akronym,
 tief verankert: Indicator-Shorttitle, Log-Rows `CFR BREAK`/`CFR BAR`, Tabelle). `chandelier_flip_radar`

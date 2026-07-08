@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // MTF StochRSI Pair Score [WavesUnchained]
-// Version: 1.8.2
+// Version: 2.0.0
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-07-07 00:00:00
 // ============================================================================
 // Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus
 // and conflict penalty.
@@ -15,7 +15,8 @@
 //   ✓ Smoothed total score (EMA / RMA / SMA / WMA / HMA / JMA)
 //   ✓ TF Agreement Index — directional consensus across all 6 TFs
 //   ✓ Signal markers — edge-triggered, optional confirmed-bar gate
-//   ✓ Dashboard table — per-TF, per-pair (disabled pairs grayed), agreement, and total
+//   ✓ Bias / Quality / Timing state engine — single-glance decision readout
+//   ✓ Dashboard table — compact state view by default, per-TF/per-pair debug view optional
 //
 // ============================================================================
 
@@ -65,13 +66,19 @@ jmaPower   = input.float(2.0,    "  JMA Power", minval=1.0,  maxval=4.0, step=0.
 
 groupDisplay = "Display"
 showTable      = input.bool(true,  "Show Table",                  group=groupDisplay)
+showDebugTable = input.bool(false, "Show Debug Table (per-TF/per-pair)", group=groupDisplay,
+     tooltip="Adds the per-TF and per-pair breakdown below the Bias/Quality/Timing state block")
 showSignals    = input.bool(true,  "Show Signal Markers",         group=groupDisplay)
 confirmedOnly  = input.bool(true,  "Only Confirmed Bar Signals",  group=groupDisplay,
      tooltip="Prevents signals from appearing and disappearing on open HTF bars — strongly recommended")
 longLevel      = input.float(60,   "Strong Long Level",           minval=0,    maxval=100, group=groupDisplay)
 shortLevel     = input.float(-60,  "Strong Short Level",          minval=-100, maxval=0,   group=groupDisplay)
+buildingLevel  = input.float(30,   "Building Level",              minval=0,    maxval=100, group=groupDisplay,
+     tooltip="Score threshold (± ) for the BUILDING state, below the Strong Long/Short Level")
 minAgreement   = input.float(33,   "Min Agreement for Signals",   minval=0,    maxval=100, step=33, group=groupDisplay,
      tooltip="33 = at least 4:2 majority across 6 TFs. 0 = any majority (3:2 with one neutral).")
+freshWindow    = input.int(3,      "Fresh Window (bars)",         minval=1,   group=groupDisplay,
+     tooltip="Bars after a Confirmed signal during which Timing shows FRESH")
 
 // ─────────────────────────────────────
 // Helpers
@@ -133,8 +140,11 @@ f_score() =>
     score += kAboveD ? 20 : -20
     score += kRising ? 20 : -20
 
-    score += crossUp ? 30 : 0
-    score += crossDn ? -30 : 0
+    score += (k - d) * 0.5
+    score += (k - k[1]) * 0.8
+
+    score += crossUp ? 15 : 0
+    score += crossDn ? -15 : 0
 
     score += crossUp and k < lower ? 30 : 0
     score += crossDn and k > upper ? -30 : 0
@@ -217,6 +227,60 @@ bullCount    = (s1 > 0 ? 1 : 0) + (s2 > 0 ? 1 : 0) + (s3 > 0 ? 1 : 0) + (s4 > 0 
 bearCount    = (s1 < 0 ? 1 : 0) + (s2 < 0 ? 1 : 0) + (s3 < 0 ? 1 : 0) + (s4 < 0 ? 1 : 0) + (s5 < 0 ? 1 : 0) + (s6 < 0 ? 1 : 0)
 agreementIdx = (bullCount - bearCount) / 6.0 * 100
 
+// Confirmed-bar gate: block intrabar state changes on open HTF candles
+sigOk = not confirmedOnly or barstate.isconfirmed
+
+// Threshold crossing: fires once, exactly when the score enters the zone (+ min agreement)
+longTrigger  = ta.crossover(smoothedTotal, longLevel)   and agreementIdx >=  minAgreement and sigOk
+shortTrigger = ta.crossunder(smoothedTotal, shortLevel) and agreementIdx <= -minAgreement and sigOk
+
+// ─────────────────────────────────────
+// State Engine — Bias / Quality / Timing
+// (pure readout over the scores/triggers above — no new gating, alerts unchanged)
+// ─────────────────────────────────────
+biasDir  = smoothedTotal > 0 ? 1 : smoothedTotal < 0 ? -1 : 0
+agreeDir = agreementIdx  > 0 ? 1 : agreementIdx  < 0 ? -1 : 0
+conflict = biasDir != 0 and agreeDir != 0 and biasDir != agreeDir
+
+string biasState = "NO EDGE"
+if smoothedTotal >= longLevel and agreementIdx >= minAgreement
+    biasState := "LONG CONFIRMED"
+else if smoothedTotal <= shortLevel and agreementIdx <= -minAgreement
+    biasState := "SHORT CONFIRMED"
+else if conflict
+    biasState := "CONFLICT"
+else if smoothedTotal > buildingLevel and agreeDir >= 0
+    biasState := "LONG BUILDING"
+else if smoothedTotal < -buildingLevel and agreeDir <= 0
+    biasState := "SHORT BUILDING"
+
+string qualityState = "WEAK"
+if math.abs(agreementIdx) >= 66
+    qualityState := "CLEAN"
+else if math.abs(agreementIdx) >= 33
+    qualityState := "MIXED"
+
+// Exhaustion majority: how many TFs already sit deep in the zone in the bias direction
+lateLongCount  = (k1 > upper ? 1 : 0) + (k2 > upper ? 1 : 0) + (k3 > upper ? 1 : 0) + (k4 > upper ? 1 : 0) + (k5 > upper ? 1 : 0) + (k6 > upper ? 1 : 0)
+lateShortCount = (k1 < lower ? 1 : 0) + (k2 < lower ? 1 : 0) + (k3 < lower ? 1 : 0) + (k4 < lower ? 1 : 0) + (k5 < lower ? 1 : 0) + (k6 < lower ? 1 : 0)
+isLateLong     = lateLongCount  >= 4
+isLateShort    = lateShortCount >= 4
+
+barsSinceLong  = ta.barssince(longTrigger)
+barsSinceShort = ta.barssince(shortTrigger)
+
+string timingState = "-"
+if biasState == "LONG CONFIRMED" and isLateLong
+    timingState := "LATE"
+else if biasState == "SHORT CONFIRMED" and isLateShort
+    timingState := "LATE"
+else if biasState == "LONG CONFIRMED" and barsSinceLong <= freshWindow
+    timingState := "FRESH"
+else if biasState == "SHORT CONFIRMED" and barsSinceShort <= freshWindow
+    timingState := "FRESH"
+else if biasState == "LONG CONFIRMED" or biasState == "SHORT CONFIRMED"
+    timingState := "ACTIVE"
+
 // ─────────────────────────────────────
 // Plots
 // ─────────────────────────────────────
@@ -224,24 +288,10 @@ hline(0,          "Neutral",      color=color.new(color.gray,  60))
 hline(longLevel,  "Strong Long",  color=color.new(color.green, 70))
 hline(shortLevel, "Strong Short", color=color.new(color.red,   70))
 
-plot(agreementIdx,  "StochRSI Agreement", linewidth=1, color=color.new(color.blue,   30))
-plot(smoothedTotal, "Total Score",        linewidth=2, color=color.new(color.teal,   0))
+plot(smoothedTotal, "Total Score", linewidth=2, color=color.new(color.teal, 0))
 
-// Strong signal: magnitude + StochRSI consensus (min agreement)
-strongLong  = smoothedTotal >= longLevel  and agreementIdx >=  minAgreement
-strongShort = smoothedTotal <= shortLevel and agreementIdx <= -minAgreement
-
-// Confirmed-bar gate: block intrabar state changes on open HTF candles
-sigOk        = not confirmedOnly or barstate.isconfirmed
-finalLong    = strongLong  and sigOk
-finalShort   = strongShort and sigOk
-
-// Edge-triggered: fire only on state change, not every bar the condition holds
-longTrigger  = finalLong  and not finalLong[1]
-shortTrigger = finalShort and not finalShort[1]
-
-plotshape(showSignals and longTrigger,  title="Long Bias",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.green, text="LONG")
-plotshape(showSignals and shortTrigger, title="Short Bias", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.red,   text="SHORT")
+plotshape(showSignals and longTrigger,  title="Long Bias",  style=shape.triangleup,   location=location.bottom, size=size.tiny, color=color.green)
+plotshape(showSignals and shortTrigger, title="Short Bias", style=shape.triangledown, location=location.top,    size=size.tiny, color=color.red)
 
 bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="Alerts")
 bool alertOk = not alertsOnBarClose or barstate.isconfirmed
@@ -254,7 +304,7 @@ alertcondition(alertOk and (shortTrigger), "MTF StochRSI Short Bias", "MSRP · S
 color tc = color.new(color.gray, 20)
 color hd = color.new(color.gray, 90)
 
-var table t = table.new(position.top_right, 4, 10,
+var table t = table.new(position.top_right, 4, 13,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -276,32 +326,79 @@ f_sep(row) =>
     table.cell(t, 2, row, "", bgcolor=color.new(color.gray, 80))
     table.cell(t, 3, row, "", bgcolor=color.new(color.gray, 80))
 
+// State row: label | value, value cell merged across the remaining 3 columns
+f_stateRow(row, label, value, bg, txt) =>
+    table.cell(t, 0, row, label, text_color=tc,  bgcolor=na, text_size=size.tiny)
+    table.cell(t, 1, row, value, text_color=txt, bgcolor=bg, text_size=size.small)
+    table.cell(t, 2, row, "",    bgcolor=bg)
+    table.cell(t, 3, row, "",    bgcolor=bg)
+    table.merge_cells(t, 1, row, 3, row)
+
+f_biasBg(state) =>
+    switch state
+        "LONG CONFIRMED"  => color.new(#00c853, 15)
+        "LONG BUILDING"   => color.new(#00c853, 55)
+        "SHORT CONFIRMED" => color.new(#d50000, 15)
+        "SHORT BUILDING"  => color.new(#d50000, 55)
+        "CONFLICT"        => color.new(#ff6f00, 35)
+        =>                   color.new(color.gray, 80)
+
+f_biasTxt(state) =>
+    state == "NO EDGE" ? tc : color.white
+
+f_qualityBg(state) =>
+    switch state
+        "CLEAN" => color.new(#00c853, 55)
+        "MIXED" => color.new(#ff6f00, 55)
+        =>         color.new(color.gray, 75)
+
+f_qualityTxt(state) =>
+    state == "WEAK" ? tc : color.white
+
+f_timingBg(state) =>
+    switch state
+        "FRESH"  => color.new(#ffd600, 45)
+        "LATE"   => color.new(#ff6f00, 45)
+        "ACTIVE" => color.new(color.gray, 70)
+        =>          color.new(color.gray, 85)
+
+f_timingTxt(state) =>
+    state == "ACTIVE" or state == "-" ? tc : color.white
+
 if showTable and barstate.islast
-    // Header
-    table.cell(t, 0, 0, "TF",   text_color=tc, bgcolor=hd, text_size=size.tiny)
-    table.cell(t, 1, 0, "Scr",  text_color=tc, bgcolor=hd, text_size=size.tiny)
-    table.cell(t, 2, 0, "TF",   text_color=tc, bgcolor=hd, text_size=size.tiny)
-    table.cell(t, 3, 0, "Scr",  text_color=tc, bgcolor=hd, text_size=size.tiny)
+    // Bias / Quality / Timing — single-glance decision readout
+    f_stateRow(0, "BIAS",    biasState,    f_biasBg(biasState),       f_biasTxt(biasState))
+    f_stateRow(1, "QUALITY", qualityState, f_qualityBg(qualityState), f_qualityTxt(qualityState))
+    f_stateRow(2, "TIMING",  timingState,  f_timingBg(timingState),   f_timingTxt(timingState))
+    f_sep(3)
 
-    // TFs — 2 per row
-    f_cell(0, 1, tf1, s1)
-    f_cell(2, 1, tf2, s2)
-    f_cell(0, 2, tf3, s3)
-    f_cell(2, 2, tf4, s4)
-    f_cell(0, 3, tf5, s5)
-    f_cell(2, 3, tf6, s6)
+    if showDebugTable
+        // Header
+        table.cell(t, 0, 4, "TF",   text_color=tc, bgcolor=hd, text_size=size.tiny)
+        table.cell(t, 1, 4, "Scr",  text_color=tc, bgcolor=hd, text_size=size.tiny)
+        table.cell(t, 2, 4, "TF",   text_color=tc, bgcolor=hd, text_size=size.tiny)
+        table.cell(t, 3, 4, "Scr",  text_color=tc, bgcolor=hd, text_size=size.tiny)
 
-    // Pairs — 2 per row
-    f_cell(0, 4, "P " + tf1 + "+" + tf2, p12, useP12)
-    f_cell(2, 4, "P " + tf2 + "+" + tf3, p23, useP23)
-    f_cell(0, 5, "P " + tf3 + "+" + tf4, p34, useP34)
-    f_cell(2, 5, "P " + tf4 + "+" + tf5, p45, useP45)
-    f_cell(0, 6, "P " + tf5 + "+" + tf6, p56, useP56)
-    table.cell(t, 2, 6, "", bgcolor=color.new(color.gray, 92))
-    table.cell(t, 3, 6, "", bgcolor=color.new(color.gray, 92))
+        // TFs — 2 per row
+        f_cell(0, 5, tf1, s1)
+        f_cell(2, 5, tf2, s2)
+        f_cell(0, 6, tf3, s3)
+        f_cell(2, 6, tf4, s4)
+        f_cell(0, 7, tf5, s5)
+        f_cell(2, 7, tf6, s6)
 
-    f_sep(7)
+        // Pairs — 2 per row, named by TF tier (Fast → Macro+) instead of raw TF pair
+        f_cell(0, 8, "Fast",  p12, useP12)
+        f_cell(2, 8, "Mid",   p23, useP23)
+        f_cell(0, 9, "Slow",  p34, useP34)
+        f_cell(2, 9, "Macro", p45, useP45)
+        f_cell(0, 10, "Macro+", p56, useP56)
+        table.cell(t, 2, 10, "", bgcolor=color.new(color.gray, 92))
+        table.cell(t, 3, 10, "", bgcolor=color.new(color.gray, 92))
+
+        f_sep(11)
 
     // Totals
-    f_cell(0, 8, "Agree", agreementIdx)
-    f_cell(2, 8, "Total", smoothedTotal)
+    rowTotals = showDebugTable ? 12 : 4
+    f_cell(0, rowTotals, "Agree", agreementIdx)
+    f_cell(2, rowTotals, "Total", smoothedTotal)

@@ -1,0 +1,254 @@
+//@version=6
+// ============================================================================
+// Adaptive Arithmetic Candles + Quality Score [WavesUnchained]
+// Version: 1.2
+// Author: WavesUnchained
+// Build: 2026-07-05 00:00:00
+// ============================================================================
+// Kaufman-efficiency-adaptive candle transform blended with a linear
+// regression anchor, overlaid with a 0-100 Trend Quality Score.
+//
+// Features:
+//   ✓ Adaptive Arithmetic Candles (efficiency-ratio smoothed close/open blend)
+//   ✓ Regression-anchored close with trend-pressure body boost
+//   ✓ Synthetic wicks scaled by noise compression
+//   ✓ Trend Quality Score (0-100) — efficiency, slope, body ratio, follow-through
+//   ✓ Strong/weak bull/bear candle coloring
+//   ✓ Quality score line + high-quality dot markers
+//   ✓ Bullish/Bearish flip signals with quality confirmation
+//   ✓ Long/Short breakout signals (strong state + structure break, not just a flip)
+//   ✓ Data Window debug outputs (direction, quality, slope, ER, state, breakout)
+//
+// ============================================================================
+
+indicator("Adaptive Arithmetic Candles + Quality Score [WavesUnchained]", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// Helpers
+// ============================================================================
+f_tanh(x) =>
+    e2x = math.exp(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+lenER      = input.int(18, "Efficiency Length", minval=2)
+lenATR     = input.int(14, "ATR Length", minval=2)
+lenReg     = input.int(34, "Regression Length", minval=5)
+wickFactor = input.float(0.55, "Synthetic Wick Strength", minval=0.0, maxval=1.5, step=0.05)
+
+showRealClose = input.bool(false, "Show Real Close Dots")
+showBiasBg    = input.bool(false, "Subtle Trend Background")
+showScoreLine = input.bool(true, "Show Quality Score Line")
+showScoreDots = input.bool(true, "Show Quality Dots")
+showLabels    = input.bool(false, "Show Flip Labels")
+
+signalLen  = input.int(8, "Signal Breakout Length", minval=2, group="Signal")
+minQuality = input.int(65, "Minimum Signal Quality", minval=1, maxval=100, group="Signal")
+
+// ============================================================================
+// Core components
+// ============================================================================
+change = math.abs(close - close[lenER])
+noise  = math.sum(math.abs(close - close[1]), lenER)
+er     = noise != 0.0 ? change / noise : 0.0
+
+atr = ta.atr(lenATR)
+bodyRaw  = close - open
+bodyNorm = atr != 0.0 ? bodyRaw / atr : 0.0
+
+regNow   = ta.linreg(close, lenReg, 0)
+regPrev  = ta.linreg(close, lenReg, 1)
+regSlope = atr != 0.0 ? (regNow - regPrev) / atr : 0.0
+
+fast = 2.0 / (2.0 + 1.0)
+slow = 2.0 / (30.0 + 1.0)
+adaptiveAlpha = math.pow(er * (fast - slow) + slow, 2.0)
+
+// ============================================================================
+// Adaptive arithmetic candles
+// ============================================================================
+typical = (open + high + low + close) / 4.0
+weightedPrice = close * 0.45 + typical * 0.35 + regNow * 0.20
+
+var float arithClose = na
+arithClose := na(arithClose[1]) ? weightedPrice : arithClose[1] + adaptiveAlpha * (weightedPrice - arithClose[1])
+
+var float arithOpen = na
+arithOpen := na(arithOpen[1]) ? open : arithOpen[1] * 0.45 + arithClose[1] * 0.55
+
+trendPressure = f_tanh(regSlope * 1.8 + bodyNorm * 0.35)
+bodyBoost = atr * trendPressure * er * 0.18
+
+arithCloseFinal = arithClose + bodyBoost
+arithOpenFinal  = arithOpen
+
+realUpperWick = high - math.max(open, close)
+realLowerWick = math.min(open, close) - low
+
+noiseCompression = 1.0 - er
+upperWick = realUpperWick * (wickFactor + noiseCompression * 0.25)
+lowerWick = realLowerWick * (wickFactor + noiseCompression * 0.25)
+
+arithHigh = math.max(math.max(arithOpenFinal, arithCloseFinal), arithCloseFinal + upperWick)
+arithLow  = math.min(math.min(arithOpenFinal, arithCloseFinal), arithCloseFinal - lowerWick)
+
+// ============================================================================
+// Trend Quality Score
+// ============================================================================
+direction = arithCloseFinal > arithOpenFinal ? 1 : arithCloseFinal < arithOpenFinal ? -1 : 0
+
+slopeScore = math.min(math.abs(regSlope) * 140.0, 100.0)
+effScore   = er * 100.0
+
+bodySize = math.abs(arithCloseFinal - arithOpenFinal)
+rangeSize = arithHigh - arithLow
+bodyRatio = rangeSize != 0.0 ? bodySize / rangeSize : 0.0
+bodyScore = math.min(bodyRatio * 140.0, 100.0)
+
+bool followThrough = false
+if direction == 1
+    followThrough := close > close[1]
+else if direction == -1
+    followThrough := close < close[1]
+
+followScore = followThrough ? 100.0 : 35.0
+
+rawQuality =
+     effScore   * 0.35 +
+     slopeScore * 0.30 +
+     bodyScore  * 0.20 +
+     followScore * 0.15
+
+quality = math.round(math.max(0.0, math.min(rawQuality, 100.0)))
+
+// Directional quality: positive bullish, negative bearish
+dirQuality = quality * direction
+
+// ============================================================================
+// Visual state
+// ============================================================================
+bull = direction == 1
+bear = direction == -1
+
+strongBull = bull and quality >= minQuality and regSlope > 0
+strongBear = bear and quality >= minQuality and regSlope < 0
+
+weakBull = bull and not strongBull
+weakBear = bear and not strongBear
+
+color candleColor = color.gray
+if strongBull
+    candleColor := color.rgb(0, 170, 120)
+else if weakBull
+    candleColor := color.rgb(90, 190, 155)
+else if strongBear
+    candleColor := color.rgb(220, 70, 80)
+else if weakBear
+    candleColor := color.rgb(215, 120, 125)
+
+color wickColor = color.gray
+if bull
+    wickColor := color.rgb(40, 150, 120)
+else if bear
+    wickColor := color.rgb(180, 70, 80)
+
+color borderColor = color.rgb(120, 120, 120)
+if strongBull
+    borderColor := color.rgb(0, 120, 90)
+else if strongBear
+    borderColor := color.rgb(170, 45, 55)
+
+// ============================================================================
+// Candle Plot
+// ============================================================================
+plotcandle(
+     arithOpenFinal,
+     arithHigh,
+     arithLow,
+     arithCloseFinal,
+     title="Adaptive Arithmetic Candles",
+     color=candleColor,
+     wickcolor=wickColor,
+     bordercolor=borderColor
+)
+
+plot(showRealClose ? close : na, "Real Close", style=plot.style_circles, color=color.new(color.white, 15), linewidth=1)
+
+bgcolor(showBiasBg ? (regSlope > 0 ? color.new(color.green, 92) : regSlope < 0 ? color.new(color.red, 92) : na) : na)
+
+// ============================================================================
+// Quality Overlay
+// ============================================================================
+scoreBase = ta.lowest(low, 50)
+scoreRange = ta.atr(50) * 1.2
+scoreLine = scoreBase - scoreRange + scoreRange * (quality / 100.0)
+
+color scoreColor = color.rgb(150, 150, 150)
+if dirQuality > 65
+    scoreColor := color.rgb(0, 170, 120)
+else if dirQuality > 25
+    scoreColor := color.rgb(90, 190, 155)
+else if dirQuality < -65
+    scoreColor := color.rgb(220, 70, 80)
+else if dirQuality < -25
+    scoreColor := color.rgb(215, 120, 125)
+
+plot(showScoreLine ? scoreLine : na, "Trend Quality Score", color=scoreColor, linewidth=2)
+
+plotshape(
+     showScoreDots and quality >= 70,
+     title="High Quality Candle",
+     style=shape.circle,
+     location=location.bottom,
+     size=size.tiny,
+     color=scoreColor
+)
+
+// ============================================================================
+// Flip Signals
+// ============================================================================
+trendFlipUp   = bull and bear[1] and quality >= 55 and regSlope > 0
+trendFlipDown = bear and bull[1] and quality >= 55 and regSlope < 0
+
+plotshape(trendFlipUp, title="Bullish Arithmetic Flip", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.rgb(0, 170, 120))
+plotshape(trendFlipDown, title="Bearish Arithmetic Flip", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.rgb(220, 70, 80))
+
+if showLabels and trendFlipUp
+    label.new(bar_index, low, "AQ " + str.tostring(quality), style=label.style_label_up, textcolor=color.white, color=color.rgb(0, 130, 95), size=size.tiny)
+
+if showLabels and trendFlipDown
+    label.new(bar_index, high, "AQ " + str.tostring(quality), style=label.style_label_down, textcolor=color.white, color=color.rgb(180, 55, 65), size=size.tiny)
+
+// ============================================================================
+// Breakout Signals (Setup = strongBull/strongBear, Trigger = structure break)
+// ============================================================================
+breakHigh = close > ta.highest(high[1], signalLen)
+breakLow  = close < ta.lowest(low[1], signalLen)
+
+longSignal  = strongBull and breakHigh
+shortSignal = strongBear and breakLow
+
+plotshape(longSignal, title="Long Signal", style=shape.labelup, location=location.belowbar, text="LONG", color=color.rgb(0, 150, 110), textcolor=color.white, size=size.small)
+plotshape(shortSignal, title="Short Signal", style=shape.labeldown, location=location.abovebar, text="SHORT", color=color.rgb(200, 60, 70), textcolor=color.white, size=size.small)
+
+// ============================================================================
+// Debug (Data Window only — answers "why did/didn't a signal fire here")
+// ============================================================================
+plot(direction, "Debug: Direction (1 bull / -1 bear)", display=display.data_window)
+plot(quality, "Debug: Quality Score", display=display.data_window)
+plot(regSlope, "Debug: Regression Slope (ATR-norm.)", display=display.data_window)
+plot(er, "Debug: Efficiency Ratio", display=display.data_window)
+plot(strongBull ? 1 : 0, "Debug: Strong Bull", display=display.data_window)
+plot(strongBear ? 1 : 0, "Debug: Strong Bear", display=display.data_window)
+plot(breakHigh ? 1 : 0, "Debug: Break High", display=display.data_window)
+plot(breakLow ? 1 : 0, "Debug: Break Low", display=display.data_window)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+alertcondition(trendFlipUp, "Bullish Arithmetic Flip", "Adaptive Arithmetic Candle flipped bullish with quality confirmation.")
+alertcondition(trendFlipDown, "Bearish Arithmetic Flip", "Adaptive Arithmetic Candle flipped bearish with quality confirmation.")
+alertcondition(longSignal, "Long Signal", "Adaptive Arithmetic Candle Long Signal — strong bullish state and structure breakout confirmed.")
+alertcondition(shortSignal, "Short Signal", "Adaptive Arithmetic Candle Short Signal — strong bearish state and structure breakout confirmed.")

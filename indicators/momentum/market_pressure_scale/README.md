@@ -2,7 +2,7 @@
 
 **TradingView:** https://de.tradingview.com/script/y36Lhppi/
 
-Two-component oscillator that separates **Setup Pressure** (market coiling for a move) from **Impulse Pressure** (active directional momentum). Both run on a 0–100 scale in the same sub-pane. A phase label, signal markers, StochRSI and MFI overlays with divergences, and price-chart markers complete the picture.
+Two-component oscillator that separates **Setup Pressure** (market coiling for a move) from **Impulse Pressure** (active directional momentum). Both run on a 0–100 scale in the same sub-pane. A phase label, signal markers, and a Move Strength column gauge complete the picture.
 
 ## Why two components?
 
@@ -14,10 +14,6 @@ Classic volatility indicators (ATR, Bollinger Width) measure compression but go 
 |---|---|---|
 | Setup Pressure | Orange (thick) | ATR compression, BB compression, S/R proximity, volume drying up |
 | Impulse Pressure | Green (thick) | Range expansion vs ATR, relative volume, candle body ratio |
-| StochRSI K | Blue (thin, optional) | Standard StochRSI K line |
-| StochRSI D | Orange-red (thin, optional) | Standard StochRSI D line |
-| MFI | Lavender (thin, optional) | Money Flow Index — RSI applied to Typical Price × Volume |
-| WT Osc / Signal | Sky blue / orange (thin, optional, default off) | WaveTrend oscillator + signal line with own divergences and zone crosses |
 
 ## Phases
 
@@ -25,11 +21,18 @@ Priority order — first match wins:
 
 | Phase | Condition |
 |---|---|
+| **Sideways / Chop** | Range Chop Filter active (ADX < 16, \|DI+ − DI−\| < 5, price mid-range) |
 | **Impulse Running** | Impulse > 70 |
-| **Breakout Watch** | Setup > 55 and Impulse ≥ 45 |
-| **Coiling** | Setup > 65 and Impulse < 45 |
 | **Sideways / Quiet** | Setup < 40 and Impulse < 40 |
 | **Neutral** | everything else |
+
+### Range Chop Filter
+
+A chop filter (ADX < 16 and DI+/DI− within 5 of each other while price sits in the middle 60% of the range) takes priority over every other phase, and gates Failed Coil and Reversal so they only evaluate at a genuine range extreme, not on coincidental compression in the middle of a dead range.
+
+## Move Strength
+
+Blue columns (Show Columns toggle, default on), plotted behind Setup/Impulse Pressure rather than as a full-pane background so they add information without washing out the two curves. Tracks the expected magnitude of the eventual move — not whether a setup exists, but how forceful the release is likely to be once it fires. Built from compression depth (energy stored), range-edge proximity (location), and ADX (trend confirmation), and suppressed to a third of its value while the Range Chop Filter is active. Colored in 5 opacity bands (near-invisible → faint → medium → strong → near-solid blue) rather than a continuous gradient, so consecutive bars read as a clear step change instead of a near-uniform tint. Also shown as a numeric 0–100 row in the dashboard table with the same banded cell color.
 
 ## Signal markers
 
@@ -37,53 +40,24 @@ Small labels in the oscillator panel with hover tooltips. Each marker is individ
 
 | Label | Trigger | Meaning |
 |---|---|---|
-| `▲` gold | Setup crosses 65 with Impulse < 40 | Coiling — spring loading |
-| `ℹ` orange | Impulse crosses 45 with Setup > 55 | Breakout Watch — watch for follow-through |
-| `FC` red | Setup drops below 52 without Impulse ever reaching 45 | Failed Coil — breakout stalled |
-| `NI` red | Impulse > 70, Setup drops below 40 | Naked Impulse — move without structural backing |
-| `DP` purple | Both components above 65 simultaneously | Double Peak — sharp move imminent |
-| `DF` gray | Both falling from above 60, one crosses below 55 | Dual Fade — momentum exhausting |
+| `FC` red | Setup drops below 52 without Impulse ever reaching 45, AND price falls back toward the middle of the range (25–75 %) | Failed Coil — breakout stalled, range continues |
+| `NI` red | Impulse > 70, Setup drops below 40, AND ADX < 25 | Naked Impulse — move without structural backing or trend confirmation |
+| `◆` green / red | Reversal score crosses 60 at a range extreme, confirmed by the trigger candle's close | Reversal — Impulse fading from its own recent high + rejection wick, weighted by Setup compression |
 
-## Divergences
+### Reversal
 
-All divergences share the same pivot lookback and bar range settings. A master toggle controls all sources; Bull/Bear are individually toggleable beneath it.
+A DMI-free counter-trend signal, built from the four-stage reversal pipeline (regime veto → exhaustion → confirmation → quality):
 
-**Impulse Pressure** — divergence between price pivots and Impulse Pressure, drawn on the oscillator in the same visual style as WaveTrend v4.
+- **Regime veto** — only active at a genuine range extreme and outside chop (`reversalActive = validSetupZone and not chopMarket`)
+- **Exhaustion** — how far Impulse Pressure has faded from its own 10-bar high (only counts if that high was itself above 50)
+- **Confirmation** — a rejection wick against the extreme, sized relative to the bar's range, AND the trigger candle itself must close in the reversal's direction (a big wick that closes back toward the extreme doesn't count)
+- **Quality** — Setup Pressure (compression) reused as-is
 
-**StochRSI K** — same pivot logic applied to the StochRSI K line. Divergence lines shown in the oscillator when StochRSI is enabled.
-
-**MFI** — same pivot logic applied to the MFI line. Detects when directional volume flow diverges from price. Divergence lines shown in the oscillator when MFI curve is enabled; `◆` price-chart markers are independently toggleable (visible even with MFI curve off).
-
-## Price-chart markers
-
-Markers drawn directly on the candlestick chart, decoupled from oscillator curve visibility:
-
-| Marker | Color | Meaning |
-|---|---|---|
-| `●` green | Lavender | StochRSI K crosses above D in oversold zone |
-| `●` red | Red | StochRSI K crosses below D in overbought zone |
-| `◆` lavender | Lavender | MFI divergence (bullish or bearish) |
-
-StochRSI cross dot size scales with Setup Pressure — larger dot = more structural backing.
-
-## Momentum Regime Map
-
-Optional background overlay (default off) classifying the combined WT + StochRSI + MFI state. Replaces the phase background when active; also shown as a colored dashboard row.
-
-| Regime | Condition | Reading |
-|---|---|---|
-| Euphoric ↑ / ↓ | All three oscillators at extremes | Reversal risk |
-| Distribution | WT bullish but MFI fading | Buying volume drying up |
-| Accumulation | WT bearish but MFI recovering | Selling volume drying up |
-| Energy Build | All three near midpoint | Potential pressure buildup |
-
-## Market Character Score
-
-Inter-indicator divergence diagnosis in the dashboard (toggleable): **Conviction ↑/↓** (all three oscillators aligned), **Art. Push ↑/↓** (WT moves without MFI confirmation), **Div. Bull/Bear** (StochRSI leads opposite to WT), **Mixed** otherwise.
+The three scored components combine into one score per direction (`exhaustionScore × 0.45 + wickRatio × 0.30 + setupPressure × 0.25`), and the signal fires when that score crosses 60 on the correct side of the range with a confirming candle close (long only near the range low, short only near the range high). It never touches DMI, so it isn't exposed to the lag a DMI-based directional read would have at actual turning points.
 
 ## Dashboard table
 
-Top-right panel:
+Top-right panel (Show Table toggle, default off):
 
 | Row | Content |
 |---|---|
@@ -92,8 +66,8 @@ Top-right panel:
 | Impulse | Value / 100 + direction arrow (green) |
 | Bias | Bullish / Bearish / Flat from configurable MA cross |
 | Range Pos. | Where close sits within the N-bar high/low range (0–100 %) |
-| Regime | Momentum Regime Map state, color-coded |
-| Character | Market Character Score, color-coded |
+| Move Str. | Move Strength value / 100, blue-tinted by magnitude |
+| Action | Plain-language read (Ignore/Chop, Watch Setup, Trend Running, Long/Short Reversal, Wait) — same priority order as the phase/signals above |
 
 ## Inputs
 
@@ -105,14 +79,6 @@ Top-right panel:
 
 **Signal Markers** — master toggle + individual toggle per marker
 
-**StochRSI** — show toggle; Divergences sub-toggle; Crosses sub-toggle with Zone Low / Zone High thresholds (cross dots only in overbought / oversold zone, sized by Setup Pressure); K smoothing, D smoothing, RSI length, Stoch length
+**Move Strength** — Show Columns toggle (default on)
 
-**WaveTrend** — show toggle (default off); Divergences sub-toggle; Crosses sub-toggle with Zone Low / Zone High thresholds; Channel / Average / Signal lengths
-
-**MFI** — show toggle; Divergences sub-toggle (oscillator, active only when MFI on); Chart Markers sub-toggle (price chart, independent of MFI curve); Length
-
-**Momentum Regime Map** — Show Regime Background toggle (default off)
-
-**Market Character** — Show Character in Table toggle
-
-**Divergence** — master Show Divergences toggle; Bull / Bear sub-toggles; pivot left / right lookback, min / max bar range
+**Debug** — "Log Reversal Context" toggle (default off): writes the full Reversal calculation (range position, chop state, Setup/Impulse, exhaustion, both wick ratios, both direction scores) to Pine Logs on every confirmed bar at a range extreme, so a specific historical bar can be inspected for why a Reversal signal did or didn't fire

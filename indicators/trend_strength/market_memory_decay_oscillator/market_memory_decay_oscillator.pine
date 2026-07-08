@@ -1,0 +1,209 @@
+//@version=6
+// ============================================================================
+// Market Memory & Decay Oscillator [WavesUnchained]
+// Version: 1.0
+// Author: WavesUnchained
+// Build: 2026-07-04 00:00:00
+// ============================================================================
+// Signed oscillator fusing return-autocorrelation half-life, a Hurst-exponent
+// approximation, path efficiency and range expansion into a single carry/decay
+// read on how long the current impulse is likely to persist before mean-reverting.
+//
+// Features:
+//   ✓ Autocorrelation-derived half-life (impulse memory clamp)
+//   ✓ Hurst exponent approximation (persistent vs. mean-reverting regime)
+//   ✓ Path efficiency (direct move vs. total travelled distance)
+//   ✓ Range expansion / decay via fast-vs-slow ATR ratio
+//   ✓ Composite Memory Strength vs. Decay Pressure score
+//   ✓ Bullish/Bearish Carry and Decay regime states with background shading
+//   ✓ Impulse markers on Z-score threshold breach
+//   ✓ Light-theme dashboard (score, state, half-life, impulse age, Hurst, efficiency, range ratio)
+//   ✓ Bullish/Bearish Carry and Impulse Decay alerts
+//
+// ============================================================================
+
+indicator("Market Memory & Decay Oscillator [WavesUnchained]", "MMDO [WU]", overlay=false, max_labels_count=100)
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+src = input.source(close, "Source")
+
+memoryLen   = input.int(64, "Memory Length", minval=20)
+fastLen     = input.int(16, "Fast Impulse Length", minval=5)
+slowLen     = input.int(96, "Slow Context Length", minval=30)
+smoothLen   = input.int(8, "Score Smoothing", minval=1)
+
+impulseZ    = input.float(1.2, "Impulse Z-Threshold", step=0.1)
+maxHalfLife = input.float(48.0, "Max Half-Life Clamp", step=1.0)
+
+showZones      = input.bool(true, "Show Zones")
+showImpulse    = input.bool(true, "Show Impulse Markers")
+showDashboard  = input.bool(true, "Show Dashboard")
+
+//------------------------------------------------------------------------------
+// Helpers
+//------------------------------------------------------------------------------
+f_clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_safeDiv(a, b, fallback) =>
+    b != 0.0 and not na(b) ? a / b : fallback
+
+f_norm(x, scale) =>
+    f_clamp(x / scale, -1.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Returns / Impulse
+//------------------------------------------------------------------------------
+ret = math.log(src / src[1])
+
+retMean = ta.sma(ret, memoryLen)
+retSd   = ta.stdev(ret, memoryLen)
+retZ    = f_safeDiv(ret - retMean, retSd, 0.0)
+
+impulseRaw = ta.ema(retZ, fastLen)
+impulseDir = impulseRaw > 0 ? 1.0 : impulseRaw < 0 ? -1.0 : 0.0
+impulseStrength = f_clamp(math.abs(impulseRaw) / 2.5, 0.0, 1.0)
+
+newImpulse = math.abs(retZ) > impulseZ
+barsFromImpulse = ta.barssince(newImpulse)
+age = na(barsFromImpulse) ? 999.0 : barsFromImpulse
+
+//------------------------------------------------------------------------------
+// Memory via Autocorrelation / Half-Life
+//------------------------------------------------------------------------------
+phi = ta.correlation(ret, ret[1], memoryLen)
+
+persistentPhi = f_clamp(nz(phi), 0.0, 0.98)
+halfLife = persistentPhi > 0.01 ? -math.log(2.0) / math.log(persistentPhi) : 0.0
+halfLife := f_clamp(halfLife, 0.0, maxHalfLife)
+
+decayCurve = halfLife > 0 ? math.exp(-age / halfLife) : 0.0
+halfLifeScore = f_clamp(halfLife / maxHalfLife, 0.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Hurst Approximation
+//------------------------------------------------------------------------------
+hi = ta.highest(src, memoryLen)
+lo = ta.lowest(src, memoryLen)
+sd = ta.stdev(src, memoryLen)
+rs = f_safeDiv(hi - lo, sd, 1.0)
+hurst = f_clamp(math.log(math.max(rs, 1.0)) / math.log(memoryLen), 0.0, 1.0)
+
+hurstMemory = f_clamp((hurst - 0.50) * 2.5, -1.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Path Efficiency
+//------------------------------------------------------------------------------
+direct = math.abs(src - src[memoryLen])
+path = ta.sum(math.abs(src - src[1]), memoryLen)
+efficiency = f_safeDiv(direct, path, 0.0)
+effScore = f_clamp((efficiency - 0.20) * 2.0, 0.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Range Expansion / Decay
+//------------------------------------------------------------------------------
+tr = ta.tr(true)
+rangeFast = ta.ema(tr, fastLen)
+rangeSlow = ta.ema(tr, slowLen)
+
+rangeRatio = f_safeDiv(rangeFast, rangeSlow, 1.0)
+rangeExpansion = f_clamp((rangeRatio - 1.0) / 0.8, 0.0, 1.0)
+rangeDecay = f_clamp((1.0 - rangeRatio) / 0.45, 0.0, 1.0)
+
+//------------------------------------------------------------------------------
+// Composite Memory / Decay
+//------------------------------------------------------------------------------
+memoryStrength =
+     halfLifeScore * 0.35 +
+     math.max(hurstMemory, 0.0) * 0.25 +
+     effScore * 0.25 +
+     rangeExpansion * 0.15
+
+decayPressure =
+     rangeDecay * 0.35 +
+     f_clamp(age / maxHalfLife, 0.0, 1.0) * 0.25 +
+     math.max(-hurstMemory, 0.0) * 0.25 +
+     f_clamp(1.0 - efficiency * 3.0, 0.0, 1.0) * 0.15
+
+carryRaw = impulseDir * impulseStrength * memoryStrength * decayCurve * 100.0
+decayRaw = impulseDir * decayPressure * impulseStrength * 100.0
+
+mmdo = ta.ema(carryRaw - decayRaw * 0.55, smoothLen)
+decayLine = ta.ema(decayRaw, smoothLen)
+memoryLine = ta.ema(impulseDir * memoryStrength * 100.0, smoothLen)
+
+//------------------------------------------------------------------------------
+// Regime
+//------------------------------------------------------------------------------
+carryBull = mmdo > 25
+carryBear = mmdo < -25
+decaying = math.abs(decayLine) > math.abs(memoryLine) * 0.65 and math.abs(mmdo) < math.abs(memoryLine)
+
+stateText =
+     carryBull and not decaying ? "BULLISH CARRY" :
+     carryBear and not decaying ? "BEARISH CARRY" :
+     decaying                  ? "DECAY" :
+                                 "NO EDGE"
+
+scoreColor = color.from_gradient(mmdo, -100, 100, color.rgb(220, 75, 95), color.rgb(40, 180, 120))
+decayColor = color.rgb(240, 170, 65)
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+h100 = hline(100, "Upper Limit", color=color.new(color.gray, 92))
+h60  = hline(60, "Strong Carry", color=color.new(color.green, 76))
+h25  = hline(25, "Carry Threshold", color=color.new(color.green, 84))
+h0   = hline(0, "Zero", color=color.new(color.white, 45))
+hm25 = hline(-25, "Bear Carry Threshold", color=color.new(color.red, 84))
+hm60 = hline(-60, "Strong Bear Carry", color=color.new(color.red, 76))
+hm100 = hline(-100, "Lower Limit", color=color.new(color.gray, 92))
+
+fill(h25, h60, color=showZones ? color.new(color.green, 94) : na)
+fill(h60, h100, color=showZones ? color.new(color.green, 90) : na)
+fill(hm25, hm60, color=showZones ? color.new(color.red, 94) : na)
+fill(hm60, hm100, color=showZones ? color.new(color.red, 90) : na)
+
+plot(mmdo, "Memory & Decay Score", color=scoreColor, linewidth=3)
+plot(memoryLine, "Memory Potential", color=color.new(color.aqua, 40), linewidth=1)
+plot(decayLine, "Decay Pressure", color=color.new(decayColor, 25), linewidth=2)
+
+plot(showImpulse and newImpulse ? impulseDir * 95 : na, "Impulse Marker", style=plot.style_circles, color=color.new(scoreColor, 0), linewidth=3)
+
+bgcolor(carryBull ? color.new(color.green, 93) : carryBear ? color.new(color.red, 93) : decaying ? color.new(color.orange, 92) : na)
+
+//------------------------------------------------------------------------------
+// Dashboard
+//------------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 7, border_width=1)
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "MMDO", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 0, str.tostring(mmdo, "#.0"), text_color=color.white, bgcolor=color.new(scoreColor, 18))
+
+    table.cell(dash, 0, 1, "State", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 1, stateText, text_color=color.white, bgcolor=color.new(scoreColor, 35))
+
+    table.cell(dash, 0, 2, "Half-Life", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 2, str.tostring(halfLife, "#.0") + " bars", text_color=color.white, bgcolor=color.new(color.gray, 75))
+
+    table.cell(dash, 0, 3, "Impulse Age", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 3, str.tostring(age, "#"), text_color=color.white, bgcolor=color.new(color.gray, 75))
+
+    table.cell(dash, 0, 4, "Hurst", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 4, str.tostring(hurst, "#.00"), text_color=color.white, bgcolor=color.new(color.gray, 75))
+
+    table.cell(dash, 0, 5, "Efficiency", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 5, str.tostring(efficiency * 100, "#.0") + "%", text_color=color.white, bgcolor=color.new(color.gray, 75))
+
+    table.cell(dash, 0, 6, "Range Ratio", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 6, str.tostring(rangeRatio, "#.00"), text_color=color.white, bgcolor=color.new(color.gray, 75))
+
+//------------------------------------------------------------------------------
+// Alerts
+//------------------------------------------------------------------------------
+alertcondition(ta.crossover(mmdo, 25), "Bullish Carry", "MMDO entered bullish carry regime.")
+alertcondition(ta.crossunder(mmdo, -25), "Bearish Carry", "MMDO entered bearish carry regime.")
+alertcondition(decaying, "Impulse Decay", "MMDO detects impulse decay.")

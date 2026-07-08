@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Oscillator Divergence Zones [WavesUnchained]
-// Version: 1.4.3
+// Version: 1.5.0
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-07-08 00:00:00
 // ============================================================================
 // Detects regular and hidden divergences for RSI, CCI, MFI, Fisher Transform, TSI,
 // Schaff Trend Cycle, DPO, Ehlers Roofing Filter or Ehlers Cyber Cycle.
@@ -12,11 +12,16 @@
 //   ✓ Oscillator selector: RSI (default), CCI, MFI, Fisher, TSI, STC, DPO, Roofing, Cyber
 //   ✓ Regular divergence: price/oscillator structural opposition at pivots
 //   ✓ Hidden divergence: trend-continuation counterpart (toggle separately)
+//   ✓ Optional trend filter for hidden divergence (EMA alignment, off by default)
 //   ✓ Three-mode level filter: Off / Fixed OB-OS / Dynamic Zones (percentile-based)
 //   ✓ StdDev filter: optional statistical overextension gate for regular divergences
+//   ✓ Divergence Quality Score (0-100): pivot spacing, oscillator magnitude, OB/OS
+//     extremity, trend context — informational, does not filter signals
 //   ✓ ATR-based zone width: band height locked to creation-time volatility
-//   ✓ Configurable break trigger: full-candle (default) or close-based
-//   ✓ Zone retest counter: touch count displayed at zone right edge
+//   ✓ Configurable break trigger: full-candle (default) or close-based, checked
+//     against the actual zone boundary
+//   ✓ Zone retest counter: debounced touch count displayed at zone right edge
+//   ✓ Dashboard: oscillator, last signal + quality, active zones, filter mode, trend bias
 //   ✓ Dual-pane visualization: oscillator pane markers and chart overlay
 //   ✓ Alert conditions for all four divergence types
 //
@@ -79,6 +84,16 @@ useStdFilter = input.bool(false,  "Statistical Overextension Filter", group=g_st
 stdPeriod    = input.int(100,  "Lookback Period", minval=10,               group=g_std)
 stdMult      = input.float(1.5, "StdDev Multiplier", minval=0.5, step=0.1, group=g_std)
 
+g_trend      = "Trend Context"
+trendLen     = input.int(200, "Trend EMA Length", minval=2, group=g_trend,
+     tooltip="EMA used for trend bias. Feeds the Hidden Divergence filter below, the Quality Score's trend component, and the Dashboard's Trend Bias field.")
+useHiddenTrendFilter = input.bool(false, "Filter Hidden Divergence by Trend", group=g_trend,
+     tooltip="Off (default): hidden divergences fire regardless of trend. On: hidden bullish only fires above the Trend EMA, hidden bearish only below it — hidden divergences are continuation signals and should align with the prevailing trend.")
+
+g_score      = "Quality Score"
+useQualityScore = input.bool(true, "Compute Quality Score", group=g_score,
+     tooltip="0-100 score per divergence combining pivot spacing, oscillator divergence magnitude, OB/OS extremity, and trend context. Informational only — never filters or blocks a signal. Shown in the signal tag, tooltip, and zone shading.")
+
 g_zone       = "Zones"
 showZones    = input.bool(true,  "Show Zones on Chart",             group=g_zone)
 maxZones     = input.int(10,     "Max Active Zones", minval=1, maxval=50, group=g_zone)
@@ -92,6 +107,12 @@ g_col   = "Colors"
 bullCol = input.color(#26a69a, "Bullish", group=g_col)
 bearCol = input.color(#ef5350, "Bearish", group=g_col)
 
+g_dash        = "Dashboard"
+showDashboard = input.bool(true, "Show Dashboard", group=g_dash)
+dashPos       = input.string("top_right", "Dashboard Position",
+     options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"],
+     group=g_dash)
+
 g_debug    = "Debug"
 showPivots = input.bool(false, "Show All Pivots", group=g_debug,
      tooltip="Marks every detected price pivot as a small circle — helps diagnose why a divergence was not triggered. Filled = passed all filters. Semi-transparent = pivot detected but no divergence signal.")
@@ -104,6 +125,8 @@ type Zone
     label info
     float halfW
     bool  bull
+    int   score
+    bool  wasInside
 
 // ─── State ───────────────────────────────────────────────────────────────────
 var array<Zone> bullZones    = array.new<Zone>()
@@ -118,6 +141,7 @@ srcHl2   = srcAuto ? hl2   : oscSrc
 srcHlc3  = srcAuto ? hlc3  : oscSrc
 
 atr         = ta.atr(atrLen)
+trendEMA    = ta.ema(close, trendLen)
 rsiSeries = ta.rsi(srcClose, oscLen)
 cciSeries = ta.cci(srcHlc3, oscLen)
 mfiSeries = ta.mfi(srcHlc3, oscLen)
@@ -262,7 +286,7 @@ _bullData(bool hid) =>
     ok1 = not na(p1) and d1 >= minRange and d1 <= maxRange and (hid ? low[pivRight] > p1 and oscLowVal < ov1 : low[pivRight] < p1 and oscLowVal > ov1)
     ok2 = not na(p2) and d2 >= minRange and d2 <= maxRange and (hid ? low[pivRight] > p2 and oscLowVal < ov2 : low[pivRight] < p2 and oscLowVal > ov2)
     ok3 = not na(p3) and d3 >= minRange and d3 <= maxRange and (hid ? low[pivRight] > p3 and oscLowVal < ov3 : low[pivRight] < p3 and oscLowVal > ov3)
-    [ok1 or ok2 or ok3, ok1 ? ob1 : ok2 ? ob2 : ob3, ok1 ? ov1 : ok2 ? ov2 : ov3]
+    [ok1 or ok2 or ok3, ok1 ? ob1 : ok2 ? ob2 : ob3, ok1 ? ov1 : ok2 ? ov2 : ov3, ok1 ? d1 : ok2 ? d2 : d3]
 
 _bearData(bool hid) =>
     p1 = ta.valuewhen(foundPH, high[pivRight], 1)
@@ -283,12 +307,16 @@ _bearData(bool hid) =>
     ok1 = not na(p1) and d1 >= minRange and d1 <= maxRange and (hid ? high[pivRight] < p1 and oscHighVal > ov1 : high[pivRight] > p1 and oscHighVal < ov1)
     ok2 = not na(p2) and d2 >= minRange and d2 <= maxRange and (hid ? high[pivRight] < p2 and oscHighVal > ov2 : high[pivRight] > p2 and oscHighVal < ov2)
     ok3 = not na(p3) and d3 >= minRange and d3 <= maxRange and (hid ? high[pivRight] < p3 and oscHighVal > ov3 : high[pivRight] > p3 and oscHighVal < ov3)
-    [ok1 or ok2 or ok3, ok1 ? ob1 : ok2 ? ob2 : ob3, ok1 ? ov1 : ok2 ? ov2 : ov3]
+    [ok1 or ok2 or ok3, ok1 ? ob1 : ok2 ? ob2 : ob3, ok1 ? ov1 : ok2 ? ov2 : ov3, ok1 ? d1 : ok2 ? d2 : d3]
 
-[bullHit, bullPrevBar, bullPrevOsc]          = _bullData(false)
-[bearHit, bearPrevBar, bearPrevOsc]          = _bearData(false)
-[bullHidHit, bullHidPrevBar, bullHidPrevOsc] = _bullData(true)
-[bearHidHit, bearHidPrevBar, bearHidPrevOsc] = _bearData(true)
+[bullHit, bullPrevBar, bullPrevOsc, bullPrevD]          = _bullData(false)
+[bearHit, bearPrevBar, bearPrevOsc, bearPrevD]          = _bearData(false)
+[bullHidHit, bullHidPrevBar, bullHidPrevOsc, bullHidPrevD] = _bullData(true)
+[bearHidHit, bearHidPrevBar, bearHidPrevOsc, bearHidPrevD] = _bearData(true)
+
+// Trend alignment for hidden (continuation) divergences — off by default (see g_trend)
+hidTrendBullOk = not useHiddenTrendFilter or close > trendEMA
+hidTrendBearOk = not useHiddenTrendFilter or close < trendEMA
 
 // Regular: price/oscillator oppose → reversal signal
 bullDiv    = foundPL and bullOk and stdBullOk and bullHit
@@ -296,23 +324,48 @@ bearDiv    = foundPH and bearOk and stdBearOk and bearHit
 
 // Hidden: price/oscillator diverge in trend direction → continuation signal
 // Always calculated so strategy/alerts can use them; display gated by showHidden
-bullHidDiv = foundPL and bullOk and bullHidHit
-bearHidDiv = foundPH and bearOk and bearHidHit
+bullHidDiv = foundPL and bullOk and bullHidHit and hidTrendBullOk
+bearHidDiv = foundPH and bearOk and bearHidHit and hidTrendBearOk
+
+// ─── Divergence Quality Score (0-100, informational only) ─────────────────────
+// Averages four components: pivot spacing (structural significance), oscillator
+// divergence magnitude (relative to its own stdev), extremity past the active
+// filter boundary, and trend context (overextension for regular, alignment for hidden).
+_qualityScore(int d, float pivotOsc, float prevOsc, bool isBull, bool isHidden) =>
+    float spacingScore = math.min(100.0, math.max(0.0, (d - minRange) / math.max(1, maxRange - minRange) * 100.0))
+    float oscMag    = math.abs(pivotOsc - prevOsc)
+    float magScore  = _oscStd > 0 ? math.min(100.0, oscMag / _oscStd * 50.0) : 50.0
+    // Extremity relative to the active filter boundary (not the hard OB/OS line), so a
+    // signal that merely clears the filter already gets a non-zero score instead of
+    // needing to reach the OB/OS extreme to earn any credit.
+    float extScore  = isBull ? math.min(100.0, math.max(0.0, (bullFilterLvl - pivotOsc) / math.max(1e-10, bullFilterLvl - effectiveOS) * 100.0)) : math.min(100.0, math.max(0.0, (pivotOsc - bearFilterLvl) / math.max(1e-10, effectiveOB - bearFilterLvl) * 100.0))
+    bool  wantAbove  = isHidden ? isBull : not isBull   // hidden bull / regular bear want price above trend EMA
+    float distATR    = atr > 0 ? (wantAbove ? (close - trendEMA) / atr : (trendEMA - close) / atr) : 0.0
+    float trendScore = math.min(100.0, math.max(0.0, distATR / 2.0 * 100.0))
+    int(math.round((spacingScore + magScore + extScore + trendScore) / 4.0))
+
+bullScore    = useQualityScore and bullDiv    ? _qualityScore(bullPrevD,    oscLowVal,  bullPrevOsc,    true,  false) : int(na)
+bearScore    = useQualityScore and bearDiv    ? _qualityScore(bearPrevD,    oscHighVal, bearPrevOsc,    false, false) : int(na)
+bullHidScore = useQualityScore and bullHidDiv ? _qualityScore(bullHidPrevD, oscLowVal,  bullHidPrevOsc, true,  true)  : int(na)
+bearHidScore = useQualityScore and bearHidDiv ? _qualityScore(bearHidPrevD, oscHighVal, bearHidPrevOsc, false, true)  : int(na)
 
 // ─── Zone functions ───────────────────────────────────────────────────────────
-_addZone(arr, col, priceLevel, isHidden, isBull) =>
+_addZone(arr, col, priceLevel, isHidden, isBull, score) =>
     halfW    = atr * zoneFactor / 2
     x1       = bar_index - pivRight
     x2       = bar_index + zoneExtend
     // Label sits outside the zone box — below for bull, above for bear
     labelY   = isBull ? priceLevel - halfW : priceLevel + halfW
+    bool  hasScore = not na(score)
+    int   borderW  = hasScore and score >= 70 ? 2 : 1
+    color areaBg   = isHidden ? color.new(col, 100) : (hasScore and score >= 70 ? color.new(col, 82) : hasScore and score < 40 ? color.new(col, 95) : color.new(col, 90))
     edgeLine = line.new(x1, priceLevel, x2, priceLevel,
          color=col, width=1,
          style=isHidden ? line.style_dashed : line.style_solid,
          force_overlay=true)
     areaBox  = box.new(x1, priceLevel + halfW, x2, priceLevel - halfW,
-         border_color=color.new(col, 60),
-         bgcolor=isHidden ? color.new(col, 100) : color.new(col, 90),
+         border_color=color.new(col, 60), border_width=borderW,
+         bgcolor=areaBg,
          force_overlay=true)
     // Retest counter: text-only (no bubble), stays invisible until price actually
     // re-enters the zone, so untouched zones show nothing.
@@ -321,21 +374,26 @@ _addZone(arr, col, priceLevel, isHidden, isBull) =>
          textcolor=col, size=size.small,
          tooltip="Retest count: how many times price re-entered this zone without breaking it.",
          force_overlay=true)
-    arr.push(Zone.new(edgeLine, areaBox, 0, infoLbl, halfW, isBull))
+    arr.push(Zone.new(edgeLine, areaBox, 0, infoLbl, halfW, isBull, score, false))
     while arr.size() > maxZones
         old = arr.shift()
         old.edge.delete()
         old.area.delete()
         old.info.delete()
 
+// Break/touch are checked against the actual zone boundary (lvl ± halfW), not the
+// bare pivot price. Break-on-close uses the candle close; the default "full-candle"
+// mode breaks on a wick piercing the boundary (immediate, not delayed).
 _updateZones(arr, isBull) =>
     if arr.size() > 0
         toRemove = array.new<int>()
         for i = 0 to arr.size() - 1
             z       = arr.get(i)
             lvl     = z.edge.get_y1()
-            broken  = breakOnClose ? (isBull ? close < lvl : close > lvl) : (isBull ? high <= lvl : low >= lvl)
-            touched = not broken and (isBull ? low <= lvl + z.halfW : high >= lvl - z.halfW)
+            lower   = lvl - z.halfW
+            upper   = lvl + z.halfW
+            broken  = breakOnClose ? (isBull ? close < lower : close > upper) : (isBull ? low < lower : high > upper)
+            inside  = not broken and high >= lower and low <= upper
             if broken
                 z.edge.set_x2(bar_index)
                 z.edge.set_style(line.style_dotted)
@@ -347,8 +405,10 @@ _updateZones(arr, isBull) =>
             else
                 z.edge.set_x2(bar_index + zoneExtend)
                 z.area.set_right(bar_index + zoneExtend)
-                if touched
+                // Only count a new touch on entry into the zone, not every bar spent inside it
+                if inside and not z.wasInside
                     z.touches += 1
+                z.wasInside := inside
                 if showTouches and z.touches > 0
                     z.info.set_x(bar_index + zoneExtend)
                     z.info.set_text("×" + str.tostring(z.touches))
@@ -364,13 +424,13 @@ _updateZones(hidBearZones, false)
 
 if showZones
     if bullDiv
-        _addZone(bullZones,    bullCol, low[pivRight],  false, true)
+        _addZone(bullZones,    bullCol, low[pivRight],  false, true,  bullScore)
     if bearDiv
-        _addZone(bearZones,    bearCol, high[pivRight], false, false)
+        _addZone(bearZones,    bearCol, high[pivRight], false, false, bearScore)
     if showHidden and bullHidDiv
-        _addZone(hidBullZones, bullCol, low[pivRight],  true,  true)
+        _addZone(hidBullZones, bullCol, low[pivRight],  true,  true,  bullHidScore)
     if showHidden and bearHidDiv
-        _addZone(hidBearZones, bearCol, high[pivRight], true,  false)
+        _addZone(hidBearZones, bearCol, high[pivRight], true,  false, bearHidScore)
 
 // Divergence lines: connect the matched prior pivot's oscillator extreme to the
 // current one, so both ends sit on the oscillator's own trough/peak.
@@ -395,27 +455,31 @@ _sig(float y, color col, bool up, string tag, string txt) =>
          color=col, textcolor=color.white, size=size.small,
          tooltip=txt, force_overlay=true)
 
+// Compact signal tag, optionally suffixed with the quality score
+_tag(string base, int score) => useQualityScore and not na(score) ? base + " " + str.tostring(score) : base
+_qLine(int score) => useQualityScore and not na(score) ? "\nQuality: " + str.tostring(score) + "/100" : ""
+
 if bullDiv
-    tt = oscType + " · Bullish divergence (reversal)\nPrice: lower low   " + oscType + ": higher low\n" + oscType + " " + str.tostring(bullPrevOsc, "#.0") + "  →  " + str.tostring(oscLowVal, "#.0")
+    tt = oscType + " · Bullish divergence (reversal)\nPrice: lower low   " + oscType + ": higher low\n" + oscType + " " + str.tostring(bullPrevOsc, "#.0") + "  →  " + str.tostring(oscLowVal, "#.0") + _qLine(bullScore)
     _divDraw(bullPrevBar, bullPrevOsc, oscLowBar, oscLowVal, bullCol, false)
     _mark(oscLowBar, oscLowVal, bullCol, true, tt)
-    _sig(low[pivRight], bullCol, true, "Reversal", tt)
+    _sig(low[pivRight], bullCol, true, _tag("RD+", bullScore), tt)
 if bearDiv
-    tt = oscType + " · Bearish divergence (reversal)\nPrice: higher high   " + oscType + ": lower high\n" + oscType + " " + str.tostring(bearPrevOsc, "#.0") + "  →  " + str.tostring(oscHighVal, "#.0")
+    tt = oscType + " · Bearish divergence (reversal)\nPrice: higher high   " + oscType + ": lower high\n" + oscType + " " + str.tostring(bearPrevOsc, "#.0") + "  →  " + str.tostring(oscHighVal, "#.0") + _qLine(bearScore)
     _divDraw(bearPrevBar, bearPrevOsc, oscHighBar, oscHighVal, bearCol, false)
     _mark(oscHighBar, oscHighVal, bearCol, false, tt)
-    _sig(high[pivRight], bearCol, false, "Reversal", tt)
+    _sig(high[pivRight], bearCol, false, _tag("RD-", bearScore), tt)
 
 if showHidden and bullHidDiv
-    tt = oscType + " · Hidden bullish divergence (continuation)\nPrice: higher low   " + oscType + ": lower low\n" + oscType + " " + str.tostring(bullHidPrevOsc, "#.0") + "  →  " + str.tostring(oscLowVal, "#.0")
+    tt = oscType + " · Hidden bullish divergence (continuation)\nPrice: higher low   " + oscType + ": lower low\n" + oscType + " " + str.tostring(bullHidPrevOsc, "#.0") + "  →  " + str.tostring(oscLowVal, "#.0") + _qLine(bullHidScore)
     _divDraw(bullHidPrevBar, bullHidPrevOsc, oscLowBar, oscLowVal, bullCol, true)
     _mark(oscLowBar, oscLowVal, color.new(bullCol, 30), true, tt)
-    _sig(low[pivRight], color.new(bullCol, 30), true, "Cont.", tt)
+    _sig(low[pivRight], color.new(bullCol, 30), true, _tag("HD+", bullHidScore), tt)
 if showHidden and bearHidDiv
-    tt = oscType + " · Hidden bearish divergence (continuation)\nPrice: lower high   " + oscType + ": higher high\n" + oscType + " " + str.tostring(bearHidPrevOsc, "#.0") + "  →  " + str.tostring(oscHighVal, "#.0")
+    tt = oscType + " · Hidden bearish divergence (continuation)\nPrice: lower high   " + oscType + ": higher high\n" + oscType + " " + str.tostring(bearHidPrevOsc, "#.0") + "  →  " + str.tostring(oscHighVal, "#.0") + _qLine(bearHidScore)
     _divDraw(bearHidPrevBar, bearHidPrevOsc, oscHighBar, oscHighVal, bearCol, true)
     _mark(oscHighBar, oscHighVal, color.new(bearCol, 30), false, tt)
-    _sig(high[pivRight], color.new(bearCol, 30), false, "Cont.", tt)
+    _sig(high[pivRight], color.new(bearCol, 30), false, _tag("HD-", bearHidScore), tt)
 
 // ─── Oscillator pane plots ───────────────────────────────────────────────────
 p_ob  = plot(effectiveOB, "OB",  color=color.new(bearCol, 50))
@@ -450,6 +514,58 @@ plotshape(showPivots and foundPL ? low[pivRight] : na, offset=-pivRight,
 plotshape(showPivots and foundPH ? high[pivRight] : na, offset=-pivRight,
      title="Debug: Pivot High (chart)", style=shape.circle, location=location.absolute,
      color=color.new(bearCol, 60), size=size.tiny, force_overlay=true)
+
+// ─── Dashboard ───────────────────────────────────────────────────────────────
+var string lastSignalType  = "—"
+var int    lastSignalScore = int(na)
+
+if bullDiv
+    lastSignalType  := "Bull Div"
+    lastSignalScore := bullScore
+if bearDiv
+    lastSignalType  := "Bear Div"
+    lastSignalScore := bearScore
+if showHidden and bullHidDiv
+    lastSignalType  := "Hid Bull"
+    lastSignalScore := bullHidScore
+if showHidden and bearHidDiv
+    lastSignalType  := "Hid Bear"
+    lastSignalScore := bearHidScore
+
+if showDashboard and barstate.islast
+    color tc = color.new(color.gray, 20)
+    color hd = color.new(color.gray, 90)
+
+    var table dash = table.new(dashPos, 2, 6,
+         bgcolor=color.new(color.white, 5),
+         border_color=color.new(color.gray, 60),
+         border_width=1,
+         frame_color=color.new(color.gray, 40),
+         frame_width=1)
+
+    string signalStr = lastSignalType + (na(lastSignalScore) ? "" : "  Q" + str.tostring(lastSignalScore))
+    color  signalCol  = lastSignalType == "Bull Div" or lastSignalType == "Hid Bull" ? bullCol : lastSignalType == "Bear Div" or lastSignalType == "Hid Bear" ? bearCol : tc
+    int    activeZones = bullZones.size() + bearZones.size() + hidBullZones.size() + hidBearZones.size()
+    string biasStr = close > trendEMA ? "Up" : close < trendEMA ? "Down" : "Flat"
+    color  biasCol  = biasStr == "Up" ? bullCol : biasStr == "Down" ? bearCol : tc
+
+    table.cell(dash, 0, 0, "Osc. Div. Zones", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 0, "",                text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Oscillator",   text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, oscType,        text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Last Signal",  text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, signalStr,      text_color=signalCol, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Active Zones", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(activeZones), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Filter Mode",  text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 4, filterMode,     text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Trend Bias",   text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 5, biasStr,        text_color=biasCol, text_size=size.small)
 
 // ─── Alerts ──────────────────────────────────────────────────────────────────
 // alertcondition: named alerts, require one setup per condition in the Alert dialog

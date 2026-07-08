@@ -1,5 +1,72 @@
 # Changelog
 
+## v4.13 — 2026-07-06
+- Idea evaluated from a reference indicator (Wedge and Flag Finder by Trendoscope, MPL/CC BY-NC-SA — analyzed for technique only, no code adopted per license and repo convention): its validity check tests every single bar's high/low against the channel, not just the chosen swing points. `boundaryHoldOk` only ever checked the intermediate SWINGS between points 1 and 5 — a bar between two swings could poke through the channel without ever registering as a swing itself
+- Added `barsInsideOk`, a new hard veto checking every bar from x1 to x5 against both boundaries (1-3 and 2-4) with `p5TolAtr` tolerance. Deliberately run only ONCE per `i5` on the single best-scoring combination found for it (`f_bars_inside_ok`), not per combination — the combinatorial search already evaluates tens of thousands of (i1,i2,i3,i4) combinations per i5, so a full bar-by-bar scan on every one of those would have been prohibitively expensive
+- Added `max_bars_back(high, 2000)`/`max_bars_back(low, 2000)` since the check can index hundreds of bars back with a variable (non-constant) offset
+- New "Bars Inside (Veto)" row in the debug table, `barsInside=` field in the `WWSP SEARCH` log line
+
+## v4.12 — 2026-07-06
+- Per user preference across the scanner family (same fix applied to Triangle Compression Scanner Pro and Broadening Wedge Scanner Pro): `Max. gleichzeitige Patterns` now defaults to 1 instead of 5, so only the single highest-scoring Wolfe wave is tracked/drawn at a time instead of several at once. The v4.2 eviction logic already replaces the current pattern with any better-scoring non-overlapping candidate, so this needed no new logic — just the lower default. Raise the input if multiple genuinely separate waves at once is wanted
+
+## v4.11 — 2026-07-06
+- The optional invalidation level line (`Invalidierung anzeigen`) used `extend.right`, drawing all the way to the right edge of the chart instead of just past the live edge — fixed by drawing it a configurable `Linien-Überstand (Bars)` (default 10) past the current bar and advancing that endpoint every bar while the pattern stays live, same treatment as Triangle Compression Scanner Pro and Broadening Wedge Scanner Pro's boundary lines
+
+## v4.10 — 2026-07-06
+- `Invalidierung anzeigen` now defaults to off (per request) — the invalidation level line isn't needed on the chart by default; still available as a toggle for anyone who wants it
+
+## v4.9 — 2026-07-06
+- Chart-confirmed: `boundaryHoldOk` only ever checked the 1-3 boundary, never the 2-4 boundary — a bear pattern (score 80) with a clean-looking upper (1-3) channel could still have its lower (2-4) boundary breached somewhere between points 1 and 5 without being caught, since nothing checked it
+- `boundaryHoldOk` now scans every intermediate swing against BOTH boundaries (1-3 and 2-4), not just 1-3. A Wolfe channel has to hold on both sides — 2-4 is just as much a wall as 1-3, it just never gets its own dedicated "test" the way point 5 tests 1-3
+
+## v4.8 — 2026-07-06
+- Code review fixes (external review of v4.7; `emptyPattern()`'s na-count was flagged as suspect but verified correct — 14 na for x1-x5/y1-y5/targetNow/targetETA/invalidate/etaBar, matching the type exactly):
+  - Candidate wedge preview drew 1-5/2-4 instead of 1-3/2-4, making the near-miss preview look like a different shape than the pattern it was previewing — now matches the real drawing's boundaries
+  - Dashboard's Bias/EPA/Invalidation showed the raw search candidate (`best`), which can be a lower-scoring near-miss or a different pattern than what's actually tracked — now shows the best currently-tracked pattern's data when one exists, falling back to the search candidate only when nothing is active
+  - Added `Reward als Pflichtfilter` (default off, preserves prior behavior): optionally hard-gates `rewardOk` into `valid` for users who want a guaranteed minimum reward instead of a soft-scored one
+  - Added `Invalidierung nur per Close` (default on, preserves prior behavior): toggle to invalidate on intrabar high/low breach instead of waiting for a confirmed close
+  - Lowered `Max. gleichzeitige Patterns` cap from 15 to 8 and `Suchbereich letzte Swings` cap from 40 to 24 — both were reachable via the input UI but risked drawing-object bloat and combinatorial search cost respectively; defaults unchanged
+
+## v4.7 — 2026-07-06
+- Chart- and log-confirmed (x1=2212 y=4.3673, x5=2248 y=2.712): a bull pattern's 1-3/2-4 wedge had already converged at/right before point 5 (true intersection ≈ x=2247, i.e. `etaOk` narrowly failed `xi > x5`), yet still validated at score 72 because `etaOk` was scored (15 points) but never gated. The fallback apex projection (`x5 + 2x pattern width`) then extrapolated the same already-converged slopes further out and went deeply negative in price — drawing grossly wrong lines shooting off into empty space below the chart
+- `etaOk` is now required for `valid`, alongside `structureOk`, `boundaryHoldOk` and `p5ZoneOk`. A wedge that hasn't actually converged ahead of point 5 isn't a completed Wolfe wave — same category as the other two vetoes, just at the apex instead of the boundary or point 5 itself
+
+## v4.6 — 2026-07-06
+- Chart- and log-confirmed (x1=2120 y=3.6505, x5=2210 y=4.8503): a bear pattern's point 5 sat ~1 full price unit beyond the 1-3 boundary — several times past the 1.5 ATR `p5TolAtr` tolerance — yet still validated at score 73, because `p5ZoneOk` was scored (15 points) but never gated. Other criteria made up the missing points
+- `p5ZoneOk` is now required for `valid`, alongside `structureOk` and `boundaryHoldOk`. A point 5 that blows straight through the trendline instead of testing it near the tolerance band is the same category of violation as the mid-pattern boundary breaks v4.5 already vetoes — it just happens at the last point instead of an earlier one
+
+## v4.5 — 2026-07-06
+- Fixed a real structural gap confirmed from a chart example: between points 3 and 4, price plunged far below the 1-3 trendline and recovered before point 4 formed — a channel break the scanner never checked, since the search only ever compares the five *chosen* swings to each other, never what happened between them (including swings it deliberately skipped when picking a non-consecutive combination)
+- Added `boundaryHoldOk`, a hard veto (not scored, like `structureOk`): scans every swing between point 1 and point 5 — chosen or skipped — and rejects the pattern if any of them already breaches the 1-3 boundary by more than the same tolerance point 5 itself gets (`p5TolAtr`). A real Wolfe wave tests that boundary exactly once, at point 5; a premature, larger break beforehand means the channel was never held, regardless of how well the five chosen points alone score
+- Added a "Boundary Hold (Veto)" row to the debug table and a `boundaryHold=` field to the `WWSP SEARCH` log line
+
+## v4.4 — 2026-07-06
+- The v4.3 dedup fix (direction-matching + pairwise cleanup) didn't visibly change anything: the strict [x4,x5] interval check was still too narrow. Each of the 2-3 clustered same-direction patterns can have its own completion leg narrow enough to not literally overlap its neighbor, while all of them still visually crowd the same small stretch of chart
+- `f_overlaps` now adds a margin — a third of the larger pattern's own total width (x1 to x5) — to both patterns' ranges before comparing. Same-direction patterns still need genuine separation, scaled to how big the wave itself is (large waves need proportionally more room between them, small ones less), instead of a fixed bar count that would be wrong in one direction or the other
+
+## v4.3 — 2026-07-06
+- Fixed a chart-confirmed clutter issue: three overlapping "Bear Wolfe" patterns showing at once in the same time region. Two causes: (1) `f_overlaps` didn't check direction, so a bull and a bear pattern occupying the same bars could interfere with each other's slot; (2) the pairwise insertion check only compares a new candidate against tracked patterns one at a time — if A overlaps B and B overlaps C, but A and C don't directly overlap, all three could end up tracked simultaneously even though they visually occupy the same stretch
+- `f_overlaps` now requires matching direction (`a.bull == b.bull`) — overlap dedup only competes same-direction patterns for the same slot, per feedback that this should never compare across the whole chart, only within same-type (bull/bear) overlaps in a given time range
+- Added `f_dedupe_overlaps()`, run once per search after all insertions: checks every pair of tracked patterns, and for any same-direction, overlapping pair, keeps only the higher-scoring one — cleans up overlap chains the pairwise insertion logic alone can't catch
+
+## v4.2 — 2026-07-06
+- Found the reason nothing was drawn near the live edge despite `best.valid=true` (score up to 100) firing on the very last bar of every re-test log: `Max. gleichzeitige Patterns` had no eviction policy. Once all slots filled with patterns that happened not to invalidate for a stretch, every genuinely new, non-overlapping, higher-scoring candidate found afterward was silently discarded — confirmed in logs across 4 files, gaps of 5 weeks to 1.7 years between the last `PATTERN FIRED`/`REPLACED` and the end of the data, even though the search kept finding valid=true candidates the whole time
+- Fixed: once the cap is reached, a new non-overlapping candidate now evicts the currently weakest (lowest-scoring) tracked pattern if it scores higher than that one, logged as `PATTERN EVICTED`. The tracked set now always represents the best distinct patterns currently available, not just whichever ones happened to fire first and never invalidate
+
+## v4.1 — 2026-07-06
+- Fixed overlap detection blocking newer patterns: `f_overlaps` compared the full [x1,x5] span, but a Wolfe wave's point 1 can sit anywhere within `Suchbereich letzte Swings` — two genuinely different, well-separated completions often still share early swings for points 1-2. One wide, high-scoring pattern could block every other candidate in that stretch until it invalidated, even once a completely separate, more current wave had formed. Overlap is now checked on the [x4,x5] completion leg only
+- Deliberately kept timing/symmetry as *scored*, not hard-gated: per classic Wolfe theory it's a confirmation factor, not a structural rule, and hard-gating it would violate this repo's own "no hard AND-chains" principle
+- Instead strengthened the `timing` check itself: it previously only bounded the last leg (t4-5) against the sum of the other three, which missed the case where a *middle* leg (e.g. 3-4) alone consumes more than half the pattern's total duration while t4-5 still looks proportionate in isolation. No single leg may now exceed 40% of the total pattern time
+
+## v4.0 — 2026-07-06
+- Structural change: the scanner now tracks and draws every distinct, non-overlapping *valid* pattern found in the search window simultaneously, not just the single highest-scoring one. A genuinely separate second Wolfe wave next to the first (different point-5, non-overlapping range) now stays visible instead of being silently discarded because it scored lower than the first
+- New `Max. gleichzeitige Patterns` input (default 5) caps how many patterns are tracked at once
+- Each tracked pattern owns its own drawing objects and invalidation state independently — invalidating one doesn't affect any other
+- An overlapping candidate only replaces an already-tracked pattern at that spot if it scores higher; otherwise it's skipped (no duplicate/flicker)
+- `Alte Patterns behalten` renamed to `Invalidierte/ersetzte Patterns behalten` to reflect the new per-pattern (not global) cleanup behavior
+- Dashboard gained an "Active Patterns" row (count / max); "Best Score", "Bias", "EPA" still reflect the single best-in-window candidate (used for the debug table and near-miss marker, independent of how many patterns are actually tracked)
+- Alerts (`WWSP · BULL WOLFE` / `BEAR WOLFE` / `INVALIDATED`) now aggregate across all patterns firing/invalidating on a given bar, since a single bar can no longer be represented by one `newPattern` boolean
+
 ## v3.3 — 2026-07-06
 - The 1-4 trigger line and its vertical apex marker now use the bull/bear color (`col`, same as the wedge lines) instead of a fixed yellow `EPA-Ziel` color, and are drawn thinner (width 1 instead of 2) so they read as a secondary reference against the bolder wedge
 - Removed the now-unused `EPA-Ziel` color input

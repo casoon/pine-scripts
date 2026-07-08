@@ -1,0 +1,870 @@
+//@version=6
+// ============================================================================
+// Triangle Compression Scanner Pro [WavesUnchained]
+// Version: 1.12
+// Author: WavesUnchained
+// Build: 2026-07-06 19:00:00
+// ============================================================================
+// Slides a fixed-size window of confirmed swings across the search depth and
+// fits two boundary lines (upper from the window's outer highs, lower from
+// its outer lows) to find compressing triangles — symmetric, ascending, or
+// descending. Every distinct, non-overlapping valid triangle is tracked
+// independently until a confirmed breakout resolves it.
+//
+// Features:
+//   ✓ Sliding-window search (not a fixed point count like a harmonic pattern)
+//     across consecutive swing windows within the search depth
+//   ✓ Tracks multiple simultaneously valid, non-overlapping triangles at
+//     once, each with its own drawings and breakout state
+//   ✓ Weighted 0-100 score: structure, compression, touch quality, line
+//     quality, duration
+//   ✓ Live breakout tracking (either direction resolves the pattern) + alert
+//   ✓ Score-breakdown debug table
+//
+// ============================================================================
+
+indicator("Triangle Compression Scanner Pro [WavesUnchained]", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+pivotLen              = input.int(6, "Swing-Stärke", minval=2, maxval=30)
+maxSwings             = input.int(80, "Max. gespeicherte Swings", minval=20, maxval=200)
+searchDepth           = input.int(24, "Suchbereich letzte Swings", minval=8, maxval=60)
+triangleWindow        = input.int(8, "Swings pro Dreieck-Fenster", minval=6, maxval=20)
+maxConcurrentPatterns = input.int(1, "Max. gleichzeitige Patterns", minval=1, maxval=15)
+maxPatternAgeMult     = input.float(1.5, "Max. Pattern-Alter (× Fensterbreite)", minval=1.0, step=0.5)
+
+minScore             = input.int(60, "Mindestqualität", minval=0, maxval=100)
+atrLen               = input.int(14, "ATR-Länge")
+flatSlopeAtrTol      = input.float(0.5, "Flat-Toleranz (ATR über Fensterbreite)", minval=0.05, step=0.05)
+touchTolAtr          = input.float(0.5, "Touch-Toleranz ATR", minval=0.05, step=0.05)
+minCompressionRatio  = input.float(0.75, "Max. Endbreite / Startbreite", minval=0.3, maxval=0.95, step=0.05)
+minWidthAtr          = input.float(1.0, "Mindest-Startbreite ATR", minval=0.2, step=0.1)
+
+showOldPatterns   = input.bool(true, "Aufgelöste Patterns behalten")
+showLabels        = input.bool(true, "Score-Label anzeigen")
+lineAheadBars     = input.int(10, "Linien-Überstand (Bars)", minval=1, maxval=50)
+
+triangleCol       = input.color(color.blue, "Dreieck (offen)")
+bullCol           = input.color(color.lime, "Bullischer Breakout")
+bearCol           = input.color(color.red, "Bärischer Breakout")
+
+groupDebug        = "Debug"
+showDebug         = input.bool(false, "Score-Breakdown Debug-Tabelle", group=groupDebug)
+enableLogging     = input.bool(false, "Pine-Logs aktivieren (Fehlersuche)", group=groupDebug)
+
+groupDash         = "Dashboard"
+showDashboard     = input.bool(true, "Dashboard anzeigen", group=groupDash)
+
+groupAlert        = "Alerts"
+alertsOnBarClose  = input.bool(true, "Alerts nur bei bestätigter Kerze (Bar Close)", group=groupAlert)
+
+atr = ta.atr(atrLen)
+
+// The bar-by-bar containment check below indexes high/low up to
+// searchDepth × pivotLen bars back, which can exceed Pine's default
+// auto-detected historical buffer for a variable (non-constant) offset.
+max_bars_back(high, 2000)
+max_bars_back(low, 2000)
+
+// ============================================================================
+// Types
+// ============================================================================
+
+type Swing
+    int x
+    float y
+    int dir      // +1 = High, -1 = Low
+
+type Pattern
+    bool valid
+    string ttype          // "Symmetrisch" | "Ascending" | "Descending" | "None"
+    int score
+    int xU1
+    int xU2
+    float yU1
+    float yU2
+    int xL1
+    int xL2
+    float yL1
+    float yL2
+    int windowStartX
+    int windowEndX
+    bool structureOk
+    bool compressionOk
+    bool touchOk
+    bool lineQualityOk
+    bool durationOk
+    bool barsInsideOk
+
+// A tracked, currently-live pattern owns its own drawing objects so it can
+// be cleaned up independently of every other tracked pattern.
+type TrackedPattern
+    Pattern p
+    line[] objLines
+    label[] objLabels
+    int createdBar
+
+// ============================================================================
+// Storage
+// ============================================================================
+
+var swings = array.new<Swing>()
+
+// Tracks the newest swing's bar index, not the array LENGTH — once `swings`
+// hits its `maxSwings` cap, every push is paired with a shift, so the length
+// never changes again and a length-based "did a new swing form" check would
+// freeze forever right when the cap is first reached.
+var int lastSwingX = -1
+
+emptyPattern() =>
+    Pattern.new(false, "None", 0, na, na, na, na, na, na, na, na, na, na, false, false, false, false, false, false)
+
+// Single best-in-window candidate, regardless of whether it could ever
+// actually be tracked — kept only for the debug table (explains why the
+// overall best-scoring shape still isn't firing) and the near-miss
+// candidate marker. Independent of `trackedPatterns` below, which holds
+// every distinct, non-overlapping VALID triangle found at once.
+var Pattern best = emptyPattern()
+
+// Best candidate that could ACTUALLY be tracked (valid, still open, not
+// already aged out) — this is what the main dashboard row shows. `best`
+// above can be a stillborn or already-aged window-end that will never fire,
+// which made the dashboard show a misleadingly high "Best Score"/Type for a
+// shape that was never going to appear on the chart.
+var Pattern bestTrackable = emptyPattern()
+
+var trackedPatterns = array.new<TrackedPattern>()
+
+// Resolved patterns move here only when showOldPatterns keeps their
+// drawings around — kept purely so a later overlapping candidate can be
+// compared against the score of the historical shape still on the chart,
+// instead of silently drawing a second, lower-quality triangle on top of it.
+var keptPatterns = array.new<TrackedPattern>()
+
+var table dash = table.new(position.top_right, 2, 5,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+var table dbgTable = table.new(position.bottom_right, 2, 7,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+f_log(string msg) =>
+    if enableLogging
+        log.info("TCS " + msg)
+
+f_line(line[] arr, int x1, float y1, int x2, float y2, color col, style, int width, ext = extend.none) =>
+    ln = line.new(x1, y1, x2, y2, color=col, style=style, width=width, extend=ext)
+    array.push(arr, ln)
+    ln
+
+f_price(int x1, float y1, int x2, float y2, int x) =>
+    x2 == x1 ? y1 : y1 + (y2 - y1) * float(x - x1) / float(x2 - x1)
+
+f_slope(int x1, float y1, int x2, float y2) =>
+    x2 == x1 ? na : (y2 - y1) / float(x2 - x1)
+
+// Picks the two REAL touch points (not a computed average) that best act as
+// a boundary: the pair with the fewest other points violating it (poking
+// through by more than `tolPrice` on the wrong side — above for an upper/
+// resistance line, below for a lower/support one), tie-broken by the most
+// points touching it within tolerance. This is how a chartist actually draws
+// a trendline — through real highs/lows that define the edge — not a
+// least-squares fit, which pulls the line through the middle of the point
+// cloud and can miss every real touch when a few points cluster together.
+// O(n^3) over the window's own point count (n = nH or nL, capped by half of
+// `triangleWindow`/`wedgeWindow`, so at most a few dozen), trivial at this
+// scale. Requires at least 2 points; callers already guarantee this
+// (`array.size(highX) >= 2 and array.size(lowX) >= 2`).
+f_best_boundary(int[] xs, float[] ys, float tolPrice, bool isUpper) =>
+    n = array.size(xs)
+    bestI = 0
+    bestJ = n - 1
+    bestViolations = 1000000
+    bestTouches = -1
+    for i = 0 to n - 2
+        xi = array.get(xs, i)
+        yi = array.get(ys, i)
+        for j = i + 1 to n - 1
+            xj = array.get(xs, j)
+            yj = array.get(ys, j)
+            touches = 0
+            violations = 0
+            for k = 0 to n - 1
+                xk = array.get(xs, k)
+                yk = array.get(ys, k)
+                dist = yk - f_price(xi, yi, xj, yj, xk)
+                if math.abs(dist) <= tolPrice
+                    touches += 1
+                else if isUpper and dist > tolPrice
+                    violations += 1
+                else if not isUpper and dist < -tolPrice
+                    violations += 1
+            better = violations < bestViolations or (violations == bestViolations and touches > bestTouches)
+            if better
+                bestViolations := violations
+                bestTouches := touches
+                bestI := i
+                bestJ := j
+    [array.get(xs, bestI), array.get(ys, bestI), array.get(xs, bestJ), array.get(ys, bestJ)]
+
+f_add_swing(int x, float y, int dir) =>
+    sz = array.size(swings)
+
+    if sz == 0
+        array.push(swings, Swing.new(x, y, dir))
+    else
+        last = array.get(swings, sz - 1)
+
+        if last.dir == dir
+            stronger = dir == 1 ? y > last.y : y < last.y
+            if stronger
+                array.set(swings, sz - 1, Swing.new(x, y, dir))
+        else
+            array.push(swings, Swing.new(x, y, dir))
+
+    while array.size(swings) > maxSwings
+        array.shift(swings)
+
+// True interval overlap between two patterns' [windowStartX,windowEndX]
+// ranges — keeps at most one tracked triangle per stretch of chart.
+f_overlaps(Pattern a, Pattern b) =>
+    math.max(a.windowStartX, b.windowStartX) <= math.min(a.windowEndX, b.windowEndX)
+
+f_find_overlap_index(Pattern p, TrackedPattern[] arr) =>
+    n = array.size(arr)
+    idx = -1
+    if n > 0
+        for i = 0 to n - 1
+            tp = array.get(arr, i)
+            if idx < 0 and f_overlaps(p, tp.p)
+                idx := i
+    idx
+
+// Index of the lowest-scoring currently tracked pattern — used to make room
+// for a new, non-overlapping, higher-scoring candidate once the cap is
+// reached. Without this, the first `maxConcurrentPatterns` triangles that
+// happen not to break out for a long stretch permanently fill every slot,
+// silently discarding every new, better candidate found afterward (the same
+// bug fixed in Wolfe Wave Scanner Pro's f_find_weakest_index).
+f_find_weakest_index() =>
+    n = array.size(trackedPatterns)
+    idx = -1
+    minScoreSeen = 1000000
+    if n > 0
+        for i = 0 to n - 1
+            tp = array.get(trackedPatterns, i)
+            if tp.p.score < minScoreSeen
+                minScoreSeen := tp.p.score
+                idx := i
+    idx
+
+// Index of the highest-scoring currently tracked pattern — used so the
+// dashboard reflects an actual tracked, live pattern instead of the raw
+// search candidate (same fix as Wolfe Wave Scanner Pro's
+// f_find_best_active_index).
+f_find_best_active_index() =>
+    n = array.size(trackedPatterns)
+    idx = -1
+    maxScoreSeen = -1
+    if n > 0
+        for i = 0 to n - 1
+            tp = array.get(trackedPatterns, i)
+            if tp.p.score > maxScoreSeen
+                maxScoreSeen := tp.p.score
+                idx := i
+    idx
+
+// Deletes every drawing object owned by a tracked pattern. Arrays are
+// reference types in Pine, so popping from tp.objLines/objLabels mutates
+// the exact arrays the TrackedPattern struct already holds.
+f_delete_tracked(TrackedPattern tp) =>
+    while array.size(tp.objLines) > 0
+        line.delete(array.pop(tp.objLines))
+    while array.size(tp.objLabels) > 0
+        label.delete(array.pop(tp.objLabels))
+
+// Finalizes a still-open tracked pattern's lines into a bounded segment
+// ending at the current bar (instead of drifting on extend.right forever)
+// and moves it into keptPatterns, so a future overlapping candidate is still
+// compared against its score. Shared by every path that displaces a
+// still-open pattern while `showOldPatterns` is on: overlap replacement, cap
+// eviction, breakout resolution, and overlap-chain dedupe.
+f_finalize_and_keep(TrackedPattern tp) =>
+    if array.size(tp.objLines) >= 2
+        upperLine = array.get(tp.objLines, 0)
+        lowerLine = array.get(tp.objLines, 1)
+        upperNow = f_price(tp.p.xU1, tp.p.yU1, tp.p.xU2, tp.p.yU2, bar_index)
+        lowerNow = f_price(tp.p.xL1, tp.p.yL1, tp.p.xL2, tp.p.yL2, bar_index)
+        line.set_extend(upperLine, extend.none)
+        line.set_extend(lowerLine, extend.none)
+        line.set_xy2(upperLine, bar_index, upperNow)
+        line.set_xy2(lowerLine, bar_index, lowerNow)
+    array.push(keptPatterns, tp)
+
+// Cleans up same-direction overlap chains the pairwise insertion check can
+// miss: if A overlaps B and B overlaps C, but A and C don't directly overlap
+// each other, all three could end up tracked at once even though they
+// visually occupy the same stretch (same fix as Wolfe Wave Scanner Pro's
+// f_dedupe_overlaps). Checks every pair, keeping only the higher-scoring one.
+f_dedupe_overlaps() =>
+    n = array.size(trackedPatterns)
+    if n > 1
+        keep = array.new_bool(n, true)
+        for i = 0 to n - 2
+            for j = i + 1 to n - 1
+                tpI = array.get(trackedPatterns, i)
+                tpJ = array.get(trackedPatterns, j)
+                if array.get(keep, i) and array.get(keep, j) and f_overlaps(tpI.p, tpJ.p)
+                    if tpI.p.score >= tpJ.p.score
+                        array.set(keep, j, false)
+                    else
+                        array.set(keep, i, false)
+        for i = n - 1 to 0
+            if not array.get(keep, i)
+                tp = array.get(trackedPatterns, i)
+                if showOldPatterns
+                    f_finalize_and_keep(tp)
+                else
+                    f_delete_tracked(tp)
+                array.remove(trackedPatterns, i)
+
+// ============================================================================
+// Scoring Engine
+// ============================================================================
+
+f_eval_triangle(int[] highX, float[] highY, int[] lowX, float[] lowY, int windowStartX, int windowEndX) =>
+    nH = array.size(highX)
+    nL = array.size(lowX)
+
+    windowBars = windowEndX - windowStartX
+    touchTolPrice = touchTolAtr * atr
+
+    // Boundaries are the two real touch points that best act as a resistance
+    // (upper) / support (lower) line — fewest other points poking through it,
+    // most points actually touching it — not a least-squares average through
+    // the whole point cloud.
+    [xU1, yU1, xU2, yU2] = f_best_boundary(highX, highY, touchTolPrice, true)
+    [xL1, yL1, xL2, yL2] = f_best_boundary(lowX, lowY, touchTolPrice, false)
+
+    slopeU = f_slope(xU1, yU1, xU2, yU2)
+    slopeL = f_slope(xL1, yL1, xL2, yL2)
+
+    // "Flat" is defined relative to how much the line would move across the
+    // whole window, in ATR terms — not an absolute slope value, so it scales
+    // sensibly across symbols/timeframes.
+    flatTolPrice = windowBars > 0 ? flatSlopeAtrTol * atr / windowBars : flatSlopeAtrTol * atr
+
+    upperFlat = not na(slopeU) and math.abs(slopeU) < flatTolPrice
+    lowerFlat = not na(slopeL) and math.abs(slopeL) < flatTolPrice
+    upperFalling = not na(slopeU) and slopeU < 0 and not upperFlat
+    lowerRising  = not na(slopeL) and slopeL > 0 and not lowerFlat
+
+    isSymmetric  = upperFalling and lowerRising
+    isAscending  = upperFlat and lowerRising
+    isDescending = upperFalling and lowerFlat
+
+    ttype = isSymmetric ? "Symmetrisch" : isAscending ? "Ascending" : isDescending ? "Descending" : "None"
+    structureOk = isSymmetric or isAscending or isDescending
+
+    midX = int(math.round((windowStartX + windowEndX) / 2.0))
+
+    upperAtStart = f_price(xU1, yU1, xU2, yU2, windowStartX)
+    lowerAtStart = f_price(xL1, yL1, xL2, yL2, windowStartX)
+    upperAtMid   = f_price(xU1, yU1, xU2, yU2, midX)
+    lowerAtMid   = f_price(xL1, yL1, xL2, yL2, midX)
+    upperAtEnd   = f_price(xU1, yU1, xU2, yU2, windowEndX)
+    lowerAtEnd   = f_price(xL1, yL1, xL2, yL2, windowEndX)
+
+    // Signed, not abs(): the two boundary lines are linear, so their
+    // difference is linear too and shrinks monotonically across the window
+    // whenever structureOk holds — even past the point where the lines
+    // cross (apex inside the window). abs() turns that crossing into a
+    // V-shape, which rejects the tightest, most valid compressions right
+    // when they finish converging.
+    widthStart = upperAtStart - lowerAtStart
+    widthMid   = upperAtMid - lowerAtMid
+    widthEnd   = upperAtEnd - lowerAtEnd
+
+    // Requires a real contraction ratio AND monotonic narrowing through the
+    // midpoint — a channel that bulges outward before barely re-narrowing at
+    // the very end doesn't qualify, same reasoning as Wolfe Wave Scanner's
+    // contraction check. widthMid/widthEnd > 0 additionally requires the
+    // lines to not have crossed yet by windowEndX — a triangle whose apex
+    // already sits inside the window is a resolved/stale shape, not one
+    // still converging.
+    compressionOk = widthStart > minWidthAtr * atr and widthMid > 0 and widthEnd > 0 and widthMid <= widthStart and widthEnd <= widthMid and widthEnd <= widthStart * minCompressionRatio
+
+    touchHighCount = 0
+    if nH > 0
+        for i = 0 to nH - 1
+            hx = array.get(highX, i)
+            hy = array.get(highY, i)
+            lineY = f_price(xU1, yU1, xU2, yU2, hx)
+            if math.abs(hy - lineY) <= touchTolPrice
+                touchHighCount += 1
+    touchLowCount = 0
+    if nL > 0
+        for i = 0 to nL - 1
+            lx = array.get(lowX, i)
+            ly = array.get(lowY, i)
+            lineY = f_price(xL1, yL1, xL2, yL2, lx)
+            if math.abs(ly - lineY) <= touchTolPrice
+                touchLowCount += 1
+    touchRatio = (float(touchHighCount) / float(nH) + float(touchLowCount) / float(nL)) / 2.0
+    touchOk = touchRatio >= 0.75
+
+    // Every high/low in the window must sit inside its boundary line (plus
+    // touch tolerance) — a swing that pokes well through the line it's
+    // supposed to respect makes the "triangle" a geometric fit only, not a
+    // real chart structure.
+    insideOk = true
+    if nH > 0
+        for i = 0 to nH - 1
+            hx = array.get(highX, i)
+            hy = array.get(highY, i)
+            insideOk := insideOk and hy <= f_price(xU1, yU1, xU2, yU2, hx) + touchTolPrice
+    if nL > 0
+        for i = 0 to nL - 1
+            lx = array.get(lowX, i)
+            ly = array.get(lowY, i)
+            insideOk := insideOk and ly >= f_price(xL1, yL1, xL2, yL2, lx) - touchTolPrice
+
+    // For a symmetric triangle, neither side should be wildly steeper than
+    // the other (a near-flat side paired with a near-vertical one never
+    // looks like a real converging triangle, even if it technically
+    // qualifies) — same 3x-ratio reasoning as Wolfe Wave Scanner.
+    slopeRatio = isSymmetric and not na(slopeU) and not na(slopeL) and math.abs(slopeL) > 0.0000001 ? math.abs(slopeU) / math.abs(slopeL) : na
+    lineQualityOk = (isSymmetric ? (not na(slopeRatio) and slopeRatio >= 0.3 and slopeRatio <= 3.0) : structureOk) and insideOk
+
+    durationOk = windowBars >= pivotLen * 3
+
+    // insideOk above only checks the chosen swing highs/lows against the
+    // boundaries — a bar between two swings can still poke through the
+    // channel without ever registering as a swing itself, so the "triangle"
+    // held only at the sampled points, not for real across the whole
+    // window. A reference indicator (Wedge and Flag Finder by Trendoscope)
+    // checks every single bar's high/low this way; ported the same
+    // principle here as a hard veto, like `structureOk` — a channel that
+    // was actually violated somewhere in the middle isn't a real triangle,
+    // regardless of how well the sampled swings alone score.
+    barsInsideOk = true
+    for i = windowStartX to windowEndX
+        upperAt = f_price(xU1, yU1, xU2, yU2, i)
+        lowerAt = f_price(xL1, yL1, xL2, yL2, i)
+        barHigh = high[bar_index - i]
+        barLow = low[bar_index - i]
+        if barHigh > upperAt + touchTolPrice or barLow < lowerAt - touchTolPrice
+            barsInsideOk := false
+            break
+
+    score = 0
+    score += structureOk ? 30 : 0
+    score += compressionOk ? 25 : 0
+    score += touchOk ? 20 : 0
+    score += lineQualityOk ? 15 : 0
+    score += durationOk ? 10 : 0
+
+    Pattern.new(
+         score >= minScore and structureOk and barsInsideOk,
+         ttype,
+         score,
+         xU1, xU2, yU1, yU2,
+         xL1, xL2, yL1, yL2,
+         windowStartX, windowEndX,
+         structureOk, compressionOk, touchOk, lineQualityOk, durationOk, barsInsideOk)
+
+// ============================================================================
+// Pattern drawing — builds one self-contained TrackedPattern
+// ============================================================================
+
+// A pattern's boundary is a straight line fitted on its own window; extending
+// it forever as the chart advances means extrapolating that fixed slope over
+// an ever-growing distance, which inevitably drifts into nonsensical prices
+// the longer a pattern stays untouched (chart- and log-confirmed on
+// Broadening Wedge Scanner Pro: with no cap, ~100% of tracked wedges ended
+// via ATR-drift, essentially never via a real breakout). Capping the
+// extension to one more window-width past the window's own end bounds how
+// far the line can ever be extrapolated, by construction — instead of
+// drawing it forever and then reactively expiring it once the damage is
+// already visible.
+f_line_cap_x(Pattern p) =>
+    p.windowEndX + (p.windowEndX - p.windowStartX)
+
+f_draw_pattern(Pattern p) =>
+    objLines = array.new_line()
+    objLabels = array.new_label()
+
+    // Ends a little past the current bar instead of extend.right, which would
+    // draw the boundary all the way to the right edge of the chart. Advanced
+    // bar by bar in the breakout-tracking loop below while the pattern stays
+    // open (and short of the fixed cap), so it keeps pace with the chart
+    // without ever spanning it or extrapolating indefinitely.
+    aheadX = math.min(bar_index + lineAheadBars, f_line_cap_x(p))
+    f_line(objLines, p.xU1, p.yU1, aheadX, f_price(p.xU1, p.yU1, p.xU2, p.yU2, aheadX), triangleCol, line.style_solid, 2)
+    f_line(objLines, p.xL1, p.yL1, aheadX, f_price(p.xL1, p.yL1, p.xL2, p.yL2, aheadX), triangleCol, line.style_solid, 2)
+
+    if showLabels
+        txt = p.ttype + " Triangle\nScore " + str.tostring(p.score)
+        lb = label.new(p.windowEndX, p.yU2, txt, style=label.style_label_down, color=triangleCol, textcolor=color.white, size=size.small)
+        array.push(objLabels, lb)
+
+    TrackedPattern.new(p, objLines, objLabels, bar_index)
+
+// ============================================================================
+// Swing Detection
+// ============================================================================
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+if not na(ph)
+    f_add_swing(bar_index - pivotLen, ph, 1)
+    f_log("SWING dir=H x=" + str.tostring(bar_index - pivotLen) + " y=" + str.tostring(ph, format.mintick) + " count=" + str.tostring(array.size(swings)))
+
+if not na(pl)
+    f_add_swing(bar_index - pivotLen, pl, -1)
+    f_log("SWING dir=L x=" + str.tostring(bar_index - pivotLen) + " y=" + str.tostring(pl, format.mintick) + " count=" + str.tostring(array.size(swings)))
+
+// ============================================================================
+// Search (only re-run when a new swing has actually formed)
+// ============================================================================
+// Slides a fixed-size window across the search depth; for each window end,
+// the outer highs/lows within it define the two boundary lines. Every
+// window end's own best-scoring valid triangle is kept, not just the single
+// overall best, so two genuinely separate triangles in the same window can
+// both surface.
+
+sz = array.size(swings)
+currentSwingX = sz > 0 ? array.get(swings, sz - 1).x : -1
+newSwing = currentSwingX != lastSwingX
+lastSwingX := currentSwingX
+
+newTriangleFound = false
+
+if newSwing and sz < triangleWindow
+    f_log("SEARCH SKIPPED sz=" + str.tostring(sz) + " (<" + str.tostring(triangleWindow) + ")")
+
+if newSwing and sz >= triangleWindow
+    start = math.max(0, sz - searchDepth)
+    perEndBest = array.new<Pattern>()
+    localBest = emptyPattern()
+    localBestTrackable = emptyPattern()
+
+    // Guarded explicitly: Pine's `for i = A to B` silently reverses (and can
+    // step on an out-of-bounds index) whenever A > B — which happens here if
+    // `searchDepth` is set smaller than `triangleWindow`, leaving no room for
+    // a single full window inside the search range.
+    firstEnd = math.max(start + triangleWindow - 1, triangleWindow - 1)
+    if firstEnd <= sz - 1
+        for end = firstEnd to sz - 1
+            winStart = end - triangleWindow + 1
+            highX = array.new_int()
+            highY = array.new_float()
+            lowX  = array.new_int()
+            lowY  = array.new_float()
+
+            for k = winStart to end
+                s = array.get(swings, k)
+                if s.dir == 1
+                    array.push(highX, s.x)
+                    array.push(highY, s.y)
+                else
+                    array.push(lowX, s.x)
+                    array.push(lowY, s.y)
+
+            candidate = emptyPattern()
+            if array.size(highX) >= 2 and array.size(lowX) >= 2
+                windowStartX = array.get(swings, winStart).x
+                windowEndX = array.get(swings, end).x
+                candidate := f_eval_triangle(highX, highY, lowX, lowY, windowStartX, windowEndX)
+
+            if candidate.score > localBest.score
+                localBest := candidate
+
+            array.push(perEndBest, candidate)
+
+    best := localBest
+    bestTrackable := localBestTrackable
+    f_log("SEARCH sz=" + str.tostring(sz) + " best.score=" + str.tostring(best.score) + " type=" + best.ttype + " valid=" + str.tostring(best.valid)
+         + " structure=" + str.tostring(best.structureOk) + " compression=" + str.tostring(best.compressionOk)
+         + " touch=" + str.tostring(best.touchOk) + " lineQuality=" + str.tostring(best.lineQualityOk) + " duration=" + str.tostring(best.durationOk))
+
+    // Every distinct, non-overlapping valid triangle gets its own tracked
+    // pattern. An overlapping candidate only replaces the existing one at
+    // that spot if it scores higher and isn't literally the same window.
+    if array.size(perEndBest) > 0
+        for i = 0 to array.size(perEndBest) - 1
+            c = array.get(perEndBest, i)
+            if c.valid
+                // The newest swing needs pivotLen bars of opposite-direction
+                // movement to even confirm — and that's often the same move
+                // that already carries price through a boundary that, by
+                // compressionOk's own definition, was already tight at
+                // windowEndX. Without this check, most detected triangles
+                // are stillborn: already broken out the instant they're
+                // found, so they'd be drawn and deleted one bar later
+                // without ever being visibly "live".
+                // Same frozen-at-cap evaluation as the tracking loop: a
+                // window-end deep in `Suchbereich letzte Swings` can be old
+                // enough that extrapolating all the way to today's bar_index
+                // already overshoots its own capped extension — evaluate at
+                // the same bounded x so a merely-old-but-still-plausible
+                // candidate isn't rejected as "stillborn" for a reason that
+                // has nothing to do with whether it actually broke out.
+                stillOpenEvalX = math.min(bar_index, f_line_cap_x(c))
+                upperAtNow = f_price(c.xU1, c.yU1, c.xU2, c.yU2, stillOpenEvalX)
+                lowerAtNow = f_price(c.xL1, c.yL1, c.xL2, c.yL2, stillOpenEvalX)
+                stillOpen = close < upperAtNow and close > lowerAtNow
+                // `Suchbereich letzte Swings` can resurface a window-end that's
+                // already past its own age-expiry threshold by the time it's
+                // found (log-confirmed on Broadening Wedge Scanner Pro: fired,
+                // then expired on the very same bar with age=220 against an
+                // 81-bar window, 1.5×=121.5) — gate it here instead of firing
+                // it just to immediately expire it, which wastes a cycle and
+                // leaves the one tracking slot empty for a whole search event
+                // over a candidate that was never going to live anyway.
+                alreadyAged = bar_index - c.windowEndX > maxPatternAgeMult * math.max(c.windowEndX - c.windowStartX, 1)
+                if alreadyAged
+                    f_log("PATTERN SKIPPED (already aged) type=" + c.ttype + " score=" + str.tostring(c.score) + " age=" + str.tostring(bar_index - c.windowEndX))
+                else if not stillOpen
+                    f_log("PATTERN SKIPPED (stillborn) type=" + c.ttype + " score=" + str.tostring(c.score))
+                if stillOpen and not alreadyAged
+                    if c.score > localBestTrackable.score
+                        localBestTrackable := c
+                    // A resolved-and-kept triangle no longer sits in
+                    // trackedPatterns, so without this check a later
+                    // candidate at the same spot would draw right on top of
+                    // it regardless of quality. Only let the new one through
+                    // if it actually outscores the kept one there.
+                    keptOverlapIdx = f_find_overlap_index(c, keptPatterns)
+                    keptBlocks = keptOverlapIdx >= 0 and array.get(keptPatterns, keptOverlapIdx).p.score >= c.score
+                    if keptBlocks
+                        f_log("PATTERN SKIPPED (kept overlap scores higher) type=" + c.ttype + " score=" + str.tostring(c.score))
+                    if not keptBlocks
+                        if keptOverlapIdx >= 0
+                            outscoredKept = array.get(keptPatterns, keptOverlapIdx)
+                            f_delete_tracked(outscoredKept)
+                            array.remove(keptPatterns, keptOverlapIdx)
+                        overlapIdx = f_find_overlap_index(c, trackedPatterns)
+                        if overlapIdx < 0
+                            if array.size(trackedPatterns) < maxConcurrentPatterns
+                                newTp = f_draw_pattern(c)
+                                array.push(trackedPatterns, newTp)
+                                newTriangleFound := true
+                                f_log("PATTERN FIRED type=" + c.ttype + " score=" + str.tostring(c.score)
+                                     + " start=" + str.tostring(c.windowStartX) + " end=" + str.tostring(c.windowEndX))
+                            else
+                                // Once every slot is full, a genuinely new, non-
+                                // overlapping candidate must be able to evict the
+                                // weakest tracked triangle if it outscores it —
+                                // otherwise the first `maxConcurrentPatterns` triangles
+                                // that happen not to break out for a while permanently
+                                // occupy every slot and silently block every better
+                                // candidate found afterward.
+                                weakestIdx = f_find_weakest_index()
+                                weakest = array.get(trackedPatterns, weakestIdx)
+                                if c.score > weakest.p.score
+                                    if showOldPatterns
+                                        f_finalize_and_keep(weakest)
+                                    else
+                                        f_delete_tracked(weakest)
+                                    newTp = f_draw_pattern(c)
+                                    array.set(trackedPatterns, weakestIdx, newTp)
+                                    newTriangleFound := true
+                                    f_log("PATTERN EVICTED old_score=" + str.tostring(weakest.p.score) + " type=" + c.ttype + " score=" + str.tostring(c.score))
+                        else
+                            existing = array.get(trackedPatterns, overlapIdx)
+                            if c.windowEndX != existing.p.windowEndX and c.score > existing.p.score
+                                if showOldPatterns
+                                    f_finalize_and_keep(existing)
+                                else
+                                    f_delete_tracked(existing)
+                                newTp = f_draw_pattern(c)
+                                array.set(trackedPatterns, overlapIdx, newTp)
+                                newTriangleFound := true
+                                f_log("PATTERN REPLACED type=" + c.ttype + " score=" + str.tostring(c.score))
+
+    // Cleans up any same-direction overlap chain the pairwise checks above
+    // can miss (A overlaps B, B overlaps C, but A and C don't directly
+    // overlap each other).
+    f_dedupe_overlaps()
+
+    // `keptPatterns` exists purely so a future overlapping candidate can be
+    // compared against a resolved shape's score instead of drawing over it —
+    // but with no cleanup, every resolved pattern piled up here forever
+    // across the entire chart history (default `Aufgelöste Patterns
+    // behalten` is on), growing `f_find_overlap_index(c, keptPatterns)`'s
+    // linear scan cost on every single search event, year after year. A kept
+    // entry old enough that even a LIVE tracked pattern of the same age
+    // would already have expired can never usefully be compared against
+    // again — no future search window reaches that far back — so it's
+    // trimmed on the same age basis instead of kept indefinitely.
+    if array.size(keptPatterns) > 0
+        for i = array.size(keptPatterns) - 1 to 0
+            kp = array.get(keptPatterns, i)
+            kpWindowBars = kp.p.windowEndX - kp.p.windowStartX
+            if bar_index - kp.p.windowEndX > maxPatternAgeMult * math.max(kpWindowBars, 1)
+                f_delete_tracked(kp)
+                array.remove(keptPatterns, i)
+
+// ============================================================================
+// Breakout tracking (every bar — price can break either boundary any time)
+// ============================================================================
+
+breakoutBull = false
+breakoutBear = false
+
+if array.size(trackedPatterns) > 0
+    for i = array.size(trackedPatterns) - 1 to 0
+        tp = array.get(trackedPatterns, i)
+        // Evaluated at min(bar_index, capX) instead of bar_index directly: once
+        // a pattern has run past its fixed extension budget (one more
+        // window-width beyond its own formation, see f_line_cap_x), its
+        // boundary level FREEZES at whatever it was at the cap instead of
+        // continuing to extrapolate forever. A pattern that hasn't broken
+        // that frozen level within a reasonable time is stale (handled by
+        // `aged` below), not still meaningfully "live".
+        capX = f_line_cap_x(tp.p)
+        evalX = math.min(bar_index, capX)
+        upperNow  = f_price(tp.p.xU1, tp.p.yU1, tp.p.xU2, tp.p.yU2, evalX)
+        lowerNow  = f_price(tp.p.xL1, tp.p.yL1, tp.p.xL2, tp.p.yL2, evalX)
+        // One-bar grace period only — not a "fresh cross" requirement. A
+        // fresh-cross check (close[1] on the inside, close now outside)
+        // sounds cleaner, but windowEndX is always in the past by
+        // construction (pivotLen swing-confirmation lag), so it can never
+        // gate anything; and if price is already outside the very first
+        // time a pattern is tracked, the "fresh cross" moment already
+        // happened and never recurs — the pattern then sits in
+        // trackedPatterns forever, permanently occupying one of the
+        // maxConcurrentPatterns slots. This just skips the check on the
+        // pattern's own creation bar (avoids labeling a breakout in the
+        // same instant the triangle is drawn) and falls back to a plain
+        // containment check every bar after, so a pattern that's already
+        // outside always resolves on the very next bar.
+        justCreated = bar_index <= tp.createdBar
+        bullHit = not justCreated and close > upperNow
+        bearHit = not justCreated and close < lowerNow
+        // Classic TA treats a pattern that hasn't resolved within a
+        // reasonable multiple of its own formation length as stale, not
+        // live — same principle applied here. This is the sole cleanup
+        // mechanism now (an ATR-based drift check was tried and removed:
+        // log-confirmed on Broadening Wedge Scanner Pro it was killing
+        // legitimate, already-capped patterns on arrival — ATR measures
+        // bar-to-bar noise, not the honest cumulative price range a
+        // triangle's own real slope implies over dozens-to-hundreds of
+        // bars, so it was never a calibrated way to judge this).
+        windowBars = tp.p.windowEndX - tp.p.windowStartX
+        aged = bar_index - tp.p.windowEndX > maxPatternAgeMult * math.max(windowBars, 1)
+        if bullHit or bearHit
+            breakoutBull := breakoutBull or bullHit
+            breakoutBear := breakoutBear or bearHit
+            col = bullHit ? bullCol : bearCol
+            txt = bullHit ? "Breakout ↑" : "Breakdown ↓"
+            lb = label.new(bar_index, bullHit ? upperNow : lowerNow, txt,
+                 style=bullHit ? label.style_label_up : label.style_label_down,
+                 color=col, textcolor=color.white, size=size.small)
+            array.push(tp.objLabels, lb)
+            f_log("BREAKOUT bull=" + str.tostring(bullHit) + " type=" + tp.p.ttype)
+            if showOldPatterns
+                f_finalize_and_keep(tp)
+            else
+                f_delete_tracked(tp)
+            array.remove(trackedPatterns, i)
+        else if aged
+            f_log("PATTERN EXPIRED type=" + tp.p.ttype + " score=" + str.tostring(tp.p.score) + " age=" + str.tostring(bar_index - tp.p.windowEndX))
+            if showOldPatterns
+                f_finalize_and_keep(tp)
+            else
+                f_delete_tracked(tp)
+            array.remove(trackedPatterns, i)
+        else if array.size(tp.objLines) >= 2
+            // Still open: keep advancing the boundary lines' far end to stay
+            // just `lineAheadBars` ahead of the current bar, capped at capX so
+            // it stops growing once the fixed extension budget is used up
+            // instead of drawing all the way across the chart.
+            aheadX = math.min(bar_index + lineAheadBars, capX)
+            line.set_xy2(array.get(tp.objLines, 0), aheadX, f_price(tp.p.xU1, tp.p.yU1, tp.p.xU2, tp.p.yU2, aheadX))
+            line.set_xy2(array.get(tp.objLines, 1), aheadX, f_price(tp.p.xL1, tp.p.yL1, tp.p.xL2, tp.p.yL2, aheadX))
+
+// ============================================================================
+// Dashboard
+// ============================================================================
+
+if showDashboard and barstate.islast
+    statusActive = array.size(trackedPatterns) > 0
+
+    // Reflects the actually tracked pattern when one exists, otherwise the
+    // best candidate that could actually be tracked right now (valid, still
+    // open, not already aged out) — not the raw `best`, which can be a
+    // stillborn or already-aged window-end that will never fire, making the
+    // dashboard show a misleadingly high score/type for a shape that was
+    // never going to appear on the chart.
+    Pattern dashPattern = statusActive ? array.get(trackedPatterns, f_find_best_active_index()).p : bestTrackable
+
+    table.cell(dash, 0, 0, "Triangle Scanner", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 0, statusActive ? "ACTIVE" : "SCAN", text_color=color.white, bgcolor=statusActive ? color.new(triangleCol, 0) : color.new(color.gray, 80), text_size=size.small)
+
+    table.cell(dash, 0, 1, "Active Patterns", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(array.size(trackedPatterns)) + " / " + str.tostring(maxConcurrentPatterns), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Best Score", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(dashPattern.score) + " / " + str.tostring(minScore), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Type", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, dashPattern.structureOk ? dashPattern.ttype : "—", text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Window", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 4, na(dashPattern.windowStartX) ? "—" : (str.tostring(dashPattern.windowEndX - dashPattern.windowStartX) + " Bars"), text_color=tc, text_size=size.small)
+
+// ============================================================================
+// Debug: score breakdown of the current best-in-depth candidate
+// ============================================================================
+
+if showDebug and barstate.islast
+    table.cell(dbgTable, 0, 0, "Score-Breakdown", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dbgTable, 1, 0, str.tostring(best.score) + " / " + str.tostring(minScore), text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(dbgTable, 0, 1, "Struktur (30)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 1, best.structureOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 2, "Kompression (25)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 2, best.compressionOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 3, "Touch-Qualität (20)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 3, best.touchOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 4, "Linien-Qualität (15)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 4, best.lineQualityOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 5, "Dauer (10)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 5, best.durationOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 6, "Bars Inside (Veto)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 6, best.barsInsideOk ? "OK" : "VERLETZT", text_color=tc, text_size=size.tiny)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertOk = not alertsOnBarClose or barstate.isconfirmed
+
+alertcondition(alertOk and newTriangleFound, "Neues Dreieck erkannt", "TCS · TRIANGLE FOUND · {{ticker}} {{interval}}")
+alertcondition(alertOk and breakoutBull, "Bullischer Breakout", "TCS · BULL BREAKOUT · {{ticker}} {{interval}}")
+alertcondition(alertOk and breakoutBear, "Bärischer Breakdown", "TCS · BEAR BREAKDOWN · {{ticker}} {{interval}}")
