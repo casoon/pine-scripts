@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.0 — 2026-07-09
+- Added Sentiment Bar (group 7, on by default): live label at the panel's right edge scoring how far WT sits inside its own OB/OS zone, ±100 with a mini bar — ported from Williams VIX Fix Advanced's Sentiment Bar. Computed on raw WT/Overbought1/Oversold1, consistent across all three Scale Modes. No Signal Quality score added — this variant has no trend-context or stall/absorption layer for that weighting to draw on.
+- Alerts group label numbered ("8 · Alerts") for consistency with the rest of the input groups.
+
 ## v1.0.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

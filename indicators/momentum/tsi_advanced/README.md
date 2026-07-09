@@ -15,6 +15,8 @@ TSI Advanced ports the CCI Advanced context view onto a True Strength Index core
 - **Stall/absorption layer:** flags bars where TSI cools/heats sharply while price barely moves
 - **Trend context line:** a slow TSI plotted faint behind the fast line; a cross against its side of zero is marked counter-trend
 - **Divergence wedge:** fills the area between fast TSI and the trend context only when they move in opposite directions
+- **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far TSI sits inside its own stretch zone, plus a mini bar
+- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — stretch-zone depth (50%) + context agreement (25%) + stall-free (25%)
 - **Alert conditions:** bull/bear cross from stretch zone; zero-cross up/down
 
 ## Scoring

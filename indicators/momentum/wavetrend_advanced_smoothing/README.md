@@ -12,7 +12,12 @@ WaveTrend oscillator with a pluggable smoothing kernel and a rich visualization 
 - **WT / Signal fill** — optional shaded fill between the main and signal lines
 - **OB/OS zone fills** — flat color fills between the first and second OB/OS levels
 - **Signal markers** — large triangles at extreme crosses (OB/OS zone), small circle dots for all other crosses
+- **Sentiment Bar** — optional live label at the panel's right edge, a signed ±100 score for how far WT sits inside its own OB/OS zone, plus a mini bar (no Signal Quality score in this variant — see Scoring below)
 - **Alerts** — bull/bear extreme cross + plain cross-up / cross-down
+
+## Scoring
+
+Ported from Williams VIX Fix Advanced's Sentiment Bar, computed on raw WT (unscaled) and Overbought 1 / Oversold 1, so it stays consistent across all three Scale Modes. This variant has no Signal Quality score: that weighting needs a trend-context line and a stall/absorption layer for its context-agreement and stall-free terms, neither of which exists here (unlike RSI/CCI/ROC/etc. Advanced, which have both).
 
 ## Smoothing Notes
 

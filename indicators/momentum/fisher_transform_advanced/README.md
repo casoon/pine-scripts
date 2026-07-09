@@ -5,16 +5,17 @@ Fisher Transform Advanced ports the CCI Advanced context view onto a zero-center
 ## Features
 
 - **Fisher core:** normalized source range → recursive Fisher Transform → averaged main line → signal line
-- **Zero-centered scale:** 0 midline with configurable ±1.5 default extreme levels and ±3 zone boundaries
+- **Zero-centered scale:** 0 midline with configurable ±1.5 default extreme levels; panel autoscales to the actual Fisher range instead of a fixed outer boundary
 - **Signals on raw Fisher values:** crossover detection uses Fisher and its signal directly
 - **4-state histogram:** rising/falling × positive/negative drives four opacity states
 - **Gradient line:** `color.from_gradient()` from bull teal to bear pink based on Fisher extreme level
 - **Shadow fills:** gradient shadows between Fisher and zero
-- **OB/OS zone fills:** configurable upper/lower Fisher extreme bands
 - **Signal markers:** configurable extreme-zone filter for Fisher/signal crosses; optional zero-cross dots
 - **Stall/absorption layer:** flags bars where Fisher cools/heats sharply while price barely moves
 - **Trend context line:** a slow Fisher Transform plotted faint behind the fast line; a cross against its side of zero is marked counter-trend
 - **Divergence wedge:** fills the area between fast Fisher and the trend context only when they move in opposite directions
+- **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far Fisher sits inside its own OB/OS zone, plus a mini bar
+- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — OB/OS-zone depth (50%) + context agreement (25%) + stall-free (25%)
 - **Alert conditions:** bull/bear cross from extreme zone; zero-cross up/down
 
 ## Scoring

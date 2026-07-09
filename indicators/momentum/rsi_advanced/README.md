@@ -15,11 +15,15 @@ RSI Advanced ports the CCI Advanced context view onto a bounded RSI core. It kee
 - **Stall/absorption layer:** flags bars where RSI cools/heats sharply while price barely moves
 - **Trend context line:** a slow RSI plotted faint behind the fast line; a cross against its side of 50 is marked counter-trend
 - **Divergence wedge:** fills the area between fast RSI and the trend context only when they move in opposite directions
+- **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far RSI sits inside its own OB/OS zone, plus a mini bar
+- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — OB/OS-zone depth (50%) + context agreement (25%) + stall-free (25%)
 - **Alert conditions:** bull/bear cross from extreme zone; 50-cross up/down
 
 ## Scoring
 
 The optional extreme filter requires the RSI line to have visited the oversold or overbought zone within the last N bars before a signal-line cross qualifies as a triangle signal.
+
+The Sentiment Bar and Signal Quality score are a separate, optional layer (group 8, ported from Williams VIX Fix Advanced): the Sentiment Bar reads current extremity live, the Signal Quality score grades each individual cross.
 
 ## Trend Context
 

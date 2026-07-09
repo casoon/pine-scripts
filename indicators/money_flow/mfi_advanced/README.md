@@ -16,6 +16,8 @@ MFI Advanced ports the CCI Advanced context view onto a Money Flow Index core. I
 - **Stall/absorption layer:** flags bars where MFI cools/heats sharply while price barely moves; renders contradicted crosses as small/faded triangles and fades the histogram without touching cross logic
 - **Trend context line:** a slow MFI plotted faint behind the fast line; a cross against its side of 50 is marked counter-trend
 - **Divergence wedge:** fills the area between fast MFI and the trend context only when they move in opposite directions
+- **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far MFI sits inside its own OB/OS zone, plus a mini bar
+- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — OB/OS-zone depth (50%) + context agreement (25%) + stall-free (25%)
 - **Alert conditions:** bull/bear cross from extreme zone; 50-cross up/down
 
 ## Scoring
@@ -24,7 +26,7 @@ The optional extreme filter requires the MFI line to have visited the oversold o
 
 ## Volume Handling
 
-MFI requires volume. On instruments where `volume` is missing or zero across the MFI lookback, the indicator pins the raw MFI calculation to a neutral 50 and disables signal/alert conditions until volume becomes available. The panel remains usable as a visual placeholder, but no money-flow signal should be interpreted on no-volume symbols.
+MFI requires volume. On instruments where `volume` is missing or zero across the MFI lookback, the indicator pins the raw MFI calculation to a neutral 50 and disables signal/alert conditions until volume becomes available. The panel remains usable as a visual placeholder, but no money-flow signal should be interpreted on no-volume symbols. The Sentiment Bar naturally reads 0 (balanced) in this state, since a neutral 50 MFI sits exactly on the midline.
 
 ## Stall / Absorption
 

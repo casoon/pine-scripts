@@ -16,11 +16,15 @@ CCI with pluggable smoothing, three scale modes, and rich visualization. The ind
 - **Signal markers:** configurable OB/OS-zone filter for crosses; optional zero-line cross dots
 - **Stall/absorption layer:** single-timeframe detector for bars where the CCI cools/heats sharply while price barely moves; renders the contradicted cross as a small/faded triangle and fades the histogram, without touching the cross logic
 - **Trend context line:** a slow CCI (longer length, same kernel) plotted faint behind the fast line — the price-dependent trend the fast CCI rests on; a cross against its side of zero is marked counter-trend (weak)
+- **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far CCI sits inside its own OB/OS zone, plus a mini bar
+- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — OB/OS-zone depth (50%) + context agreement (25%) + stall-free (25%)
 - **Alert conditions:** bull/bear cross from extreme zone; zero-line cross up/down
 
 ## Scoring
 
 The optional extreme filter requires the main CCI line to have visited the oversold (or overbought) zone within the last N bars before a cross qualifies as a signal. This eliminates mid-range crosses that lack mean-reversion context.
+
+The Sentiment Bar and Signal Quality score (group 10, ported from Williams VIX Fix Advanced) are computed on the raw, unscaled CCI line and Overbought 1 / Oversold 1 levels — like the signal logic above, they stay consistent across all three Scale Modes. Quality labels are positioned on the displayed (scaled) line so they land at the correct screen height regardless of Scale Mode.
 
 ## Stall / Absorption
 

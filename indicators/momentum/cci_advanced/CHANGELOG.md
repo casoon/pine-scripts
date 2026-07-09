@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.4.0 — 2026-07-09
+- Added Sentiment Bar (group 10, on by default): live label at the panel's right edge scoring how far CCI sits inside its own OB/OS zone, ±100 with a mini bar — ported from Williams VIX Fix Advanced's Sentiment Bar. Computed on raw CCI/Overbought1/Oversold1, consistent across all three Scale Modes.
+- Added Signal Quality (group 10, off by default): optional 0-100 score next to each Bull/Bear Extreme marker, weighted 50% OB/OS-zone depth + 25% context agreement + 25% stall-free — same weighting as Williams VIX Fix Advanced's Spike Quality. Labels position on the scaled display line so they land correctly regardless of Scale Mode.
+- Alerts group label numbered ("11 · Alerts") for consistency with the rest of the input groups.
+
+## v1.3.0 — 2026-07-09
+- Raised default Signal Length from 3 to 9 — at equal length to the main-line smoothing (avgLen=3), the signal line tracked the CCI line too closely to produce a visible separation or usable histogram/crossover signal.
+
 ## v1.2.0 — 2026-06-30
 - Trend context line (group 9): a slow CCI plotted faint behind the fast line — the trend the fast CCI rests on (price-dependent support), single-timeframe
 - Counter-trend conviction: an extreme cross fired against the trend context's side of zero now renders as a weak/absorbed triangle, alongside the stall layer; both are independently toggleable (`useStall` / `useCtx`)

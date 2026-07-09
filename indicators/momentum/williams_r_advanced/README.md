@@ -15,6 +15,8 @@ Williams %R Advanced ports the CCI Advanced context view onto a Williams %R core
 - **Stall/absorption layer:** flags bars where %R cools/heats sharply while price barely moves
 - **Trend context line:** a slow Williams %R plotted faint behind the fast line; a cross against its side of 50 is marked counter-trend
 - **Divergence wedge:** fills the area between fast %R and the trend context only when they move in opposite directions
+- **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far %R sits inside its own OB/OS zone, plus a mini bar
+- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — OB/OS-zone depth (50%) + context agreement (25%) + stall-free (25%)
 - **Alert conditions:** bull/bear cross from extreme zone; 50-cross up/down
 
 ## Scale

@@ -15,6 +15,8 @@ Stoch RSI Advanced ports the CCI Advanced context view onto a bounded Stoch RSI 
 - **Stall/absorption layer:** flags bars where Stoch RSI cools/heats sharply while price barely moves; renders contradicted crosses as small/faded triangles and fades the histogram without touching cross logic
 - **Trend context line:** a slow Stoch RSI plotted faint behind K; a cross against its side of 50 is marked counter-trend
 - **Divergence wedge:** fills the area between K and the trend context only when they move in opposite directions
+- **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far K sits inside its own OB/OS zone, plus a mini bar
+- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — OB/OS-zone depth (50%) + context agreement (25%) + stall-free (25%)
 - **Alert conditions:** bull/bear cross from extreme zone; 50-cross up/down
 
 ## Scoring
