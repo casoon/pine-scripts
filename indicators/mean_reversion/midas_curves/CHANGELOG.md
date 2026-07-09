@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.4.0 — 2026-07-09
+- New **Anchor Display** mode (Backpainted / Confirmed): auto-swing anchors previously always re-seeded the curve from the real pivot bar and drew the marker backdated, which looks cleaner historically but the anchor isn't knowable live until `Anchor Swing Right` bars later. **Confirmed** now starts the curve and marks the anchor only at the bar it's actually known live; **Backpainted** (default) keeps the previous behaviour
+- Dashboard: **Anchor** row now notes `(drawn Xb back)` when Backpainted is active, so the delay between the drawn anchor and its live confirmation is explicit
+- Dashboard: new **Volume** row — flags when `volume` is missing/zero and the curve is falling back to equal-weighted price instead of true volume-weighting
+- **Reclaim Quality Score** (0–5): reclaim markers/alerts are unchanged (still fire on stretch + MIDAS crossover), but now carry an annotation score built from stretch beforehand, candle close strength, volume above average, a small structure break, and a TBF late/expired bonus. Shown as marker text and a new dashboard **Reclaim Q** row — context only, does not gate the marker
+- Auto EMA bias now holds its side until price closes on the new side for `Auto EMA: min hold bars` (default 3) consecutive bars, reducing whipsaw flips of the context markers in choppy phases (set to 1 for the old immediate-flip behaviour)
+- Wording: TBF description softened from "forecasts trend exhaustion" to "accelerated exhaustion estimate" — it projects, it doesn't predict
+
 ## v2.3.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

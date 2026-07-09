@@ -1,6 +1,6 @@
 # MIDAS 2.0
 
-An anchored **MIDAS support/resistance curve** (Paul Levine's launch-anchored volume-weighted price) with a true **topfinder / bottomfinder** accelerated curve that forecasts trend exhaustion. It is a **Location + Exhaustion** sensor: it reports *where price sits relative to value* (distance from the curve, band zone) and *how far the launched move has run toward its projected end* (the topfinder d/D progress). Context markers are Setup-level evidence, never hard BUY/SELL triggers.
+An anchored **MIDAS support/resistance curve** (Paul Levine's launch-anchored volume-weighted price) with a true **topfinder / bottomfinder** accelerated curve — an accelerated exhaustion *estimate*, not a forecast. It is a **Location + Exhaustion** sensor: it reports *where price sits relative to value* (distance from the curve, band zone) and *how far the launched move has run toward its projected end* (the topfinder d/D progress). Context markers are Setup-level evidence, never hard BUY/SELL triggers.
 
 It is the exhaustion-aware sibling of [`anchored_vwap`](../anchored_vwap/): where Anchored VWAP is a pure Location sensor (distance-in-σ, no triggers), MIDAS 2.0 adds the launch-anchored S/R curve and the accelerated topfinder/bottomfinder that the classic MIDAS methodology is actually known for.
 
@@ -10,7 +10,9 @@ It is the exhaustion-aware sibling of [`anchored_vwap`](../anchored_vwap/): wher
 - **Volume-weighted σ bands**, **ATR bands**, or **Hybrid** (average of the two) at two configurable multiples
 - **Topfinder / bottomfinder** accelerated curve with closed-form auto-fit — catches up to price and projects where the launched move ends
 - **4-stage exhaustion read** (`no fit / running / late / expired`) from the cumulative-volume progress `d/D`
-- **Stretched-from-value** and **reclaim-after-stretch** context markers (light, Setup-level)
+- **Stretched-from-value** and **reclaim-after-stretch** context markers (light, Setup-level), each reclaim carrying a **0–5 Reclaim Quality Score**
+- **Backpainted / Confirmed** anchor display mode — trade off a clean historical look against a live-honest anchor
+- Auto EMA bias with a configurable **hold-bars** hysteresis to reduce whipsaw flips in choppy phases
 - **Element | Value | Read** dashboard — every row carries a plain-language interpretation plus a synthesised **TF-aware** conclusion
 - Light-theme dashboard, alerts (de-directionalised wording), optional debug log
 
@@ -38,7 +40,7 @@ In an uptrend price tends to ride above a curve launched from a swing low (dynam
 
 ## Topfinder / bottomfinder
 
-When a trend *accelerates* away from its MIDAS curve, Levine's topfinder/bottomfinder fits a steeper, decelerating curve that catches back up to price and forecasts where the move ends. It re-weights the accumulation by `wᵢ = 1 − dᵢ/D`, where `dᵢ` is cumulative volume since launch and `D` is the projected **total** volume at which the move terminates:
+When a trend *accelerates* away from its MIDAS curve, Levine's topfinder/bottomfinder fits a steeper, decelerating curve that catches back up to price and estimates where the move ends — an accelerated exhaustion estimate, not a forecast. It re-weights the accumulation by `wᵢ = 1 − dᵢ/D`, where `dᵢ` is cumulative volume since launch and `D` is the projected **total** volume at which the move terminates:
 
 ```
 TBF(j) = Σ pᵢ·Vᵢ·(1 − dᵢ/D) / Σ Vᵢ·(1 − dᵢ/D) = (A·D − B) / (C·D − E)
@@ -71,7 +73,9 @@ Each row shows the raw value **and** its interpretation; the bottom **Read** row
 | **Band zone** | inside / U1–U2 / above U2 … | `normal` / `stretched` / `extreme` |
 | **Topfinder/Bottomfinder** | state + `d/D` | `no accel` / `move running` / `don't chase` (late) / `overrun` (expired) |
 | **Trend** | above/below value + slope arrow | `buyers / sellers since launch` |
-| **Anchor** | bars since anchor | `fresh (thin)` / `established` |
+| **Anchor** | bars since anchor (+ `drawn Xb back` if Backpainted) | `fresh (thin)` / `established` |
+| **Volume** | `ok` / `missing` | `volume-weighted` / `equal-weighted price` |
+| **Reclaim Q** | last reclaim's score, `0–5` + direction | `weak` / `medium` / `high quality` |
 | **Read** | — | TF-aware headline, e.g. *"Overextended from value → mean-reversion to MIDAS likely"* (higher TF) vs *"Stretched — intraday, fade only on a trigger"* |
 
 The Read is a **verbalisation of the existing role outputs** (Location / Trend / Exhaustion / Maturity) — it is context, not a new signal or a trigger.
@@ -80,19 +84,22 @@ The Read is a **verbalisation of the existing role outputs** (Location / Trend /
 
 | Group | Key inputs |
 |---|---|
-| Anchor | mode (Manual Time / Daily Open / Auto Last Swing / Auto Swing Low / Auto Swing High), manual time, anchor swing left/right (significant degree), source |
+| Anchor | mode (Manual Time / Daily Open / Auto Last Swing / Auto Swing Low / Auto Swing High), anchor display (Backpainted / Confirmed), manual time, anchor swing left/right (significant degree), source |
 | Bands | show, mode (VW StDev / ATR / Hybrid), mult 1 & 2, ATR length |
 | Topfinder/Bottomfinder | enable, exhaustion warn `d/D`, fit swing left/right (smaller pullback degree) |
-| Bias | Auto EMA / Up / Down, EMA length |
-| Display | context markers, reclaim stretch lookback, dashboard + position, anchor markers, debug |
+| Bias | Auto EMA / Up / Down, EMA length, Auto EMA min hold bars before flip |
+| Display | context markers, reclaim stretch lookback, reclaim volume avg length, reclaim structure-break lookback, reclaim min close-in-body ratio, dashboard + position, anchor markers, debug |
 | Colors | MIDAS, TBF, bullish, bearish |
 
 ## Notes
 
 - Auto-anchor modes re-anchor on the most recent **significant** swing (the `Anchor Swing` degree, default 20) — the origin of the current leg. A larger anchor degree keeps the curve on the current move rather than resetting on every minor wiggle (and avoids pinning it to the all-time extreme). The topfinder fits to the *smaller* `Fit Swing` pullbacks within that leg.
-- The running sums are re-seeded from the actual pivot bar (`Anchor Swing Right` back); the pivot only sets the **anchor origin** — it is not a trigger, grade gate, or dedup key (design skill §8).
+- The running sums are re-seeded from the actual pivot bar (`Anchor Swing Right` back) only in **Backpainted** anchor display mode; the pivot only sets the **anchor origin** — it is not a trigger, grade gate, or dedup key (design skill §8). In **Confirmed** mode the curve instead starts flat at the bar the pivot is actually confirmed, so the anchor is never drawn earlier than it was live-knowable — at the cost of a less clean historical look.
+- **Volume missing/zero** (`na` or `≤ 0`, e.g. some CFD/forex feeds) falls back to `vol = 1.0` per bar, turning the MIDAS curve into an equal-weighted average rather than a true volume-weighted one. The dashboard **Volume** row flags this explicitly so the volume-weighting isn't assumed where it doesn't actually apply.
+- **Reclaim Quality Score** (0–5, marker text + dashboard **Reclaim Q** row): counts stretch-beforehand, a strong candle close in the reclaim direction, volume above its `Reclaim: volume avg length` average, a small structure break (`Reclaim: structure-break lookback`), and a TBF late/expired bonus. It is an **annotation only** — it does not gate the `reclaimUp`/`reclaimDn` marker or alert, which still fire purely on stretch + MIDAS crossover.
+- **Auto EMA bias** only flips once price has closed on the new side of the EMA for `Auto EMA: min hold bars` consecutive bars (default 3), which reduces marker whipsaw in choppy phases; set it to 1 to restore the old immediate-flip behaviour.
 - The MIDAS and TBF curves jump at each re-anchor — each segment is an independent launch-anchored series.
 - The topfinder is hidden when no valid forward fit exists (`no fit` in the dashboard). This is **expected** in range-bound or non-accelerating markets: the topfinder/bottomfinder only projects *accelerated* (parabolic) legs, so it typically fits on higher timeframes / strong trends and correctly stays `no fit` in intraday ranges (verified on NatGas — daily legs fit and the exhaustion warnings land near the major 2021/2022/2025 tops, while 1h/15m ranges show `no fit`). Turn on **Debug log** to see why a fit was rejected (`D<=d` = projected end already passed / no acceleration).
 - **MIDAS (orange) crossing the TBF (purple) is not a signal.** They are different objects — a cumulative-VWAP level vs an accelerated projection — and they coincide at the launch by construction. What carries meaning is the *gap* between them: a TBF pulling far from MIDAS = strong acceleration (the move is outrunning its fair value); the two staying close = little acceleration. A literal crossover is just the projection passing through the level, not a turn.
 - The TBF (purple) line forces a one-bar break on every re-anchor, so on long-history ("Alle") views you see separate projection episodes rather than one continuous diagonal. Each episode is an independent launch→projection.
-- Context markers are deliberately small and unlabelled (design skill §9): they add information without overloading the decision logic.
+- Context markers are deliberately small (design skill §9): stretch markers stay unlabelled, reclaim markers carry only their 0–5 Reclaim Quality Score — they add information without overloading the decision logic.

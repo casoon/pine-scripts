@@ -1,15 +1,16 @@
 //@version=6
 // ============================================================================
 // MIDAS 2.0 [WavesUnchained]
-// Version: 2.3.2
+// Version: 2.4.0
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-07-09 00:00:00
 // ============================================================================
 // Anchored MIDAS support/resistance curve (launch-anchored volume-weighted price)
-// with a true topfinder / bottomfinder accelerated curve that forecasts trend
-// exhaustion. Location + Exhaustion sensor: it reports where price sits relative
-// to the MIDAS curve/bands and how far the launched move has run toward its
-// projected end. Context markers are Setup-level evidence, not hard entries.
+// with a true topfinder / bottomfinder accelerated curve — an accelerated
+// exhaustion estimate, not a forecast. Location + Exhaustion sensor: it reports
+// where price sits relative to the MIDAS curve/bands and how far the launched
+// move has run toward its projected end. Context markers are Setup-level
+// evidence, not hard entries.
 //
 // Features:
 //   ✓ MIDAS curve anchored at manual time, daily open, or auto swing (last / low / high)
@@ -17,6 +18,9 @@
 //   ✓ Topfinder / bottomfinder accelerated curve with closed-form auto-fit
 //   ✓ 4-stage exhaustion read (no fit / running / late / expired) from d/D progress
 //   ✓ Stretched-from-value and reclaim-after-stretch context markers (no BUY/SELL)
+//   ✓ Reclaim Quality Score (0-5): stretch, close strength, volume, structure break, TBF exhaustion
+//   ✓ Backpainted vs Confirmed anchor display mode for auto swing anchors
+//   ✓ Auto EMA bias with configurable hold bars to reduce whipsaw flips
 //   ✓ Element | Value | Read dashboard with a TF-aware plain-language conclusion
 //   ✓ Light-theme dashboard, alerts, debug log
 //
@@ -32,6 +36,8 @@ g_anchor = "1 · Anchor"
 anchorMode = input.string("Auto Last Swing", "Anchor on",
      options=["Manual Time", "Daily Open", "Auto Last Swing", "Auto Swing Low", "Auto Swing High"], group=g_anchor,
      tooltip="Auto Last Swing anchors on the most recent significant swing of either side and sets the TBF direction from it (low → topfinder, high → bottomfinder). Auto Swing Low/High force a side.")
+anchorDisplayMode = input.string("Backpainted", "Anchor Display", options=["Backpainted", "Confirmed"], group=g_anchor,
+     tooltip="Only affects Auto Swing anchors. Backpainted draws the anchor and starts the MIDAS curve at the real pivot bar (clean history, but that pivot isn't knowable live until Anchor Swing Right bars later). Confirmed starts the curve and marks the anchor only once it's actually known live — more honest for live trading, at the cost of a less clean historical look.")
 anchorTime = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Manual Anchor", group=g_anchor)
 anchorLeft  = input.int(20, "Anchor Swing Left",  minval=1, group=g_anchor)
 anchorRight = input.int(20, "Anchor Swing Right", minval=1, group=g_anchor,
@@ -48,7 +54,7 @@ atrLen    = input.int(14, "ATR Length", minval=1, group=g_bands)
 
 g_tbf = "3 · Topfinder / Bottomfinder"
 enableTBF = input.bool(true, "Enable TBF Exhaustion Curve", group=g_tbf,
-     tooltip="Accelerated MIDAS curve auto-fitted to the most recent same-direction swing after the launch. Catches up to price and forecasts the end of the launched move.")
+     tooltip="Accelerated MIDAS curve auto-fitted to the most recent same-direction swing after the launch. Catches up to price and gives an accelerated estimate of how far the launched move has run toward exhaustion.")
 warnThresh = input.float(0.85, "Exhaustion Warn (d/D)", minval=0.5, maxval=0.99, step=0.05, group=g_tbf,
      tooltip="When cumulative volume since launch reaches this fraction of the fitted projection D, flag the move as nearing exhaustion.")
 fitLeft    = input.int(5, "Fit Swing Left",  minval=1, group=g_tbf)
@@ -59,13 +65,19 @@ g_bias = "4 · Bias"
 curveBias = input.string("Auto EMA", "Trend Bias", options=["Auto EMA", "Up", "Down"], group=g_bias,
      tooltip="Colours the context markers and selects topfinder vs bottomfinder for Manual/Daily anchors. For Auto modes the TBF direction follows the anchor side (low → topfinder, high → bottomfinder). Auto EMA = price vs EMA.")
 emaLen    = input.int(55, "Auto Bias EMA", minval=5, group=g_bias)
+biasHoldBars = input.int(3, "Auto EMA: min hold bars before flip", minval=1, group=g_bias,
+     tooltip="Auto EMA bias only flips once price has closed on the new side for this many consecutive bars — reduces whipsaw in choppy phases. Set to 1 for the old immediate-flip behaviour.")
 
 g_disp = "5 · Display"
 showMarkers = input.bool(true, "Show context markers", group=g_disp,
      tooltip="Stretched-from-value and MIDAS-reclaim markers. Setup-level context, not hard entries.")
 reclaimLook = input.int(10, "Reclaim: stretch lookback", minval=1, group=g_disp,
      tooltip="A MIDAS reclaim only fires if price was stretched past the inner band within this many bars before reclaiming the curve.")
-showTable   = input.bool(true, "Show dashboard", group=g_disp)
+reclaimVolLen    = input.int(20, "Reclaim: volume avg length", minval=1, group=g_disp)
+reclaimStructLen = input.int(5, "Reclaim: structure-break lookback", minval=1, group=g_disp)
+reclaimBodyMin   = input.float(0.6, "Reclaim: min close-in-body ratio", minval=0.5, maxval=1.0, step=0.05, group=g_disp,
+     tooltip="Reclaim Quality Score (0-5, shown as marker text + dashboard row, annotation only — does not gate the marker): stretch beforehand, strong candle close, volume above average, small structure break, TBF late/expired bonus.")
+showTable   = input.bool(false, "Show dashboard", group=g_disp)
 tablePos    = input.string("Top Right", "Dashboard position",
      options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=g_disp)
 showAnchor  = input.bool(true, "Show anchor markers", group=g_disp)
@@ -80,7 +92,8 @@ colDn    = input.color(#d50000, "Bearish",     group=g_col)
 // ─────────────────────────────────────────────────────────────────────────────
 // ANCHOR
 // ─────────────────────────────────────────────────────────────────────────────
-vol = na(volume) or volume <= 0 ? 1.0 : volume
+bool volMissing = na(volume) or volume <= 0
+vol = volMissing ? 1.0 : volume
 
 manualPulse = time >= anchorTime and time[1] < anchorTime
 dailyPulse  = ta.change(time("D")) != 0
@@ -92,6 +105,7 @@ fitLowConf   = not na(ta.pivotlow(low,  fitLeft, fitRight))
 fitHighConf  = not na(ta.pivothigh(high, fitLeft, fitRight))
 
 bool isPivotMode = anchorMode == "Auto Swing Low" or anchorMode == "Auto Swing High" or anchorMode == "Auto Last Swing"
+bool backpainted = anchorDisplayMode == "Backpainted"
 
 // Auto modes re-anchor on the most recent significant swing — the origin of the
 // current leg. Larger anchor degree keeps the curve on the current move, not on
@@ -129,7 +143,7 @@ if anchorPulse or na(cumPV)
     cumP2V := 0.0
     cumPVd := 0.0
     cumVd  := 0.0
-    if isPivotMode and anchorPulse
+    if isPivotMode and anchorPulse and backpainted
         // re-seed from the real pivot bar (anchorRight back), so value accrues
         // from the actual swing rather than the lagging confirmation bar
         for i = anchorRight to 0
@@ -175,13 +189,23 @@ lower2 = midas - dev * bandMult2
 // BIAS  (Trend role — colour + TBF direction only, never a hard gate)
 // ─────────────────────────────────────────────────────────────────────────────
 ema = ta.ema(close, emaLen)
-int bias = 0
+var int bias = 1
 if curveBias == "Up"
     bias := 1
 else if curveBias == "Down"
     bias := -1
 else
-    bias := close >= ema ? 1 : -1
+    // Auto EMA holds its side until price closes on the opposite side for
+    // `biasHoldBars` bars running — reduces whipsaw flips in choppy phases
+    var int biasFlipStreak = 0
+    bool oppositeSide = (bias == 1 and close < ema) or (bias == -1 and close >= ema)
+    if oppositeSide
+        biasFlipStreak += 1
+        if biasFlipStreak >= biasHoldBars
+            bias := bias * -1
+            biasFlipStreak := 0
+    else
+        biasFlipStreak := 0
 // TBF direction follows the anchor type (low → topfinder, high → bottomfinder)
 // so the accelerated curve is coherent with the launch; bias only decides for
 // manual / daily anchors.
@@ -255,6 +279,31 @@ stretchDn = bias == -1 and not na(lower2) and low  < lower2 and close > lower2  
 reclaimUp = bias == 1  and stretchedLowRecently  and ta.crossover(close, midas)  // value reclaimed after a stretch below
 reclaimDn = bias == -1 and stretchedHighRecently and ta.crossunder(close, midas) // value lost after a stretch above
 
+// Reclaim Quality Score (0-5) — context annotation only, does not gate the marker/alert:
+// stretch beforehand, strong candle close, volume above average, small structure
+// break, TBF late/expired bonus.
+avgVol        = ta.sma(volume, reclaimVolLen)
+volAboveAvg   = not na(volume) and volume > 0 and not na(avgVol) and volume > avgVol
+barRange      = high - low
+closeInBody   = barRange > 0 ? (close - low) / barRange : 0.5
+strongCloseUp = closeInBody >= reclaimBodyMin
+strongCloseDn = (1 - closeInBody) >= reclaimBodyMin
+structBreakUp = close > ta.highest(high[1], reclaimStructLen)
+structBreakDn = close < ta.lowest(low[1], reclaimStructLen)
+tbfExhausted  = tbfState == "late" or tbfState == "expired"
+
+reclaimUpScore = (stretchedLowRecently ? 1 : 0) + (strongCloseUp ? 1 : 0) + (volAboveAvg ? 1 : 0) + (structBreakUp ? 1 : 0) + (tbfExhausted ? 1 : 0)
+reclaimDnScore = (stretchedHighRecently ? 1 : 0) + (strongCloseDn ? 1 : 0) + (volAboveAvg ? 1 : 0) + (structBreakDn ? 1 : 0) + (tbfExhausted ? 1 : 0)
+
+var int    lastReclaimScore = na
+var string lastReclaimDir   = na
+if reclaimUp
+    lastReclaimScore := reclaimUpScore
+    lastReclaimDir   := "▲"
+if reclaimDn
+    lastReclaimScore := reclaimDnScore
+    lastReclaimDir   := "▼"
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PLOTS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -265,11 +314,12 @@ plot(showBands ? upper2 : na, "Upper 2", color=color.new(colUp, 30))
 plot(showBands ? lower2 : na, "Lower 2", color=color.new(colDn, 30))
 plot(tbf, "TBF curve", color=color.new(colTBF, tbfWarn ? 0 : 35), linewidth=2, style=plot.style_line)
 
-// Anchor marker — pivot modes mark the real pivot bar (offset back), time/daily mark the current bar
-plotshape(showAnchor and anchorPulse and isPivotMode ? src[anchorRight] : na, "Anchor (pivot)",
+// Anchor marker — Backpainted pivot modes mark the real pivot bar (offset back);
+// time/daily and Confirmed pivot modes mark the current (live-known) bar
+plotshape(showAnchor and anchorPulse and isPivotMode and backpainted ? src[anchorRight] : na, "Anchor (pivot, backpainted)",
      style=shape.circle, location=location.absolute, offset=-anchorRight,
      color=color.new(colMidas, 0), size=size.tiny)
-plotshape(showAnchor and anchorPulse and not isPivotMode ? src : na, "Anchor",
+plotshape(showAnchor and anchorPulse and (not isPivotMode or not backpainted) ? src : na, "Anchor",
      style=shape.circle, location=location.absolute,
      color=color.new(colMidas, 0), size=size.tiny)
 
@@ -277,10 +327,14 @@ plotshape(showMarkers and stretchUp, "Stretched above value", style=shape.triang
      color=color.new(colDn, 20), size=size.tiny)
 plotshape(showMarkers and stretchDn, "Stretched below value", style=shape.triangleup, location=location.belowbar,
      color=color.new(colUp, 20), size=size.tiny)
-plotshape(showMarkers and reclaimUp, "MIDAS reclaim ▲", style=shape.diamond, location=location.belowbar,
-     color=color.new(colUp, 0), size=size.tiny)
-plotshape(showMarkers and reclaimDn, "MIDAS reclaim ▼", style=shape.diamond, location=location.abovebar,
-     color=color.new(colDn, 0), size=size.tiny)
+// plotshape's text arg must be a const string, so the dynamic Reclaim Quality
+// Score is rendered via label.new instead (shape/position match the old markers)
+if showMarkers and reclaimUp
+    label.new(bar_index, low, str.tostring(reclaimUpScore), yloc=yloc.belowbar,
+         style=label.style_diamond, color=color.new(colUp, 0), textcolor=color.white, size=size.tiny)
+if showMarkers and reclaimDn
+    label.new(bar_index, high, str.tostring(reclaimDnScore), yloc=yloc.abovebar,
+         style=label.style_diamond, color=color.new(colDn, 0), textcolor=color.white, size=size.tiny)
 plotshape(tbfLateNew and tbfTop, "TBF late move (top)", style=shape.xcross, location=location.abovebar,
      color=color.new(colTBF, 0), text="LATE", textcolor=color.white, size=size.tiny)
 plotshape(tbfLateNew and not tbfTop, "TBF late move (bottom)", style=shape.xcross, location=location.belowbar,
@@ -312,6 +366,7 @@ tbfStr     = not enableTBF ? "off" : na(progress) ? "no fit" : tbfState + " " + 
 tbfRead    = not enableTBF ? "off" : tbfState == "no fit" ? "no accel" : tbfState == "running" ? "move running" : tbfState == "late" ? "don't chase" : "overrun"
 
 ageRead    = na(age) ? "n/a" : age < 2 * anchorRight ? "fresh (thin)" : "established"
+anchorDelayNote = (isPivotMode and backpainted) ? " (drawn " + str.tostring(anchorRight) + "b back)" : ""
 
 flat = not na(dev) and dev > 0 and not na(midasSlope) and math.abs(midasSlope) < dev * 0.15
 
@@ -348,7 +403,7 @@ color hd = color.new(color.gray, 90)
 posSel = tablePos == "Top Right" ? position.top_right : tablePos == "Top Left" ? position.top_left : tablePos == "Bottom Right" ? position.bottom_right : position.bottom_left
 
 if showTable and barstate.islast
-    var table t = table.new(posSel, 3, 8,
+    var table t = table.new(posSel, 3, 10,
          bgcolor=color.new(color.white, 5),
          border_color=color.new(color.gray, 60),
          border_width=1,
@@ -384,17 +439,28 @@ if showTable and barstate.islast
     // Anchor maturity
     table.cell(t, 0, 5, "Anchor", text_color=tc, text_size=size.small)
     table.cell(t, 1, 5, na(age) ? "n/a" : str.tostring(age) + " bars", text_color=tc, text_size=size.small)
-    table.cell(t, 2, 5, ageRead, text_color=tc, text_size=size.small)
+    table.cell(t, 2, 5, ageRead + anchorDelayNote, text_color=tc, text_size=size.small)
+
+    // Volume basis
+    table.cell(t, 0, 6, "Volume", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 6, volMissing ? "missing" : "ok", text_color=volMissing ? colDn : tc, text_size=size.small)
+    table.cell(t, 2, 6, volMissing ? "equal-weighted price" : "volume-weighted", text_color=tc, text_size=size.small)
+
+    // Reclaim Quality Score (last fired reclaim only; context, not a gate)
+    table.cell(t, 0, 7, "Reclaim Q", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 7, na(lastReclaimScore) ? "n/a" : str.tostring(lastReclaimScore) + "/5 " + lastReclaimDir,
+         text_color=na(lastReclaimScore) ? tc : (lastReclaimDir == "▲" ? colUp : colDn), text_size=size.small)
+    table.cell(t, 2, 7, na(lastReclaimScore) ? "—" : (lastReclaimScore >= 4 ? "high quality" : lastReclaimScore >= 2 ? "medium" : "weak"), text_color=tc, text_size=size.small)
 
     // Separator
-    table.cell(t, 0, 6, "", bgcolor=color.new(color.gray, 80))
-    table.cell(t, 1, 6, "", bgcolor=color.new(color.gray, 80))
-    table.cell(t, 2, 6, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 0, 8, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 8, "", bgcolor=color.new(color.gray, 80))
+    table.cell(t, 2, 8, "", bgcolor=color.new(color.gray, 80))
 
     // TF-aware read (headline conclusion)
-    table.cell(t, 0, 7, "Read", text_color=tc, text_size=size.normal, bgcolor=hd)
-    table.cell(t, 1, 7, headline, text_color=headlineCol, text_size=size.normal, bgcolor=hd)
-    table.cell(t, 2, 7, "", text_color=tc, text_size=size.normal, bgcolor=hd)
+    table.cell(t, 0, 9, "Read", text_color=tc, text_size=size.normal, bgcolor=hd)
+    table.cell(t, 1, 9, headline, text_color=headlineCol, text_size=size.normal, bgcolor=hd)
+    table.cell(t, 2, 9, "", text_color=tc, text_size=size.normal, bgcolor=hd)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ALERTS
