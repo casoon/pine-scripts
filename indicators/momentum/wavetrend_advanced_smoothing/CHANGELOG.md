@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.1 — 2026-07-09
+- Fixed Sentiment Bar color: it used `score > 0 ? colBull : colBear`, coloring the overbought side (positive score) bull and the oversold side (negative score) bear — backwards from every other color cue in the panel (gradient line), where `colBull` marks the oversold side and `colBear` the overbought side. Swapped to match.
+
 ## v1.1.0 — 2026-07-09
 - Added Sentiment Bar (group 7, on by default): live label at the panel's right edge scoring how far WT sits inside its own OB/OS zone, ±100 with a mini bar — ported from Williams VIX Fix Advanced's Sentiment Bar. Computed on raw WT/Overbought1/Oversold1, consistent across all three Scale Modes. No Signal Quality score added — this variant has no trend-context or stall/absorption layer for that weighting to draw on.
 - Alerts group label numbered ("8 · Alerts") for consistency with the rest of the input groups.
