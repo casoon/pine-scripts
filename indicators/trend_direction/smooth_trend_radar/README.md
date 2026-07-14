@@ -6,8 +6,10 @@ Double-smoothed Supertrend baseline for trend direction, with pivot-based reject
 
 - **Double-smoothed baseline**: Supertrend upper and lower bands are averaged, then passed through WMA → EMA — significantly fewer whipsaws than standard Supertrend
 - **Auto Timeframe Scaling**: Supertrend factor, ATR period, smoothing lengths, pivot window, and overextension threshold all auto-adjust to the chart timeframe (1m → W). Manual inputs remain as fallback when scaling is disabled
-- **Slope-based trend direction**: bullish when the smoothed baseline rises, bearish when it falls — no price-to-band crossing required
-- **Pivot-based rejection signals**: confirmed swing low/high at the baseline, validated by sustained baseline contact and a slope filter — one signal per actual extremum, no clustering
+- **Volatility-Adaptive Band Width** (optional): scales the Supertrend factor by the instrument's own ATR percentile rank, so the same factor produces comparable relative band width across instruments — off by default
+- **Slope-based trend direction**: baseline slope over `Trend Slope Lookback` bars, scaled to ATR units. Trend flips only when the move exceeds `Trend Slope Threshold` and holds its previous value otherwise (hysteresis) — filters micro-noise flips
+- **Trend strength**: baseline-slope magnitude ranked against its own recent history — self-adapting like Overextension, not a fixed threshold. Flags a "strong trend" state (optional background tint) and tags rejection signals fired during it, with a dedicated alert pair for rejection entries inside an already-strong trend
+- **Live baseline rejection signals**: validated by sustained baseline contact, a slope filter, and optional bar-polarity and volume filters. Fires in both ADX regimes, tagged "Trend Pullback" (trending) or "Range Rejection" (sideways) in the tooltip
 - **Statistical overextension**: bars where the absolute distance from baseline ranks in the top X% of the lookback window are flagged with accent candle coloring (purple = price far below baseline, orange = far above) — self-adapts to symbol/timeframe characteristics
 - **SL/TP visualization**: on every trend flip (or rejection re-entry), entry, SL, and three TP levels are drawn with extended horizontal lines, labels, and risk/reward fills
 - **Re-Entry on Rejection**: after an SL hit with unchanged trend, the next confirmed rejection signal rebuilds the full setup at current price
@@ -20,9 +22,31 @@ Double-smoothed Supertrend baseline for trend direction, with pivot-based reject
 midline   = avg(supertrend_lower, supertrend_upper)
 baseline  = EMA(WMA(midline, wmaLength), emaLength)
 
-trend     = 1   when baseline > baseline[1]   (rising)
-trend     = -1  when baseline < baseline[1]   (falling)
+slope     = baseline - baseline[trendSlopeLookback]
+trend     = 1   when slope >  atr * trendSlopeThreshold
+trend     = -1  when slope < -atr * trendSlopeThreshold
+trend     = trend[1]   otherwise (holds previous value — hysteresis)
 ```
+
+## Trend Strength
+
+Statistical, not threshold-based — same percentile-rank approach as Overextension, but on a
+different axis (slope magnitude, not distance from baseline):
+
+```
+slopeMag   = |slope| / atr
+strengthPctRank = percentrank(slopeMag, strengthLookback)
+strongTrend = strengthPctRank > strengthThreshold
+```
+
+`strongTrend` marks bars where the baseline is moving faster than usual for this symbol/timeframe
+— i.e. a decisive, high-conviction move rather than a bare threshold-crossing. Distance from the
+baseline already has the opposite meaning (Overextension = stretched = reversal risk), so it isn't
+reused here — strength reads the baseline's own rate of movement instead.
+
+Used for: an optional background tint while active, a "Strong Trend" note in rejection tooltips,
+and a dedicated `STR Bull/Bear Rejection (Strong Trend)` alert pair — for entering rejection
+pullbacks specifically inside an already-strong trend rather than every rejection.
 
 ## Auto Timeframe Scaling
 
@@ -39,19 +63,20 @@ The smoothing parameters need to scale with timeframe to keep the baseline respo
 | D         | 12.0      | 90         | 40  | 14  | 5         | 100              |
 | W         | 14.0      | 120        | 50  | 18  | 4         | 100              |
 
-Disable Auto Scaling to use the manual input values exclusively.
+Disable Auto Scaling to use the manual input values exclusively. Enable **Volatility-Adaptive Band Width** to additionally scale the Supertrend factor by the instrument's own ATR percentile rank (200-bar lookback) — keeps relative band width comparable across instruments (crypto vs. forex vs. commodities) instead of relying on the fixed per-timeframe factor alone.
 
 ## Rejection Signal
 
-A rejection fires when **all** of the following hold at a confirmed pivot bar (`pivBars` left and right confirmation):
+Pivots are not used for signal timing — rejection is detected live, from the current bar plus recent baseline contact. A rejection fires when **all** of the following hold on the current bar:
 
-1. `ta.pivotlow(low)` (or `pivothigh(high)` for bear) is non-na — a real swing point
-2. The pivot value touches the baseline: `pivLow <= tL` (or `pivHigh >= tL`)
-3. Trend at the pivot bar matches the signal direction (`trend == 1` for bull)
-4. **Slope filter**: baseline is rising over `slopeLookback` bars (`tL > tL[N]`) — filters flat / chop zones
-5. **Touch validation**: in the pivot window, at least `contFactor` bars touched the baseline — filters single-spike touches
+1. Price touches the baseline this bar: `low <= tL and close > tL` for bull (or `high >= tL and close < tL` for bear)
+2. Trend matches the signal direction (`trend == 1` for bull)
+3. **Slope filter**: baseline is rising over `slopeLookback` bars (`tL > tL[N]`) — filters flat / chop zones
+4. **Touch validation**: at least `contFactor` of the last bars touched the baseline in the trend direction — filters single-spike touches
+5. **Polarity filter** (optional): pivot bar's body or close-position matches direction
+6. **Volume filter** (optional): bar volume exceeds its own SMA — confirms rejections with real participation
 
-The signal fires `pivBars` after the actual pivot (non-repainting), but the marker is displayed exactly at the pivot bar via `bar_index - pivBars` offset.
+Rejections fire in **both** ADX regimes — a pullback in an active trend is as valid a signal as one in a range. The regime is not a gate; it's carried as a tooltip tag: **Trend Pullback** when `isTrending` (ADX above threshold), **Range Rejection** when `isSideways`.
 
 ## Overextension Detection
 
@@ -89,6 +114,7 @@ This approach is **self-adapting**: it doesn't matter whether the symbol is vola
 | Small ▲ ▼ at price | Rejection signal at confirmed pivot |
 | Purple candle | Bull-side overextension (price far below baseline) |
 | Orange candle | Bear-side overextension (price far above baseline) |
+| Faint teal/red background | Strong Trend zone — slope percentile above threshold |
 | Horizontal lines | Active setup — entry, SL, TP1, TP2, TP3 |
 | Red fill | Risk zone — entry to SL |
 | Green fill | Reward zone — entry to TP3 |

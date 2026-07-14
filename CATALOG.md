@@ -31,7 +31,7 @@ Quality columns (★ 1–5):
 | Indikator | Version | Status | Konzept | Code | Getestet | Notiz |
 |---|---|---|---|---|---|---|
 | [chandelier_flip_radar](indicators/trend_direction/chandelier_flip_radar/) | 1.6 | Stabil | ★★★★☆ | ★★★★★ | ★★★☆☆ | PF 1.22 (pre-v1.6, vor Ratchet-Fix → Strategie neu validieren); v1.5 optionaler MTF-Confluence-Layer; v1.6 Ratchet-Fix + Conviction-Mode + K-means auf echtem Chandelier + direktionale States + Weak-Flip-Marker |
-| [smooth_trend_radar](indicators/trend_direction/smooth_trend_radar/) | 3.3.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | |
+| [smooth_trend_radar](indicators/trend_direction/smooth_trend_radar/) | 3.5.0 | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ | v3.4.0: ATR-scaled slope-threshold trend detection + hysteresis, rejections fire in both ADX regimes, optional volume/vol-adaptive filters; v3.5.0: Trend Strength (percentile-ranked slope magnitude) |
 | [auto_trendlines](indicators/market_structure/auto_trendlines/) | 1.1.1 | Stabil | ★★★★☆ | ★★★★☆ | ★★☆☆☆ | |
 | [regime_detector](indicators/trend_strength/regime_detector/) | 1.1.0 | Stabil | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | v1.1: Vola-Dimension + Regime-Reife + Playbook + RS-Modifier (Aktien) |
 | [ma_regime_bands](indicators/trend_direction/ma_regime_bands/) | 1.0.1 | Stabil | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | |
@@ -45,6 +45,7 @@ Quality columns (★ 1–5):
 | [regime_transition_engine](indicators/trend_strength/regime_transition_engine/) | 1.0 | Draft | ★★★☆☆ | ★★★☆☆ | ☆☆☆☆☆ | Sieben-State-Regime-Klassifikator (Noise/Compression/Expansion/Trend Up/Down/Exhaustion/Reversion) aus geteiltem Feature-Set (VolPct, Efficiency, Chop, Slope, Return-Z, Variance Ratio, Autokorrelation); Dwell+Hysterese-Debouncing gegen State-Flicker; gerichteter Transition-Pressure-Oszillator je Nachfolge-State; State-Change-Events + Dashboard; ungetestet |
 | [predictability_regime_index](indicators/trend_strength/predictability_regime_index/) | 1.0 | Draft | ★★★☆☆ | ★★★☆☆ | ☆☆☆☆☆ | Signierter −100..+100 Index aus Variance Ratio, Return-Autokorrelation, Hurst-Approximation und Fractal Efficiency → Momentum/Reversion/Noise/Mixed-Regime-Klassifikation mit Confidence (Stärke × Sensor-Übereinstimmung); ungetestet |
 | [adaptive_arithmetic_candles](indicators/trend_direction/adaptive_arithmetic_candles/) | 1.2 | Draft | ★★★☆☆ | ★★★☆☆ | ☆☆☆☆☆ | Efficiency-adaptiver Candle-Transform (Kaufman ER + Regression-Anker) + regressions-gestützter Body-Boost; 0-100 Trend Quality Score (Efficiency/Slope/Body-Ratio/Follow-Through); Flip = Vorwarnung, Long/Short-Signal = Setup (strongBull/Bear) + Breakout-Trigger statt Flip-als-Trade; ungetestet |
+| [modern_trend_regime](indicators/trend_direction/modern_trend_regime/) | 1.3.1 | Draft | ★★★☆☆ | ★★★☆☆ | ☆☆☆☆☆ | Trend/Range/Übergang-Regime — beide Seiten als Faktor-Score statt AND-Kette (Trend: ADX+ER+DI+Stack+Preis, 4/5 bzw. 5/5 bei Range Trading; Range: 4 Faktoren, 3/4 bzw. 4/4), sofortiger Übergang bei Strukturverlust, nur Neueinstieg bestätigungsgefiltert; echte Range-Struktur mit eingefrorenen Swing-Grenzen statt ATR-Band, einmalig scharfgeschaltete Breakouts, entprellte Reaktionen; Trendbestätigung an Regime-Wechsel gekoppelt, kleiner Dreieck-Marker mit Hover-Tooltip statt Textlabel; sechs Presets + Benutzerdefiniert; ungetestet |
 
 ## Volatility
 
@@ -165,7 +166,7 @@ Ratings: **Not ready** (PF < 1.15 or Return/DD < 1.5) · **Promising** (PF ≥ 1
 |---|---|---|---|---|---|---|
 | [wavetrend_v4_strategy](strategies/wavetrend/) | WaveTrend | Trailing | 1D | 3.07 | Promising | Bestes PF im Repo; 4H 1.49, 1H 1.37; out-of-sample ausstehend |
 | [chandelier_flip_radar_strategy](strategies/chandelier_flip_radar/) | Chandelier Flip Radar | Trailing | 4H | 1.60 | Promising | Return/DD 5.87; beide Richtungen profitabel — **stale**: Werte vor v1.6-Ratchet-Fix, Strategie noch nicht regeneriert/neu validiert |
-| [smooth_trend_radar_strategy](strategies/smooth_trend_radar/) | Smooth Trend Radar | Fixed TP | 4H | 1.71 (Long) | Promising (Long Only) | Short-Seite durch NatGas-Bull-Bias strukturell schwach |
+| [smooth_trend_radar_strategy](strategies/smooth_trend_radar/) | Smooth Trend Radar | Fixed TP | 4H | 1.71 (Long) | Promising (Long Only) | Short-Seite durch NatGas-Bull-Bias strukturell schwach; **stale**: resynced to indicator v3.4.0 logic, Werte noch von vor dem Resync — neu validieren |
 | [oscillator_divergence_zones_strategy](strategies/oscillator_divergence_zones/) | Oscillator Divergence Zones | Pivot ATR | 4H | 1.14 | Promising | Long PF 1.32; Short Entry-Delay durch pivRight |
 | [reversal_engine_score_strategy](strategies/reversal_engine_score/) | Reversal Engine Score | — | 15M | 0.95 | Not ready | Score-Logik fehlerhaft (test131); v1.2 in Arbeit |
 | [commodity_pulse_matrix_v4_strategy](strategies/commodity_pulse_matrix/) | Commodity Pulse Matrix v4 | — | — | — | Not ready | Kein Backtest vorhanden |

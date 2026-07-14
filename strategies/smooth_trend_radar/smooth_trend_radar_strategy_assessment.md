@@ -4,6 +4,8 @@
 **Strategy file:** `smooth_trend_radar_strategy.pine`  
 **Assessment date:** 2026-04-29
 
+> **Stale as of 2026-07-09**: the strategy was resynced to indicator v3.4.0 (ATR-scaled slope-threshold trend detection instead of raw crossover; rejection signals no longer gated to sideways-only regime; optional volume/volatility-adaptive filters). All runs below reflect the pre-v3.4.0 logic and need to be re-validated.
+
 ---
 
 ## Signal Logic

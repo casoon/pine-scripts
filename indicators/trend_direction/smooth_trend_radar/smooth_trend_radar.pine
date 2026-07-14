@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Smooth Trend Radar [WavesUnchained]
-// Version: 3.3.2
+// Version: 3.5.0
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-07-14 00:00:00
 // ============================================================================
 // Double-smoothed Supertrend baseline for trend direction, with live baseline
 // rejection signals at the baseline, statistical overextension highlighting,
@@ -12,9 +12,12 @@
 // Features:
 //   ✓ Supertrend midline double-smoothed with WMA + EMA — fewer whipsaws
 //   ✓ Auto Timeframe Scaling — parameters self-adjust per chart timeframe
-//   ✓ Trend direction from baseline slope (rising = bullish, falling = bearish)
+//   ✓ Optional volatility-adaptive band width — normalizes factor across instruments
+//   ✓ Trend direction from ATR-scaled baseline slope with hysteresis — filters micro-noise flips
+//   ✓ Trend strength — percentile-ranked slope magnitude flags "strong trend" zones, self-adapting
 //   ✓ Baseline rejection with slope filter, touch validation,
-//       and optional bar-polarity filter (Body or Pressure)
+//       optional bar-polarity filter (Body or Pressure), and optional volume filter
+//   ✓ Rejections fire in both regimes, tagged Trend Pullback / Range Rejection
 //   ✓ Three SL methods: Flip Candle / Baseline ± ATR / Swing Structure
 //   ✓ Four TP modes: Pivot (R/S levels), R-Multiple, Fibonacci extension, ATR
 //   ✓ Pivot TP auto-fallback to ATR when prior session levels are out of range
@@ -55,6 +58,19 @@ emaLength   = input.int(14,   "EMA Length",            minval=1, group=g_trend, 
      tooltip="EMA applied to the WMA output — second smoothing pass.")
 adxThreshold = input.float(25.0, "ADX Trend/Sideways Threshold", minval=5.0, maxval=50.0, step=1.0, group=g_trend, display=disp,
      tooltip="ADX threshold: trend-following (flips) is allowed above this value; rejections/pullbacks are allowed below it.")
+trendSlopeLookback  = input.int(3, "Trend Slope Lookback", minval=1, group=g_trend, display=disp,
+     tooltip="Bars back to measure baseline slope for trend direction.")
+trendSlopeThreshold = input.float(0.05, "Trend Slope Threshold (× ATR)", minval=0.0, step=0.01, group=g_trend, display=disp,
+     tooltip="Minimum baseline movement over the Slope Lookback, in ATR units, required to flip trend direction. Higher = fewer, more decisive flips; 0 = flips on any directional move (old crossover behavior).")
+volAdaptive = input.bool(false, "Volatility-Adaptive Band Width", group=g_trend, display=disp,
+     tooltip="Scales the Supertrend factor by the instrument's own ATR percentile rank (200-bar lookback), so the same factor produces comparable relative band width across instruments. Off by default to preserve existing behavior.")
+
+g_strength = "Trend Strength"
+strengthLookback  = input.int(100, "Lookback", minval=20, group=g_strength, display=disp,
+     tooltip="How far back to rank the current baseline-slope magnitude. Self-adapts to symbol/timeframe characteristics, same methodology as the Overextension lookback.")
+strengthThreshold = input.float(70, "Percentile Threshold", minval=50, maxval=99, step=1, group=g_strength, display=disp,
+     tooltip="Trend counts as 'strong' once the slope clears the top X% of its own recent history. 70 = top 30%, 90 = top 10%.")
+showStrengthZone  = input.bool(true, "Highlight Strong Trend (Background)", group=g_strength, display=disp)
 
 g_rej = "Rejection"
 contFactor     = input.int(2, "Min Baseline Touches", minval=1, maxval=5, group=g_rej, display=disp,
@@ -63,6 +79,10 @@ slopeLookback  = input.int(5, "Slope Lookback",       minval=1, group=g_rej, dis
      tooltip="Rejection only fires when the baseline is trending in the signal direction over this many bars. Filters out signals in flat/choppy zones.")
 polarityMethod = input.string("Off", "Polarity Filter", options=["Off", "Body", "Pressure"], group=g_rej, display=disp,
      tooltip="Extra filter at the pivot bar. Off: no filter. Body: pivot bar must be bullish/bearish (close > open). Pressure: close must be in the upper/lower half of the bar's range — more robust against doji bars and long wicks (e.g. NatGas).")
+volumeFilter = input.string("Off", "Volume Filter", options=["Off", "Above Average"], group=g_rej, display=disp,
+     tooltip="Extra filter at the pivot bar. Off: no filter. Above Average: bar volume must exceed its SMA (Volume MA Length) — confirms rejections with real participation.")
+volumeMaLen  = input.int(20, "Volume MA Length", minval=1, group=g_rej, display=disp,
+     tooltip="SMA length for the Volume Filter. Ignored when Volume Filter is Off.")
 g_overext = "Overextension"
 overextLookback  = input.int(100, "Lookback", minval=20, group=g_overext, display=disp,
      tooltip="How far back to compare current distance from baseline. Self-adapts to symbol/timeframe characteristics.")
@@ -143,17 +163,24 @@ _supertrend(factor, atrPeriod) =>
     prevUpper = nz(upper[1])
     lower    := lower > prevLower or close[1] < prevLower ? lower : prevLower
     upper    := upper < prevUpper or close[1] > prevUpper ? upper : prevUpper
-    [lower, upper]
+    [lower, upper, atr]
 
-[lwr, upr] = _supertrend(_efFactor, _efAtrPeriod)
+// Volatility-adaptive band width: scale the factor by where current ATR ranks
+// within its own recent history, so the same factor yields comparable relative
+// band width across instruments. Off by default — preserves prior behavior.
+_volPctRank  = ta.percentrank(ta.atr(_efAtrPeriod), 200)
+_efFactorAdj = volAdaptive ? _efFactor * (0.85 + 0.3 * _volPctRank / 100) : _efFactor
+
+[lwr, upr, _stAtr] = _supertrend(_efFactorAdj, _efAtrPeriod)
 tL = ta.ema(ta.wma(math.avg(lwr, upr), _efWma), _efEma)
 
 // ─── Trend direction ─────────────────────────────────────────────────────────
+// Baseline slope over trendSlopeLookback bars, scaled to ATR units. Trend only
+// flips once the move exceeds trendSlopeThreshold — holds previous value
+// otherwise (hysteresis), filtering micro-noise crosses.
+_trendSlope = tL - tL[trendSlopeLookback]
 var int trend = 0
-if ta.crossover(tL, tL[1])
-    trend := 1
-if ta.crossunder(tL, tL[1])
-    trend := -1
+trend := _trendSlope > _stAtr * trendSlopeThreshold ? 1 : _trendSlope < -_stAtr * trendSlopeThreshold ? -1 : trend
 
 // ADX Trend/Sideways Regime detection
 [diPlus, diMinus, adx] = ta.dmi(14, 14)
@@ -162,6 +189,16 @@ isSideways = not na(adx) and adx <= adxThreshold
 
 longSignal  = trend == 1  and trend[1] != 1 and isTrending
 shortSignal = trend == -1 and trend[1] != -1 and isTrending
+
+// ─── Trend strength ──────────────────────────────────────────────────────────
+// How decisively the baseline slope clears the flip threshold, ranked against its
+// own recent history — self-adapting, same percentile-rank approach as
+// Overextension below. Not distance-from-baseline: that axis already carries the
+// opposite meaning (Overextension = far from baseline = stretched / reversal-risk),
+// so strength reads slope magnitude — the trend's own rate of movement — instead.
+_slopeMag        = math.abs(_trendSlope) / _stAtr
+_strengthPctRank = ta.percentrank(_slopeMag, strengthLookback)
+strongTrend      = _strengthPctRank > strengthThreshold
 
 // ─── Rejection detection (live baseline touch validation) ───────────────────
 // Pivots are intentionally not used for signal timing. Rejection is detected
@@ -178,9 +215,16 @@ for i = 0 to contFactor - 1
 
 bool _polBull = polarityMethod == "Off" or (polarityMethod == "Body" ? close > open : (close - low) > (high - close))
 bool _polBear = polarityMethod == "Off" or (polarityMethod == "Body" ? close < open : (close - low) < (high - close))
+bool _volOk   = volumeFilter == "Off" or volume > ta.sma(volume, volumeMaLen)
 
-rejSignalBull = low <= tL and close > tL and trend == 1 and tL > tL[slopeLookback] and _bullTouches >= contFactor and _polBull and isSideways
-rejSignalBear = high >= tL and close < tL and trend == -1 and tL < tL[slopeLookback] and _bearTouches >= contFactor and _polBear and isSideways
+// Rejections fire in both ADX regimes — a baseline pullback in an active trend
+// is as valid a signal as one in a range. The regime is carried as a label tag
+// (Trend Pullback vs Range Rejection) rather than used to gate the signal.
+rejSignalBull = low <= tL and close > tL and trend == 1 and tL > tL[slopeLookback] and _bullTouches >= contFactor and _polBull and _volOk
+rejSignalBear = high >= tL and close < tL and trend == -1 and tL < tL[slopeLookback] and _bearTouches >= contFactor and _polBear and _volOk
+rejRegime     = isTrending ? "Trend Pullback" : "Range Rejection"
+rejSignalBullStrong = rejSignalBull and strongTrend
+rejSignalBearStrong = rejSignalBear and strongTrend
 
 // ─── SL / TP levels ──────────────────────────────────────────────────────────
 volatility = ta.atr(atrPeriod)
@@ -348,17 +392,20 @@ if shortSignal
 if rejSignalBull
     label.new(bar_index, low, "",
          style=label.style_triangleup, color=color.new(bullCol, 30), size=rejSize,
-         tooltip="Bull Rejection\nLow: " + str.tostring(low, format.mintick) + "\n" + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
+         tooltip="Bull Rejection (" + rejRegime + (strongTrend ? ", Strong Trend" : "") + ")\nLow: " + str.tostring(low, format.mintick) + "\n" + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
 if rejSignalBear
     label.new(bar_index, high, "",
          style=label.style_triangledown, color=color.new(bearCol, 30), size=rejSize,
-         tooltip="Bear Rejection\nHigh: " + str.tostring(high, format.mintick) + "\n" + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
+         tooltip="Bear Rejection (" + rejRegime + (strongTrend ? ", Strong Trend" : "") + ")\nHigh: " + str.tostring(high, format.mintick) + "\n" + str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
 
 // Gradient-based overextension intensity: from threshold (faded) to 100% (full)
 _overextBullGrad = color.from_gradient(_distPctRank, overextThreshold, 100.0, color.new(overextBullCol, 60), color.new(overextBullCol, 0))
 _overextBearGrad = color.from_gradient(_distPctRank, overextThreshold, 100.0, color.new(overextBearCol, 60), color.new(overextBearCol, 0))
 _barCol = isOverextBull ? _overextBullGrad : isOverextBear ? _overextBearGrad : trend == 1 ? color.new(bullCol, 60) : color.new(bearCol, 60)
 barcolor(_barCol)
+
+// Strong Trend zone — background tint while the slope percentile-ranks above threshold
+bgcolor(showStrengthZone and strongTrend ? (trend == 1 ? color.new(bullCol, 90) : color.new(bearCol, 90)) : na, title="Strong Trend Zone")
 
 // ─── Alerts ──────────────────────────────────────────────────────────────────
 await = awaitConfirm ? barstate.isconfirmed : true
@@ -405,6 +452,8 @@ alertcondition(longSignal    and await, "STR Buy Signal",     "STR · Buy · {{t
 alertcondition(shortSignal   and await, "STR Sell Signal",    "STR · Sell · {{ticker}} {{interval}}")
 alertcondition(rejSignalBull and await, "STR Bull Rejection", "STR · Bull Rejection · {{ticker}} {{interval}}")
 alertcondition(rejSignalBear and await, "STR Bear Rejection", "STR · Bear Rejection · {{ticker}} {{interval}}")
+alertcondition(rejSignalBullStrong and await, "STR Bull Rejection (Strong Trend)", "STR · Bull Rejection Strong · {{ticker}} {{interval}}")
+alertcondition(rejSignalBearStrong and await, "STR Bear Rejection (Strong Trend)", "STR · Bear Rejection Strong · {{ticker}} {{interval}}")
 alertcondition(tp1Hit and await,        "STR TP1 Hit",        "STR · TP1 Hit · {{ticker}} {{interval}}")
 alertcondition(tp2Hit and await,        "STR TP2 Hit",        "STR · TP2 Hit · {{ticker}} {{interval}}")
 alertcondition(tp3Hit and await,        "STR TP3 Hit",        "STR · TP3 Hit · {{ticker}} {{interval}}")
@@ -415,14 +464,3 @@ if longSignal and await
     alert("Smooth Trend Radar Buy — " + _ticker, alert.freq_once_per_bar_close)
 if shortSignal and await
     alert("Smooth Trend Radar Sell — " + _ticker, alert.freq_once_per_bar_close)
-
-// @strategy-config
-// long:       longSignal, bullRejRe
-// short:      shortSignal, bearRejRe
-// sl:         SL
-// sl_type:    fixed
-// tp1:        TP1_lvl
-// tp2:        TP2_lvl
-// tp3:        TP3_lvl
-// tp_default: TP1
-// @end-strategy-config
