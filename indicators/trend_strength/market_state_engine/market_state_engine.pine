@@ -1,0 +1,3188 @@
+//@version=6
+// ============================================================================
+// Market State Engine [WavesUnchained]
+// Version: 2.0.0
+// Author: WavesUnchained
+// Build: 2026-07-15 10:26:01
+// ============================================================================
+// Context engine that classifies market state, value location, structural
+// bias, and energy phase — instead of generating a standalone buy/sell signal.
+//
+// Features:
+//   ✓ Orthogonal Structure Regime, Energy Phase, and Auction Location axes
+//   ✓ Score-arbitrated nine-state classifier with dominance-based Transition
+//   ✓ Adaptive value zone (VWMA/EMA/Hybrid) with Discount/Value/Premium location
+//   ✓ Auction Pressure from close-position, failed auctions, absorption, and value-extreme reaction
+//   ✓ Direction-aware compression/expansion/exhaustion energy scoring
+//   ✓ Bar-close state machine with confirmation bars, minimum dwell, and emergency opposite-state override
+//   ✓ Selectable structure smoothing (EMA/DEMA/KAMA/JMA Approx), with JMA Approx as default
+//   ✓ Net-progress impulse memory and reaction-confirmed pullback readiness
+//   ✓ Confirmed higher-timeframe structural context (advisory by default, optional strict gate)
+//   ✓ Balance/compression zones with interruption grace, width limits, state history, and acceptance-based breakouts
+//   ✓ Shock-bar guard pauses rather than immediately deleting a valid raw zone
+//   ✓ Zone quality encoded via border thickness (running average State Quality), fill/border by pressure
+//   ✓ Box profile with ATR width, edge reactions, failed breaks, volume, anchored VWAP, and breakout quality
+//   ✓ State, zone, and breakout hover labels with contextual metrics
+//   ✓ Four-level Long/Short context and reaction-based readiness markers
+//   ✓ Optional context dashboard and bar-close state-change/zone-breakout alerts
+//
+// ============================================================================
+indicator(
+     "Market State Engine [WavesUnchained]",
+     shorttitle = "MSE",
+     overlay = true,
+     max_boxes_count = 100,
+     max_labels_count = 300,
+     max_lines_count = 100
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// CONSTANTS
+// ─────────────────────────────────────────────────────────────────────────────
+int STATE_BALANCE          = 0
+int STATE_COMPRESSION      = 1
+int STATE_BULL_EXPANSION   = 2
+int STATE_BEAR_EXPANSION   = 3
+int STATE_BULL_PULLBACK    = 4
+int STATE_BEAR_PULLBACK    = 5
+int STATE_BULL_EXHAUSTION  = 6
+int STATE_BEAR_EXHAUSTION  = 7
+int STATE_TRANSITION       = 8
+int REGIME_CONFLICTED      = 0
+int REGIME_BALANCED        = 1
+int REGIME_BULLISH         = 2
+int REGIME_BEARISH         = 3
+int ENERGY_NEUTRAL         = 0
+int ENERGY_CONTRACTING     = 1
+int ENERGY_EXPANDING       = 2
+int ENERGY_EXHAUSTING      = 3
+int TRANSITION_NONE        = 0
+int TRANSITION_NO_DATA     = 1
+int TRANSITION_CONFLICT    = 2
+int TRANSITION_TREND_BUILD = 3
+int TRANSITION_BREAK       = 4
+int TRANSITION_CHAOTIC     = 5
+int CONTEXT_UNFAVORABLE    = 0
+int CONTEXT_NEUTRAL        = 1
+int CONTEXT_COMPATIBLE     = 2
+int CONTEXT_PREFERRED      = 3
+int BREAKOUT_NONE          = 0
+int BREAKOUT_HELD          = 1
+int BREAKOUT_RETESTED      = 2
+int BREAKOUT_FAILED        = 3
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUT GROUPS
+// ─────────────────────────────────────────────────────────────────────────────
+string GROUP_PRESET     = "01 · Preset"
+string GROUP_STRUCTURE  = "02 · Market Structure"
+string GROUP_VALUE      = "03 · Value and Location"
+string GROUP_ENERGY     = "04 · Energy and Compression"
+string GROUP_VOLUME     = "05 · Volume and Auction Pressure"
+string GROUP_MTF        = "06 · Higher Timeframe"
+string GROUP_STATE      = "07 · State Logic"
+string GROUP_ZONES      = "08 · Zones"
+string GROUP_VISUAL     = "09 · Display"
+// ─────────────────────────────────────────────────────────────────────────────
+// PRESET
+// ─────────────────────────────────────────────────────────────────────────────
+string preset = input.string(
+     "Swing",
+     "Preset",
+     options = [
+         "Position",
+         "Swing",
+         "Active",
+         "Custom"
+     ],
+     group = GROUP_PRESET
+)
+bool isPosition = preset == "Position"
+bool isSwing    = preset == "Swing"
+bool isActive   = preset == "Active"
+bool isCustom   = preset == "Custom"
+// ─────────────────────────────────────────────────────────────────────────────
+// CUSTOM INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+int customFastLen = input.int(
+     21,
+     "Fast Structure",
+     minval = 5,
+     maxval = 200,
+     group = GROUP_STRUCTURE
+)
+int customSlowLen = input.int(
+     55,
+     "Slow Structure",
+     minval = 10,
+     maxval = 400,
+     group = GROUP_STRUCTURE
+)
+int customRangeLen = input.int(
+     40,
+     "Structure Window",
+     minval = 10,
+     maxval = 300,
+     group = GROUP_STRUCTURE
+)
+int customSwingLen = input.int(
+     5,
+     "Swing Length",
+     minval = 2,
+     maxval = 20,
+     group = GROUP_STRUCTURE
+)
+int customValueLen = input.int(
+     55,
+     "Value Window",
+     minval = 10,
+     maxval = 300,
+     group = GROUP_VALUE
+)
+float valueWidth = input.float(
+     1.25,
+     "Value Zone Width",
+     minval = 0.50,
+     maxval = 4.00,
+     step = 0.05,
+     group = GROUP_VALUE,
+     tooltip = "Width of the adaptive value zone in units of residual standard deviation."
+)
+int customEnergyLen = input.int(
+     20,
+     "Energy Window",
+     minval = 5,
+     maxval = 100,
+     group = GROUP_ENERGY
+)
+int customCompressionLen = input.int(
+     50,
+     "Compression Comparison",
+     minval = 20,
+     maxval = 300,
+     group = GROUP_ENERGY
+)
+int customVolumeLen = input.int(
+     40,
+     "Volume Context",
+     minval = 10,
+     maxval = 200,
+     group = GROUP_VOLUME
+)
+int customConfirmBars = input.int(
+     3,
+     "Confirmation Bars",
+     minval = 1,
+     maxval = 10,
+     group = GROUP_STATE,
+     tooltip = "Number of consecutive bars required before the displayed state changes."
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// RESOLVED PARAMETERS
+// ─────────────────────────────────────────────────────────────────────────────
+int fastLen        = isPosition ? 34  : isSwing ? 21 : isActive ? 13 : customFastLen
+int slowLen        = isPosition ? 89  : isSwing ? 55 : isActive ? 34 : customSlowLen
+int rangeLen       = isPosition ? 80  : isSwing ? 50 : isActive ? 30 : customRangeLen
+int swingLen       = isPosition ? 7   : isSwing ? 5  : isActive ? 3  : customSwingLen
+int valueLen       = isPosition ? 89  : isSwing ? 55 : isActive ? 34 : customValueLen
+int energyLen      = isPosition ? 30  : isSwing ? 20 : isActive ? 14 : customEnergyLen
+int compressionLen = isPosition ? 100 : isSwing ? 60 : isActive ? 40 : customCompressionLen
+int volumeLen      = isPosition ? 60  : isSwing ? 40 : isActive ? 25 : customVolumeLen
+int confirmBars    = isPosition ? 4   : isSwing ? 3  : isActive ? 2  : customConfirmBars
+// ─────────────────────────────────────────────────────────────────────────────
+// STRUCTURE INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+string structureSmoothing = input.string(
+     "JMA Approx",
+     "Structure Smoothing",
+     options = [
+         "EMA",
+         "DEMA",
+         "KAMA",
+         "JMA Approx"
+     ],
+     group = GROUP_STRUCTURE,
+     tooltip = "JMA Approx: smooth, low-lag default. EMA: stable reference. DEMA: faster but more sensitive. KAMA: adapts to quiet and trending phases. The selection also changes crosses, slopes, pullbacks, and HTF structure."
+)
+int atrLen = input.int(
+     14,
+     "ATR Length",
+     minval = 5,
+     maxval = 100,
+     group = GROUP_STRUCTURE
+)
+int diLen = input.int(
+     14,
+     "DI Length",
+     minval = 5,
+     maxval = 100,
+     group = GROUP_STRUCTURE
+)
+int adxSmooth = input.int(
+     14,
+     "ADX Smoothing",
+     minval = 5,
+     maxval = 100,
+     group = GROUP_STRUCTURE
+)
+float trendAdxThreshold = input.float(
+     21.0,
+     "ADX Trend Threshold",
+     minval = 10.0,
+     maxval = 50.0,
+     step = 0.5,
+     group = GROUP_STRUCTURE
+)
+float strongTrendAdx = input.float(
+     28.0,
+     "ADX Strong Trend Threshold",
+     minval = 15.0,
+     maxval = 60.0,
+     step = 0.5,
+     group = GROUP_STRUCTURE
+)
+float efficiencyTrendThreshold = input.float(
+     0.34,
+     "Trend Efficiency Threshold",
+     minval = 0.10,
+     maxval = 0.90,
+     step = 0.01,
+     group = GROUP_STRUCTURE,
+     tooltip = "Ratio between net progress and the total distance traveled by price."
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// VALUE INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+string valueMethod = input.string(
+     "VWMA",
+     "Value Method",
+     options = [
+         "VWMA",
+         "EMA",
+         "Hybrid"
+     ],
+     group = GROUP_VALUE
+)
+float discountThreshold = input.float(
+     -0.65,
+     "Discount Threshold",
+     minval = -2.0,
+     maxval = -0.10,
+     step = 0.05,
+     group = GROUP_VALUE
+)
+float premiumThreshold = input.float(
+     0.65,
+     "Premium Threshold",
+     minval = 0.10,
+     maxval = 2.0,
+     step = 0.05,
+     group = GROUP_VALUE
+)
+float extremeLocationThreshold = input.float(
+     1.50,
+     "Extreme Location Threshold",
+     minval = 0.80,
+     maxval = 4.0,
+     step = 0.05,
+     group = GROUP_VALUE
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// ENERGY INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+float compressionThreshold = input.float(
+     0.62,
+     "Compression Threshold",
+     minval = 0.30,
+     maxval = 0.90,
+     step = 0.01,
+     group = GROUP_ENERGY
+)
+float expansionThreshold = input.float(
+     0.55,
+     "Expansion Threshold",
+     minval = 0.30,
+     maxval = 0.90,
+     step = 0.01,
+     group = GROUP_ENERGY
+)
+float exhaustionThreshold = input.float(
+     0.58,
+     "Exhaustion Threshold",
+     minval = 0.30,
+     maxval = 0.90,
+     step = 0.01,
+     group = GROUP_ENERGY
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// VOLUME INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+bool useVolume = input.bool(
+     true,
+     "Use Volume in Auction Pressure",
+     group = GROUP_VOLUME,
+     tooltip = "Controls volume in Auction Pressure, absorption, and Exhaustion calculations. Box Volume and Box VWAP use their separate zone setting."
+)
+float volumeEventZ = input.float(
+     1.25,
+     "Exceptional Volume Threshold",
+     minval = 0.50,
+     maxval = 4.00,
+     step = 0.05,
+     group = GROUP_VOLUME
+)
+float directionalBiasThreshold = input.float(
+     0.18,
+     "Auction Pressure Threshold",
+     minval = 0.05,
+     maxval = 0.60,
+     step = 0.01,
+     group = GROUP_VOLUME,
+     tooltip = "Threshold for buying or selling auction pressure. This describes candle and range behavior and is not a long/short signal."
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// HIGHER TIMEFRAME
+// ─────────────────────────────────────────────────────────────────────────────
+bool useHigherTimeframe = input.bool(
+     true,
+     "Use Higher Timeframe",
+     group = GROUP_MTF
+)
+string higherTimeframe = input.timeframe(
+     "D",
+     "Context Timeframe",
+     group = GROUP_MTF
+)
+bool requireHtfAgreement = input.bool(
+     false,
+     "HTF Must Confirm Expansion",
+     group = GROUP_MTF,
+     tooltip = "Strict option. When enabled, expansions against the higher-timeframe structure are blocked."
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE LOGIC
+// ─────────────────────────────────────────────────────────────────────────────
+int minimumStateBars = input.int(
+     3,
+     "Minimum State Duration",
+     minval = 1,
+     maxval = 20,
+     group = GROUP_STATE,
+     tooltip = "Prevents very short states unless a strong opposing move is detected."
+)
+float oppositeBreakThreshold = input.float(
+     0.75,
+     "Fast Countertrend Switch Threshold",
+     minval = 0.50,
+     maxval = 0.95,
+     step = 0.01,
+     group = GROUP_STATE,
+     tooltip = "Allows only a high-confidence opposite Bull/Bear Expansion to bypass normal state dwell."
+)
+float minimumStateScore = input.float(
+     0.55,
+     "Minimum State Score",
+     minval = 0.30,
+     maxval = 0.90,
+     step = 0.01,
+     group = GROUP_STATE
+)
+float stateDominanceMargin = input.float(
+     0.06,
+     "State Dominance Margin",
+     minval = 0.0,
+     maxval = 0.30,
+     step = 0.01,
+     group = GROUP_STATE,
+     tooltip = "Minimum lead of the best candidate score over the second-best score. Smaller leads are classified as Transition."
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// ZONE INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+bool showBalanceZones = input.bool(
+     true,
+     "Balance/Compression Zones",
+     group = GROUP_ZONES
+)
+int minimumZoneBars = input.int(
+     5,
+     "Start Zone After Bars",
+     minval = 2,
+     maxval = 30,
+     group = GROUP_ZONES
+)
+int maximumZoneBars = input.int(
+     150,
+     "Maximum Zone Length",
+     minval = 20,
+     maxval = 500,
+     group = GROUP_ZONES
+)
+float zoneBreakAtr = input.float(
+     0.20,
+     "Breakout Buffer in ATR",
+     minval = 0.0,
+     maxval = 2.0,
+     step = 0.05,
+     group = GROUP_ZONES
+)
+float maximumZoneWidthAtr = input.float(
+     6.0,
+     "Maximum Zone Width in ATR",
+     minval = 1.5,
+     maxval = 15.0,
+     step = 0.25,
+     group = GROUP_ZONES
+)
+int rawZoneGraceBars = input.int(
+     1,
+     "Raw Zone Interruption Bars",
+     minval = 0,
+     maxval = 5,
+     group = GROUP_ZONES,
+     tooltip = "Preserves an unconfirmed zone across this many ineligible or shock bars, unless price closes beyond its buffered boundary."
+)
+int zoneStateGraceBars = input.int(
+     3,
+     "Zone State Grace Bars",
+     minval = 1,
+     maxval = 10,
+     group = GROUP_ZONES
+)
+int breakoutConfirmationBars = input.int(
+     2,
+     "Breakout Confirmation Closes",
+     minval = 1,
+     maxval = 5,
+     group = GROUP_ZONES
+)
+float minimumBreakoutQuality = input.float(
+     0.50,
+     "Minimum Breakout Quality",
+     minval = 0.0,
+     maxval = 1.0,
+     step = 0.05,
+     group = GROUP_ZONES
+)
+int breakoutFollowupBars = input.int(
+     12,
+     "Breakout Follow-up Bars",
+     minval = 2,
+     maxval = 50,
+     group = GROUP_ZONES
+)
+float shockBarAtrMult = input.float(
+     2.2,
+     "Shock Bar Threshold (× ATR)",
+     minval = 1.2,
+     maxval = 5.0,
+     step = 0.1,
+     group = GROUP_ZONES,
+     tooltip = "Bars with a range above this ATR multiple do not count as Balance/Compression and cannot start or extend a zone. This prevents one violent bar from inflating the zone height."
+)
+bool showZoneVwap = input.bool(
+     false,
+     "Show Box VWAP",
+     group = GROUP_ZONES,
+     tooltip = "Shows the evolving volume-anchored average of the active box. With box statistics volume enabled and usable data, the value remains available in the hover regardless of this display setting."
+)
+bool useZoneVolume = input.bool(
+     true,
+     "Use Volume in Box Statistics",
+     group = GROUP_ZONES,
+     tooltip = "Controls Box Volume, Box VWAP, and volume confirmation in breakout quality independently of the Auction Pressure volume setting."
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUAL INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+bool showBackground = input.bool(
+     true,
+     "State Background",
+     group = GROUP_VISUAL
+)
+bool showValueZone = input.bool(
+     true,
+     "Adaptive Value Zone",
+     group = GROUP_VISUAL
+)
+bool showStructureLines = input.bool(
+     false,
+     "Structure Lines",
+     group = GROUP_VISUAL
+)
+bool colorBars = input.bool(
+     false,
+     "Color Bars by State",
+     group = GROUP_VISUAL
+)
+bool showStateTransitions = input.bool(
+     true,
+     "Mark State Changes",
+     group = GROUP_VISUAL
+)
+bool showCompatibilityMarkers = input.bool(
+     true,
+     "Long/Short Compatibility",
+     group = GROUP_VISUAL
+)
+bool showDashboard = input.bool(
+     false,
+     "Context Dashboard",
+     group = GROUP_VISUAL
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUT VALIDATION
+// ──────────────────────────────────────────────────────────────────────────────
+float chartTimeframeSeconds = timeframe.in_seconds()
+float contextTimeframeSeconds = timeframe.in_seconds(higherTimeframe)
+bool htfTimeframeIsValid =
+     na(chartTimeframeSeconds) or
+     na(contextTimeframeSeconds) or
+     contextTimeframeSeconds > chartTimeframeSeconds
+bool htfEnabled = useHigherTimeframe and htfTimeframeIsValid
+if barstate.isfirst
+    if isCustom and customFastLen >= customSlowLen
+        runtime.error("Custom: Fast Structure must be shorter than Slow Structure.")
+    if trendAdxThreshold >= strongTrendAdx
+        runtime.error("ADX Trend Threshold must be lower than ADX Strong Trend Threshold.")
+    if math.abs(discountThreshold) >= extremeLocationThreshold or premiumThreshold >= extremeLocationThreshold
+        runtime.error("Value Location: Discount and Premium thresholds must remain inside the Extreme Location threshold.")
+    if minimumZoneBars > maximumZoneBars
+        runtime.error("Zones: Minimum zone duration must not exceed maximum zone length.")
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPER FUNCTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+f_clamp(float value, float minimum, float maximum) =>
+    math.max(minimum, math.min(maximum, value))
+f_safeDiv(float numerator, float denominator, float fallback) =>
+    math.abs(denominator) > 0.0000001 ? numerator / denominator : fallback
+f_normalize(float value, float low, float high) =>
+    f_clamp(f_safeDiv(value - low, high - low, 0.0), 0.0, 1.0)
+f_kama(series float source, simple int length) =>
+    float change = math.abs(source - source[length])
+    float volatility = math.sum(math.abs(source - source[1]), length)
+    float efficiency = volatility != 0.0 ? change / volatility : 0.0
+    float smoothing = math.pow(
+         efficiency * (2.0 / 3.0 - 2.0 / 31.0) + 2.0 / 31.0,
+         2.0
+    )
+    var float kama = na
+    kama := nz(kama[1], source) + smoothing * (source - nz(kama[1], source))
+    kama
+f_jma(series float source, simple int length) =>
+    var float jma = na
+    var float e0 = na
+    var float e1 = na
+    var float e2 = na
+    float phaseRatio = 1.5
+    float beta = 0.45 * (length - 1) / (0.45 * (length - 1) + 2.0)
+    float alpha = math.pow(beta, 2.0)
+    e0 := (1.0 - alpha) * source + alpha * nz(e0[1], source)
+    e1 := (source - e0) * (1.0 - beta) + beta * nz(e1[1], 0.0)
+    e2 :=
+         (e0 + phaseRatio * e1 - nz(jma[1], source)) * math.pow(1.0 - alpha, 2.0) +
+         math.pow(alpha, 2.0) * nz(e2[1], 0.0)
+    jma := nz(jma[1], source) + e2
+    jma
+f_structureAverage(series float source, simple int length) =>
+    switch structureSmoothing
+        "DEMA" =>
+            float firstEma = ta.ema(source, length)
+            2.0 * firstEma - ta.ema(firstEma, length)
+        "KAMA" => f_kama(source, length)
+        "JMA Approx" => f_jma(source, length)
+        => ta.ema(source, length)
+f_htfStructureSnapshot() =>
+    float fastStructure = f_structureAverage(close, fastLen)
+    float slowStructure = f_structureAverage(close, slowLen)
+    [close[1], fastStructure[1], slowStructure[1], slowStructure[2], ta.atr(atrLen)[1]]
+f_regimeName(int regime) =>
+    switch regime
+        REGIME_BALANCED => "Balanced"
+        REGIME_BULLISH  => "Bullish"
+        REGIME_BEARISH  => "Bearish"
+        => "Conflicted"
+f_energyPhaseName(int phase) =>
+    switch phase
+        ENERGY_CONTRACTING => "Contracting"
+        ENERGY_EXPANDING   => "Expanding"
+        ENERGY_EXHAUSTING  => "Exhausting"
+        => "Neutral"
+f_transitionReasonName(int reason) =>
+    switch reason
+        TRANSITION_NO_DATA     => "Initializing"
+        TRANSITION_CONFLICT    => "State conflict"
+        TRANSITION_TREND_BUILD => "Trend forming"
+        TRANSITION_BREAK       => "Structure break"
+        TRANSITION_CHAOTIC     => "Chaotic conditions"
+        => "None"
+f_contextLevelName(int level) =>
+    switch level
+        CONTEXT_PREFERRED   => "Preferred"
+        CONTEXT_COMPATIBLE  => "Compatible"
+        CONTEXT_NEUTRAL     => "Neutral"
+        => "Unfavorable"
+f_breakoutFollowupName(int status) =>
+    switch status
+        BREAKOUT_HELD     => "Breakout held"
+        BREAKOUT_RETESTED => "Retest passed"
+        BREAKOUT_FAILED   => "Back inside the box"
+        => "Pending"
+f_stateName(int state) =>
+    switch state
+        STATE_BALANCE         => "Balance"
+        STATE_COMPRESSION     => "Compression"
+        STATE_BULL_EXPANSION  => "Bull Expansion"
+        STATE_BEAR_EXPANSION  => "Bear Expansion"
+        STATE_BULL_PULLBACK   => "Bull Pullback"
+        STATE_BEAR_PULLBACK   => "Bear Pullback"
+        STATE_BULL_EXHAUSTION => "Bull Exhaustion"
+        STATE_BEAR_EXHAUSTION => "Bear Exhaustion"
+        => "Transition"
+f_stateShortName(int state) =>
+    switch state
+        STATE_BALANCE         => "BAL"
+        STATE_COMPRESSION     => "COMP"
+        STATE_BULL_EXPANSION  => "EXP ↑"
+        STATE_BEAR_EXPANSION  => "EXP ↓"
+        STATE_BULL_PULLBACK   => "PB ↑"
+        STATE_BEAR_PULLBACK   => "PB ↓"
+        STATE_BULL_EXHAUSTION => "EXH ↑"
+        STATE_BEAR_EXHAUSTION => "EXH ↓"
+        => "TRANS"
+f_stateDisplayName(bool ready, int state, int transitionReason) =>
+    string result = "Initializing"
+    if ready
+        result := state == STATE_TRANSITION ?
+             "TRANS · " + f_transitionReasonName(transitionReason) :
+             f_stateShortName(state)
+    result
+f_stateColor(int state, int transparency) =>
+    color baseColor = switch state
+        STATE_BALANCE         => color.rgb(120, 130, 145)
+        STATE_COMPRESSION     => color.rgb(230, 170, 40)
+        STATE_BULL_EXPANSION  => color.rgb(20, 160, 95)
+        STATE_BEAR_EXPANSION  => color.rgb(205, 65, 70)
+        STATE_BULL_PULLBACK   => color.rgb(70, 145, 115)
+        STATE_BEAR_PULLBACK   => color.rgb(170, 90, 95)
+        STATE_BULL_EXHAUSTION => color.rgb(190, 135, 35)
+        STATE_BEAR_EXHAUSTION => color.rgb(175, 105, 35)
+        => color.rgb(135, 105, 180)
+    color.new(baseColor, transparency)
+f_biasName(float bias) =>
+    string result = "Balanced"
+    if bias > directionalBiasThreshold
+        result := "Buying Pressure"
+    else if bias < -directionalBiasThreshold
+        result := "Selling Pressure"
+    result
+f_biasColor(float bias, int transparency) =>
+    color result = color.new(color.rgb(125, 130, 140), transparency)
+    if bias > directionalBiasThreshold
+        result := color.new(color.rgb(25, 155, 95), transparency)
+    else if bias < -directionalBiasThreshold
+        result := color.new(color.rgb(205, 65, 70), transparency)
+    result
+f_zoneLabelColor(int impulseDirection, bool trendIntact) =>
+    color result = color.rgb(125, 130, 140)
+    if trendIntact and impulseDirection == 1
+        result := color.rgb(20, 160, 95)
+    else if trendIntact and impulseDirection == -1
+        result := color.rgb(205, 65, 70)
+    else if impulseDirection != 0
+        result := color.rgb(190, 135, 35)
+    result
+f_locationName(float normalizedLocation) =>
+    string result = "Extreme Premium"
+    if normalizedLocation <= -extremeLocationThreshold
+        result := "Extreme Discount"
+    else if normalizedLocation <= discountThreshold
+        result := "Discount"
+    else if normalizedLocation < premiumThreshold
+        result := "Value"
+    else if normalizedLocation < extremeLocationThreshold
+        result := "Premium"
+    result
+f_locationColor(float normalizedLocation) =>
+    color result = color.rgb(200, 75, 70)
+    if normalizedLocation <= -extremeLocationThreshold
+        result := color.rgb(20, 145, 95)
+    else if normalizedLocation <= discountThreshold
+        result := color.rgb(65, 160, 115)
+    else if normalizedLocation < premiumThreshold
+        result := color.rgb(125, 130, 140)
+    else if normalizedLocation < extremeLocationThreshold
+        result := color.rgb(190, 135, 45)
+    result
+f_qualityName(float quality) =>
+    string result = "Chaotic"
+    if quality >= 0.80
+        result := "Very Clean"
+    else if quality >= 0.65
+        result := "Clean"
+    else if quality >= 0.48
+        result := "Mixed"
+    else if quality >= 0.32
+        result := "Noisy"
+    result
+f_stateIsBullish(int state) =>
+    state == STATE_BULL_EXPANSION or
+     state == STATE_BULL_PULLBACK or
+     state == STATE_BULL_EXHAUSTION
+f_stateIsBearish(int state) =>
+    state == STATE_BEAR_EXPANSION or
+     state == STATE_BEAR_PULLBACK or
+     state == STATE_BEAR_EXHAUSTION
+f_breakoutQualityName(float score) =>
+    string result = "Weak"
+    if score >= 0.72
+        result := "Strong"
+    else if score >= 0.50
+        result := "Clean"
+    result
+f_compactNumber(float value) =>
+    string result = str.tostring(value, "#.##")
+    if value >= 1000000000000.0
+        result := str.tostring(value / 1000000000000.0, "#.##") + "T"
+    else if value >= 1000000000.0
+        result := str.tostring(value / 1000000000.0, "#.##") + "B"
+    else if value >= 1000000.0
+        result := str.tostring(value / 1000000.0, "#.##") + "M"
+    else if value >= 1000.0
+        result := str.tostring(value / 1000.0, "#.##") + "K"
+    result
+f_zoneTooltip(
+     string stateLabel,
+     float bias,
+     float quality,
+     int startBar,
+     bool zoneClosed,
+     float zoneLow,
+     float zoneHigh,
+     float widthAtr,
+     int upperEdgeTests,
+     int lowerEdgeTests,
+     int upperFailedBreaks,
+     int lowerFailedBreaks,
+     float zoneVwap,
+     float zoneVolume,
+     float zoneVolumeRatio,
+     bool zoneHasVolume,
+     string outcome,
+     string eventDetails,
+     string impulseRelation
+ ) =>
+    int durationBars = math.max(bar_index - startBar + (zoneClosed ? 0 : 1), 1)
+    string result = str.format(
+         "{0}\nAuction pressure (latest): {1} ({2})\nZone quality: {3} ({4})\nZone duration: {5} bars\nZone range: {6} – {7}",
+         stateLabel,
+         f_biasName(bias),
+         str.tostring(bias, "#.##"),
+         f_qualityName(quality),
+         str.tostring(quality, "#.##"),
+         durationBars,
+         str.tostring(zoneLow, format.mintick),
+         str.tostring(zoneHigh, format.mintick)
+    )
+    result += "\nWidth: " + str.tostring(widthAtr, "#.##") + " ATR"
+    result += "\nEdge tests since confirmation (upper/lower): " + str.tostring(upperEdgeTests) + " / " + str.tostring(lowerEdgeTests)
+    result += "\nFailed breaks since confirmation (upper/lower): " + str.tostring(upperFailedBreaks) + " / " + str.tostring(lowerFailedBreaks)
+    if not na(zoneVwap)
+        float vwapLocation = f_safeDiv(zoneVwap - zoneLow, zoneHigh - zoneLow, 0.5)
+        string vwapArea = vwapLocation <= 0.33 ? "lower third" : vwapLocation >= 0.67 ? "upper third" : "middle"
+        result += "\nBox-VWAP: " + str.tostring(zoneVwap, format.mintick) + " (" + vwapArea + ")"
+    if zoneHasVolume
+        result += "\nBox volume: " + f_compactNumber(zoneVolume)
+        result += "\nAverage volume per bar: " + str.tostring(zoneVolumeRatio, "#.##") + "× normal"
+    else
+        result += "\nBox volume: Not available"
+    if outcome != ""
+        result += "\nOutcome: " + outcome
+    if eventDetails != ""
+        result += "\n" + eventDetails
+    if impulseRelation != ""
+        result += "\nRelation to prior impulse: " + impulseRelation
+    result
+f_expansionTooltip(
+     int state,
+     float confidence,
+     float expansion,
+     float quality,
+     float location,
+     float bias,
+     string htf
+ ) =>
+    str.format(
+         "{0}\nConfidence: {1}%\nExpansion: {2}%\nState quality: {3} ({4})\nLocation: {5}\nAuction pressure: {6} ({7})\nHTF: {8}",
+         f_stateName(state),
+         str.tostring(confidence * 100.0, "#.0"),
+         str.tostring(expansion * 100.0, "#.0"),
+         f_qualityName(quality),
+         str.tostring(quality, "#.##"),
+         f_locationName(location),
+         f_biasName(bias),
+         str.tostring(bias, "#.##"),
+         htf
+    )
+f_zoneContextHeading(
+     string stateLabel,
+     string contextLabel,
+     int impulseDirection,
+     bool trendIntact,
+     float impulseSizeAtr,
+     float impulseEfficiency,
+     float depth,
+     string riskReason,
+     int zoneStartState,
+     int zoneCurrentState,
+     int balanceBars,
+     int compressionBars
+ ) =>
+    string result = stateLabel + " Zone"
+    int zoneTypeBars = balanceBars + compressionBars
+    string zoneEvolution = f_stateName(zoneStartState)
+    if zoneCurrentState != zoneStartState
+        zoneEvolution += " → " + f_stateName(zoneCurrentState)
+    result += "\nZone evolution: " + zoneEvolution
+    if zoneTypeBars > 0
+        float compressionShare = float(compressionBars) / zoneTypeBars
+        result += "\nCompression share: " + str.tostring(compressionShare * 100.0, "#.0") + "%"
+    if impulseDirection != 0 and not na(depth)
+        string impulseName = impulseDirection == 1 ? "Long" : "Short"
+        result += "\nPrior impulse: " + impulseName + " (" + str.tostring(impulseSizeAtr, "#.##") + " ATR)"
+        if not na(impulseEfficiency)
+            result += "\nImpulse efficiency: " + str.tostring(impulseEfficiency * 100.0, "#.0") + "%"
+        result += "\nPhase after impulse: " + contextLabel
+        result += "\nRetracement against impulse: " + str.tostring(depth * 100.0, "#.0") + "%"
+        if trendIntact
+            result += "\nPreferred direction: " + impulseName
+        else
+            result += "\nPreferred direction: None"
+            if riskReason != ""
+                result += "\nReason: " + riskReason
+    else
+        result += "\nPrior impulse: None detected"
+    result
+f_breakoutTooltip(
+     bool bullishBreakout,
+     string stateLabel,
+     string zoneHeading,
+     float bias,
+     float quality,
+     int startBar,
+     float zoneLow,
+     float zoneHigh,
+     float widthAtr,
+     int upperEdgeTests,
+     int lowerEdgeTests,
+     int upperFailedBreaks,
+     int lowerFailedBreaks,
+     float zoneVwap,
+     float zoneVolume,
+     float zoneVolumeRatio,
+     bool zoneHasVolume,
+     string impulseRelation,
+     float breakoutQuality,
+     float breakoutDistanceAtr,
+     float breakoutVolumeRatio,
+     bool breakoutHasVolume
+ ) =>
+    string direction = bullishBreakout ? "Long" : "Short"
+    string side = bullishBreakout ? "upper" : "lower"
+    string result = "Breakout through the " + side + " edge of " + stateLabel
+    result += "\nBreakout direction: " + direction
+    result += "\nConfirmed: " + str.tostring(breakoutConfirmationBars) + " close(s) beyond the ATR-buffered zone plus quality gate"
+    result += "\nBreakout quality: " + f_breakoutQualityName(breakoutQuality) + " (" + str.tostring(breakoutQuality * 100.0, "#.0") + "%)"
+    result += "\nDistance beyond zone: " + str.tostring(breakoutDistanceAtr, "#.##") + " ATR"
+    if breakoutHasVolume
+        result += "\nVolume: " + str.tostring(breakoutVolumeRatio, "#.##") + "× average"
+    result += "\n\n" + f_zoneTooltip(
+         zoneHeading,
+         bias,
+         quality,
+         startBar,
+         true,
+         zoneLow,
+         zoneHigh,
+         widthAtr,
+         upperEdgeTests,
+         lowerEdgeTests,
+         upperFailedBreaks,
+         lowerFailedBreaks,
+         zoneVwap,
+         zoneVolume,
+         zoneVolumeRatio,
+         zoneHasVolume,
+         "",
+         "",
+         impulseRelation
+    )
+    result
+f_zoneDirectionalShortName(
+     int state,
+     int impulseDirection,
+     bool trendIntact
+ ) =>
+    string result = f_stateShortName(state)
+    if impulseDirection == 1
+        result += trendIntact ? " ↑" : " ?"
+    else if impulseDirection == -1
+        result += trendIntact ? " ↓" : " ?"
+    result
+// ─────────────────────────────────────────────────────────────────────────────
+// BASE CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+float atr = ta.atr(atrLen)
+float safeAtr = math.max(atr, syminfo.mintick)
+float structureFast = f_structureAverage(close, fastLen)
+float structureSlow = f_structureAverage(close, slowLen)
+float fastSlope = f_safeDiv(structureFast - structureFast[3], safeAtr * 3.0, 0.0)
+float slowSlope = f_safeDiv(structureSlow - structureSlow[5], safeAtr * 5.0, 0.0)
+float structureSeparation = f_safeDiv(
+     math.abs(structureFast - structureSlow),
+     safeAtr,
+     0.0
+)
+[plusDI, minusDI, adx] = ta.dmi(diLen, adxSmooth)
+float directionalDI = f_safeDiv(
+     plusDI - minusDI,
+     plusDI + minusDI,
+     0.0
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// MARKET EFFICIENCY
+// ─────────────────────────────────────────────────────────────────────────────
+float pathTravel = math.sum(math.abs(ta.change(close)), energyLen)
+float netTravel = math.abs(close - close[energyLen])
+float efficiencyRatio = f_clamp(
+     f_safeDiv(netTravel, pathTravel, 0.0),
+     0.0,
+     1.0
+)
+float efficiencyDirection = 0.0
+if close > close[energyLen]
+    efficiencyDirection := 1.0
+else if close < close[energyLen]
+    efficiencyDirection := -1.0
+float signedEfficiency = efficiencyRatio * efficiencyDirection
+// Candle overlap measures how much successive candle ranges overlap.
+// High overlap generally belongs to balance or compression.
+float overlapTop = math.min(high, high[1])
+float overlapBottom = math.max(low, low[1])
+float overlapAmount = math.max(overlapTop - overlapBottom, 0.0)
+float previousRange = math.max(high[1] - low[1], syminfo.mintick)
+float currentRange = math.max(high - low, syminfo.mintick)
+float overlapRatio = f_clamp(
+     f_safeDiv(
+         overlapAmount,
+         math.min(previousRange, currentRange),
+         0.0
+     ),
+     0.0,
+     1.0
+)
+float averageOverlap = ta.ema(overlapRatio, energyLen)
+// ─────────────────────────────────────────────────────────────────────────────
+// STRUCTURE DIRECTION
+// ─────────────────────────────────────────────────────────────────────────────
+float structureBullScore =
+     0.30 * f_normalize(structureFast - structureSlow, -safeAtr, safeAtr) +
+     0.25 * f_normalize(fastSlope, -0.20, 0.20) +
+     0.20 * f_normalize(slowSlope, -0.12, 0.12) +
+     0.15 * f_normalize(directionalDI, -0.35, 0.35) +
+     0.10 * f_normalize(signedEfficiency, -0.40, 0.40)
+float structureBearScore = 1.0 - structureBullScore
+float structureDirection = structureBullScore - structureBearScore
+bool structuralBull =
+     structureFast > structureSlow and
+     slowSlope > -0.02 and
+     structureDirection > 0.08
+bool structuralBear =
+     structureFast < structureSlow and
+     slowSlope < 0.02 and
+     structureDirection < -0.08
+// ─────────────────────────────────────────────────────────────────────────────
+// HIGHER TIMEFRAME CONTEXT
+// ─────────────────────────────────────────────────────────────────────────────
+[htfClose, htfFast, htfSlow, htfSlowPrevious, htfAtr] = request.security(
+     syminfo.tickerid,
+     higherTimeframe,
+     f_htfStructureSnapshot(),
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_on
+)
+float htfSlowSlope = f_safeDiv(
+     htfSlow - htfSlowPrevious,
+     math.max(htfAtr, syminfo.mintick),
+     0.0
+)
+bool htfBull =
+     not htfEnabled or
+     (
+         htfFast > htfSlow and
+         htfClose > htfSlow and
+         htfSlowSlope >= 0
+     )
+bool htfBear =
+     not htfEnabled or
+     (
+         htfFast < htfSlow and
+         htfClose < htfSlow and
+         htfSlowSlope <= 0
+     )
+string htfContext = "Neutral"
+if not useHigherTimeframe
+    htfContext := "Off"
+else if not htfTimeframeIsValid
+    htfContext := "TF ≤ Chart"
+else if htfBull
+    htfContext := "Bullish"
+else if htfBear
+    htfContext := "Bearish"
+// ─────────────────────────────────────────────────────────────────────────────
+// ADAPTIVE VALUE
+// ─────────────────────────────────────────────────────────────────────────────
+float emaValue = ta.ema(hlc3, valueLen)
+float vwmaValue = ta.vwma(hlc3, valueLen)
+bool hasUsableVolume =
+     not na(volume) and
+     ta.sma(volume, volumeLen) > 0
+float effectiveVwma = hasUsableVolume ? vwmaValue : emaValue
+float fairValue = switch valueMethod
+    "EMA"    => emaValue
+    "Hybrid" => (emaValue + effectiveVwma) / 2.0
+    => effectiveVwma
+float valueResidual = close - fairValue
+float residualDeviation = ta.stdev(valueResidual, valueLen)
+float adaptiveDeviation = math.max(
+     residualDeviation,
+     safeAtr * 0.60
+)
+float valueUpper = fairValue + adaptiveDeviation * valueWidth
+float valueLower = fairValue - adaptiveDeviation * valueWidth
+float normalizedLocation = f_safeDiv(
+     close - fairValue,
+     adaptiveDeviation * valueWidth,
+     0.0
+)
+// Separate range-relative location.
+// This prevents a moving average alone from defining "cheap" and "expensive".
+float rollingHigh = ta.highest(high, rangeLen)
+float rollingLow = ta.lowest(low, rangeLen)
+float rollingWidth = math.max(rollingHigh - rollingLow, syminfo.mintick)
+float rangeLocation = f_clamp(
+     f_safeDiv(close - rollingLow, rollingWidth, 0.5),
+     0.0,
+     1.0
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// VOLATILITY AND COMPRESSION
+// ─────────────────────────────────────────────────────────────────────────────
+float atrPercent = f_safeDiv(atr, close, 0.0)
+float atrBaseline = ta.sma(atrPercent, compressionLen)
+float atrCompression = 1.0 - f_clamp(
+     f_safeDiv(atrPercent, atrBaseline * 1.25, 1.0),
+     0.0,
+     1.0
+)
+float basis = ta.sma(close, energyLen)
+float deviation = ta.stdev(close, energyLen)
+float bbWidth = f_safeDiv(
+     deviation * 4.0,
+     basis,
+     0.0
+)
+float bbWidthBaseline = ta.sma(bbWidth, compressionLen)
+float bandCompression = 1.0 - f_clamp(
+     f_safeDiv(bbWidth, bbWidthBaseline * 1.20, 1.0),
+     0.0,
+     1.0
+)
+float rangeAtrRatio = f_safeDiv(
+     rollingWidth,
+     safeAtr * math.sqrt(rangeLen),
+     0.0
+)
+float rangeContainment = 1.0 - f_normalize(
+     rangeAtrRatio,
+     1.50,
+     4.50
+)
+float compressionScore =
+     0.32 * atrCompression +
+     0.28 * bandCompression +
+     0.22 * averageOverlap +
+     0.18 * rangeContainment
+compressionScore := f_clamp(compressionScore, 0.0, 1.0)
+// ─────────────────────────────────────────────────────────────────────────────
+// EXPANSION
+// ─────────────────────────────────────────────────────────────────────────────
+float candleBody = math.abs(close - open)
+float bodyEfficiency = f_clamp(
+     f_safeDiv(candleBody, currentRange, 0.0),
+     0.0,
+     1.0
+)
+float closeLocationInBar = f_clamp(
+     f_safeDiv(close - low, currentRange, 0.5),
+     0.0,
+     1.0
+)
+float bullBodyQuality = f_clamp(
+     f_safeDiv(close - open, currentRange, 0.0),
+     0.0,
+     1.0
+)
+float bearBodyQuality = f_clamp(
+     f_safeDiv(open - close, currentRange, 0.0),
+     0.0,
+     1.0
+)
+float bullCloseQuality = closeLocationInBar
+float bearCloseQuality = 1.0 - closeLocationInBar
+float rangeExpansion = f_normalize(
+     currentRange,
+     safeAtr * 0.70,
+     safeAtr * 1.80
+)
+float atrAcceleration = f_normalize(
+     f_safeDiv(atr, atr[5], 1.0),
+     0.90,
+     1.25
+)
+float adxExpansion = f_normalize(
+     adx,
+     trendAdxThreshold - 5.0,
+     strongTrendAdx + 8.0
+)
+float directionalProgress = f_safeDiv(
+     close - close[energyLen],
+     safeAtr * math.sqrt(energyLen),
+     0.0
+)
+float bullProgress = f_normalize(directionalProgress, 0.0, 2.0)
+float bearProgress = f_normalize(-directionalProgress, 0.0, 2.0)
+float bullExpansionScore =
+     0.22 * efficiencyRatio +
+     0.18 * adxExpansion +
+     0.16 * rangeExpansion +
+     0.12 * atrAcceleration +
+     0.12 * bullBodyQuality +
+     0.12 * bullCloseQuality +
+     0.08 * bullProgress
+bullExpansionScore := f_clamp(bullExpansionScore, 0.0, 1.0)
+float bearExpansionScore =
+     0.22 * efficiencyRatio +
+     0.18 * adxExpansion +
+     0.16 * rangeExpansion +
+     0.12 * atrAcceleration +
+     0.12 * bearBodyQuality +
+     0.12 * bearCloseQuality +
+     0.08 * bearProgress
+bearExpansionScore := f_clamp(bearExpansionScore, 0.0, 1.0)
+// Generic energy output remains available for dashboards and existing consumers.
+float expansionScore = math.max(bullExpansionScore, bearExpansionScore)
+// ─────────────────────────────────────────────────────────────────────────────
+// VOLUME AND DIRECTIONAL PRESSURE
+// ─────────────────────────────────────────────────────────────────────────────
+float volumeAverage = ta.sma(volume, volumeLen)
+float volumeDeviation = ta.stdev(volume, volumeLen)
+bool hasUsableZoneVolume = useZoneVolume and hasUsableVolume
+float volumeZ = 0.0
+if hasUsableVolume
+    volumeZ := f_safeDiv(volume - volumeAverage, volumeDeviation, 0.0)
+float volumeStrength = 0.50
+if useVolume and hasUsableVolume
+    volumeStrength := f_normalize(volumeZ, -0.50, 2.50)
+// Signed close position:
+// +1 means candle closed near its high.
+// -1 means candle closed near its low.
+float signedClosePosition = closeLocationInBar * 2.0 - 1.0
+// Effort-versus-result:
+// High volume with limited directional result can indicate absorption.
+float directionalResult = f_safeDiv(
+     math.abs(close - close[1]),
+     safeAtr,
+     0.0
+)
+float effortResultMismatch = 0.0
+if useVolume and hasUsableVolume
+    effortResultMismatch := f_clamp(
+         f_normalize(volumeZ, 0.50, 2.50) *
+         (1.0 - f_normalize(directionalResult, 0.20, 1.20)),
+         0.0,
+         1.0
+     )
+// Failed auctions around rolling structure.
+float priorStructureLow = ta.lowest(low[1], swingLen * 2)
+float priorStructureHigh = ta.highest(high[1], swingLen * 2)
+bool failedBreakdown =
+     low < priorStructureLow and
+     close > priorStructureLow and
+     closeLocationInBar > 0.55
+bool failedBreakout =
+     high > priorStructureHigh and
+     close < priorStructureHigh and
+     closeLocationInBar < 0.45
+float failedAuctionBias = 0.0
+if failedBreakdown
+    failedAuctionBias := 1.0
+else if failedBreakout
+    failedAuctionBias := -1.0
+// Price response around value extremes.
+float valueResponseBias = 0.0
+if normalizedLocation < discountThreshold and signedClosePosition > 0
+    valueResponseBias := signedClosePosition
+else if normalizedLocation > premiumThreshold and signedClosePosition < 0
+    valueResponseBias := signedClosePosition
+// Volume-pressure proxy.
+// It does not claim to be true order flow.
+float pressureRaw =
+     signedClosePosition *
+     bodyEfficiency *
+     (0.50 + volumeStrength * 0.50)
+float pressureSmoothed = ta.ema(pressureRaw, energyLen)
+// Auction Pressure combines:
+// 1. persistent directional pressure,
+// 2. failed auctions,
+// 3. absorption at useful locations,
+// 4. price response around adaptive value.
+float absorptionDirection = 0.0
+if rangeLocation < 0.35 and signedClosePosition > 0
+    absorptionDirection := 1.0
+else if rangeLocation > 0.65 and signedClosePosition < 0
+    absorptionDirection := -1.0
+float absorptionBias = effortResultMismatch * absorptionDirection
+float directionalBias =
+     0.40 * pressureSmoothed +
+     0.25 * failedAuctionBias +
+     0.20 * absorptionBias +
+     0.15 * valueResponseBias
+directionalBias := f_clamp(directionalBias, -1.0, 1.0)
+float smoothedDirectionalBias = ta.ema(directionalBias, 3)
+// ─────────────────────────────────────────────────────────────────────────────
+// EXHAUSTION
+// ─────────────────────────────────────────────────────────────────────────────
+// Price extension is context, not a reversal signal.
+float bullExtensionScore = f_normalize(normalizedLocation, 0.70, 2.20)
+float bearExtensionScore = f_normalize(-normalizedLocation, 0.70, 2.20)
+float directionalExtensionScore =
+     structuralBull ? bullExtensionScore :
+     structuralBear ? bearExtensionScore :
+     0.0
+// Momentum deceleration:
+// Trend may still point in the same direction while its rate deteriorates.
+float momentumFast = ta.roc(close, math.max(3, int(math.round(energyLen * 0.35))))
+float momentumSlow = ta.roc(close, energyLen)
+float momentumDelta = momentumFast - momentumFast[3]
+float momentumDeltaDeviation = ta.stdev(momentumDelta, energyLen)
+float normalizedMomentumDelta = f_safeDiv(
+     momentumDelta,
+     math.max(nz(momentumDeltaDeviation, 0.0), 0.0001),
+     0.0
+)
+float bullDeceleration = momentumSlow > 0 ?
+     f_normalize(-normalizedMomentumDelta, 0.0, 2.5) :
+     0.0
+float bearDeceleration = momentumSlow < 0 ?
+     f_normalize(normalizedMomentumDelta, 0.0, 2.5) :
+     0.0
+float directionalDeceleration = 0.0
+if structuralBull
+    directionalDeceleration := bullDeceleration
+else if structuralBear
+    directionalDeceleration := bearDeceleration
+float trendAge = ta.barssince(
+     structuralBull != structuralBull[1] or
+     structuralBear != structuralBear[1]
+)
+float ageScore = f_normalize(
+     nz(trendAge, 0),
+     energyLen,
+     energyLen * 4.0
+)
+float failedProgress = 0.0
+if efficiencyRatio < efficiencyRatio[5]
+    failedProgress := f_normalize(
+         efficiencyRatio[5] - efficiencyRatio,
+         0.0,
+         0.25
+     )
+float exhaustionScore =
+     0.30 * directionalExtensionScore +
+     0.25 * directionalDeceleration +
+     0.18 * ageScore +
+     0.17 * failedProgress +
+     0.10 * effortResultMismatch
+float directionalExpansionPersistence =
+     structuralBull ? bullExpansionScore :
+     structuralBear ? bearExpansionScore :
+     0.0
+exhaustionScore *= 1.0 - directionalExpansionPersistence * 0.30
+exhaustionScore := f_clamp(exhaustionScore, 0.0, 1.0)
+bool hasExhaustionTrigger =
+     directionalDeceleration >= 0.30 or
+     failedProgress >= 0.35 or
+     effortResultMismatch >= 0.55
+// Confirmed impulse memory is declared before pullback scoring so the current
+// raw read can use only information committed by prior confirmed bars.
+var int activeImpulseDirection = 0
+var float activeImpulseStartPrice = na
+var float activeImpulseEndPrice = na
+var float activeImpulseHigh = na
+var float activeImpulseLow = na
+var float activeImpulseAtrSum = 0.0
+var float activeImpulseQualitySum = 0.0
+var int activeImpulseBars = 0
+var int lastImpulseDirection = 0
+var int lastImpulseEndBar = na
+var float lastImpulseStartPrice = na
+var float lastImpulseEndPrice = na
+var float lastImpulseHigh = na
+var float lastImpulseLow = na
+var float lastImpulseCounterExtreme = na
+var float lastImpulseCounterCloseExtreme = na
+var float lastImpulseSizeAtr = na
+var float lastImpulseGrossRangeAtr = na
+var float lastImpulseEfficiency = na
+var float lastImpulseQuality = na
+var int lastImpulseBars = 0
+// ─────────────────────────────────────────────────────────────────────────────
+// PULLBACK DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+int pullbackMemoryBars = math.max(20, compressionLen)
+int priorImpulseAge = na(lastImpulseEndBar) ? pullbackMemoryBars + 1 : bar_index - lastImpulseEndBar
+bool recentBullImpulse =
+     activeImpulseDirection == 1 or
+     (
+         lastImpulseDirection == 1 and
+         priorImpulseAge <= pullbackMemoryBars and
+         nz(lastImpulseEfficiency, 0.0) >= 0.45
+     )
+bool recentBearImpulse =
+     activeImpulseDirection == -1 or
+     (
+         lastImpulseDirection == -1 and
+         priorImpulseAge <= pullbackMemoryBars and
+         nz(lastImpulseEfficiency, 0.0) >= 0.45
+     )
+float bullImpulseStart = activeImpulseDirection == 1 ? activeImpulseStartPrice : lastImpulseStartPrice
+float bullImpulseExtreme = activeImpulseDirection == 1 ? activeImpulseHigh : lastImpulseHigh
+float bearImpulseStart = activeImpulseDirection == -1 ? activeImpulseStartPrice : lastImpulseStartPrice
+float bearImpulseExtreme = activeImpulseDirection == -1 ? activeImpulseLow : lastImpulseLow
+float bullPullbackDepth = recentBullImpulse ? f_clamp(
+     f_safeDiv(bullImpulseExtreme - close, bullImpulseExtreme - bullImpulseStart, 0.0),
+     0.0,
+     1.50
+) : na
+float bearPullbackDepth = recentBearImpulse ? f_clamp(
+     f_safeDiv(close - bearImpulseExtreme, bearImpulseStart - bearImpulseExtreme, 0.0),
+     0.0,
+     1.50
+) : na
+float bullPullbackLocationScore =
+     1.0 - f_normalize(math.abs(close - structureSlow), safeAtr * 0.10, safeAtr * 1.20)
+float bearPullbackLocationScore =
+     1.0 - f_normalize(math.abs(close - structureSlow), safeAtr * 0.10, safeAtr * 1.20)
+float bullPullbackScore =
+     recentBullImpulse and structuralBull and not na(bullPullbackDepth) ?
+         f_clamp(
+             0.30 * structureBullScore +
+             0.25 * bullPullbackLocationScore +
+             0.20 * (1.0 - bearExpansionScore) +
+             0.15 * (1.0 - f_normalize(bullPullbackDepth, 0.55, 0.85)) +
+             0.10 * f_normalize(bullPullbackDepth, 0.08, 0.30),
+             0.0,
+             1.0
+         ) :
+         0.0
+float bearPullbackScore =
+     recentBearImpulse and structuralBear and not na(bearPullbackDepth) ?
+         f_clamp(
+             0.30 * structureBearScore +
+             0.25 * bearPullbackLocationScore +
+             0.20 * (1.0 - bullExpansionScore) +
+             0.15 * (1.0 - f_normalize(bearPullbackDepth, 0.55, 0.85)) +
+             0.10 * f_normalize(bearPullbackDepth, 0.08, 0.30),
+             0.0,
+             1.0
+         ) :
+         0.0
+bool bullPullback =
+     bullPullbackScore >= minimumStateScore and
+     close < structureFast and
+     close >= structureSlow - safeAtr * 0.35 and
+     bullPullbackDepth > 0.08 and
+     bullPullbackDepth < 0.80 and
+     fastSlope > -0.12
+bool bearPullback =
+     bearPullbackScore >= minimumStateScore and
+     close > structureFast and
+     close <= structureSlow + safeAtr * 0.35 and
+     bearPullbackDepth > 0.08 and
+     bearPullbackDepth < 0.80 and
+     fastSlope < 0.12
+// ─────────────────────────────────────────────────────────────────────────────
+// BALANCE DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+float balanceScore =
+     0.28 * (1.0 - efficiencyRatio) +
+     0.24 * averageOverlap +
+     0.20 * (1.0 - adxExpansion) +
+     0.16 * (1.0 - f_normalize(structureSeparation, 0.20, 1.50)) +
+     0.12 * rangeContainment
+balanceScore := f_clamp(balanceScore, 0.0, 1.0)
+bool balanceCandidate =
+     balanceScore >= 0.56 and
+     adx < strongTrendAdx and
+     math.abs(structureDirection) < 0.48
+bool compressionCandidate =
+     compressionScore >= compressionThreshold and
+     balanceScore >= 0.44
+// ─────────────────────────────────────────────────────────────────────────────
+// TREND QUALITY
+// ─────────────────────────────────────────────────────────────────────────────
+float directionalAgreement = 0.0
+if structuralBull
+    directionalAgreement := f_normalize(structureDirection, 0.0, 0.65)
+else if structuralBear
+    directionalAgreement := f_normalize(-structureDirection, 0.0, 0.65)
+float htfAgreementScore = 0.45
+if not htfEnabled
+    htfAgreementScore := 0.65
+else if structuralBull and htfBull
+    htfAgreementScore := 1.0
+else if structuralBear and htfBear
+    htfAgreementScore := 1.0
+else if structuralBull and htfBear
+    htfAgreementScore := 0.0
+else if structuralBear and htfBull
+    htfAgreementScore := 0.0
+float trendQuality =
+     0.30 * efficiencyRatio +
+     0.22 * adxExpansion +
+     0.18 * directionalAgreement +
+     0.15 * (1.0 - averageOverlap) +
+     0.15 * htfAgreementScore
+trendQuality := f_clamp(trendQuality, 0.0, 1.0)
+float balanceQuality =
+     0.40 * balanceScore +
+     0.35 * compressionScore +
+     0.25 * averageOverlap
+balanceQuality := f_clamp(balanceQuality, 0.0, 1.0)
+bool localEngineReady =
+     not na(structureFast) and
+     not na(structureSlow) and
+     not na(atr) and
+     not na(adx) and
+     not na(atrBaseline) and
+     not na(bbWidthBaseline) and
+     not na(residualDeviation) and
+     not na(averageOverlap) and
+     not na(momentumSlow) and
+     not na(momentumDeltaDeviation)
+bool htfDataReady =
+     not htfEnabled or
+     (
+         not na(htfClose) and
+         not na(htfFast) and
+         not na(htfSlow) and
+         not na(htfSlowPrevious) and
+         not na(htfAtr)
+     )
+bool engineReady = localEngineReady and htfDataReady
+// ─────────────────────────────────────────────────────────────────────────────
+// ORTHOGONAL MARKET AXES
+// ─────────────────────────────────────────────────────────────────────────────
+int structureRegime = REGIME_CONFLICTED
+if engineReady
+    if balanceCandidate
+        structureRegime := REGIME_BALANCED
+    else if structuralBull
+        structureRegime := REGIME_BULLISH
+    else if structuralBear
+        structureRegime := REGIME_BEARISH
+    else if balanceScore >= 0.44
+        structureRegime := REGIME_BALANCED
+float contractingEvidence = compressionScore
+float expandingEvidence = math.max(bullExpansionScore, bearExpansionScore)
+float exhaustingEvidence = hasExhaustionTrigger ? exhaustionScore : 0.0
+int energyPhase = ENERGY_NEUTRAL
+float strongestEnergyEvidence = math.max(
+     contractingEvidence,
+     math.max(expandingEvidence, exhaustingEvidence)
+)
+if engineReady and strongestEnergyEvidence >= 0.45
+    if strongestEnergyEvidence == contractingEvidence
+        energyPhase := ENERGY_CONTRACTING
+    else if strongestEnergyEvidence == exhaustingEvidence
+        energyPhase := ENERGY_EXHAUSTING
+    else
+        energyPhase := ENERGY_EXPANDING
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE CANDIDATE SCORES AND ARBITRATION
+// ─────────────────────────────────────────────────────────────────────────────
+bool bullExpansionAllowed =
+     structuralBull and
+     (
+         not requireHtfAgreement or
+         htfBull
+     )
+bool bearExpansionAllowed =
+     structuralBear and
+     (
+         not requireHtfAgreement or
+         htfBear
+     )
+bool bullExhausted =
+     structuralBull and
+     exhaustionScore >= exhaustionThreshold and
+     hasExhaustionTrigger
+bool bearExhausted =
+     structuralBear and
+     exhaustionScore >= exhaustionThreshold and
+     hasExhaustionTrigger
+bool bullExpanding =
+     bullExpansionAllowed and
+     bullExpansionScore >= expansionThreshold and
+     signedEfficiency >= efficiencyTrendThreshold
+bool bearExpanding =
+     bearExpansionAllowed and
+     bearExpansionScore >= expansionThreshold and
+     signedEfficiency <= -efficiencyTrendThreshold
+float balanceCandidateScore = balanceCandidate ?
+     balanceScore * (1.0 - 0.20 * compressionScore) :
+     0.0
+float compressionCandidateScore = compressionCandidate ?
+     0.72 * compressionScore + 0.28 * balanceScore :
+     0.0
+float bullExpansionCandidateScore = bullExpanding ?
+     0.72 * bullExpansionScore + 0.28 * structureBullScore :
+     0.0
+float bearExpansionCandidateScore = bearExpanding ?
+     0.72 * bearExpansionScore + 0.28 * structureBearScore :
+     0.0
+float bullPullbackCandidateScore = bullPullback ? bullPullbackScore : 0.0
+float bearPullbackCandidateScore = bearPullback ? bearPullbackScore : 0.0
+float bullExhaustionCandidateScore = bullExhausted ?
+     0.72 * exhaustionScore + 0.28 * structureBullScore :
+     0.0
+float bearExhaustionCandidateScore = bearExhausted ?
+     0.72 * exhaustionScore + 0.28 * structureBearScore :
+     0.0
+int bestState = STATE_TRANSITION
+float bestStateScore = 0.0
+float secondStateScore = 0.0
+if engineReady
+    if balanceCandidateScore > bestStateScore
+        secondStateScore := bestStateScore
+        bestStateScore := balanceCandidateScore
+        bestState := STATE_BALANCE
+    else if balanceCandidateScore > secondStateScore
+        secondStateScore := balanceCandidateScore
+    if compressionCandidateScore > bestStateScore
+        secondStateScore := bestStateScore
+        bestStateScore := compressionCandidateScore
+        bestState := STATE_COMPRESSION
+    else if compressionCandidateScore > secondStateScore
+        secondStateScore := compressionCandidateScore
+    if bullExpansionCandidateScore > bestStateScore
+        secondStateScore := bestStateScore
+        bestStateScore := bullExpansionCandidateScore
+        bestState := STATE_BULL_EXPANSION
+    else if bullExpansionCandidateScore > secondStateScore
+        secondStateScore := bullExpansionCandidateScore
+    if bearExpansionCandidateScore > bestStateScore
+        secondStateScore := bestStateScore
+        bestStateScore := bearExpansionCandidateScore
+        bestState := STATE_BEAR_EXPANSION
+    else if bearExpansionCandidateScore > secondStateScore
+        secondStateScore := bearExpansionCandidateScore
+    if bullPullbackCandidateScore > bestStateScore
+        secondStateScore := bestStateScore
+        bestStateScore := bullPullbackCandidateScore
+        bestState := STATE_BULL_PULLBACK
+    else if bullPullbackCandidateScore > secondStateScore
+        secondStateScore := bullPullbackCandidateScore
+    if bearPullbackCandidateScore > bestStateScore
+        secondStateScore := bestStateScore
+        bestStateScore := bearPullbackCandidateScore
+        bestState := STATE_BEAR_PULLBACK
+    else if bearPullbackCandidateScore > secondStateScore
+        secondStateScore := bearPullbackCandidateScore
+    if bullExhaustionCandidateScore > bestStateScore
+        secondStateScore := bestStateScore
+        bestStateScore := bullExhaustionCandidateScore
+        bestState := STATE_BULL_EXHAUSTION
+    else if bullExhaustionCandidateScore > secondStateScore
+        secondStateScore := bullExhaustionCandidateScore
+    if bearExhaustionCandidateScore > bestStateScore
+        secondStateScore := bestStateScore
+        bestStateScore := bearExhaustionCandidateScore
+        bestState := STATE_BEAR_EXHAUSTION
+    else if bearExhaustionCandidateScore > secondStateScore
+        secondStateScore := bearExhaustionCandidateScore
+float stateDominance = bestStateScore - secondStateScore
+int rawState =
+     engineReady and
+     bestStateScore >= minimumStateScore and
+     stateDominance >= stateDominanceMargin ?
+         bestState :
+         STATE_TRANSITION
+float rawStateConfidence = rawState == STATE_TRANSITION ?
+     engineReady ?
+         f_clamp(
+             bestStateScore < minimumStateScore ? 1.0 - bestStateScore : 1.0 - stateDominance,
+             0.0,
+             1.0
+         ) :
+         0.0 :
+     bestStateScore
+float stateQuality = rawState == STATE_TRANSITION ?
+     f_clamp(math.max(trendQuality, balanceQuality) * (1.0 - stateDominance), 0.0, 1.0) :
+     bestStateScore
+// Backward-compatible internal alias. Visible output calls this State Quality.
+float marketQuality = stateQuality
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE MACHINE WITH CONFIRMATION AND HYSTERESIS
+// ─────────────────────────────────────────────────────────────────────────────
+var int confirmedState = STATE_TRANSITION
+var int candidateState = STATE_TRANSITION
+var int candidateBars = 0
+var int barsInConfirmedState = 0
+var int confirmedTransitionReason = TRANSITION_NO_DATA
+int transitionReason = TRANSITION_NONE
+if not engineReady
+    transitionReason := TRANSITION_NO_DATA
+else if rawState != STATE_TRANSITION
+    transitionReason := confirmedState == STATE_TRANSITION ? TRANSITION_TREND_BUILD : TRANSITION_NONE
+else if rawState == STATE_TRANSITION
+    if bestStateScore >= minimumStateScore and stateDominance < stateDominanceMargin
+        transitionReason := TRANSITION_CONFLICT
+    else if (
+             f_stateIsBullish(confirmedState) and not structuralBull
+         ) or
+         (
+             f_stateIsBearish(confirmedState) and not structuralBear
+         )
+        transitionReason := TRANSITION_BREAK
+    else if structureRegime == REGIME_BULLISH or
+         structureRegime == REGIME_BEARISH
+        transitionReason := TRANSITION_TREND_BUILD
+    else
+        transitionReason := TRANSITION_CHAOTIC
+bool rawIsOppositeExpansion =
+     (
+         f_stateIsBullish(confirmedState) and
+         rawState == STATE_BEAR_EXPANSION
+     ) or
+     (
+         f_stateIsBearish(confirmedState) and
+         rawState == STATE_BULL_EXPANSION
+     )
+bool emergencyStateChange =
+     rawIsOppositeExpansion and
+     rawStateConfidence >= oppositeBreakThreshold
+bool stateShouldChange = false
+if barstate.isconfirmed and engineReady
+    if rawState == candidateState
+        candidateBars += 1
+    else
+        candidateState := rawState
+        candidateBars := 1
+    barsInConfirmedState += 1
+    bool normalStateChangeAllowed =
+         barsInConfirmedState >= minimumStateBars and
+         candidateBars >= confirmBars
+    stateShouldChange :=
+         candidateState != confirmedState and
+         (
+             normalStateChangeAllowed or
+             emergencyStateChange
+         )
+    if stateShouldChange
+        confirmedState := candidateState
+        barsInConfirmedState := 0
+    if confirmedState == STATE_TRANSITION
+        confirmedTransitionReason := transitionReason
+bool confirmedStateChanged =
+     barstate.isconfirmed and
+     confirmedState != confirmedState[1]
+marketQuality := switch confirmedState
+    STATE_BALANCE         => balanceCandidateScore
+    STATE_COMPRESSION     => compressionCandidateScore
+    STATE_BULL_EXPANSION  => bullExpansionCandidateScore
+    STATE_BEAR_EXPANSION  => bearExpansionCandidateScore
+    STATE_BULL_PULLBACK   => bullPullbackCandidateScore
+    STATE_BEAR_PULLBACK   => bearPullbackCandidateScore
+    STATE_BULL_EXHAUSTION => bullExhaustionCandidateScore
+    STATE_BEAR_EXHAUSTION => bearExhaustionCandidateScore
+    => stateQuality
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPULSE MEMORY AND CORRECTION CONTEXT
+// ─────────────────────────────────────────────────────────────────────────────
+int currentImpulseDirection =
+     confirmedState == STATE_BULL_EXPANSION ? 1 :
+     confirmedState == STATE_BEAR_EXPANSION ? -1 :
+     0
+if barstate.isconfirmed
+    if activeImpulseDirection != 0 and currentImpulseDirection != activeImpulseDirection
+        float activeImpulseAvgAtr = activeImpulseBars > 0 ? activeImpulseAtrSum / activeImpulseBars : safeAtr
+        float activeImpulseGrossRange = math.max(activeImpulseHigh - activeImpulseLow, syminfo.mintick)
+        float activeImpulseNetProgress = activeImpulseDirection == 1 ?
+             activeImpulseEndPrice - activeImpulseStartPrice :
+             activeImpulseStartPrice - activeImpulseEndPrice
+        lastImpulseDirection := activeImpulseDirection
+        lastImpulseEndBar := bar_index - 1
+        lastImpulseStartPrice := activeImpulseStartPrice
+        lastImpulseEndPrice := activeImpulseEndPrice
+        lastImpulseHigh := activeImpulseHigh
+        lastImpulseLow := activeImpulseLow
+        lastImpulseCounterExtreme := activeImpulseDirection == 1 ? activeImpulseHigh : activeImpulseLow
+        lastImpulseCounterCloseExtreme := activeImpulseEndPrice
+        lastImpulseSizeAtr := f_safeDiv(math.max(activeImpulseNetProgress, 0.0), activeImpulseAvgAtr, 0.0)
+        lastImpulseGrossRangeAtr := f_safeDiv(activeImpulseGrossRange, activeImpulseAvgAtr, 0.0)
+        lastImpulseEfficiency := f_clamp(
+             f_safeDiv(math.max(activeImpulseNetProgress, 0.0), activeImpulseGrossRange, 0.0),
+             0.0,
+             1.0
+        )
+        lastImpulseQuality := activeImpulseBars > 0 ? activeImpulseQualitySum / activeImpulseBars : 0.0
+        lastImpulseBars := activeImpulseBars
+        activeImpulseDirection := 0
+        activeImpulseStartPrice := na
+        activeImpulseEndPrice := na
+        activeImpulseHigh := na
+        activeImpulseLow := na
+        activeImpulseAtrSum := 0.0
+        activeImpulseQualitySum := 0.0
+        activeImpulseBars := 0
+    if currentImpulseDirection != 0
+        if activeImpulseDirection == 0
+            activeImpulseDirection := currentImpulseDirection
+            activeImpulseStartPrice := close[1]
+            activeImpulseEndPrice := close
+            activeImpulseHigh := math.max(high, close[1])
+            activeImpulseLow := math.min(low, close[1])
+            activeImpulseAtrSum := safeAtr
+            activeImpulseQualitySum := marketQuality
+            activeImpulseBars := 1
+        else
+            activeImpulseEndPrice := close
+            activeImpulseHigh := math.max(activeImpulseHigh, high)
+            activeImpulseLow := math.min(activeImpulseLow, low)
+            activeImpulseAtrSum += safeAtr
+            activeImpulseQualitySum += marketQuality
+            activeImpulseBars += 1
+    if lastImpulseDirection == 1 and currentImpulseDirection == 0
+        lastImpulseCounterExtreme := math.min(nz(lastImpulseCounterExtreme, lastImpulseHigh), low)
+        lastImpulseCounterCloseExtreme := math.min(nz(lastImpulseCounterCloseExtreme, lastImpulseEndPrice), close)
+    else if lastImpulseDirection == -1 and currentImpulseDirection == 0
+        lastImpulseCounterExtreme := math.max(nz(lastImpulseCounterExtreme, lastImpulseLow), high)
+        lastImpulseCounterCloseExtreme := math.max(nz(lastImpulseCounterCloseExtreme, lastImpulseEndPrice), close)
+
+bool balanceContextState =
+     confirmedState == STATE_BALANCE or
+     confirmedState == STATE_COMPRESSION
+int correctionMemoryBars = math.max(20, compressionLen)
+int lastImpulseAge = na(lastImpulseEndBar) ? correctionMemoryBars + 1 : bar_index - lastImpulseEndBar
+bool hasRecentImpulse =
+     lastImpulseDirection != 0 and
+     lastImpulseAge >= 1 and
+     lastImpulseAge <= correctionMemoryBars and
+     lastImpulseBars >= 1 and
+     lastImpulseSizeAtr >= 0.80 and
+     lastImpulseEfficiency >= 0.45 and
+     lastImpulseQuality >= 0.35
+float impulseWickRange = lastImpulseDirection == 1 ?
+     math.max(nz(lastImpulseHigh - lastImpulseStartPrice), syminfo.mintick) :
+     math.max(nz(lastImpulseStartPrice - lastImpulseLow), syminfo.mintick)
+float impulseCloseRange = math.max(
+     math.abs(nz(lastImpulseEndPrice - lastImpulseStartPrice)),
+     syminfo.mintick
+)
+float correctionDepth = na
+if hasRecentImpulse
+    float wickDepth = lastImpulseDirection == 1 ?
+         f_safeDiv(lastImpulseHigh - lastImpulseCounterExtreme, impulseWickRange, 0.0) :
+         f_safeDiv(lastImpulseCounterExtreme - lastImpulseLow, impulseWickRange, 0.0)
+    float closeDepth = lastImpulseDirection == 1 ?
+         f_safeDiv(lastImpulseEndPrice - lastImpulseCounterCloseExtreme, impulseCloseRange, 0.0) :
+         f_safeDiv(lastImpulseCounterCloseExtreme - lastImpulseEndPrice, impulseCloseRange, 0.0)
+    correctionDepth := f_clamp(0.35 * wickDepth + 0.65 * closeDepth, 0.0, 1.50)
+bool oppositeStructure =
+     (lastImpulseDirection == 1 and structuralBear) or
+     (lastImpulseDirection == -1 and structuralBull)
+bool impulseStructureHeld =
+     lastImpulseDirection == 1 ?
+         (structureFast >= structureSlow - safeAtr * 0.20 and slowSlope > -0.08) :
+     lastImpulseDirection == -1 ?
+         (structureFast <= structureSlow + safeAtr * 0.20 and slowSlope < 0.08) :
+     false
+bool htfDoesNotOpposeImpulse =
+     not htfEnabled or
+     (lastImpulseDirection == 1 and not htfBear) or
+     (lastImpulseDirection == -1 and not htfBull)
+bool opposingBias =
+     (lastImpulseDirection == 1 and directionalBias < -directionalBiasThreshold) or
+     (lastImpulseDirection == -1 and directionalBias > directionalBiasThreshold)
+bool impulseTrendIntact =
+     hasRecentImpulse and
+     correctionDepth < 0.75 and
+     not oppositeStructure and
+     impulseStructureHeld and
+     htfDoesNotOpposeImpulse
+string impulseRiskReason = ""
+if hasRecentImpulse and not impulseTrendIntact
+    if correctionDepth >= 0.75
+        impulseRiskReason := "Retracement is at least 75%"
+    else if oppositeStructure
+        impulseRiskReason := "Opposing structure detected"
+    else if not impulseStructureHeld
+        impulseRiskReason := "Structure lines no longer support the impulse"
+    else if not htfDoesNotOpposeImpulse
+        impulseRiskReason := "Higher timeframe is opposing the impulse"
+bool balanceHasImpulseContext = balanceContextState and hasRecentImpulse
+string balanceContextName = "No clear impulse"
+if balanceHasImpulseContext
+    if not impulseTrendIntact
+        balanceContextName := "No clear continuation"
+    else if confirmedState == STATE_COMPRESSION and correctionDepth < 0.38 and not opposingBias
+        balanceContextName := lastImpulseDirection == 1 ? "Pause after advance" : "Pause after decline"
+    else
+        balanceContextName := lastImpulseDirection == 1 ? "Correction after advance" : "Correction after decline"
+bool postImpulseContextStarted =
+     barstate.isconfirmed and
+     balanceHasImpulseContext and
+     not balanceHasImpulseContext[1]
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE DIRECTION AND TRADE COMPATIBILITY
+// ─────────────────────────────────────────────────────────────────────────────
+bool bullPullbackReaction =
+     confirmedState == STATE_BULL_PULLBACK and
+     close > open and
+     closeLocationInBar >= 0.60 and
+     (
+         low <= structureSlow + safeAtr * 0.20 or
+         low <= valueUpper
+     ) and
+     directionalBias > 0
+bool bearPullbackReaction =
+     confirmedState == STATE_BEAR_PULLBACK and
+     close < open and
+     closeLocationInBar <= 0.40 and
+     (
+         high >= structureSlow - safeAtr * 0.20 or
+         high >= valueLower
+     ) and
+     directionalBias < 0
+int longContextLevel = CONTEXT_NEUTRAL
+int shortContextLevel = CONTEXT_NEUTRAL
+if engineReady
+    if confirmedState == STATE_BULL_EXPANSION
+        longContextLevel := normalizedLocation >= extremeLocationThreshold ? CONTEXT_NEUTRAL : CONTEXT_COMPATIBLE
+        shortContextLevel := CONTEXT_UNFAVORABLE
+    else if confirmedState == STATE_BEAR_EXPANSION
+        longContextLevel := CONTEXT_UNFAVORABLE
+        shortContextLevel := normalizedLocation <= -extremeLocationThreshold ? CONTEXT_NEUTRAL : CONTEXT_COMPATIBLE
+    else if confirmedState == STATE_BULL_PULLBACK
+        longContextLevel := bullPullbackReaction ? CONTEXT_PREFERRED : CONTEXT_COMPATIBLE
+        shortContextLevel := CONTEXT_UNFAVORABLE
+    else if confirmedState == STATE_BEAR_PULLBACK
+        longContextLevel := CONTEXT_UNFAVORABLE
+        shortContextLevel := bearPullbackReaction ? CONTEXT_PREFERRED : CONTEXT_COMPATIBLE
+    else if confirmedState == STATE_BULL_EXHAUSTION
+        longContextLevel := CONTEXT_NEUTRAL
+        shortContextLevel := normalizedLocation >= premiumThreshold ? CONTEXT_COMPATIBLE : CONTEXT_NEUTRAL
+    else if confirmedState == STATE_BEAR_EXHAUSTION
+        longContextLevel := normalizedLocation <= discountThreshold ? CONTEXT_COMPATIBLE : CONTEXT_NEUTRAL
+        shortContextLevel := CONTEXT_NEUTRAL
+    else if confirmedState == STATE_BALANCE or confirmedState == STATE_COMPRESSION
+        if balanceHasImpulseContext and impulseTrendIntact
+            longContextLevel := lastImpulseDirection == 1 ? CONTEXT_COMPATIBLE : CONTEXT_UNFAVORABLE
+            shortContextLevel := lastImpulseDirection == -1 ? CONTEXT_COMPATIBLE : CONTEXT_UNFAVORABLE
+        else
+            longContextLevel := normalizedLocation >= premiumThreshold ? CONTEXT_UNFAVORABLE : CONTEXT_NEUTRAL
+            shortContextLevel := normalizedLocation <= discountThreshold ? CONTEXT_UNFAVORABLE : CONTEXT_NEUTRAL
+        if normalizedLocation <= discountThreshold and directionalBias > 0 and not (balanceHasImpulseContext and impulseTrendIntact and lastImpulseDirection == -1)
+            longContextLevel := CONTEXT_PREFERRED
+        if normalizedLocation >= premiumThreshold and directionalBias < 0 and not (balanceHasImpulseContext and impulseTrendIntact and lastImpulseDirection == 1)
+            shortContextLevel := CONTEXT_PREFERRED
+        if confirmedState == STATE_COMPRESSION and directionalBias > directionalBiasThreshold and longContextLevel >= CONTEXT_NEUTRAL
+            longContextLevel := math.max(longContextLevel, CONTEXT_COMPATIBLE)
+        if confirmedState == STATE_COMPRESSION and directionalBias < -directionalBiasThreshold and shortContextLevel >= CONTEXT_NEUTRAL
+            shortContextLevel := math.max(shortContextLevel, CONTEXT_COMPATIBLE)
+    if htfEnabled and htfBear
+        longContextLevel := math.min(longContextLevel, CONTEXT_NEUTRAL)
+    if htfEnabled and htfBull
+        shortContextLevel := math.min(shortContextLevel, CONTEXT_NEUTRAL)
+bool longContextCompatible = longContextLevel >= CONTEXT_COMPATIBLE
+bool shortContextCompatible = shortContextLevel >= CONTEXT_COMPATIBLE
+// Higher-quality contextual readiness.
+// These are not entries.
+bool longReadiness =
+     longContextCompatible and
+     (
+         bullPullbackReaction or
+         (
+             confirmedState == STATE_COMPRESSION and
+             directionalBias > directionalBiasThreshold
+         ) or
+         (
+             confirmedState == STATE_BALANCE and
+             normalizedLocation <= discountThreshold and
+             directionalBias > 0
+         )
+     )
+bool shortReadiness =
+     shortContextCompatible and
+     (
+         bearPullbackReaction or
+         (
+             confirmedState == STATE_COMPRESSION and
+             directionalBias < -directionalBiasThreshold
+         ) or
+         (
+             confirmedState == STATE_BALANCE and
+             normalizedLocation >= premiumThreshold and
+             directionalBias < 0
+         )
+     )
+bool longReadinessStarted =
+     barstate.isconfirmed and
+     longReadiness and
+     not longReadiness[1]
+bool shortReadinessStarted =
+     barstate.isconfirmed and
+     shortReadiness and
+     not shortReadiness[1]
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPRESSION / BALANCE ZONES
+// ─────────────────────────────────────────────────────────────────────────────
+// Raw (undebounced) zone extents — tracks the true onset and range of a
+// balance/compression episode independently of the confirmed-state machine's
+// confirmation lag, so the box reflects the actual structure instead of a
+// fixed short lookback window. A shock bar (range >> ATR) can never start or
+// extend the raw zone — one violent bar shouldn't set the zone's height.
+bool isShockBar = currentRange > safeAtr * shockBarAtrMult
+bool rawBalanceState =
+     rawState == STATE_COMPRESSION or
+     rawState == STATE_BALANCE
+bool rawZoneState = barstate.isconfirmed and rawBalanceState and not isShockBar
+var int rawZoneStart = na
+var int rawZoneStartState = STATE_BALANCE
+var float rawZoneHigh = na
+var float rawZoneLow = na
+var float rawZoneQualitySum = 0.0
+var float rawZoneAtrSum = 0.0
+var float rawZonePriceVolumeSum = 0.0
+var float rawZoneVolumeSum = 0.0
+var float rawZoneVolumeBaselineSum = 0.0
+var int rawZoneVolumeCount = 0
+var int rawZoneQualityCount = 0
+var int rawZoneBalanceBars = 0
+var int rawZoneCompressionBars = 0
+var int rawZoneInterruptions = 0
+bool rawZoneExists = not na(rawZoneStart)
+bool rawZoneGeometricBreak =
+     rawZoneExists and
+     (
+         close > rawZoneHigh + safeAtr * zoneBreakAtr or
+         close < rawZoneLow - safeAtr * zoneBreakAtr
+     )
+if barstate.isconfirmed
+    if rawZoneState
+        if not rawZoneExists
+            rawZoneStart := bar_index
+            rawZoneStartState := rawState
+            rawZoneHigh := high
+            rawZoneLow := low
+            rawZoneQualitySum := stateQuality
+            rawZoneAtrSum := safeAtr
+            rawZonePriceVolumeSum := hasUsableZoneVolume ? hlc3 * volume : 0.0
+            rawZoneVolumeSum := hasUsableZoneVolume ? volume : 0.0
+            rawZoneVolumeBaselineSum := hasUsableZoneVolume ? volumeAverage : 0.0
+            rawZoneVolumeCount := hasUsableZoneVolume ? 1 : 0
+            rawZoneQualityCount := 1
+            rawZoneBalanceBars := rawState == STATE_BALANCE ? 1 : 0
+            rawZoneCompressionBars := rawState == STATE_COMPRESSION ? 1 : 0
+        else
+            rawZoneHigh := math.max(rawZoneHigh, high)
+            rawZoneLow := math.min(rawZoneLow, low)
+            rawZoneQualitySum += stateQuality
+            rawZoneAtrSum += safeAtr
+            if hasUsableZoneVolume
+                rawZonePriceVolumeSum += hlc3 * volume
+                rawZoneVolumeSum += volume
+                rawZoneVolumeBaselineSum += volumeAverage
+                rawZoneVolumeCount += 1
+            rawZoneQualityCount += 1
+            rawZoneBalanceBars += rawState == STATE_BALANCE ? 1 : 0
+            rawZoneCompressionBars += rawState == STATE_COMPRESSION ? 1 : 0
+        rawZoneInterruptions := 0
+    else if rawZoneExists
+        rawZoneInterruptions += 1
+        if rawZoneGeometricBreak or rawZoneInterruptions > rawZoneGraceBars
+            rawZoneStart := na
+            rawZoneStartState := STATE_BALANCE
+            rawZoneHigh := na
+            rawZoneLow := na
+            rawZoneQualitySum := 0.0
+            rawZoneAtrSum := 0.0
+            rawZonePriceVolumeSum := 0.0
+            rawZoneVolumeSum := 0.0
+            rawZoneVolumeBaselineSum := 0.0
+            rawZoneVolumeCount := 0
+            rawZoneQualityCount := 0
+            rawZoneBalanceBars := 0
+            rawZoneCompressionBars := 0
+            rawZoneInterruptions := 0
+
+bool zoneState =
+     balanceContextState
+var int zoneBars = 0
+if barstate.isconfirmed
+    if zoneState
+        if not zoneState[1]
+            zoneBars := 1
+        else
+            zoneBars += 1
+    else
+        zoneBars := 0
+var box activeZone = na
+var label activeZoneLabel = na
+var float activeZoneHigh = na
+var float activeZoneLow = na
+var int activeZoneStart = na
+var int activeZoneStartState = STATE_BALANCE
+var int activeZoneCurrentState = STATE_BALANCE
+var int activeZoneBalanceBars = 0
+var int activeZoneCompressionBars = 0
+var int activeZoneBarsOutsideState = 0
+var float activeZoneBias = 0.0
+var string activeZoneStateName = ""
+var string activeZoneContextName = "No clear impulse"
+var int activeZoneImpulseDirection = 0
+var bool activeZoneImpulseTrendIntact = false
+var float activeZoneImpulseSizeAtr = na
+var float activeZoneImpulseEfficiency = na
+var float activeZoneCorrectionDepth = na
+var string activeZoneRiskReason = ""
+var float activeZoneQualitySum = 0.0
+var float activeZoneAtrSum = 0.0
+var float activeZonePriceVolumeSum = 0.0
+var float activeZoneVolumeSum = 0.0
+var float activeZoneVolumeBaselineSum = 0.0
+var int activeZoneVolumeCount = 0
+var int activeZoneQualityCount = 0
+var int activeZoneUpperEdgeTests = 0
+var int activeZoneLowerEdgeTests = 0
+var int activeZoneUpperFailedBreaks = 0
+var int activeZoneLowerFailedBreaks = 0
+var bool activeUpperEdgeReaction = false
+var bool activeLowerEdgeReaction = false
+var bool activeUpperFailedBreak = false
+var bool activeLowerFailedBreak = false
+var int activeBreakDirection = 0
+var int activeBreakCloses = 0
+var int activeBreakStartBar = na
+var float activeBreakQuality = na
+var label activeBreakLabel = na
+var array<label> breakoutFollowupLabels = array.new<label>()
+var array<int> breakoutFollowupDirections = array.new<int>()
+var array<int> breakoutFollowupStartBars = array.new<int>()
+var array<int> breakoutFollowupStatuses = array.new<int>()
+var array<float> breakoutFollowupHighs = array.new<float>()
+var array<float> breakoutFollowupLows = array.new<float>()
+var array<string> breakoutFollowupTooltips = array.new<string>()
+var float zoneVwapPlotValue = na
+float fallbackZoneHigh = ta.highest(high, minimumZoneBars)
+float fallbackZoneLow = ta.lowest(low, minimumZoneBars)
+bool createZone =
+     barstate.isconfirmed and
+     showBalanceZones and
+     zoneState and
+     zoneBars == minimumZoneBars
+if createZone
+    activeZoneStart := na(rawZoneStart) ? bar_index - minimumZoneBars + 1 : rawZoneStart
+    activeZoneStartState := na(rawZoneStart) ? confirmedState : rawZoneStartState
+    activeZoneCurrentState := confirmedState
+    activeZoneBalanceBars := rawZoneQualityCount > 0 ? rawZoneBalanceBars : int(math.sum(rawState == STATE_BALANCE ? 1 : 0, minimumZoneBars))
+    activeZoneCompressionBars := rawZoneQualityCount > 0 ? rawZoneCompressionBars : int(math.sum(rawState == STATE_COMPRESSION ? 1 : 0, minimumZoneBars))
+    activeZoneBarsOutsideState := 0
+    activeZoneHigh := na(rawZoneHigh) ? fallbackZoneHigh : rawZoneHigh
+    activeZoneLow := na(rawZoneLow) ? fallbackZoneLow : rawZoneLow
+    activeZoneBias := smoothedDirectionalBias
+    activeZoneStateName := f_stateName(confirmedState)
+    activeZoneContextName := balanceContextName
+    activeZoneImpulseDirection := balanceHasImpulseContext ? lastImpulseDirection : 0
+    activeZoneImpulseTrendIntact := balanceHasImpulseContext and impulseTrendIntact
+    activeZoneImpulseSizeAtr := balanceHasImpulseContext ? lastImpulseSizeAtr : na
+    activeZoneImpulseEfficiency := balanceHasImpulseContext ? lastImpulseEfficiency : na
+    activeZoneCorrectionDepth := balanceHasImpulseContext ? correctionDepth : na
+    activeZoneRiskReason := balanceHasImpulseContext ? impulseRiskReason : ""
+    activeZoneQualitySum := rawZoneQualityCount > 0 ? rawZoneQualitySum : math.sum(marketQuality, minimumZoneBars)
+    activeZoneAtrSum := rawZoneQualityCount > 0 ? rawZoneAtrSum : math.sum(safeAtr, minimumZoneBars)
+    activeZonePriceVolumeSum := rawZoneQualityCount > 0 ? rawZonePriceVolumeSum : hasUsableZoneVolume ? math.sum(hlc3 * volume, minimumZoneBars) : 0.0
+    activeZoneVolumeSum := rawZoneQualityCount > 0 ? rawZoneVolumeSum : hasUsableZoneVolume ? math.sum(volume, minimumZoneBars) : 0.0
+    activeZoneVolumeBaselineSum := rawZoneQualityCount > 0 ? rawZoneVolumeBaselineSum : hasUsableZoneVolume ? math.sum(volumeAverage, minimumZoneBars) : 0.0
+    activeZoneVolumeCount := rawZoneQualityCount > 0 ? rawZoneVolumeCount : hasUsableZoneVolume ? minimumZoneBars : 0
+    activeZoneQualityCount := rawZoneQualityCount > 0 ? rawZoneQualityCount : minimumZoneBars
+    activeZoneUpperEdgeTests := 0
+    activeZoneLowerEdgeTests := 0
+    activeZoneUpperFailedBreaks := 0
+    activeZoneLowerFailedBreaks := 0
+    activeUpperEdgeReaction := false
+    activeLowerEdgeReaction := false
+    activeUpperFailedBreak := false
+    activeLowerFailedBreak := false
+    activeBreakDirection := 0
+    activeBreakCloses := 0
+    activeBreakStartBar := na
+    activeBreakQuality := na
+    activeBreakLabel := na
+    zoneVwapPlotValue := na
+    float initialZoneAvgQuality = activeZoneQualityCount > 0 ? activeZoneQualitySum / activeZoneQualityCount : 0.0
+    float initialZoneAvgAtr = activeZoneQualityCount > 0 ? activeZoneAtrSum / activeZoneQualityCount : safeAtr
+    float initialZoneWidthAtr = f_safeDiv(activeZoneHigh - activeZoneLow, initialZoneAvgAtr, 0.0)
+    float initialZoneVwap = activeZoneVolumeSum > 0 ? activeZonePriceVolumeSum / activeZoneVolumeSum : na
+    bool initialZoneHasVolume = activeZoneVolumeCount == activeZoneQualityCount and activeZoneVolumeSum > 0 and activeZoneVolumeBaselineSum > 0
+    float initialZoneVolumeRatio = initialZoneHasVolume ? f_safeDiv(activeZoneVolumeSum, activeZoneVolumeBaselineSum, 0.0) : na
+    zoneVwapPlotValue := initialZoneVwap
+    activeZone := box.new(
+         left = activeZoneStart,
+         top = activeZoneHigh,
+         right = bar_index,
+         bottom = activeZoneLow,
+         xloc = xloc.bar_index,
+         bgcolor = f_biasColor(activeZoneBias, 87),
+         border_color = f_biasColor(activeZoneBias, 38),
+         border_width = 1
+    )
+    activeZoneLabel := label.new(
+         activeZoneStart,
+         activeZoneHigh,
+         f_zoneDirectionalShortName(
+             confirmedState,
+             activeZoneImpulseDirection,
+             activeZoneImpulseTrendIntact
+         ),
+         color = f_zoneLabelColor(
+             activeZoneImpulseDirection,
+             activeZoneImpulseTrendIntact
+         ),
+         textcolor = color.white,
+         style = label.style_label_down,
+         size = size.small,
+         tooltip = f_zoneTooltip(
+             f_zoneContextHeading(
+                 activeZoneStateName,
+                 activeZoneContextName,
+                 activeZoneImpulseDirection,
+                 activeZoneImpulseTrendIntact,
+                 activeZoneImpulseSizeAtr,
+                 activeZoneImpulseEfficiency,
+                 activeZoneCorrectionDepth,
+                 activeZoneRiskReason,
+                 activeZoneStartState,
+                 activeZoneCurrentState,
+                 activeZoneBalanceBars,
+                 activeZoneCompressionBars
+             ),
+             activeZoneBias,
+             initialZoneAvgQuality,
+             activeZoneStart,
+             false,
+             activeZoneLow,
+             activeZoneHigh,
+             initialZoneWidthAtr,
+             activeZoneUpperEdgeTests,
+             activeZoneLowerEdgeTests,
+             activeZoneUpperFailedBreaks,
+             activeZoneLowerFailedBreaks,
+             initialZoneVwap,
+             activeZoneVolumeSum,
+             initialZoneVolumeRatio,
+             initialZoneHasVolume,
+             "",
+             "",
+             ""
+         )
+    )
+bool activeZoneExists = not na(activeZone)
+// Test the close against the zone as it existed before the current bar. Only
+// surviving raw zone bars may expand its geometry afterwards.
+bool bullBreakAttempt =
+     barstate.isconfirmed and
+     activeZoneExists and
+     close > activeZoneHigh + safeAtr * zoneBreakAtr
+bool bearBreakAttempt =
+     barstate.isconfirmed and
+     activeZoneExists and
+     close < activeZoneLow - safeAtr * zoneBreakAtr
+float currentBreakDistanceAtr =
+     bullBreakAttempt ? f_safeDiv(close - activeZoneHigh, safeAtr, 0.0) :
+     bearBreakAttempt ? f_safeDiv(activeZoneLow - close, safeAtr, 0.0) :
+     na
+float currentBreakDistanceScore = f_normalize(
+     nz(currentBreakDistanceAtr, 0.0),
+     zoneBreakAtr,
+     zoneBreakAtr + 1.0
+)
+float currentBreakCloseQuality = bullBreakAttempt ? closeLocationInBar : 1.0 - closeLocationInBar
+bool currentBreakHasVolume = hasUsableZoneVolume and volumeAverage > 0
+float currentBreakVolumeRatio = currentBreakHasVolume ? volume / volumeAverage : na
+float currentBreakQuality =
+     bullBreakAttempt or bearBreakAttempt ?
+         0.32 * currentBreakDistanceScore +
+         0.23 * bodyEfficiency +
+         0.23 * currentBreakCloseQuality +
+         0.22 * (bullBreakAttempt ? bullExpansionScore : bearExpansionScore) :
+         na
+if (bullBreakAttempt or bearBreakAttempt) and currentBreakHasVolume
+    currentBreakQuality := currentBreakQuality * 0.90 + 0.10 * f_normalize(currentBreakVolumeRatio, 0.80, 2.00)
+currentBreakQuality := not na(currentBreakQuality) ? f_clamp(currentBreakQuality, 0.0, 1.0) : na
+if barstate.isconfirmed and activeZoneExists
+    if bullBreakAttempt or bearBreakAttempt
+        int newBreakDirection = bullBreakAttempt ? 1 : -1
+        if activeBreakDirection != newBreakDirection
+            if not na(activeBreakLabel)
+                label.set_text(activeBreakLabel, "BOX ×")
+                label.set_tooltip(activeBreakLabel, "Break attempt invalidated by an opposite attempt\nFollow-up: Back inside the box")
+            activeBreakDirection := newBreakDirection
+            activeBreakCloses := 1
+            activeBreakStartBar := bar_index
+            activeBreakLabel := na
+        else
+            activeBreakCloses += 1
+        activeBreakQuality := currentBreakQuality
+        string attemptTooltip = "Break attempt " + (newBreakDirection == 1 ? "above" : "below") + " the box"
+        attemptTooltip += "\nConfirmation closes: " + str.tostring(activeBreakCloses) + " / " + str.tostring(breakoutConfirmationBars)
+        attemptTooltip += "\nQuality: " + f_breakoutQualityName(activeBreakQuality) + " (" + str.tostring(activeBreakQuality * 100.0, "#.0") + "%)"
+        attemptTooltip += activeBreakQuality >= minimumBreakoutQuality ? "\nQuality gate: Passed" : "\nQuality gate: Too weak"
+        if na(activeBreakLabel)
+            activeBreakLabel := label.new(
+                 bar_index,
+                 newBreakDirection == 1 ? low : high,
+                 newBreakDirection == 1 ? "BOX? ↑" : "BOX? ↓",
+                 color = color.new(color.gray, 15),
+                 textcolor = color.white,
+                 yloc = newBreakDirection == 1 ? yloc.belowbar : yloc.abovebar,
+                 style = newBreakDirection == 1 ? label.style_label_up : label.style_label_down,
+                 size = size.tiny,
+                 tooltip = attemptTooltip
+            )
+        else
+            label.set_tooltip(activeBreakLabel, attemptTooltip)
+    else if activeBreakDirection != 0
+        bool returnedInside = close <= activeZoneHigh and close >= activeZoneLow
+        if returnedInside
+            if activeBreakDirection == 1
+                activeZoneUpperFailedBreaks += 1
+            else
+                activeZoneLowerFailedBreaks += 1
+            if not na(activeBreakLabel)
+                label.set_text(activeBreakLabel, "BOX ×")
+                label.set_color(activeBreakLabel, color.rgb(130, 135, 145))
+                label.set_tooltip(activeBreakLabel, "Break attempt failed\nFollow-up: Back inside the box")
+            activeBreakDirection := 0
+            activeBreakCloses := 0
+            activeBreakStartBar := na
+            activeBreakQuality := na
+            activeBreakLabel := na
+        else
+            activeBreakCloses := 0
+            if not na(activeBreakLabel)
+                label.set_tooltip(activeBreakLabel, "Break attempt pending\nConfirmation interrupted")
+bool bullZoneBreak =
+     barstate.isconfirmed and
+     activeBreakDirection == 1 and
+     activeBreakCloses >= breakoutConfirmationBars and
+     activeBreakQuality >= minimumBreakoutQuality
+bool bearZoneBreak =
+     barstate.isconfirmed and
+     activeBreakDirection == -1 and
+     activeBreakCloses >= breakoutConfirmationBars and
+     activeBreakQuality >= minimumBreakoutQuality
+if barstate.isconfirmed and activeZoneExists
+    activeZoneBarsOutsideState := zoneState ? 0 : activeZoneBarsOutsideState + 1
+float priorActiveZoneAvgAtr = activeZoneQualityCount > 0 ? activeZoneAtrSum / activeZoneQualityCount : safeAtr
+float candidateZoneHigh = rawZoneState and activeZoneExists ? math.max(activeZoneHigh, high) : activeZoneHigh
+float candidateZoneLow = rawZoneState and activeZoneExists ? math.min(activeZoneLow, low) : activeZoneLow
+float candidateZoneWidthAtr = activeZoneExists ? f_safeDiv(candidateZoneHigh - candidateZoneLow, priorActiveZoneAvgAtr, 0.0) : 0.0
+bool zoneTooBroad =
+     barstate.isconfirmed and
+     activeZoneExists and
+     rawZoneState and
+     candidateZoneWidthAtr > maximumZoneWidthAtr
+bool zoneExpired =
+     barstate.isconfirmed and
+     activeZoneExists and
+     bar_index - activeZoneStart >= maximumZoneBars
+bool zoneStateEnded =
+     barstate.isconfirmed and
+     activeZoneExists and
+     activeZoneBarsOutsideState >= zoneStateGraceBars and
+     activeBreakDirection == 0 and
+     (
+         close > activeZoneHigh or
+         close < activeZoneLow
+     )
+bool zoneInvalidated =
+     activeZoneExists and
+     (
+         bullZoneBreak or
+         bearZoneBreak or
+         zoneTooBroad or
+         zoneExpired or
+         zoneStateEnded
+     )
+if zoneInvalidated
+    box.set_right(activeZone, bar_index)
+    color finalBorder = color.rgb(130, 135, 145)
+    string outcome = "Zone ended – new state: " + f_stateName(confirmedState)
+    if bullZoneBreak
+        finalBorder := color.rgb(25, 170, 100)
+        outcome := "Upper breakout (Long)"
+    else if bearZoneBreak
+        finalBorder := color.rgb(210, 65, 70)
+        outcome := "Lower breakout (Short)"
+    else if zoneTooBroad
+        outcome := "Balance became too broad"
+    else if zoneExpired
+        outcome := "Maximum zone duration reached"
+    string impulseRelation = ""
+    if bullZoneBreak or bearZoneBreak
+        bool impulseContinued =
+             (activeZoneImpulseDirection == 1 and bullZoneBreak) or
+             (activeZoneImpulseDirection == -1 and bearZoneBreak)
+        if activeZoneImpulseDirection != 0
+            impulseRelation := impulseContinued ? "aligned" : "opposing"
+    float finalAvgQuality = activeZoneQualityCount > 0 ? activeZoneQualitySum / activeZoneQualityCount : 0.0
+    float finalAvgAtr = activeZoneQualityCount > 0 ? activeZoneAtrSum / activeZoneQualityCount : safeAtr
+    float finalZoneWidthAtr = f_safeDiv(activeZoneHigh - activeZoneLow, finalAvgAtr, 0.0)
+    float finalZoneVwap = activeZoneVolumeSum > 0 ? activeZonePriceVolumeSum / activeZoneVolumeSum : na
+    bool finalZoneHasVolume = activeZoneVolumeCount == activeZoneQualityCount and activeZoneVolumeSum > 0 and activeZoneVolumeBaselineSum > 0
+    float finalZoneVolumeRatio = finalZoneHasVolume ? f_safeDiv(activeZoneVolumeSum, activeZoneVolumeBaselineSum, 0.0) : na
+    zoneVwapPlotValue := finalZoneVwap
+    float breakoutDistanceAtr = na
+    float breakoutQuality = na
+    bool breakoutHasVolume = hasUsableZoneVolume and volumeAverage > 0
+    float breakoutVolumeRatio = breakoutHasVolume ? volume / volumeAverage : na
+    string eventDetails = ""
+    if bullZoneBreak or bearZoneBreak
+        if bullZoneBreak
+            breakoutDistanceAtr := f_safeDiv(close - activeZoneHigh, safeAtr, 0.0)
+        else
+            breakoutDistanceAtr := f_safeDiv(activeZoneLow - close, safeAtr, 0.0)
+        float breakoutDistanceScore = f_normalize(
+             breakoutDistanceAtr,
+             zoneBreakAtr,
+             zoneBreakAtr + 1.0
+        )
+        float breakoutCloseQuality = bullZoneBreak ? closeLocationInBar : 1.0 - closeLocationInBar
+        breakoutQuality :=
+             0.32 * breakoutDistanceScore +
+             0.23 * bodyEfficiency +
+             0.23 * breakoutCloseQuality +
+             0.22 * (bullZoneBreak ? bullExpansionScore : bearExpansionScore)
+        if breakoutHasVolume
+            breakoutQuality := breakoutQuality * 0.90 + 0.10 * f_normalize(breakoutVolumeRatio, 0.80, 2.00)
+        breakoutQuality := f_clamp(breakoutQuality, 0.0, 1.0)
+        eventDetails := "Breakout quality: " + f_breakoutQualityName(breakoutQuality) + " (" + str.tostring(breakoutQuality * 100.0, "#.0") + "%)"
+        eventDetails += "\nDistance beyond zone: " + str.tostring(breakoutDistanceAtr, "#.##") + " ATR"
+        if breakoutHasVolume
+            eventDetails += "\nBreakout volume: " + str.tostring(breakoutVolumeRatio, "#.##") + "× average"
+    string finalTooltip = f_zoneTooltip(
+         f_zoneContextHeading(
+             activeZoneStateName,
+             activeZoneContextName,
+             activeZoneImpulseDirection,
+             activeZoneImpulseTrendIntact,
+             activeZoneImpulseSizeAtr,
+             activeZoneImpulseEfficiency,
+             activeZoneCorrectionDepth,
+             activeZoneRiskReason,
+             activeZoneStartState,
+             activeZoneCurrentState,
+             activeZoneBalanceBars,
+             activeZoneCompressionBars
+         ),
+         activeZoneBias,
+         finalAvgQuality,
+         activeZoneStart,
+         true,
+         activeZoneLow,
+         activeZoneHigh,
+         finalZoneWidthAtr,
+         activeZoneUpperEdgeTests,
+         activeZoneLowerEdgeTests,
+         activeZoneUpperFailedBreaks,
+         activeZoneLowerFailedBreaks,
+         finalZoneVwap,
+         activeZoneVolumeSum,
+         finalZoneVolumeRatio,
+         finalZoneHasVolume,
+         outcome,
+         eventDetails,
+         impulseRelation
+    )
+    box.set_border_color(activeZone, finalBorder)
+    box.set_border_width(activeZone, 2)
+    if bullZoneBreak or bearZoneBreak
+        label.set_color(activeZoneLabel, finalBorder)
+    label.set_tooltip(activeZoneLabel, finalTooltip)
+    if bullZoneBreak or bearZoneBreak
+        string breakoutTooltip = f_breakoutTooltip(
+             bullZoneBreak,
+             activeZoneStateName,
+             f_zoneContextHeading(
+                 activeZoneStateName,
+                 activeZoneContextName,
+                 activeZoneImpulseDirection,
+                 activeZoneImpulseTrendIntact,
+                 activeZoneImpulseSizeAtr,
+                 activeZoneImpulseEfficiency,
+                 activeZoneCorrectionDepth,
+                 activeZoneRiskReason,
+                 activeZoneStartState,
+                 activeZoneCurrentState,
+                 activeZoneBalanceBars,
+                 activeZoneCompressionBars
+             ),
+             activeZoneBias,
+             finalAvgQuality,
+             activeZoneStart,
+             activeZoneLow,
+             activeZoneHigh,
+             finalZoneWidthAtr,
+             activeZoneUpperEdgeTests,
+             activeZoneLowerEdgeTests,
+             activeZoneUpperFailedBreaks,
+             activeZoneLowerFailedBreaks,
+             finalZoneVwap,
+             activeZoneVolumeSum,
+             finalZoneVolumeRatio,
+             finalZoneHasVolume,
+             impulseRelation,
+             breakoutQuality,
+             breakoutDistanceAtr,
+             breakoutVolumeRatio,
+             breakoutHasVolume
+        )
+        label breakoutLabel = activeBreakLabel
+        if na(breakoutLabel)
+            breakoutLabel := label.new(
+                 bar_index,
+                 bullZoneBreak ? low : high,
+                 bullZoneBreak ? "BOX ↑" : "BOX ↓",
+                 color = finalBorder,
+                 textcolor = color.white,
+                 yloc = bullZoneBreak ? yloc.belowbar : yloc.abovebar,
+                 style = bullZoneBreak ? label.style_label_up : label.style_label_down,
+                 size = size.tiny,
+                 tooltip = breakoutTooltip + "\nFollow-up: Pending"
+            )
+        else
+            label.set_text(breakoutLabel, bullZoneBreak ? "BOX ↑" : "BOX ↓")
+            label.set_color(breakoutLabel, finalBorder)
+            label.set_tooltip(breakoutLabel, breakoutTooltip + "\nFollow-up: Pending")
+        array.push(breakoutFollowupLabels, breakoutLabel)
+        array.push(breakoutFollowupDirections, bullZoneBreak ? 1 : -1)
+        array.push(breakoutFollowupStartBars, bar_index)
+        array.push(breakoutFollowupStatuses, BREAKOUT_NONE)
+        array.push(breakoutFollowupHighs, activeZoneHigh)
+        array.push(breakoutFollowupLows, activeZoneLow)
+        array.push(breakoutFollowupTooltips, breakoutTooltip)
+    else if not na(activeBreakLabel)
+        label.set_text(activeBreakLabel, "BOX ×")
+        label.set_color(activeBreakLabel, color.rgb(130, 135, 145))
+        label.set_tooltip(activeBreakLabel, "Break attempt ended with the source zone\nOutcome: " + outcome)
+    activeZone := na
+    activeZoneLabel := na
+    activeZoneHigh := na
+    activeZoneLow := na
+    activeZoneStart := na
+    activeZoneStartState := STATE_BALANCE
+    activeZoneCurrentState := STATE_BALANCE
+    activeZoneBalanceBars := 0
+    activeZoneCompressionBars := 0
+    activeZoneBarsOutsideState := 0
+    activeZoneBias := 0.0
+    activeZoneStateName := ""
+    activeZoneContextName := "No clear impulse"
+    activeZoneImpulseDirection := 0
+    activeZoneImpulseTrendIntact := false
+    activeZoneImpulseSizeAtr := na
+    activeZoneImpulseEfficiency := na
+    activeZoneCorrectionDepth := na
+    activeZoneRiskReason := ""
+    activeZoneQualitySum := 0.0
+    activeZoneAtrSum := 0.0
+    activeZonePriceVolumeSum := 0.0
+    activeZoneVolumeSum := 0.0
+    activeZoneVolumeBaselineSum := 0.0
+    activeZoneVolumeCount := 0
+    activeZoneQualityCount := 0
+    activeZoneUpperEdgeTests := 0
+    activeZoneLowerEdgeTests := 0
+    activeZoneUpperFailedBreaks := 0
+    activeZoneLowerFailedBreaks := 0
+    activeUpperEdgeReaction := false
+    activeLowerEdgeReaction := false
+    activeUpperFailedBreak := false
+    activeLowerFailedBreak := false
+    activeBreakDirection := 0
+    activeBreakCloses := 0
+    activeBreakStartBar := na
+    activeBreakQuality := na
+    activeBreakLabel := na
+    zoneVwapPlotValue := na
+else if activeZoneExists and not createZone and barstate.isconfirmed
+    float priorZoneWidth = math.max(activeZoneHigh - activeZoneLow, syminfo.mintick)
+    float edgeTolerance = math.max(safeAtr * 0.15, priorZoneWidth * 0.03)
+    float failedBreakMinimum = math.max(safeAtr * 0.15, priorZoneWidth * 0.03)
+    float upperWickRatio = f_safeDiv(high - math.max(open, close), currentRange, 0.0)
+    float lowerWickRatio = f_safeDiv(math.min(open, close) - low, currentRange, 0.0)
+    bool upperEdgeReactionNow =
+         high >= activeZoneHigh - edgeTolerance and
+         close < activeZoneHigh and
+         upperWickRatio >= 0.20
+    bool lowerEdgeReactionNow =
+         low <= activeZoneLow + edgeTolerance and
+         close > activeZoneLow and
+         lowerWickRatio >= 0.20
+    bool upperFailedBreakNow =
+         high > activeZoneHigh + failedBreakMinimum and
+         close < activeZoneHigh and
+         upperWickRatio >= 0.25
+    bool lowerFailedBreakNow =
+         low < activeZoneLow - failedBreakMinimum and
+         close > activeZoneLow and
+         lowerWickRatio >= 0.25
+    if upperEdgeReactionNow and not activeUpperEdgeReaction
+        activeZoneUpperEdgeTests += 1
+    if lowerEdgeReactionNow and not activeLowerEdgeReaction
+        activeZoneLowerEdgeTests += 1
+    if upperFailedBreakNow and not activeUpperFailedBreak
+        activeZoneUpperFailedBreaks += 1
+    if lowerFailedBreakNow and not activeLowerFailedBreak
+        activeZoneLowerFailedBreaks += 1
+    activeUpperEdgeReaction := upperEdgeReactionNow
+    activeLowerEdgeReaction := lowerEdgeReactionNow
+    activeUpperFailedBreak := upperFailedBreakNow
+    activeLowerFailedBreak := lowerFailedBreakNow
+    if rawZoneState
+        activeZoneHigh := math.max(activeZoneHigh, high)
+        activeZoneLow := math.min(activeZoneLow, low)
+    activeZoneBias := smoothedDirectionalBias
+    if zoneState
+        activeZoneCurrentState := confirmedState
+        activeZoneStateName := f_stateName(confirmedState)
+        activeZoneBalanceBars += confirmedState == STATE_BALANCE ? 1 : 0
+        activeZoneCompressionBars += confirmedState == STATE_COMPRESSION ? 1 : 0
+    if zoneState
+        if balanceHasImpulseContext
+            activeZoneContextName := balanceContextName
+            activeZoneImpulseDirection := lastImpulseDirection
+            activeZoneImpulseTrendIntact := impulseTrendIntact
+            activeZoneImpulseSizeAtr := lastImpulseSizeAtr
+            activeZoneImpulseEfficiency := lastImpulseEfficiency
+            activeZoneCorrectionDepth := correctionDepth
+            activeZoneRiskReason := impulseRiskReason
+        else
+            activeZoneContextName := "No clear impulse"
+            activeZoneImpulseDirection := 0
+            activeZoneImpulseTrendIntact := false
+            activeZoneImpulseSizeAtr := na
+            activeZoneImpulseEfficiency := na
+            activeZoneCorrectionDepth := na
+            activeZoneRiskReason := ""
+    if zoneState and activeBreakDirection == 0
+        activeZoneQualitySum += marketQuality
+        activeZoneAtrSum += safeAtr
+        if hasUsableZoneVolume
+            activeZonePriceVolumeSum += hlc3 * volume
+            activeZoneVolumeSum += volume
+            activeZoneVolumeBaselineSum += volumeAverage
+            activeZoneVolumeCount += 1
+        activeZoneQualityCount += 1
+    float activeZoneAvgQuality = activeZoneQualityCount > 0 ? activeZoneQualitySum / activeZoneQualityCount : 0.0
+    float activeZoneAvgAtr = activeZoneQualityCount > 0 ? activeZoneAtrSum / activeZoneQualityCount : safeAtr
+    float activeZoneWidthAtr = f_safeDiv(activeZoneHigh - activeZoneLow, activeZoneAvgAtr, 0.0)
+    float activeZoneVwap = activeZoneVolumeSum > 0 ? activeZonePriceVolumeSum / activeZoneVolumeSum : na
+    bool activeZoneHasVolume = activeZoneVolumeCount == activeZoneQualityCount and activeZoneVolumeSum > 0 and activeZoneVolumeBaselineSum > 0
+    float activeZoneVolumeRatio = activeZoneHasVolume ? f_safeDiv(activeZoneVolumeSum, activeZoneVolumeBaselineSum, 0.0) : na
+    zoneVwapPlotValue := activeZoneVwap
+    int qualityBorderWidth = int(math.round(1 + activeZoneAvgQuality * 2))
+    box.set_right(activeZone, bar_index)
+    box.set_top(activeZone, activeZoneHigh)
+    box.set_bottom(activeZone, activeZoneLow)
+    box.set_bgcolor(activeZone, f_biasColor(activeZoneBias, 87))
+    box.set_border_color(activeZone, f_biasColor(activeZoneBias, 38))
+    box.set_border_width(activeZone, qualityBorderWidth)
+    label.set_y(activeZoneLabel, activeZoneHigh)
+    label.set_text(
+         activeZoneLabel,
+         f_zoneDirectionalShortName(
+             activeZoneCurrentState,
+             activeZoneImpulseDirection,
+             activeZoneImpulseTrendIntact
+         )
+    )
+    label.set_color(
+         activeZoneLabel,
+         f_zoneLabelColor(
+             activeZoneImpulseDirection,
+             activeZoneImpulseTrendIntact
+         )
+    )
+    label.set_tooltip(
+         activeZoneLabel,
+         f_zoneTooltip(
+             f_zoneContextHeading(
+                 activeZoneStateName,
+                 activeZoneContextName,
+                 activeZoneImpulseDirection,
+                 activeZoneImpulseTrendIntact,
+                 activeZoneImpulseSizeAtr,
+                 activeZoneImpulseEfficiency,
+                 activeZoneCorrectionDepth,
+                 activeZoneRiskReason,
+                 activeZoneStartState,
+                 activeZoneCurrentState,
+                 activeZoneBalanceBars,
+                 activeZoneCompressionBars
+             ),
+             activeZoneBias,
+             activeZoneAvgQuality,
+             activeZoneStart,
+             false,
+             activeZoneLow,
+             activeZoneHigh,
+             activeZoneWidthAtr,
+             activeZoneUpperEdgeTests,
+             activeZoneLowerEdgeTests,
+             activeZoneUpperFailedBreaks,
+             activeZoneLowerFailedBreaks,
+             activeZoneVwap,
+             activeZoneVolumeSum,
+             activeZoneVolumeRatio,
+             activeZoneHasVolume,
+             "",
+             "",
+             ""
+         )
+    )
+// Re-evaluate accepted breakouts for a limited window without changing their
+// historical breakout decision. The label hover receives the latest outcome.
+if barstate.isconfirmed and array.size(breakoutFollowupLabels) > 0
+    for i = array.size(breakoutFollowupLabels) - 1 to 0
+        label trackedLabel = array.get(breakoutFollowupLabels, i)
+        int trackedDirection = array.get(breakoutFollowupDirections, i)
+        int trackedStartBar = array.get(breakoutFollowupStartBars, i)
+        int trackedStatus = array.get(breakoutFollowupStatuses, i)
+        float trackedHigh = array.get(breakoutFollowupHighs, i)
+        float trackedLow = array.get(breakoutFollowupLows, i)
+        string trackedTooltip = array.get(breakoutFollowupTooltips, i)
+        int trackedAge = bar_index - trackedStartBar
+        if trackedAge > 0
+            if trackedDirection == 1
+                if close < trackedHigh
+                    trackedStatus := BREAKOUT_FAILED
+                else if low <= trackedHigh + safeAtr * 0.15 and close > trackedHigh
+                    trackedStatus := BREAKOUT_RETESTED
+                else if trackedAge >= 2 and trackedStatus == BREAKOUT_NONE
+                    trackedStatus := BREAKOUT_HELD
+            else
+                if close > trackedLow
+                    trackedStatus := BREAKOUT_FAILED
+                else if high >= trackedLow - safeAtr * 0.15 and close < trackedLow
+                    trackedStatus := BREAKOUT_RETESTED
+                else if trackedAge >= 2 and trackedStatus == BREAKOUT_NONE
+                    trackedStatus := BREAKOUT_HELD
+        array.set(breakoutFollowupStatuses, i, trackedStatus)
+        label.set_tooltip(trackedLabel, trackedTooltip + "\nFollow-up: " + f_breakoutFollowupName(trackedStatus))
+        if trackedAge >= breakoutFollowupBars
+            array.remove(breakoutFollowupLabels, i)
+            array.remove(breakoutFollowupDirections, i)
+            array.remove(breakoutFollowupStartBars, i)
+            array.remove(breakoutFollowupStatuses, i)
+            array.remove(breakoutFollowupHighs, i)
+            array.remove(breakoutFollowupLows, i)
+            array.remove(breakoutFollowupTooltips, i)
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+color currentStateColor = f_stateColor(confirmedState, 0)
+int backgroundTransparency = confirmedState == STATE_COMPRESSION ? 91 : 94
+color backgroundColor = na
+if showBackground and engineReady
+    backgroundColor := f_stateColor(confirmedState, backgroundTransparency)
+bgcolor(backgroundColor)
+plot(
+     showZoneVwap ? zoneVwapPlotValue : na,
+     "Box VWAP",
+     color = color.new(color.rgb(60, 115, 190), 25),
+     linewidth = 1,
+     style = plot.style_linebr
+)
+// Adaptive value zone
+pValueUpper = plot(
+     showValueZone ? valueUpper : na,
+     "Value High",
+     color = color.new(color.rgb(110, 130, 160), 62),
+     linewidth = 1
+)
+pFairValue = plot(
+     showValueZone ? fairValue : na,
+     "Fair Value",
+     color = color.new(color.rgb(80, 105, 145), 12),
+     linewidth = 2
+)
+pValueLower = plot(
+     showValueZone ? valueLower : na,
+     "Value Low",
+     color = color.new(color.rgb(110, 130, 160), 62),
+     linewidth = 1
+)
+color valueAreaFillColor = na
+if showValueZone
+    valueAreaFillColor := color.new(color.rgb(95, 120, 155), 91)
+fill(
+     pValueUpper,
+     pValueLower,
+     color = valueAreaFillColor,
+     title = "Adaptive Value Area"
+)
+// Structure
+plot(
+     showStructureLines ? structureFast : na,
+     "Fast Structure",
+     color = color.new(currentStateColor, 18),
+     linewidth = 2
+)
+plot(
+     showStructureLines ? structureSlow : na,
+     "Slow Structure",
+     color = color.new(currentStateColor, 55),
+     linewidth = 2
+)
+// Optional candle coloring
+color candleColor = na
+if colorBars and engineReady
+    candleColor := f_stateColor(confirmedState, 28)
+barcolor(candleColor)
+// State transitions
+bool expansionStarted =
+     confirmedStateChanged and
+     (
+         confirmedState == STATE_BULL_EXPANSION or
+         confirmedState == STATE_BEAR_EXPANSION
+     )
+if showStateTransitions and expansionStarted
+    bool bullishExpansion = confirmedState == STATE_BULL_EXPANSION
+    label.new(
+         bar_index,
+         bullishExpansion ? low : high,
+         "EXP",
+         color = bullishExpansion ? color.rgb(25, 160, 95) : color.rgb(205, 65, 70),
+         textcolor = color.white,
+         yloc = bullishExpansion ? yloc.belowbar : yloc.abovebar,
+         style = bullishExpansion ? label.style_label_up : label.style_label_down,
+         size = size.tiny,
+         tooltip = f_expansionTooltip(
+             confirmedState,
+             rawStateConfidence,
+             bullishExpansion ? bullExpansionScore : bearExpansionScore,
+             marketQuality,
+             normalizedLocation,
+             directionalBias,
+             htfContext
+         )
+    )
+// Context readiness markers
+plotshape(
+     showCompatibilityMarkers and
+     longReadinessStarted,
+     title = "Long Context Ready",
+     style = shape.triangleup,
+     location = location.belowbar,
+     color = color.new(color.rgb(25, 160, 95), 10),
+     size = size.tiny
+)
+plotshape(
+     showCompatibilityMarkers and
+     shortReadinessStarted,
+     title = "Short Context Ready",
+     style = shape.triangledown,
+     location = location.abovebar,
+     color = color.new(color.rgb(205, 65, 70), 10),
+     size = size.tiny
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────────
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table dashboard = table.new(
+     position.top_right,
+     2,
+     13,
+     bgcolor = color.new(color.white, 5),
+     border_color = color.new(color.gray, 60),
+     border_width = 1,
+     frame_color = color.new(color.gray, 40),
+     frame_width = 1
+)
+if barstate.islast and showDashboard
+    table.cell(
+         dashboard,
+         0,
+         0,
+         "MARKET STATE",
+         text_color = tc,
+         bgcolor = hd,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         1,
+         0,
+         "ENGINE",
+         text_color = tc,
+         bgcolor = hd,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         0,
+         1,
+         "State",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         1,
+         1,
+         f_stateDisplayName(engineReady, confirmedState, confirmedTransitionReason),
+         text_color = color.white,
+         bgcolor = engineReady ? f_stateColor(confirmedState, 10) : color.new(color.gray, 45),
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         0,
+         2,
+         "Location",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         1,
+         2,
+         engineReady ? f_locationName(normalizedLocation) : "—",
+         text_color = engineReady ? f_locationColor(normalizedLocation) : tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         0,
+         3,
+         "Auction Pressure",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         1,
+         3,
+         engineReady ? f_biasName(directionalBias) : "—",
+         text_color = engineReady ? f_biasColor(directionalBias, 0) : tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         0,
+         4,
+         "Energy",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         1,
+         4,
+         engineReady ? f_energyPhaseName(energyPhase) : "—",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         0,
+         5,
+         "State Quality",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         1,
+         5,
+         engineReady ? f_qualityName(marketQuality) : "—",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         0,
+         6,
+         "After Impulse",
+         text_color = tc,
+         text_size = size.small
+    )
+    color balanceContextColor = tc
+    if balanceHasImpulseContext and not impulseTrendIntact
+        balanceContextColor := color.rgb(255, 111, 0)
+    else if balanceHasImpulseContext and lastImpulseDirection == 1
+        balanceContextColor := color.rgb(0, 150, 45)
+    else if balanceHasImpulseContext and lastImpulseDirection == -1
+        balanceContextColor := color.rgb(213, 0, 0)
+    table.cell(
+         dashboard,
+         1,
+         6,
+         engineReady and balanceContextState ? balanceContextName : "—",
+         text_color = balanceContextColor,
+         text_size = size.small
+    )
+    table.cell(dashboard, 0, 7, "", bgcolor = color.new(color.gray, 80))
+    table.cell(dashboard, 1, 7, "", bgcolor = color.new(color.gray, 80))
+    table.cell(
+         dashboard,
+         0,
+         8,
+         "HTF",
+         text_color = tc,
+         text_size = size.small
+    )
+    color htfTextColor = tc
+    if htfEnabled and htfBull
+        htfTextColor := color.rgb(0, 150, 45)
+    else if htfEnabled and htfBear
+        htfTextColor := color.rgb(213, 0, 0)
+    table.cell(
+         dashboard,
+         1,
+         8,
+         engineReady ? htfContext : "—",
+         text_color = engineReady ? htfTextColor : tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         0,
+         9,
+         "Long Context",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         1,
+         9,
+         engineReady ? f_contextLevelName(longContextLevel) : "—",
+         text_color = engineReady and longContextLevel >= CONTEXT_COMPATIBLE ? color.white : tc,
+         bgcolor = engineReady and longContextLevel >= CONTEXT_COMPATIBLE ? color.new(color.rgb(0, 150, 45), longContextLevel == CONTEXT_PREFERRED ? 0 : 18) : color.new(color.gray, 80),
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         0,
+         10,
+         "Short Context",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(
+         dashboard,
+         1,
+         10,
+         engineReady ? f_contextLevelName(shortContextLevel) : "—",
+         text_color = engineReady and shortContextLevel >= CONTEXT_COMPATIBLE ? color.white : tc,
+         bgcolor = engineReady and shortContextLevel >= CONTEXT_COMPATIBLE ? color.new(color.rgb(213, 0, 0), shortContextLevel == CONTEXT_PREFERRED ? 0 : 18) : color.new(color.gray, 80),
+         text_size = size.small
+    )
+    table.cell(dashboard, 0, 11, "Structure", text_color = tc, text_size = size.small)
+    table.cell(
+         dashboard,
+         1,
+         11,
+         engineReady ? f_regimeName(structureRegime) : "—",
+         text_color = tc,
+         text_size = size.small
+    )
+    table.cell(dashboard, 0, 12, "Transition", text_color = tc, text_size = size.small)
+    table.cell(
+         dashboard,
+         1,
+         12,
+         confirmedState == STATE_TRANSITION ? f_transitionReasonName(confirmedTransitionReason) : "—",
+         text_color = tc,
+         text_size = size.small
+    )
+// ─────────────────────────────────────────────────────────────────────────────
+// DATA WINDOW OUTPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+plot(
+     engineReady ? 1 : 0,
+     "Engine Ready",
+     display = display.data_window
+)
+plot(
+     confirmedState,
+     "Confirmed State ID",
+     display = display.data_window
+)
+plot(
+     rawState,
+     "Raw State ID",
+     display = display.data_window
+)
+plot(structureRegime, "Structure Regime ID", display = display.data_window)
+plot(energyPhase, "Energy Phase ID", display = display.data_window)
+plot(confirmedTransitionReason, "Transition Reason ID", display = display.data_window)
+plot(longContextLevel, "Long Context Level", display = display.data_window)
+plot(shortContextLevel, "Short Context Level", display = display.data_window)
+plot(
+     rawStateConfidence * 100.0,
+     "Raw State Confidence %",
+     display = display.data_window
+)
+plot(
+     compressionScore * 100.0,
+     "Compression Score %",
+     display = display.data_window
+)
+plot(
+     expansionScore * 100.0,
+     "Expansion Score %",
+     display = display.data_window
+)
+plot(
+     bullExpansionScore * 100.0,
+     "Bull Expansion Score %",
+     display = display.data_window
+)
+plot(
+     bearExpansionScore * 100.0,
+     "Bear Expansion Score %",
+     display = display.data_window
+)
+plot(
+     exhaustionScore * 100.0,
+     "Exhaustion Score %",
+     display = display.data_window
+)
+plot(
+     balanceScore * 100.0,
+     "Balance Score %",
+     display = display.data_window
+)
+plot(bestStateScore * 100.0, "Best State Candidate %", display = display.data_window)
+plot(secondStateScore * 100.0, "Second State Candidate %", display = display.data_window)
+plot(stateDominance * 100.0, "State Dominance %", display = display.data_window)
+plot(
+     marketQuality * 100.0,
+     "State Quality %",
+     display = display.data_window
+)
+plot(trendQuality * 100.0, "Trend Quality %", display = display.data_window)
+plot(balanceQuality * 100.0, "Balance Quality %", display = display.data_window)
+plot(
+     directionalBias * 100.0,
+     "Auction Pressure Score",
+     display = display.data_window
+)
+plot(
+     normalizedLocation,
+     "Normalized Value Location",
+     display = display.data_window
+)
+plot(
+     efficiencyRatio * 100.0,
+     "Market Efficiency %",
+     display = display.data_window
+)
+plot(
+     lastImpulseDirection,
+     "Prior Impulse Direction",
+     display = display.data_window
+)
+plot(lastImpulseSizeAtr, "Prior Impulse Net Progress ATR", display = display.data_window)
+plot(lastImpulseGrossRangeAtr, "Prior Impulse Gross Range ATR", display = display.data_window)
+plot(lastImpulseEfficiency * 100.0, "Prior Impulse Efficiency %", display = display.data_window)
+plot(
+     balanceHasImpulseContext ? correctionDepth * 100.0 : na,
+     "Correction Depth %",
+     display = display.data_window
+)
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+alertcondition(
+     confirmedStateChanged,
+     "MSE: Market State Changed",
+     "Market State Engine: The confirmed market state has changed."
+)
+alertcondition(
+     confirmedStateChanged and confirmedState == STATE_COMPRESSION,
+     "MSE: Compression Started",
+     "Market State Engine: A confirmed compression phase has started."
+)
+alertcondition(
+     confirmedStateChanged and confirmedState == STATE_BULL_EXPANSION,
+     "MSE: Bull Expansion Started",
+     "Market State Engine: A confirmed bullish expansion has started."
+)
+alertcondition(
+     confirmedStateChanged and confirmedState == STATE_BEAR_EXPANSION,
+     "MSE: Bear Expansion Started",
+     "Market State Engine: A confirmed bearish expansion has started."
+)
+alertcondition(
+     confirmedStateChanged and confirmedState == STATE_BULL_EXHAUSTION,
+     "MSE: Bull Exhaustion",
+     "Market State Engine: The current upward move shows exhaustion characteristics."
+)
+alertcondition(
+     confirmedStateChanged and confirmedState == STATE_BEAR_EXHAUSTION,
+     "MSE: Bear Exhaustion",
+     "Market State Engine: The current downward move shows exhaustion characteristics."
+)
+alertcondition(
+     bullZoneBreak,
+     "MSE: Zone Breakout Up",
+     "Market State Engine: Confirmed upper breakout from a Balance/Compression zone; this identifies direction, not the zone's prior pressure."
+)
+alertcondition(
+     bearZoneBreak,
+     "MSE: Zone Breakout Down",
+     "Market State Engine: Confirmed lower breakout from a Balance/Compression zone; this identifies direction, not the zone's prior pressure."
+)
+alertcondition(
+     longReadinessStarted,
+     "MSE: Long Context Ready",
+     "Market State Engine: The market context is suitable for evaluating a long signal."
+)
+alertcondition(
+     shortReadinessStarted,
+     "MSE: Short Context Ready",
+     "Market State Engine: The market context is suitable for evaluating a short signal."
+)
+alertcondition(
+     postImpulseContextStarted,
+     "MSE: Post-Impulse Zone Started",
+     "Market State Engine: A Balance/Compression phase has started after a prior impulse; it may be classified as a pause, correction, or phase without clear continuation."
+)

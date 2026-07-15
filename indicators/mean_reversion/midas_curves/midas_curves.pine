@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // MIDAS 2.0 [WavesUnchained]
-// Version: 2.4.0
+// Version: 2.7.0
 // Author: WavesUnchained
-// Build: 2026-07-09 00:00:00
+// Build: 2026-07-15 00:00:00
 // ============================================================================
 // Anchored MIDAS support/resistance curve (launch-anchored volume-weighted price)
 // with a true topfinder / bottomfinder accelerated curve — an accelerated
@@ -16,17 +16,19 @@
 //   ✓ MIDAS curve anchored at manual time, daily open, or auto swing (last / low / high)
 //   ✓ Volume-weighted σ bands, ATR bands, or Hybrid (avg) at two configurable multiples
 //   ✓ Topfinder / bottomfinder accelerated curve with closed-form auto-fit
-//   ✓ 4-stage exhaustion read (no fit / running / late / expired) from d/D progress
+//   ✓ Fit-qualified exhaustion read (developing / mature / late / passed + reaction)
 //   ✓ Stretched-from-value and reclaim-after-stretch context markers (no BUY/SELL)
 //   ✓ Reclaim Quality Score (0-5): stretch, close strength, volume, structure break, TBF exhaustion
+//   ✓ Value-zone fills, semantic event colors, and persistent live context badge
+//   ✓ Active / Full visual modes with a role-separated Trend · Location · Exhaustion read
 //   ✓ Backpainted vs Confirmed anchor display mode for auto swing anchors
 //   ✓ Auto EMA bias with configurable hold bars to reduce whipsaw flips
-//   ✓ Element | Value | Read dashboard with a TF-aware plain-language conclusion
+//   ✓ Compact / Detailed / Tooltip-only live badge and optional dashboard
 //   ✓ Light-theme dashboard, alerts, debug log
 //
 // ============================================================================
 
-indicator("MIDAS 2.0 [WavesUnchained]", "MIDAS 2.0", overlay=true, max_labels_count=500, max_lines_count=500)
+indicator("MIDAS 2.0 [WavesUnchained]", "MIDAS 2.0", overlay=true, max_labels_count=500, max_lines_count=500, max_polylines_count=20)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INPUTS
@@ -43,9 +45,14 @@ anchorLeft  = input.int(20, "Anchor Swing Left",  minval=1, group=g_anchor)
 anchorRight = input.int(20, "Anchor Swing Right", minval=1, group=g_anchor,
      tooltip="Degree of the swing that defines an anchor. Larger = only significant pivots launch a new MIDAS curve, so it tracks the current leg origin rather than every minor wiggle. Re-seeded from the real pivot bar (anchorRight back).")
 src         = input.source(hlc3, "Price Source", group=g_anchor)
+volumeWeightMode = input.string("Per-bar fallback", "Volume Weighting",
+     options=["Per-bar fallback", "Equal weight"], group=g_anchor,
+     tooltip="Per-bar fallback uses reported volume and substitutes 1 only where volume is missing/zero; episode quality is disclosed in the dashboard and hover. Equal weight deliberately uses 1 for every bar, which is useful on instruments without meaningful volume.")
 
 g_bands = "2 · Bands"
 showBands = input.bool(true, "Show Bands", group=g_bands)
+bandDisplay = input.string("Zones", "Band Display", options=["Zones", "Lines", "Zones + Lines"], group=g_bands,
+     tooltip="Zones emphasize distance from MIDAS without turning every boundary into a competing support/resistance line. Lines keeps the classic four-line view.")
 bandMode  = input.string("VW StDev", "Band Mode", options=["VW StDev", "ATR", "Hybrid"], group=g_bands,
      tooltip="VW StDev widens with the anchored move (can dull in long trends); ATR is more reactive short-term; Hybrid averages the two.")
 bandMult1 = input.float(1.0, "Band 1 Mult", minval=0.0, step=0.25, group=g_bands)
@@ -57,6 +64,14 @@ enableTBF = input.bool(true, "Enable TBF Exhaustion Curve", group=g_tbf,
      tooltip="Accelerated MIDAS curve auto-fitted to the most recent same-direction swing after the launch. Catches up to price and gives an accelerated estimate of how far the launched move has run toward exhaustion.")
 warnThresh = input.float(0.85, "Exhaustion Warn (d/D)", minval=0.5, maxval=0.99, step=0.05, group=g_tbf,
      tooltip="When cumulative volume since launch reaches this fraction of the fitted projection D, flag the move as nearing exhaustion.")
+fitMinProgress = input.float(0.20, "Minimum Fit Maturity (d/D)", minval=0.05, maxval=0.50, step=0.05, group=g_tbf,
+     tooltip="Rejects fits made too early in the projected move. 20% follows the minimum engineering guideline for a usable topfinder/bottomfinder fit; 50% is more conservative.")
+fitStableTolerance = input.float(0.25, "Stable Fit: max D change", minval=0.05, maxval=1.0, step=0.05, group=g_tbf,
+     tooltip="A repeated fit is Stable when projected total volume D changes by no more than this fraction versus the active fit. A larger shift is held as Candidate 1/2 and cannot replace the active fit until another candidate confirms its new region.")
+tbfHistoryMode = input.string("From Fit", "TBF History", options=["From Fit", "Retrospective"], group=g_tbf,
+     tooltip="From Fit draws the current projection only from the bar where that fit became known. Retrospective applies today's fit back across the complete anchor episode and is analysis-only.")
+tbfStaleProgress = input.float(1.50, "Stale Fit after (d/D)", minval=1.10, maxval=3.0, step=0.05, group=g_tbf,
+     tooltip="After this much projected volume without a qualifying price reaction, Passed is downgraded to Stale Fit rather than remaining a permanent high-alert state.")
 fitLeft    = input.int(5, "Fit Swing Left",  minval=1, group=g_tbf)
 fitRight   = input.int(5, "Fit Swing Right", minval=1, group=g_tbf,
      tooltip="Degree of the pullback swings (smaller than the anchor) the topfinder/bottomfinder is fitted to within the current leg.")
@@ -69,23 +84,33 @@ biasHoldBars = input.int(3, "Auto EMA: min hold bars before flip", minval=1, gro
      tooltip="Auto EMA bias only flips once price has closed on the new side for this many consecutive bars — reduces whipsaw in choppy phases. Set to 1 for the old immediate-flip behaviour.")
 
 g_disp = "5 · Display"
+visualMode = input.string("Active", "Visual mode", options=["Active", "Full"], group=g_disp,
+     tooltip="Active shows the complete current anchor episode only, including its origin. Full restores every historical episode, the TBF curve, and historical events.")
 showMarkers = input.bool(true, "Show context markers", group=g_disp,
-     tooltip="Stretched-from-value and MIDAS-reclaim markers. Setup-level context, not hard entries.")
+     tooltip="Stretch, MIDAS reclaim, and confirmed TBF price-reaction markers. Setup-level context, not hard entries.")
 reclaimLook = input.int(10, "Reclaim: stretch lookback", minval=1, group=g_disp,
      tooltip="A MIDAS reclaim only fires if price was stretched past the inner band within this many bars before reclaiming the curve.")
 reclaimVolLen    = input.int(20, "Reclaim: volume avg length", minval=1, group=g_disp)
 reclaimStructLen = input.int(5, "Reclaim: structure-break lookback", minval=1, group=g_disp)
-reclaimBodyMin   = input.float(0.6, "Reclaim: min close-in-body ratio", minval=0.5, maxval=1.0, step=0.05, group=g_disp,
-     tooltip="Reclaim Quality Score (0-5, shown as marker text + dashboard row, annotation only — does not gate the marker): stretch beforehand, strong candle close, volume above average, small structure break, TBF late/expired bonus.")
+reclaimCloseLocationMin = input.float(0.6, "Reclaim: minimum close-location ratio", minval=0.5, maxval=1.0, step=0.05, group=g_disp,
+     tooltip="Required close position within the complete candle range (low to high), not within the body. The Reclaim Quality Score remains an annotation and does not gate the marker.")
+markersOnBarClose = input.bool(true, "Context markers only on bar close", group=g_disp,
+     tooltip="Prevents stretch, reclaim, TBF phase, and exhaustion-reaction markers from appearing intrabar and disappearing before the candle closes. The live context itself still updates intrabar.")
+showLiveContext = input.bool(true, "Show live context badge", group=g_disp,
+     tooltip="Shows live structure, location, exhaustion, and the next observable trigger. Hover for the underlying distance/TBF measurements and trigger details.")
+liveBadgeMode = input.string("Compact", "Live badge detail", options=["Compact", "Detailed", "Tooltip only"], group=g_disp,
+     tooltip="Compact keeps the four decisions short. Detailed shows the full role wording. Tooltip only leaves a small MIDAS info tag; all measurements remain available on hover.")
 showTable   = input.bool(false, "Show dashboard", group=g_disp)
+dashboardMode = input.string("Compact", "Dashboard detail", options=["Compact", "Detailed"], group=g_disp)
 tablePos    = input.string("Top Right", "Dashboard position",
      options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=g_disp)
-showAnchor  = input.bool(true, "Show anchor markers", group=g_disp)
+showAnchor  = input.bool(true, "Show active anchor", group=g_disp)
 dbg         = input.bool(false, "Debug log", group=g_disp)
 
 g_col = "6 · Colors"
 colMidas = input.color(#ff6f00, "MIDAS curve", group=g_col)
 colTBF   = input.color(#7b1fa2, "TBF curve",   group=g_col)
+colStretch = input.color(#ffb300, "Stretch zone", group=g_col)
 colUp    = input.color(#00c853, "Bullish",     group=g_col)
 colDn    = input.color(#d50000, "Bearish",     group=g_col)
 
@@ -93,9 +118,13 @@ colDn    = input.color(#d50000, "Bearish",     group=g_col)
 // ANCHOR
 // ─────────────────────────────────────────────────────────────────────────────
 bool volMissing = na(volume) or volume <= 0
-vol = volMissing ? 1.0 : volume
+float barWeight = volumeWeightMode == "Equal weight" ? 1.0 : volMissing ? 1.0 : volume
 
-manualPulse = time >= anchorTime and time[1] < anchorTime
+// Manual mode must not create an unofficial pre-anchor episode. If the chosen
+// time predates the loaded history, the first available bar becomes the honest
+// start of the visible episode.
+bool anchorActive = anchorMode != "Manual Time" or time >= anchorTime
+manualPulse = time >= anchorTime and (na(time[1]) or time[1] < anchorTime)
 dailyPulse  = ta.change(time("D")) != 0
 // Anchor pivots (significant degree) — define a new leg origin
 anchLowConf  = not na(ta.pivotlow(low,  anchorLeft, anchorRight))
@@ -122,6 +151,13 @@ else if anchorMode == "Auto Swing High"
 else   // Auto Last Swing — most recent significant swing of either side
     anchorPulse := anchLowConf or anchHighConf
 
+// Backpainted cumulative history is reconstructed only when the pivot becomes
+// known. Series values on earlier bars cannot be rewritten, so fits need this
+// live-knowledge boundary.
+var int anchorConfirmationBar = na
+if anchorPulse
+    anchorConfirmationBar := bar_index
+
 // Side of the active auto-anchor (used by Auto Last Swing for the TBF direction)
 var bool anchorIsLow = true
 if anchorPulse and isPivotMode
@@ -136,43 +172,113 @@ var float cumP2V = na   // Σ p² V  (for VW variance)
 var float cumPVd = na   // B
 var float cumVd  = na   // E
 var int   age    = na
+var int episodeMissingVolumeBars = 0
+var int episodeVolumeBars = 0
 
-if anchorPulse or na(cumPV)
+// Canonical cumulative episode history. Besides drawing Active TBF, these
+// arrays provide the reconstructed statistics for fit pivots that lie between
+// a backpainted pivot origin and its later confirmation bar.
+const int MAX_ACTIVE_BARS = 2500
+var array<int> episodeStatX = array.new<int>()
+var array<float> episodeStatA = array.new<float>()
+var array<float> episodeStatB = array.new<float>()
+var array<float> episodeStatC = array.new<float>()
+var array<float> episodeStatE = array.new<float>()
+
+f_storeEpisodeStat(int pointX, float pointA, float pointB, float pointC, float pointE) =>
+    array.push(episodeStatX, pointX)
+    array.push(episodeStatA, pointA)
+    array.push(episodeStatB, pointB)
+    array.push(episodeStatC, pointC)
+    array.push(episodeStatE, pointE)
+    if array.size(episodeStatX) > MAX_ACTIVE_BARS
+        array.shift(episodeStatX)
+        array.shift(episodeStatA)
+        array.shift(episodeStatB)
+        array.shift(episodeStatC)
+        array.shift(episodeStatE)
+
+f_episodeStatIndex(int pointX) =>
+    int result = -1
+    int statSize = array.size(episodeStatX)
+    if statSize > 0
+        for i = statSize - 1 to 0
+            if array.get(episodeStatX, i) == pointX
+                result := i
+                break
+    result
+
+if not anchorActive
+    cumPV  := na
+    cumV   := na
+    cumP2V := na
+    cumPVd := na
+    cumVd  := na
+    age    := na
+    episodeMissingVolumeBars := 0
+    episodeVolumeBars := 0
+    array.clear(episodeStatX)
+    array.clear(episodeStatA)
+    array.clear(episodeStatB)
+    array.clear(episodeStatC)
+    array.clear(episodeStatE)
+else if anchorPulse or na(cumPV)
     cumPV  := 0.0
     cumV   := 0.0
     cumP2V := 0.0
     cumPVd := 0.0
     cumVd  := 0.0
+    episodeMissingVolumeBars := 0
+    episodeVolumeBars := 0
+    array.clear(episodeStatX)
+    array.clear(episodeStatA)
+    array.clear(episodeStatB)
+    array.clear(episodeStatC)
+    array.clear(episodeStatE)
     if isPivotMode and anchorPulse and backpainted
         // re-seed from the real pivot bar (anchorRight back), so value accrues
         // from the actual swing rather than the lagging confirmation bar
         for i = anchorRight to 0
             float p = nz(src[i], src)
-            float v = nz(volume[i])
-            v := v <= 0 ? 1.0 : v
+            bool pointVolumeMissing = na(volume[i]) or volume[i] <= 0
+            float v = volumeWeightMode == "Equal weight" ? 1.0 : pointVolumeMissing ? 1.0 : volume[i]
             cumV   := cumV + v          // running cumulative volume d
             cumPV  := cumPV + p * v
             cumP2V := cumP2V + p * p * v
             cumPVd := cumPVd + p * v * cumV
             cumVd  := cumVd + v * cumV
+            episodeVolumeBars += 1
+            if pointVolumeMissing
+                episodeMissingVolumeBars += 1
+            f_storeEpisodeStat(bar_index - i, cumPV, cumPVd, cumV, cumVd)
         age := anchorRight + 1
     else
-        cumPV  := src * vol
-        cumV   := vol
-        cumP2V := src * src * vol
-        cumPVd := src * vol * vol
-        cumVd  := vol * vol
+        cumPV  := src * barWeight
+        cumV   := barWeight
+        cumP2V := src * src * barWeight
+        cumPVd := src * barWeight * barWeight
+        cumVd  := barWeight * barWeight
         age    := 1
+        episodeVolumeBars := 1
+        episodeMissingVolumeBars := volMissing ? 1 : 0
+        f_storeEpisodeStat(bar_index, cumPV, cumPVd, cumV, cumVd)
 else
-    float dj = cumV + vol          // running cumulative volume after this bar
-    cumPVd += src * vol * dj
-    cumVd  += vol * dj
-    cumPV  += src * vol
+    float dj = cumV + barWeight          // running cumulative volume after this bar
+    cumPVd += src * barWeight * dj
+    cumVd  += barWeight * dj
+    cumPV  += src * barWeight
     cumV   := dj
-    cumP2V += src * src * vol
+    cumP2V += src * src * barWeight
     age    += 1
+    episodeVolumeBars += 1
+    if volMissing
+        episodeMissingVolumeBars += 1
+    f_storeEpisodeStat(bar_index, cumPV, cumPVd, cumV, cumVd)
 
-midas = cumV > 0 ? cumPV / cumV : na
+float volumeAvailability = episodeVolumeBars > 0 ? (episodeVolumeBars - episodeMissingVolumeBars) / episodeVolumeBars : na
+string volumeQuality = volumeWeightMode == "Equal weight" ? "equal weight" : episodeMissingVolumeBars == 0 ? "volume-weighted" : volumeAvailability >= 0.95 ? "mostly volume-weighted" : volumeAvailability > 0 ? "mixed fallback" : "equal-weight fallback"
+
+midas = not na(cumV) and cumV > 0 ? cumPV / cumV : na
 
 // Bands
 vwVar  = math.max(cumP2V / cumV - midas * midas, 0)
@@ -210,6 +316,7 @@ else
 // so the accelerated curve is coherent with the launch; bias only decides for
 // manual / daily anchors.
 bool tbfTop = anchorMode == "Auto Swing Low" ? true : anchorMode == "Auto Swing High" ? false : anchorMode == "Auto Last Swing" ? anchorIsLow : bias == 1
+bool tbfDirectionChanged = bar_index > 0 and not isPivotMode and tbfTop != tbfTop[1]
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TOPFINDER / BOTTOMFINDER  (Exhaustion role)
@@ -217,41 +324,126 @@ bool tbfTop = anchorMode == "Auto Swing Low" ? true : anchorMode == "Auto Swing 
 //   Fit at a same-direction swing after launch:  D = (B − T·E)/(A − T·C)
 // ─────────────────────────────────────────────────────────────────────────────
 var float tbfD = na   // fitted projected total volume D
+var int tbfFitCount = 0
+var float tbfFitShift = na
+var float tbfFitProgress = na
+var string tbfFitQuality = "none"
+var int tbfFitAcceptedBar = na
+var float tbfPendingD = na
+var float tbfPendingShift = na
+var int tbfPendingConfirmations = 0
+var bool tbfFitReactionSeen = false
+var int tbfFitBestReactionScore = 0
+var bool tbfEpisodeReactionSeen = false
+var int tbfEpisodeBestReactionScore = 0
 
-if anchorPulse
+if anchorPulse or tbfDirectionChanged
     tbfD := na
+    tbfFitCount := 0
+    tbfFitShift := na
+    tbfFitProgress := na
+    tbfFitQuality := "none"
+    tbfFitAcceptedBar := na
+    tbfPendingD := na
+    tbfPendingShift := na
+    tbfPendingConfirmations := 0
+    tbfFitReactionSeen := false
+    tbfFitBestReactionScore := 0
+    tbfEpisodeReactionSeen := false
+    tbfEpisodeBestReactionScore := 0
 
 // Re-fit on a confirmed same-direction swing that sits after the launch
 float fitT  = na
 bool  doFit = false
-if enableTBF and not na(cumPV)
+int fitPivotBar = bar_index - fitRight
+bool fitNeedsReconstructedStats = isPivotMode and backpainted and not na(anchorConfirmationBar) and fitPivotBar < anchorConfirmationBar
+int fitEpisodeStatIndex = fitNeedsReconstructedStats ? f_episodeStatIndex(fitPivotBar) : -1
+bool fitSeriesAvailable = not fitNeedsReconstructedStats or fitEpisodeStatIndex >= 0
+bool fitBlockedByHistory = false
+if enableTBF and not na(cumPV) and fitSeriesAvailable
     if tbfTop and fitLowConf and age >= fitRight + 1
         fitT  := low[fitRight]
         doFit := true
     else if (not tbfTop) and fitHighConf and age >= fitRight + 1
         fitT  := high[fitRight]
         doFit := true
+else if enableTBF and not na(cumPV) and not fitSeriesAvailable and age >= fitRight + 1
+    fitBlockedByHistory := (tbfTop and fitLowConf) or (not tbfTop and fitHighConf)
 
+bool fitAccepted = false
+bool fitMaterialChange = false
+bool unstableCandidateObserved = false
 if doFit
-    float Af = cumPV[fitRight]
-    float Bf = cumPVd[fitRight]
-    float Cf = cumV[fitRight]
-    float Ef = cumVd[fitRight]
+    // A fit inside the backpainted origin→confirmation segment must read the
+    // reconstructed canonical episode state; immutable Series still belongs to
+    // the pre-confirmation calculation and may contain a previous episode.
+    float Af = fitNeedsReconstructedStats ? array.get(episodeStatA, fitEpisodeStatIndex) : cumPV[fitRight]
+    float Bf = fitNeedsReconstructedStats ? array.get(episodeStatB, fitEpisodeStatIndex) : cumPVd[fitRight]
+    float Cf = fitNeedsReconstructedStats ? array.get(episodeStatC, fitEpisodeStatIndex) : cumV[fitRight]
+    float Ef = fitNeedsReconstructedStats ? array.get(episodeStatE, fitEpisodeStatIndex) : cumVd[fitRight]
     float den = Af - fitT * Cf
     float Dcand = den != 0 ? (Bf - fitT * Ef) / den : na
+    float fitProgressCand = not na(Dcand) and Dcand > 0 ? Cf / Dcand : na
     // valid only if it still projects forward FROM NOW (D > volume already accumulated
-    // at the current bar) — not just at the fit bar, else the projected end is in the past
-    bool ok = not na(Dcand) and Dcand > cumV and Dcand < cumV * 50
+    // at the current bar), is not degenerate, and was fitted after enough of the
+    // projected move had developed.
+    bool forwardFit = not na(Dcand) and Dcand > cumV and Dcand < cumV * 50
+    bool matureFit = not na(fitProgressCand) and fitProgressCand >= fitMinProgress
+    bool ok = forwardFit and matureFit
     if ok
-        tbfD := Dcand
+        float previousD = tbfD
+        float currentShift = not na(previousD) and previousD > 0 ? math.abs(Dcand - previousD) / previousD : na
+        bool firstFit = na(previousD)
+        bool stableWithActive = not firstFit and not na(currentShift) and currentShift <= fitStableTolerance
+        if firstFit or stableWithActive
+            tbfD := Dcand
+            tbfFitCount += 1
+            tbfFitShift := currentShift
+            tbfFitProgress := fitProgressCand
+            tbfFitQuality := firstFit ? "provisional" : "stable"
+            tbfFitAcceptedBar := bar_index
+            tbfPendingD := na
+            tbfPendingShift := na
+            tbfPendingConfirmations := 0
+            fitAccepted := true
+            fitMaterialChange := firstFit
+        else
+            float pendingAgreement = not na(tbfPendingD) and tbfPendingD > 0 ? math.abs(Dcand - tbfPendingD) / tbfPendingD : na
+            bool confirmsPendingRegion = tbfPendingConfirmations > 0 and not na(pendingAgreement) and pendingAgreement <= fitStableTolerance
+            if confirmsPendingRegion
+                tbfD := Dcand
+                tbfFitCount += 1
+                tbfFitShift := currentShift
+                tbfFitProgress := fitProgressCand
+                tbfFitQuality := "stable"
+                tbfFitAcceptedBar := bar_index
+                tbfPendingD := na
+                tbfPendingShift := na
+                tbfPendingConfirmations := 0
+                fitAccepted := true
+                fitMaterialChange := true
+            else
+                // A single strongly shifted candidate never replaces the active
+                // fit. It must be confirmed by another candidate in its region.
+                tbfPendingD := Dcand
+                tbfPendingShift := currentShift
+                tbfPendingConfirmations := 1
+                unstableCandidateObserved := true
+        if fitAccepted and fitMaterialChange
+            tbfFitReactionSeen := false
+            tbfFitBestReactionScore := 0
     else if dbg and barstate.isconfirmed
         // why the fit was rejected — distinguishes "already passed / no acceleration" from "degenerate"
-        string why = na(Dcand) ? "den=0" : Dcand <= cumV ? "D<=d (already passed / no acceleration)" : "D>50·d (degenerate)"
-        log.info("MIDAS TBF FIT REJECTED dir={0} reason={1} D={2} d={3} T={4}",
-             tbfTop ? "top" : "bot", why, str.tostring(Dcand, "0"), str.tostring(cumV, "0"), str.tostring(fitT, format.mintick))
+        string why = na(Dcand) ? "den=0" : Dcand <= cumV ? "D<=d (already passed / no acceleration)" : Dcand >= cumV * 50 ? "D>50·d (degenerate)" : "fit too early"
+        log.info("MIDAS TBF FIT REJECTED dir={0} reason={1} D={2} d={3} fitProgress={4} T={5}",
+             tbfTop ? "top" : "bot", why, str.tostring(Dcand, "0"), str.tostring(cumV, "0"), str.tostring(fitProgressCand, "0.00"), str.tostring(fitT, format.mintick))
 
-// TBF curve value + 4-stage state (no fit → running → late → expired)
+// TBF curve value + phase. "Mature" begins at 50%, the conservative point at
+// which the projection becomes decision-relevant; "late" still is not a turn.
 float progress = (not enableTBF or na(tbfD)) ? na : cumV / tbfD
+float remainingVolume = na(progress) ? na : math.max(tbfD - cumV, 0)
+float episodeAvgVolume = not na(age) and age > 0 ? cumV / age : na
+int approxBarsRemaining = not na(remainingVolume) and not na(episodeAvgVolume) and episodeAvgVolume > 0 ? int(math.ceil(remainingVolume / episodeAvgVolume)) : na
 float tbf = na
 // `not anchorPulse` forces a one-bar gap on every re-anchor so separate projection
 // episodes never bridge into one straight line on long-history views
@@ -259,41 +451,69 @@ if enableTBF and not na(tbfD) and tbfD > cumV and not anchorPulse
     float denom = cumV * tbfD - cumVd
     tbf := denom != 0 ? (cumPV * tbfD - cumPVd) / denom : na
 
-// "late" = far through the projection (advanced move), NOT a confirmed turn.
-// "expired" = the move ran past its projected end (d ≥ D).
-string tbfState = not enableTBF ? "off" : na(progress) ? "no fit" : progress >= 1.0 ? "expired" : progress >= warnThresh ? "late" : "running"
+// "late" = far through the projection, NOT a confirmed turn. "passed" means
+// d >= D and still requires a separate price reaction.
+string tbfState = not enableTBF ? "off" : na(progress) ? "no fit" : progress >= 1.0 ? "passed" : progress >= warnThresh ? "late" : progress >= 0.50 ? "mature" : "developing"
 bool tbfWarn    = tbfState == "late"
 bool tbfLateNew = tbfWarn and not tbfWarn[1]
+bool tbfPassedNew = tbfState == "passed" and tbfState[1] != "passed"
+
+// Price reaction is separate from projection progress. Persistent events are
+// confirmed by default; the live context may still move intrabar.
+bool markerOk = not markersOnBarClose or barstate.isconfirmed
+float tbfClosePos = high > low ? (close - low) / (high - low) : 0.5
+bool tbfReactionCandle = tbfTop ? close < open and tbfClosePos <= 0.35 : close > open and tbfClosePos >= 0.65
+float tbfReactionBody = math.abs(close - open)
+bool tbfReactionStructure = tbfTop ? close < low[1] and tbfReactionBody >= devATR * 0.5 : close > high[1] and tbfReactionBody >= devATR * 0.5
+bool tbfReactionBand = tbfTop ? ta.crossunder(close, upper1) : ta.crossover(close, lower1)
+int tbfReactionScore = (tbfReactionCandle ? 1 : 0) + (tbfReactionStructure ? 1 : 0) + (tbfReactionBand ? 1 : 0)
+bool tbfAdvanced = tbfState == "late" or tbfState == "passed"
+bool tbfReactionQualified = enableTBF and tbfAdvanced and tbfReactionScore >= 2 and markerOk
+bool tbfReactionNew = tbfReactionQualified and not tbfFitReactionSeen
+if tbfReactionQualified
+    tbfFitReactionSeen := true
+    tbfFitBestReactionScore := math.max(tbfFitBestReactionScore, tbfReactionScore)
+    tbfEpisodeReactionSeen := true
+    tbfEpisodeBestReactionScore := math.max(tbfEpisodeBestReactionScore, tbfReactionScore)
+bool tbfStale = not na(progress) and progress >= tbfStaleProgress and not tbfFitReactionSeen
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LOCATION + CONTEXT MARKERS  (Setup-level evidence, §7/§9 — not BUY/SELL)
 // ─────────────────────────────────────────────────────────────────────────────
-distSigma = not na(midas) and dev > 0 ? (close - midas) / dev : na
+normalizedDistance = not na(midas) and dev > 0 ? (close - midas) / dev : na
 
 // Reclaim only counts after a genuine stretch past the inner band (not on small dips)
 stretchedLowRecently  = ta.barssince(not na(lower1) and close < lower1) <= reclaimLook
 stretchedHighRecently = ta.barssince(not na(upper1) and close > upper1) <= reclaimLook
 
-stretchUp = bias == 1  and not na(upper2) and high > upper2 and close < upper2   // rejected at upper band in up-bias
-stretchDn = bias == -1 and not na(lower2) and low  < lower2 and close > lower2   // rejected at lower band in down-bias
-reclaimUp = bias == 1  and stretchedLowRecently  and ta.crossover(close, midas)  // value reclaimed after a stretch below
-reclaimDn = bias == -1 and stretchedHighRecently and ta.crossunder(close, midas) // value lost after a stretch above
+// Detect location/reclaim events independently from EMA bias. Bias classifies
+// the context as trend-aligned or counter-bias; it no longer hides the event.
+bool rawStretchAbove = not na(upper2) and high > upper2 and close < upper2
+bool rawStretchBelow = not na(lower2) and low < lower2 and close > lower2
+bool rawReclaimUp = stretchedLowRecently and ta.crossover(close, midas)
+bool rawReclaimDn = stretchedHighRecently and ta.crossunder(close, midas)
+bool stretchAbove = markerOk and rawStretchAbove
+bool stretchBelow = markerOk and rawStretchBelow
+bool reclaimUp = markerOk and rawReclaimUp
+bool reclaimDn = markerOk and rawReclaimDn
 
 // Reclaim Quality Score (0-5) — context annotation only, does not gate the marker/alert:
 // stretch beforehand, strong candle close, volume above average, small structure
-// break, TBF late/expired bonus.
+// break, TBF late/passed bonus.
 avgVol        = ta.sma(volume, reclaimVolLen)
 volAboveAvg   = not na(volume) and volume > 0 and not na(avgVol) and volume > avgVol
 barRange      = high - low
-closeInBody   = barRange > 0 ? (close - low) / barRange : 0.5
-strongCloseUp = closeInBody >= reclaimBodyMin
-strongCloseDn = (1 - closeInBody) >= reclaimBodyMin
+closeLocation = barRange > 0 ? (close - low) / barRange : 0.5
+strongCloseUp = closeLocation >= reclaimCloseLocationMin
+strongCloseDn = (1 - closeLocation) >= reclaimCloseLocationMin
 structBreakUp = close > ta.highest(high[1], reclaimStructLen)
 structBreakDn = close < ta.lowest(low[1], reclaimStructLen)
-tbfExhausted  = tbfState == "late" or tbfState == "expired"
+bool tbfExhausted = (tbfState == "late" or tbfState == "passed") and not tbfStale
+bool tbfSupportsBullishReclaim = not tbfTop and tbfExhausted
+bool tbfSupportsBearishReclaim = tbfTop and tbfExhausted
 
-reclaimUpScore = (stretchedLowRecently ? 1 : 0) + (strongCloseUp ? 1 : 0) + (volAboveAvg ? 1 : 0) + (structBreakUp ? 1 : 0) + (tbfExhausted ? 1 : 0)
-reclaimDnScore = (stretchedHighRecently ? 1 : 0) + (strongCloseDn ? 1 : 0) + (volAboveAvg ? 1 : 0) + (structBreakDn ? 1 : 0) + (tbfExhausted ? 1 : 0)
+reclaimUpScore = (stretchedLowRecently ? 1 : 0) + (strongCloseUp ? 1 : 0) + (volAboveAvg ? 1 : 0) + (structBreakUp ? 1 : 0) + (tbfSupportsBullishReclaim ? 1 : 0)
+reclaimDnScore = (stretchedHighRecently ? 1 : 0) + (strongCloseDn ? 1 : 0) + (volAboveAvg ? 1 : 0) + (structBreakDn ? 1 : 0) + (tbfSupportsBearishReclaim ? 1 : 0)
 
 var int    lastReclaimScore = na
 var string lastReclaimDir   = na
@@ -307,41 +527,281 @@ if reclaimDn
 // ─────────────────────────────────────────────────────────────────────────────
 // PLOTS
 // ─────────────────────────────────────────────────────────────────────────────
-plot(midas, "MIDAS curve", color=color.new(colMidas, 0), linewidth=2)
-plot(showBands ? upper1 : na, "Upper 1", color=color.new(colUp, 60))
-plot(showBands ? lower1 : na, "Lower 1", color=color.new(colDn, 60))
-plot(showBands ? upper2 : na, "Upper 2", color=color.new(colUp, 30))
-plot(showBands ? lower2 : na, "Lower 2", color=color.new(colDn, 30))
-plot(tbf, "TBF curve", color=color.new(colTBF, tbfWarn ? 0 : 35), linewidth=2, style=plot.style_line)
+// Active mode draws the complete CURRENT anchor episode from retained points.
+// Full mode keeps the normal historical plots for diagnostic review.
+bool activeMode = visualMode == "Active"
+bool fullMode = not activeMode
+bool showBandZones = bandDisplay == "Zones" or bandDisplay == "Zones + Lines"
+bool showBandLines = bandDisplay == "Lines" or bandDisplay == "Zones + Lines"
+
+// Historical plots exist only in Full. Anchor bars are gaps so independent
+// episodes never connect diagonally.
+float fullMidasVisual = fullMode and not anchorPulse ? midas : na
+float fullUpper1Visual = fullMode and showBands and not anchorPulse ? upper1 : na
+float fullLower1Visual = fullMode and showBands and not anchorPulse ? lower1 : na
+float fullUpper2Visual = fullMode and showBands and not anchorPulse ? upper2 : na
+float fullLower2Visual = fullMode and showBands and not anchorPulse ? lower2 : na
+
+plot(fullMidasVisual, "MIDAS value", color=color.new(colMidas, 0), linewidth=3, style=plot.style_linebr)
+pUpper1 = plot(fullUpper1Visual, "Upper 1", color=showBandLines ? color.new(color.gray, 72) : na, linewidth=1, style=plot.style_linebr)
+pLower1 = plot(fullLower1Visual, "Lower 1", color=showBandLines ? color.new(color.gray, 72) : na, linewidth=1, style=plot.style_linebr)
+pUpper2 = plot(fullUpper2Visual, "Upper 2", color=showBandLines ? color.new(colStretch, 48) : na, linewidth=1, style=plot.style_linebr)
+pLower2 = plot(fullLower2Visual, "Lower 2", color=showBandLines ? color.new(colStretch, 48) : na, linewidth=1, style=plot.style_linebr)
+
+fill(pUpper1, pLower1, color=showBandZones ? color.new(color.gray, 95) : na, title="At-value zone")
+fill(pUpper2, pUpper1, color=showBandZones ? color.new(colStretch, 91) : na, title="Upper stretch zone")
+fill(pLower1, pLower2, color=showBandZones ? color.new(colStretch, 91) : na, title="Lower stretch zone")
+
+color tbfPlotCol = tbfStale ? color.new(color.gray, 55) : tbfState == "late" or tbfState == "passed" ? color.new(colTBF, 0) : tbfState == "mature" ? color.new(colTBF, 20) : color.new(colTBF, 55)
+plot(fullMode ? tbf : na, "TBF exhaustion", color=tbfPlotCol, linewidth=2, style=plot.style_linebr)
+
+// Point stores for the current episode. Backpainted pivots reconstruct the
+// origin→confirmation segment so Active never starts from an arbitrary crop.
+var array<chart.point> activeMidasPts = array.new<chart.point>()
+var array<chart.point> activeUpper1Pts = array.new<chart.point>()
+var array<chart.point> activeLower1Pts = array.new<chart.point>()
+var array<chart.point> activeUpper2Pts = array.new<chart.point>()
+var array<chart.point> activeLower2Pts = array.new<chart.point>()
+
+if anchorPulse
+    array.clear(activeMidasPts)
+    array.clear(activeUpper1Pts)
+    array.clear(activeLower1Pts)
+    array.clear(activeUpper2Pts)
+    array.clear(activeLower2Pts)
+    if isPivotMode and backpainted
+        float visualCumPV = 0.0
+        float visualCumV = 0.0
+        float visualCumP2V = 0.0
+        float visualCumPVd = 0.0
+        float visualCumVd = 0.0
+        for i = anchorRight to 0
+            float visualP = nz(src[i], src)
+            bool visualVolumeMissing = na(volume[i]) or volume[i] <= 0
+            float visualV = volumeWeightMode == "Equal weight" ? 1.0 : visualVolumeMissing ? 1.0 : volume[i]
+            visualCumPV += visualP * visualV
+            visualCumV += visualV
+            visualCumP2V += visualP * visualP * visualV
+            visualCumPVd += visualP * visualV * visualCumV
+            visualCumVd += visualV * visualCumV
+            float visualMidas = visualCumPV / visualCumV
+            float visualVar = math.max(visualCumP2V / visualCumV - visualMidas * visualMidas, 0)
+            float visualVwDev = math.sqrt(visualVar)
+            float visualAtrDev = nz(devATR[i], visualVwDev)
+            float visualDev = bandMode == "VW StDev" ? visualVwDev : bandMode == "ATR" ? visualAtrDev : math.avg(visualVwDev, visualAtrDev)
+            int visualX = bar_index - i
+            array.push(activeMidasPts, chart.point.from_index(visualX, visualMidas))
+            array.push(activeUpper1Pts, chart.point.from_index(visualX, visualMidas + visualDev * bandMult1))
+            array.push(activeLower1Pts, chart.point.from_index(visualX, visualMidas - visualDev * bandMult1))
+            array.push(activeUpper2Pts, chart.point.from_index(visualX, visualMidas + visualDev * bandMult2))
+            array.push(activeLower2Pts, chart.point.from_index(visualX, visualMidas - visualDev * bandMult2))
+    else if not na(midas)
+        array.push(activeMidasPts, chart.point.from_index(bar_index, midas))
+        if not na(upper1) and not na(lower1) and not na(upper2) and not na(lower2)
+            array.push(activeUpper1Pts, chart.point.from_index(bar_index, upper1))
+            array.push(activeLower1Pts, chart.point.from_index(bar_index, lower1))
+            array.push(activeUpper2Pts, chart.point.from_index(bar_index, upper2))
+            array.push(activeLower2Pts, chart.point.from_index(bar_index, lower2))
+else if not na(midas)
+    array.push(activeMidasPts, chart.point.from_index(bar_index, midas))
+    if not na(upper1) and not na(lower1) and not na(upper2) and not na(lower2)
+        array.push(activeUpper1Pts, chart.point.from_index(bar_index, upper1))
+        array.push(activeLower1Pts, chart.point.from_index(bar_index, lower1))
+        array.push(activeUpper2Pts, chart.point.from_index(bar_index, upper2))
+        array.push(activeLower2Pts, chart.point.from_index(bar_index, lower2))
+
+// Keep well below TradingView's polyline point ceiling while retaining long
+// active episodes. The band polygons use two points per bar.
+if array.size(activeMidasPts) > MAX_ACTIVE_BARS
+    array.shift(activeMidasPts)
+if array.size(activeUpper1Pts) > MAX_ACTIVE_BARS
+    array.shift(activeUpper1Pts)
+    array.shift(activeLower1Pts)
+    array.shift(activeUpper2Pts)
+    array.shift(activeLower2Pts)
+
+var polyline activeMidasPl = na
+var polyline activeUpper1Pl = na
+var polyline activeLower1Pl = na
+var polyline activeUpper2Pl = na
+var polyline activeLower2Pl = na
+var polyline activeValueFillPl = na
+var polyline activeUpperFillPl = na
+var polyline activeLowerFillPl = na
+var polyline activeTbfPl = na
+
+// Drawing objects are subject to Pine's realtime rollback. Rebuild the bounded
+// active episode on the last bar so the complete curve survives every update;
+// otherwise only a one-bar realtime fragment can remain visible.
+if barstate.islast
+    polyline.delete(activeMidasPl)
+    polyline.delete(activeUpper1Pl)
+    polyline.delete(activeLower1Pl)
+    polyline.delete(activeUpper2Pl)
+    polyline.delete(activeLower2Pl)
+    polyline.delete(activeValueFillPl)
+    polyline.delete(activeUpperFillPl)
+    polyline.delete(activeLowerFillPl)
+    polyline.delete(activeTbfPl)
+
+    activeMidasPl := na
+    activeUpper1Pl := na
+    activeLower1Pl := na
+    activeUpper2Pl := na
+    activeLower2Pl := na
+    activeValueFillPl := na
+    activeUpperFillPl := na
+    activeLowerFillPl := na
+    activeTbfPl := na
+
+    if activeMode and array.size(activeMidasPts) > 1
+        int activeBandSize = array.size(activeUpper1Pts)
+        if showBands and showBandZones and activeBandSize > 1
+            array<chart.point> activeValuePolygon = array.new<chart.point>()
+            array<chart.point> activeUpperPolygon = array.new<chart.point>()
+            array<chart.point> activeLowerPolygon = array.new<chart.point>()
+            for i = 0 to activeBandSize - 1
+                array.push(activeValuePolygon, array.get(activeUpper1Pts, i))
+                array.push(activeUpperPolygon, array.get(activeUpper2Pts, i))
+                array.push(activeLowerPolygon, array.get(activeLower1Pts, i))
+            for i = activeBandSize - 1 to 0
+                array.push(activeValuePolygon, array.get(activeLower1Pts, i))
+                array.push(activeUpperPolygon, array.get(activeUpper1Pts, i))
+                array.push(activeLowerPolygon, array.get(activeLower2Pts, i))
+            activeValueFillPl := polyline.new(activeValuePolygon, curved=false, closed=true,
+                 line_color=color.new(color.gray, 100), fill_color=color.new(color.gray, 95))
+            activeUpperFillPl := polyline.new(activeUpperPolygon, curved=false, closed=true,
+                 line_color=color.new(colStretch, 100), fill_color=color.new(colStretch, 91))
+            activeLowerFillPl := polyline.new(activeLowerPolygon, curved=false, closed=true,
+                 line_color=color.new(colStretch, 100), fill_color=color.new(colStretch, 91))
+
+        if showBands and showBandLines and activeBandSize > 1
+            activeUpper1Pl := polyline.new(activeUpper1Pts, curved=false, closed=false, line_color=color.new(color.gray, 72), line_width=1)
+            activeLower1Pl := polyline.new(activeLower1Pts, curved=false, closed=false, line_color=color.new(color.gray, 72), line_width=1)
+            activeUpper2Pl := polyline.new(activeUpper2Pts, curved=false, closed=false, line_color=color.new(colStretch, 48), line_width=1)
+            activeLower2Pl := polyline.new(activeLower2Pts, curved=false, closed=false, line_color=color.new(colStretch, 48), line_width=1)
+
+        activeMidasPl := polyline.new(activeMidasPts, curved=false, closed=false, line_color=colMidas, line_width=3)
+
+        // Recalculate the current TBF from the active episode's cumulative
+        // statistics and latest accepted D. From Fit (default) respects when
+        // that model became live-known; Retrospective is analysis-only.
+        int activeTbfSize = array.size(episodeStatX)
+        if enableTBF and not na(tbfD) and activeTbfSize > 1
+            array<chart.point> activeTbfPts = array.new<chart.point>()
+            for i = 0 to activeTbfSize - 1
+                float pointA = array.get(episodeStatA, i)
+                float pointB = array.get(episodeStatB, i)
+                float pointC = array.get(episodeStatC, i)
+                float pointE = array.get(episodeStatE, i)
+                int pointX = array.get(episodeStatX, i)
+                bool pointVisible = tbfHistoryMode == "Retrospective" or (not na(tbfFitAcceptedBar) and pointX >= tbfFitAcceptedBar)
+                if pointVisible and pointC < tbfD
+                    float pointDenom = pointC * tbfD - pointE
+                    if pointDenom != 0
+                        float pointTbf = (pointA * tbfD - pointB) / pointDenom
+                        array.push(activeTbfPts, chart.point.from_index(pointX, pointTbf))
+            if array.size(activeTbfPts) > 1
+                activeTbfPl := polyline.new(activeTbfPts, curved=false, closed=false, line_color=tbfPlotCol, line_width=2)
 
 // Anchor marker — Backpainted pivot modes mark the real pivot bar (offset back);
 // time/daily and Confirmed pivot modes mark the current (live-known) bar
-plotshape(showAnchor and anchorPulse and isPivotMode and backpainted ? src[anchorRight] : na, "Anchor (pivot, backpainted)",
-     style=shape.circle, location=location.absolute, offset=-anchorRight,
-     color=color.new(colMidas, 0), size=size.tiny)
-plotshape(showAnchor and anchorPulse and (not isPivotMode or not backpainted) ? src : na, "Anchor",
-     style=shape.circle, location=location.absolute,
-     color=color.new(colMidas, 0), size=size.tiny)
+plotshape(fullMode and showAnchor and anchorPulse and isPivotMode and backpainted ? src[anchorRight] : na, "Anchor (pivot, backpainted)",
+     style=shape.diamond, location=location.absolute, offset=-anchorRight,
+     color=color.new(colMidas, 0), text="A", textcolor=color.white, size=size.small)
+plotshape(fullMode and showAnchor and anchorPulse and (not isPivotMode or not backpainted) ? src : na, "Anchor",
+     style=shape.diamond, location=location.absolute,
+     color=color.new(colMidas, 0), text="A", textcolor=color.white, size=size.small)
 
-plotshape(showMarkers and stretchUp, "Stretched above value", style=shape.triangledown, location=location.abovebar,
-     color=color.new(colDn, 20), size=size.tiny)
-plotshape(showMarkers and stretchDn, "Stretched below value", style=shape.triangleup, location=location.belowbar,
-     color=color.new(colUp, 20), size=size.tiny)
+var label activeAnchorLabel = na
+var array<label> activeMarkerLabels = array.new<label>()
+const int MAX_ACTIVE_MARKERS = 300
+if anchorPulse and activeMode
+    label.delete(activeAnchorLabel)
+    activeAnchorLabel := na
+    while array.size(activeMarkerLabels) > 0
+        label.delete(array.pop(activeMarkerLabels))
+    lastReclaimScore := na
+    lastReclaimDir := na
+    if showAnchor
+        int activeAnchorX = isPivotMode and backpainted ? bar_index - anchorRight : bar_index
+        float activeAnchorY = isPivotMode and backpainted ? src[anchorRight] : src
+        activeAnchorLabel := label.new(activeAnchorX, activeAnchorY, "A", yloc=yloc.price,
+             style=label.style_diamond, color=colMidas, textcolor=color.white, size=size.tiny,
+             tooltip="Active MIDAS anchor. Every visible curve and zone in Active mode accumulates from this episode origin.")
+
+plotshape(fullMode and showMarkers and stretchAbove ? upper2 : na, "Stretched above value", style=shape.circle, location=location.absolute,
+     color=color.new(colStretch, 15), size=size.tiny)
+plotshape(fullMode and showMarkers and stretchBelow ? lower2 : na, "Stretched below value", style=shape.circle, location=location.absolute,
+     color=color.new(colStretch, 15), size=size.tiny)
+
+if activeMode and showMarkers and stretchAbove
+    string stretchAboveClass = bias == 1 ? "Trend-side overextension" : "Counter-bias rejection"
+    label activeStretchUpLabel = label.new(bar_index, upper2, "•", yloc=yloc.price,
+         style=label.style_none, textcolor=colStretch, size=size.small,
+         tooltip="STRETCH ABOVE VALUE · " + stretchAboveClass + "\nPrice traded beyond the outer band and closed back inside. Context only: wait for a MIDAS loss/reclaim or another price trigger.")
+    array.push(activeMarkerLabels, activeStretchUpLabel)
+    if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
+        label.delete(array.shift(activeMarkerLabels))
+if activeMode and showMarkers and stretchBelow
+    string stretchBelowClass = bias == -1 ? "Trend-side overextension" : "Counter-bias rejection"
+    label activeStretchDnLabel = label.new(bar_index, lower2, "•", yloc=yloc.price,
+         style=label.style_none, textcolor=colStretch, size=size.small,
+         tooltip="STRETCH BELOW VALUE · " + stretchBelowClass + "\nPrice traded beyond the outer band and closed back inside. Context only: wait for a MIDAS reclaim/loss or another price trigger.")
+    array.push(activeMarkerLabels, activeStretchDnLabel)
+    if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
+        label.delete(array.shift(activeMarkerLabels))
+
 // plotshape's text arg must be a const string, so the dynamic Reclaim Quality
 // Score is rendered via label.new instead (shape/position match the old markers)
 if showMarkers and reclaimUp
-    label.new(bar_index, low, str.tostring(reclaimUpScore), yloc=yloc.belowbar,
-         style=label.style_diamond, color=color.new(colUp, 0), textcolor=color.white, size=size.tiny)
+    string reclaimUpClass = bias == 1 ? "Trend-aligned continuation reclaim" : "Counter-bias transition reclaim"
+    string reclaimUpTip = "Bullish MIDAS reclaim · " + reclaimUpClass + " · quality " + str.tostring(reclaimUpScore) + "/5\n" +
+         "Strong close: " + (strongCloseUp ? "yes" : "no") + " · Volume: " + (volAboveAvg ? "yes" : "no") +
+         "\nStructure break: " + (structBreakUp ? "yes" : "no") + " · Bottomfinder aligned: " + (tbfSupportsBullishReclaim ? "yes" : "no")
+    label reclaimUpLabel = label.new(bar_index, low, "R " + str.tostring(reclaimUpScore) + "/5", yloc=yloc.belowbar,
+         style=label.style_label_up, color=color.new(colUp, reclaimUpScore >= 4 ? 0 : reclaimUpScore >= 2 ? 20 : 45),
+         textcolor=color.white, size=reclaimUpScore >= 4 ? size.small : size.tiny, tooltip=reclaimUpTip)
+    if activeMode
+        array.push(activeMarkerLabels, reclaimUpLabel)
+        if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
+            label.delete(array.shift(activeMarkerLabels))
 if showMarkers and reclaimDn
-    label.new(bar_index, high, str.tostring(reclaimDnScore), yloc=yloc.abovebar,
-         style=label.style_diamond, color=color.new(colDn, 0), textcolor=color.white, size=size.tiny)
-plotshape(tbfLateNew and tbfTop, "TBF late move (top)", style=shape.xcross, location=location.abovebar,
+    string reclaimDnClass = bias == -1 ? "Trend-aligned continuation reclaim" : "Counter-bias transition reclaim"
+    string reclaimDnTip = "Bearish MIDAS reclaim · " + reclaimDnClass + " · quality " + str.tostring(reclaimDnScore) + "/5\n" +
+         "Strong close: " + (strongCloseDn ? "yes" : "no") + " · Volume: " + (volAboveAvg ? "yes" : "no") +
+         "\nStructure break: " + (structBreakDn ? "yes" : "no") + " · Topfinder aligned: " + (tbfSupportsBearishReclaim ? "yes" : "no")
+    label reclaimDnLabel = label.new(bar_index, high, "R " + str.tostring(reclaimDnScore) + "/5", yloc=yloc.abovebar,
+         style=label.style_label_down, color=color.new(colDn, reclaimDnScore >= 4 ? 0 : reclaimDnScore >= 2 ? 20 : 45),
+         textcolor=color.white, size=reclaimDnScore >= 4 ? size.small : size.tiny, tooltip=reclaimDnTip)
+    if activeMode
+        array.push(activeMarkerLabels, reclaimDnLabel)
+        if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
+            label.delete(array.shift(activeMarkerLabels))
+if showMarkers and tbfReactionNew
+    string reactionTip = (tbfTop ? "TOPFINDER" : "BOTTOMFINDER") + " PRICE REACTION · " + str.tostring(tbfReactionScore) + "/3\n" +
+         "Rejection candle: " + (tbfReactionCandle ? "yes" : "no") + " · ATR displacement: " + (tbfReactionStructure ? "yes" : "no") +
+         "\nReturn through inner band: " + (tbfReactionBand ? "yes" : "no") +
+         "\nThe projection is advanced and price has reacted. This confirms exhaustion risk, not a reversal entry."
+    label reactionLabel = label.new(bar_index, tbfTop ? high : low, "EXH " + str.tostring(tbfReactionScore) + "/3",
+         yloc=tbfTop ? yloc.abovebar : yloc.belowbar,
+         style=tbfTop ? label.style_label_down : label.style_label_up,
+         color=color.new(colTBF, 0), textcolor=color.white, size=size.tiny, tooltip=reactionTip)
+    if activeMode
+        array.push(activeMarkerLabels, reactionLabel)
+        if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
+            label.delete(array.shift(activeMarkerLabels))
+plotshape(fullMode and showMarkers and markerOk and tbfLateNew and tbfTop, "TBF late move (top)", style=shape.labeldown, location=location.abovebar,
      color=color.new(colTBF, 0), text="LATE", textcolor=color.white, size=size.tiny)
-plotshape(tbfLateNew and not tbfTop, "TBF late move (bottom)", style=shape.xcross, location=location.belowbar,
+plotshape(fullMode and showMarkers and markerOk and tbfLateNew and not tbfTop, "TBF late move (bottom)", style=shape.labelup, location=location.belowbar,
      color=color.new(colTBF, 0), text="LATE", textcolor=color.white, size=size.tiny)
+plotshape(fullMode and showMarkers and markerOk and tbfPassedNew and tbfTop, "TBF projected end passed (top)", style=shape.diamond, location=location.abovebar,
+     color=color.new(colStretch, 0), text="END", textcolor=color.white, size=size.tiny)
+plotshape(fullMode and showMarkers and markerOk and tbfPassedNew and not tbfTop, "TBF projected end passed (bottom)", style=shape.diamond, location=location.belowbar,
+     color=color.new(colStretch, 0), text="END", textcolor=color.white, size=size.tiny)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// INTERPRETATION  (verbalises the role outputs; thresholds & read are TF-aware)
+// INTERPRETATION  (verbalises role outputs and names the next observable trigger)
 // ─────────────────────────────────────────────────────────────────────────────
 tfMin    = timeframe.in_seconds() / 60.0
 tfBucket = tfMin < 240 ? "Intraday" : tfMin < 1440 ? "Swing" : "Position"
@@ -349,129 +809,222 @@ higherTf = tfMin >= 240                       // Swing / Position lean on Locati
 locMid   = higherTf ? 1.0 : 1.5               // intraday is noisier → a wider stretch bar
 locHi    = higherTf ? 2.0 : 2.5
 
-absD       = na(distSigma) ? na : math.abs(distSigma)
-locUnit    = bandMode == "VW StDev" ? " σ" : bandMode == "ATR" ? " atr" : " ×"
-locStr     = na(distSigma) ? "n/a" : str.tostring(distSigma, "0.00") + locUnit
-dirWord    = na(distSigma) ? "" : distSigma > 0 ? " up" : " down"
-locRead    = na(distSigma) ? "n/a" : absD >= locHi ? "overextended" + dirWord : absD >= locMid ? "stretched" + dirWord : "at value"
+absD       = na(normalizedDistance) ? na : math.abs(normalizedDistance)
+locUnit    = bandMode == "VW StDev" ? " σ" : bandMode == "ATR" ? " atr" : " hdev"
+locStr     = na(normalizedDistance) ? "n/a" : str.tostring(normalizedDistance, "0.00") + locUnit
+dirWord    = na(normalizedDistance) ? "" : normalizedDistance > 0 ? " up" : " down"
+locRead    = na(normalizedDistance) ? "n/a" : absD >= locHi ? "overextended" + dirWord : absD >= locMid ? "stretched" + dirWord : "at value"
 
 zone       = na(midas) ? "n/a" : close > upper2 ? "above U2" : close > upper1 ? "U1–U2" : close > lower1 ? "inside" : close > lower2 ? "L1–L2" : "below L2"
-zoneRead   = na(midas) ? "n/a" : zone == "inside" ? "normal" : (zone == "above U2" or zone == "below L2") ? "extreme" : "stretched"
+zoneRead   = na(midas) ? "n/a" : zone == "inside" ? "at value" : (zone == "above U2" or zone == "below L2") ? "extreme" : "stretched"
 
 midasSlope = na(midas) ? na : midas - midas[3]
 trendVal   = na(midas) ? "n/a" : (close > midas ? "above" : "below") + " value" + (na(midasSlope) ? "" : midasSlope > 0 ? " ↑" : midasSlope < 0 ? " ↓" : " →")
 trendRead  = na(midas) ? "n/a" : close > midas ? "buyers since launch" : "sellers since launch"
 
 tbfStr     = not enableTBF ? "off" : na(progress) ? "no fit" : tbfState + " " + str.tostring(progress * 100, "0") + "%"
-tbfRead    = not enableTBF ? "off" : tbfState == "no fit" ? "no accel" : tbfState == "running" ? "move running" : tbfState == "late" ? "don't chase" : "overrun"
+tbfRead    = not enableTBF ? "off" : tbfState == "no fit" ? "no accelerated fit" : tbfStale ? "stale fit · await refit" : tbfPendingConfirmations > 0 ? tbfFitQuality + " active · candidate 1/2" : tbfFitReactionSeen ? "fit reaction " + str.tostring(tbfFitBestReactionScore) + "/3" : tbfEpisodeReactionSeen ? "episode reacted earlier" : tbfState == "developing" ? "early · " + tbfFitQuality : tbfState == "mature" ? "usable · " + tbfFitQuality : "await price reaction"
 
 ageRead    = na(age) ? "n/a" : age < 2 * anchorRight ? "fresh (thin)" : "established"
 anchorDelayNote = (isPivotMode and backpainted) ? " (drawn " + str.tostring(anchorRight) + "b back)" : ""
 
 flat = not na(dev) and dev > 0 and not na(midasSlope) and math.abs(midasSlope) < dev * 0.15
 
-// TF-aware headline conclusion + tone
-string headline = "—"
-string tone     = "neutral"
-if na(distSigma) or na(midas)
-    headline := "warming up"
-else if (tbfState == "late" or tbfState == "expired") and absD >= locMid
-    headline := higherTf ? "Overextended + late move → reversion risk, don't chase" : "Late + stretched — intraday noisy, fade only on a trigger"
-    tone := "warn"
-else if absD >= locHi
-    headline := higherTf ? "Overextended from value → mean-reversion to MIDAS likely" : "Stretched — intraday, fade only on a trigger"
-    tone := "warn"
-else if zone == "inside" and flat
-    headline := "At value / range → fade the bands, no chase"
-    tone := "neutral"
-else if close > midas and (na(midasSlope) or midasSlope > 0)
-    headline := "Trend above value → pullbacks to MIDAS = support"
-    tone := "bull"
-else if close < midas and (na(midasSlope) or midasSlope < 0)
-    headline := "Below value, falling → MIDAS = resistance"
-    tone := "bear"
-else
-    headline := "Neutral / building"
-    tone := "neutral"
-headlineCol = tone == "warn" ? #ff6f00 : tone == "bull" ? colUp : tone == "bear" ? colDn : color.new(color.gray, 20)
+// Role-separated live context. Trend, Location, and Exhaustion may disagree; that
+// disagreement is information and must remain visible instead of being averaged
+// into a single bullish/bearish headline.
+bool liveBullStructure = not na(midas) and close > midas and (na(midasSlope) or midasSlope > 0)
+bool liveBearStructure = not na(midas) and close < midas and (na(midasSlope) or midasSlope < 0)
+bool liveRangeStructure = not na(midas) and zone == "inside" and flat
+bool liveLocationExtreme = zoneRead == "extreme"
+bool liveLocationStretched = zoneRead == "stretched"
+
+string liveSignedDistance = na(normalizedDistance) ? "n/a" : (normalizedDistance > 0 ? "+" : "") + str.tostring(normalizedDistance, "0.00") + locUnit
+string tbfDirectionTag = tbfTop ? "TOP ↑" : "BOTTOM ↓"
+string tbfQualityTag = tbfFitQuality == "stable" ? "STABLE" : "PROVISIONAL"
+string tbfCandidateTag = tbfPendingConfirmations > 0 ? " · CANDIDATE 1/2" : ""
+string tbfAdvancedEvidence = tbfFitReactionSeen ? "FIT REACTION " + str.tostring(tbfFitBestReactionScore) + "/3" : tbfEpisodeReactionSeen ? "EPISODE REACTION " + str.tostring(tbfEpisodeBestReactionScore) + "/3" : "NO REACTION"
+string liveTrendValue = not anchorActive ? "— WAITING FOR MANUAL ANCHOR" : na(midas) ? "— WARMING UP" :
+     liveRangeStructure ? "↔ RANGE AROUND MIDAS" :
+     liveBullStructure ? "↑ ABOVE RISING MIDAS" :
+     liveBearStructure ? "↓ BELOW FALLING MIDAS" : "↕ TRANSITION / CONFLICT"
+string liveLocationValue = na(normalizedDistance) ? "— UNAVAILABLE" :
+     liveLocationExtreme ? "!! EXTREME " + liveSignedDistance :
+     liveLocationStretched ? "! STRETCHED " + liveSignedDistance : "· AT VALUE " + liveSignedDistance
+string liveExhaustionValue = not enableTBF ? "— OFF" : na(progress) ? "— NO ACCELERATED FIT" :
+     tbfStale ? tbfDirectionTag + " · ? STALE FIT " + str.tostring(progress * 100, "0") + "% · " + tbfAdvancedEvidence :
+     tbfState == "passed" and progress < 1.15 ? tbfDirectionTag + " · !! RECENTLY PASSED " + str.tostring(progress * 100, "0") + "% · " + tbfAdvancedEvidence :
+     tbfState == "passed" ? tbfDirectionTag + " · ! BEYOND FIT " + str.tostring(progress * 100, "0") + "% · " + tbfAdvancedEvidence :
+     tbfState == "late" ? tbfDirectionTag + " · ! LATE " + str.tostring(progress * 100, "0") + "% · " + tbfAdvancedEvidence + tbfCandidateTag :
+     tbfState == "mature" ? tbfDirectionTag + " · MATURE " + str.tostring(progress * 100, "0") + "% · " + tbfQualityTag + tbfCandidateTag :
+     tbfDirectionTag + " · DEVELOPING " + str.tostring(progress * 100, "0") + "% · " + tbfQualityTag + tbfCandidateTag
+// The fourth row is not another state summary. It names the next observable
+// condition that would make the current context more useful.
+string liveNextValue = not anchorActive ? "WAIT UNTIL MANUAL ANCHOR TIME" : na(midas) ? "WAIT FOR ACTIVE MIDAS CONTEXT" :
+     tbfStale ? "WAIT FOR NEW STABLE TBF FIT" :
+     tbfAdvanced and tbfFitReactionSeen ? (tbfTop ? "WAIT FOR MIDAS LOSS TO CONFIRM REVERSION" : "WAIT FOR MIDAS RECLAIM TO CONFIRM REVERSION") :
+     tbfAdvanced ? "WAIT FOR EXH 2/3 PRICE REACTION" :
+     liveLocationExtreme ? "WAIT FOR CLOSE BACK INSIDE OUTER BAND" :
+     liveLocationStretched and liveBullStructure ? "WAIT FOR PULLBACK INTO INNER VALUE BAND" :
+     liveLocationStretched and liveBearStructure ? "WAIT FOR RALLY INTO INNER VALUE BAND" :
+     liveLocationStretched ? "WAIT FOR RETURN INSIDE INNER VALUE BAND" :
+     liveRangeStructure ? "WAIT FOR INNER BAND TEST" :
+     liveBullStructure ? "WATCH MIDAS / INNER BAND ON PULLBACK" :
+     liveBearStructure ? "WATCH MIDAS / INNER BAND ON RALLY" :
+     "WAIT FOR PRICE + MIDAS SLOPE TO ALIGN"
+string liveTrendLine = "TREND · " + liveTrendValue
+string liveLocationLine = "LOCATION · " + liveLocationValue
+string liveExhaustionLine = "EXHAUSTION · " + liveExhaustionValue
+string liveNextLine = "NEXT · " + liveNextValue
+string liveDetailedText = liveTrendLine + "\n" + liveLocationLine + "\n" + liveExhaustionLine + "\n" + liveNextLine
+string liveTrendCompact = not anchorActive ? "— ANCHOR PENDING" : liveRangeStructure ? "↔ RANGE" : liveBullStructure ? "↑ TREND" : liveBearStructure ? "↓ TREND" : "↕ TRANSITION"
+string liveLocationCompact = na(normalizedDistance) ? "LOCATION · —" : liveLocationExtreme ? "LOCATION · !! " + liveSignedDistance : liveLocationStretched ? "LOCATION · ! " + liveSignedDistance : "LOCATION · VALUE " + liveSignedDistance
+string liveExhaustionCompact = not enableTBF ? "EXHAUSTION · OFF" : na(progress) ? "EXHAUSTION · NO FIT" : tbfStale ? tbfDirectionTag + " · STALE " + str.tostring(progress * 100, "0") + "%" : tbfDirectionTag + " · " + str.tostring(progress * 100, "0") + "% · " + (tbfFitReactionSeen ? "REACTION " + str.tostring(tbfFitBestReactionScore) + "/3" : "NO REACTION")
+string liveNextCompact = not anchorActive ? "ANCHOR TIME" : tbfStale ? "STABLE REFIT" : tbfAdvanced and tbfFitReactionSeen ? (tbfTop ? "MIDAS LOSS" : "MIDAS RECLAIM") : tbfAdvanced ? "EXH 2/3 REACTION" : liveLocationExtreme ? "CLOSE INSIDE OUTER BAND" : liveLocationStretched ? "RETURN TO INNER BAND" : liveRangeStructure ? "INNER BAND TEST" : liveBullStructure ? "PULLBACK TO MIDAS" : liveBearStructure ? "RALLY TO MIDAS" : "PRICE + SLOPE ALIGN"
+string liveCompactText = liveTrendCompact + " · " + liveLocationCompact + "\n" + liveExhaustionCompact + "\nNEXT · " + liveNextCompact
+string liveContextText = liveBadgeMode == "Detailed" ? liveDetailedText : liveBadgeMode == "Tooltip only" ? "MIDAS · INFO" : liveCompactText
+color liveContextCol = color.new(color.gray, 20)
+
+string liveStructureDetail = not anchorActive ? "Manual Time has not been reached. No MIDAS episode or pre-anchor calculation is active." : na(midas) ? "The active MIDAS episode is still warming up." :
+     liveBullStructure ? "Price is above a rising MIDAS: buyers control the active anchor episode. MIDAS is a potential support reference only if a pullback actually tests and holds it." :
+     liveBearStructure ? "Price is below a falling MIDAS: sellers control the active anchor episode. MIDAS is a potential resistance reference only if a rally actually tests and rejects it." :
+     liveRangeStructure ? "MIDAS is nearly flat and price is rotating around value: range context." :
+     "Price side and MIDAS slope do not agree: transition context, not a clean directional read."
+string liveLocationDetail = na(normalizedDistance) ? "The location reading is not available yet." :
+     not liveLocationStretched and not liveLocationExtreme ? "Inside the visible inner bands: location is not extended." :
+     liveLocationStretched ? "Between the visible inner and outer band: the trend may be intact, while the current location is already extended." :
+     liveLocationExtreme ? "Beyond the visible outer band: reversion risk is elevated, but this is still context rather than a trigger." :
+     "The band zone is not available yet."
+string tbfShiftText = na(tbfFitShift) ? "n/a (first fit)" : str.tostring(tbfFitShift * 100, "0") + "%"
+string tbfFitProgressText = na(tbfFitProgress) ? "n/a" : str.tostring(tbfFitProgress * 100, "0") + "%"
+string tbfPendingText = tbfPendingConfirmations > 0 ? "candidate 1/2 · D=" + str.tostring(tbfPendingD, "0") + " · shift=" + str.tostring(tbfPendingShift * 100, "0") + "%" : "none"
+string tbfRemainingText = na(remainingVolume) ? "n/a" : str.tostring(remainingVolume, "0")
+string tbfBarsText = na(approxBarsRemaining) ? "n/a" : "~" + str.tostring(approxBarsRemaining, "0") + " bars at episode-average volume"
+string tbfReactionDetail = tbfFitReactionSeen ? "Current-fit reaction confirmed " + str.tostring(tbfFitBestReactionScore) + "/3: at least two of rejection candle, ATR-sized displacement, and inner-band transition occurred." : tbfEpisodeReactionSeen ? "No reaction on the current fit; this anchor episode reacted earlier at " + str.tostring(tbfEpisodeBestReactionScore) + "/3." : "No qualifying 2/3 price reaction yet. Projection progress alone does not confirm a turn."
+string liveTbfDetail = not enableTBF ? "TBF is disabled, so exhaustion timing is not evaluated." :
+     na(progress) ? "No valid forward topfinder/bottomfinder projection. Exhaustion timing is unavailable; this is not evidence that the move must continue." :
+     (tbfTop ? "Topfinder for the active up-leg." : "Bottomfinder for the active down-leg.") +
+     "\nPhase: " + tbfState + " at " + str.tostring(progress * 100, "0") + "% of D." +
+     "\nFit: " + tbfFitQuality + " · accepted fits: " + str.tostring(tbfFitCount) + " · latest accepted D change: " + tbfShiftText + " · fit-pivot maturity: " + tbfFitProgressText + "." +
+     "\nPending fit: " + tbfPendingText + " · history: " + tbfHistoryMode + "." +
+     "\nRemaining projected volume: " + tbfRemainingText + " · rough time translation: " + tbfBarsText + "." +
+     "\n" + tbfReactionDetail
+string liveChangeDetail = (tbfAdvanced and not tbfFitReactionSeen ? "Exhaustion confirmation: wait for an EXH n/3 current-fit reaction.\n" : "") +
+     (liveBearStructure ? "Bullish change: price reclaims MIDAS after a lower-band stretch (green R n/5).\nBearish continuation context: a rally rejects the falling MIDAS." :
+     liveBullStructure ? "Bearish change: price loses MIDAS after an upper-band stretch (red R n/5).\nBullish continuation context: a pullback holds the rising MIDAS." :
+     "Directional change: price and MIDAS slope align on the same side. A reclaim label adds trigger-level evidence.")
+string liveAnchorDetail = na(age) ? "n/a" : str.tostring(age) + " bars" + anchorDelayNote
+string volumeAvailabilityText = na(volumeAvailability) ? "n/a" : str.tostring(volumeAvailability * 100, "0") + "%"
+string volumeDetail = volumeWeightMode == "Equal weight" ? "Equal weight selected; reported volume is intentionally not used. Data availability: " + volumeAvailabilityText + "." : "Episode weighting: " + volumeQuality + " · reported volume available on " + volumeAvailabilityText + " of bars. Missing/zero bars use weight 1."
+string liveMidasText = na(midas) ? "n/a" : str.tostring(midas, format.mintick)
+string liveSlopeText = na(midasSlope) ? "n/a" : str.tostring(midasSlope, format.mintick)
+string liveContextTip = "MIDAS LIVE CONTEXT\n\nSTRUCTURE\nPrice: " + str.tostring(close, format.mintick) +
+     "\nMIDAS: " + liveMidasText + "\n3-bar slope: " + liveSlopeText +
+     "\n" + liveStructureDetail + "\n\nLOCATION\nDistance: " + liveSignedDistance + " from MIDAS\nZone: " + zone +
+     "\n" + liveLocationDetail + "\n\nEXHAUSTION\n" + liveTbfDetail +
+     "\n\nNEXT TRIGGER\n" + liveNextValue + "\n" + liveChangeDetail + "\n\nANCHOR\n" + liveAnchorDetail +
+     "\n\nVOLUME QUALITY\n" + volumeDetail
+
+var label liveContextLabel = na
+if barstate.islast
+    label.delete(liveContextLabel)
+    liveContextLabel := na
+    if showLiveContext
+        float liveContextY = not na(midas) ? midas : close
+        liveContextLabel := label.new(bar_index + 1, liveContextY, liveContextText, yloc=yloc.price,
+             style=label.style_label_left, color=liveContextCol, textcolor=color.white, size=size.small,
+             tooltip=liveContextTip)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DASHBOARD  (light theme — see CLAUDE.md) :  Element | Value | Read
+// DASHBOARD  (light theme — see CLAUDE.md)
 // ─────────────────────────────────────────────────────────────────────────────
 color tc = color.new(color.gray, 20)
 color hd = color.new(color.gray, 90)
 posSel = tablePos == "Top Right" ? position.top_right : tablePos == "Top Left" ? position.top_left : tablePos == "Bottom Right" ? position.bottom_right : position.bottom_left
+bool compactDashboard = dashboardMode == "Compact"
+bool tbfActive = (tbfState == "late" or tbfState == "passed") and not tbfStale
+color tbfStatusBg = tbfStale ? color.new(color.gray, 80) : tbfState == "passed" ? color.new(colStretch, 0) : tbfState == "late" ? color.new(colTBF, 0) : color.new(color.gray, 80)
+color locationCol = zoneRead == "at value" ? tc : colStretch
 
 if showTable and barstate.islast
-    var table t = table.new(posSel, 3, 10,
+    var table t = table.new(posSel, compactDashboard ? 2 : 3, compactDashboard ? 5 : 10,
          bgcolor=color.new(color.white, 5),
          border_color=color.new(color.gray, 60),
          border_width=1,
          frame_color=color.new(color.gray, 40),
          frame_width=1)
 
-    // Header
-    table.cell(t, 0, 0, "MIDAS 2.0", text_color=tc, text_size=size.normal, bgcolor=hd)
-    table.cell(t, 1, 0, tfBucket,    text_color=tc, text_size=size.normal, bgcolor=hd)
-    table.cell(t, 2, 0, bias == 1 ? "Bull" : "Bear", text_color=bias == 1 ? colUp : colDn, text_size=size.normal, bgcolor=hd)
+    if compactDashboard
+        // Three state roles plus one next observable trigger.
+        table.cell(t, 0, 0, "MIDAS 2.0 · " + tfBucket, text_color=tc, text_size=size.small, bgcolor=hd)
+        table.cell(t, 1, 0, visualMode, text_color=tc, text_size=size.small, bgcolor=hd)
 
-    // Location
-    table.cell(t, 0, 1, "Location", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 1, locStr, text_color=na(distSigma) ? tc : (distSigma > 0 ? colUp : colDn), text_size=size.small)
-    table.cell(t, 2, 1, locRead, text_color=tc, text_size=size.small)
+        table.cell(t, 0, 1, "Trend", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 1, liveTrendValue, text_color=liveBullStructure ? colUp : liveBearStructure ? colDn : tc, text_size=size.small)
 
-    // Band zone
-    table.cell(t, 0, 2, "Band zone", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 2, zone, text_color=tc, text_size=size.small)
-    table.cell(t, 2, 2, zoneRead, text_color=tc, text_size=size.small)
+        table.cell(t, 0, 2, "Location", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 2, liveLocationValue, text_color=locationCol, text_size=size.small)
 
-    // TBF
-    tbfActive = tbfState == "late" or tbfState == "expired"
-    table.cell(t, 0, 3, tbfTop ? "Topfinder" : "Bottomfinder", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 3, tbfStr, text_color=tbfActive ? color.white : tc, bgcolor=tbfActive ? color.new(colTBF, 0) : na, text_size=size.small)
-    table.cell(t, 2, 3, tbfRead, text_color=tbfActive ? colTBF : tc, text_size=size.small)
+        table.cell(t, 0, 3, "Exhaustion", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 3, liveExhaustionValue, text_color=tbfActive ? color.white : tc, bgcolor=tbfStatusBg, text_size=size.small)
 
-    // Trend (price vs value)
-    table.cell(t, 0, 4, "Trend", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 4, trendVal, text_color=na(midas) ? tc : (close > midas ? colUp : colDn), text_size=size.small)
-    table.cell(t, 2, 4, trendRead, text_color=tc, text_size=size.small)
+        table.cell(t, 0, 4, "Next", text_color=tc, text_size=size.small, bgcolor=hd)
+        table.cell(t, 1, 4, liveNextValue, text_color=tc, text_size=size.small, bgcolor=hd)
+    else
+        // Detailed Element | Value | Interpretation diagnostic view.
+        table.cell(t, 0, 0, "MIDAS 2.0", text_color=tc, text_size=size.normal, bgcolor=hd)
+        table.cell(t, 1, 0, tfBucket, text_color=tc, text_size=size.normal, bgcolor=hd)
+        table.cell(t, 2, 0, bias == 1 ? "Bull" : "Bear", text_color=bias == 1 ? colUp : colDn, text_size=size.normal, bgcolor=hd)
 
-    // Anchor maturity
-    table.cell(t, 0, 5, "Anchor", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 5, na(age) ? "n/a" : str.tostring(age) + " bars", text_color=tc, text_size=size.small)
-    table.cell(t, 2, 5, ageRead + anchorDelayNote, text_color=tc, text_size=size.small)
+        table.cell(t, 0, 1, "Location", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 1, locStr, text_color=locationCol, text_size=size.small)
+        table.cell(t, 2, 1, locRead, text_color=locationCol, text_size=size.small)
 
-    // Volume basis
-    table.cell(t, 0, 6, "Volume", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 6, volMissing ? "missing" : "ok", text_color=volMissing ? colDn : tc, text_size=size.small)
-    table.cell(t, 2, 6, volMissing ? "equal-weighted price" : "volume-weighted", text_color=tc, text_size=size.small)
+        table.cell(t, 0, 2, "Band zone", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 2, zone, text_color=locationCol, text_size=size.small)
+        table.cell(t, 2, 2, zoneRead, text_color=locationCol, text_size=size.small)
 
-    // Reclaim Quality Score (last fired reclaim only; context, not a gate)
-    table.cell(t, 0, 7, "Reclaim Q", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 7, na(lastReclaimScore) ? "n/a" : str.tostring(lastReclaimScore) + "/5 " + lastReclaimDir,
-         text_color=na(lastReclaimScore) ? tc : (lastReclaimDir == "▲" ? colUp : colDn), text_size=size.small)
-    table.cell(t, 2, 7, na(lastReclaimScore) ? "—" : (lastReclaimScore >= 4 ? "high quality" : lastReclaimScore >= 2 ? "medium" : "weak"), text_color=tc, text_size=size.small)
+        table.cell(t, 0, 3, tbfTop ? "Topfinder" : "Bottomfinder", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 3, tbfStr, text_color=tbfActive ? color.white : tc, bgcolor=tbfStatusBg, text_size=size.small)
+        table.cell(t, 2, 3, tbfRead, text_color=tbfActive ? (tbfState == "passed" ? colStretch : colTBF) : tc, text_size=size.small)
 
-    // Separator
-    table.cell(t, 0, 8, "", bgcolor=color.new(color.gray, 80))
-    table.cell(t, 1, 8, "", bgcolor=color.new(color.gray, 80))
-    table.cell(t, 2, 8, "", bgcolor=color.new(color.gray, 80))
+        table.cell(t, 0, 4, "Trend", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 4, trendVal, text_color=na(midas) ? tc : (close > midas ? colUp : colDn), text_size=size.small)
+        table.cell(t, 2, 4, trendRead, text_color=tc, text_size=size.small)
 
-    // TF-aware read (headline conclusion)
-    table.cell(t, 0, 9, "Read", text_color=tc, text_size=size.normal, bgcolor=hd)
-    table.cell(t, 1, 9, headline, text_color=headlineCol, text_size=size.normal, bgcolor=hd)
-    table.cell(t, 2, 9, "", text_color=tc, text_size=size.normal, bgcolor=hd)
+        table.cell(t, 0, 5, "Anchor", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 5, na(age) ? "n/a" : str.tostring(age) + " bars", text_color=tc, text_size=size.small)
+        table.cell(t, 2, 5, ageRead + anchorDelayNote, text_color=tc, text_size=size.small)
+
+        table.cell(t, 0, 6, "Volume", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 6, volumeAvailabilityText + " available", text_color=not na(volumeAvailability) and volumeAvailability < 0.95 ? colStretch : tc, text_size=size.small)
+        table.cell(t, 2, 6, volumeQuality, text_color=tc, text_size=size.small)
+
+        table.cell(t, 0, 7, "Reclaim Q", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 7, na(lastReclaimScore) ? "n/a" : str.tostring(lastReclaimScore) + "/5 " + lastReclaimDir,
+             text_color=na(lastReclaimScore) ? tc : (lastReclaimDir == "▲" ? colUp : colDn), text_size=size.small)
+        table.cell(t, 2, 7, na(lastReclaimScore) ? "—" : (lastReclaimScore >= 4 ? "high quality" : lastReclaimScore >= 2 ? "medium" : "weak"), text_color=tc, text_size=size.small)
+
+        table.cell(t, 0, 8, "", bgcolor=color.new(color.gray, 80))
+        table.cell(t, 1, 8, "", bgcolor=color.new(color.gray, 80))
+        table.cell(t, 2, 8, "", bgcolor=color.new(color.gray, 80))
+
+        table.cell(t, 0, 9, "Next", text_color=tc, text_size=size.normal, bgcolor=hd)
+        table.cell(t, 1, 9, liveNextValue, text_color=tc, text_size=size.normal, bgcolor=hd)
+        table.cell(t, 2, 9, "", text_color=tc, text_size=size.normal, bgcolor=hd)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ALERTS
 // ─────────────────────────────────────────────────────────────────────────────
 bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="Alerts")
 bool alertOk = not alertsOnBarClose or barstate.isconfirmed
-alertcondition(alertOk and (stretchUp), "Stretched above value", "MIDAS · STRETCHED ABOVE VALUE · {{ticker}} {{interval}}")
-alertcondition(alertOk and (stretchDn), "Stretched below value", "MIDAS · STRETCHED BELOW VALUE · {{ticker}} {{interval}}")
-alertcondition(alertOk and (reclaimUp), "MIDAS bullish reclaim", "MIDAS · BULLISH RECLAIM · {{ticker}} {{interval}}")
-alertcondition(alertOk and (reclaimDn), "MIDAS bearish reclaim", "MIDAS · BEARISH RECLAIM · {{ticker}} {{interval}}")
+alertcondition(alertOk and rawStretchAbove, "Stretched above value", "MIDAS · STRETCHED ABOVE VALUE · {{ticker}} {{interval}}")
+alertcondition(alertOk and rawStretchBelow, "Stretched below value", "MIDAS · STRETCHED BELOW VALUE · {{ticker}} {{interval}}")
+alertcondition(alertOk and rawReclaimUp, "MIDAS bullish reclaim", "MIDAS · BULLISH RECLAIM · {{ticker}} {{interval}}")
+alertcondition(alertOk and rawReclaimDn, "MIDAS bearish reclaim", "MIDAS · BEARISH RECLAIM · {{ticker}} {{interval}}")
 alertcondition(alertOk and (tbfLateNew), "TBF late move", "MIDAS · TBF LATE MOVE · {{ticker}} {{interval}}")
+alertcondition(alertOk and (tbfPassedNew), "TBF projection passed", "MIDAS · TBF PROJECTION PASSED · {{ticker}} {{interval}}")
+alertcondition(alertOk and (tbfReactionNew), "TBF price reaction", "MIDAS · TBF PRICE REACTION 2/3+ · {{ticker}} {{interval}}")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEBUG
@@ -479,7 +1032,20 @@ alertcondition(alertOk and (tbfLateNew), "TBF late move", "MIDAS · TBF LATE MOV
 if dbg and barstate.isconfirmed
     if anchorPulse
         log.info("MIDAS ANCHOR mode={0} price={1}", anchorMode, str.tostring(src, format.mintick))
-    if doFit and not na(tbfD)
-        log.info("MIDAS TBF FIT dir={0} D={1} d={2} T={3}", tbfTop ? "top" : "bot", str.tostring(tbfD, "0"), str.tostring(cumV, "0"), str.tostring(fitT, format.mintick))
+    if fitBlockedByHistory
+        log.info("MIDAS TBF FIT BLOCKED pivotBar={0} confirmationBar={1} reason=reconstructed episode statistics unavailable",
+             fitPivotBar, anchorConfirmationBar)
+    if unstableCandidateObserved
+        log.info("MIDAS TBF CANDIDATE HELD D={0} activeD={1} shift={2} confirmations={3}/2",
+             str.tostring(tbfPendingD, "0"), str.tostring(tbfD, "0"), str.tostring(tbfPendingShift, "0.00"), tbfPendingConfirmations)
+    if fitAccepted
+        log.info("MIDAS TBF FIT dir={0} D={1} d={2} T={3} quality={4} shift={5} fitProgress={6}",
+             tbfTop ? "top" : "bot", str.tostring(tbfD, "0"), str.tostring(cumV, "0"), str.tostring(fitT, format.mintick),
+             tbfFitQuality, str.tostring(tbfFitShift, "0.00"), str.tostring(tbfFitProgress, "0.00"))
     if tbfLateNew
         log.info("MIDAS TBF LATE progress={0} midas={1} close={2}", str.tostring(progress, "0.00"), str.tostring(midas, format.mintick), str.tostring(close, format.mintick))
+    if tbfPassedNew
+        log.info("MIDAS TBF PASSED progress={0} fit={1}", str.tostring(progress, "0.00"), tbfFitQuality)
+    if tbfReactionNew
+        log.info("MIDAS TBF REACTION dir={0} score={1}/3 candle={2} displacement={3} band={4}",
+             tbfTop ? "top" : "bot", tbfReactionScore, tbfReactionCandle, tbfReactionStructure, tbfReactionBand)

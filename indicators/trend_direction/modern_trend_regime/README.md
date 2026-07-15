@@ -10,7 +10,7 @@ Simplified trend/range regime system without Ichimoku terminology. A three-line 
 - **Real range structure** — corridor boundaries are frozen from the swing high/low at Range entry (not a moving ATR band), so reactions and breakouts are measured against an actual range, not a channel that trails price
 - **One-shot breakout arming** — a breakout can fire at most once per Range, and reactions are edge-detected so a multi-bar boundary test doesn't repeat the signal
 - **Six tuned presets** — Standard, Schnell, Ruhig, Trendfolge, Range Trading, Ausbruch, plus Benutzerdefiniert for full manual control
-- **Multiple visualization modes** — Trendband, Range-Korridor, Regime-Leiste, Minimal, or Alles, plus an optional structure preview (visual offset only, not a forecast), bar coloring and transition background
+- **Multiple visualization modes** — Trendband, Range-Korridor, Regime-Leiste, Minimal, or Alles, plus an optional structure preview (visual offset only, not a forecast) whose fill opacity scales with structure width (thicker = stronger, more opaque; compressed = weaker, more transparent), bar coloring and transition background
 
 ## Market modes
 
@@ -41,5 +41,6 @@ Switching away from **Benutzerdefiniert** overrides the corresponding manual inp
 - **Trend Confirmed** (small triangle, hover for text) — `marketRegime` just switched to Uptrend/Downtrend; already passed the score-based Trend check, DI direction, price confirmation and the confirmation-bar count, so it fires once per genuine regime change instead of on every Fast/Base wiggle
 - **Range Reaction** (`R`) — price touches and rejects the frozen range boundary while in Range mode (first touching bar only)
 - **Range Breakout** (`BREAK`) — price closes beyond the frozen range boundary plus buffer after leaving Range mode; fires at most once until the next Range
+- **Struktur-Ausbruch** (small arrow, hover for text) — price crosses the structure preview at the value that is actually visible under today's bar (`structureUpper`/`structureLower` from `structurePreviewOffset` bars ago — the preview is drawn shifted forward by that same distance, so this is the value that landed on today). Purely informational, not wired into the regime score; distinct arrow icon so it isn't confused with the triangle-style Trend Confirmed marker
 
-Trading off against the old crossover-based flip: this version fires later (only after `Bestätigungskerzen` bars of confirmation) but no longer produces a signal on chop that hasn't earned a regime change.
+Trading off against the old crossover-based flip: this version fires later (only after `Bestätigungskerzen` bars of confirmation) but no longer produces a signal on chop that hasn't earned a regime change. Struktur-Ausbruch is the classic Ichimoku "price vs. Kumo" read, correctly time-aligned — not to be confused with comparing price against the still-unshifted (future, not yet reachable) preview value.

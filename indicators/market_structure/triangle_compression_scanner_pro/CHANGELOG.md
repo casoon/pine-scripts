@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.13 — 2026-07-14
+- Ported the near-miss candidate-preview mechanism from Wolfe Wave Scanner Pro / Broadening Wedge Scanner Pro (was missing here): `showCandidate` toggle, `candidateThreshold` (Debug group), dashed preview lines for the current best-in-window shape once it scores between `candidateThreshold` and `minScore`, and a "Triangle Candidate" watch marker
+
 ## v1.12 — 2026-07-06
 - Idea evaluated from a reference indicator (Wedge and Flag Finder by Trendoscope, MPL/CC BY-NC-SA — analyzed for technique only, no code adopted per license and repo convention): its validity check tests every single bar's high/low against the channel, not just the chosen swing points. Our `insideOk` only ever checked the sampled swing highs/lows — a bar between two swings could poke through the channel without ever registering as a swing itself, so a "triangle" could hold only at the sampled points, not for real across the whole window
 - Added `barsInsideOk` as a new hard veto (like `structureOk`): loops every bar from `windowStartX` to `windowEndX` and rejects the pattern if any bar's high/low breaches either boundary beyond `touchTolAtr`. Added `max_bars_back(high, 2000)`/`max_bars_back(low, 2000)` since the check can index a few hundred bars back with a variable (non-constant) offset

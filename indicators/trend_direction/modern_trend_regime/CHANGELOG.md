@@ -1,3 +1,13 @@
+## v1.5.1 — 2026-07-15
+- Raised Standard preset's confirmation bars (3 → 6) — direction (DI+stack+price) is trivially satisfied by any short swing, so the 4-of-5 trend score effectively only needed one lenient strength factor (ADX or ER) on top; on 1H charts this confirmed a "trend" on almost every wiggle inside an otherwise ranging market. A longer confirmation window filters short-lived alignment without touching the score math (which would risk reintroducing the opposite problem — see v1.3.0). Other presets unchanged for now
+
+## v1.5.0 — 2026-07-14
+- Strukturvorschau fill opacity now scales with structure width (`structureWidthAtr`) — a wide/strong structure renders more opaque, a compressed one more transparent, matching the classic "cloud thickness = conviction" Ichimoku read. No new input, just makes the existing fill more informative
+- Added Struktur-Ausbruch: a small arrow marker (plus alert) when price crosses the structure preview value that is actually visible under today's bar — i.e. `structureUpper`/`structureLower` from `structurePreviewOffset` bars ago, not the still-unshifted (future) value. This is the correctly time-aligned "price vs. Kumo" signal; the previous Struktur-Twist (v1.4.0, reverted in v1.4.1) compared the wrong thing and was also just noise from a raw same-bar crossover. New "Struktur-Ausbruch markieren" toggle, default on
+
+## v1.4.1 — 2026-07-14
+- Reverted Struktur-Twist (added in v1.4.0) — the dots added visual clutter without a clear read; the cloud's own color change already shows the same crossing point
+
 ## v1.3.1 — 2026-07-14
 - Trend-confirmation marker restyled again — from the flag-style `BULL`/`BEAR` text label to a small hollow triangle (`label.style_triangleup`/`triangledown`, `size.tiny`) carrying the same information as a hover tooltip instead of inline text
 

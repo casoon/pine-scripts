@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3 — 2026-07-14
+- Removed fixed ±100 upper/lower zone boundary hlines and their OB/OS zone fill — these forced the panel's autoscale regardless of actual TSI range, compressing the TSI/signal/context lines near zero since real TSI values rarely approach ±100 at the default ±25 stretch zones. The panel now autoscales to the real data range. Same fix already applied to ROC Advanced and Fisher Transform Advanced in their v1.1.
+
 ## v1.2 — 2026-07-09
 - Fixed Sentiment Bar color: it used `score > 0 ? colBull : colBear`, coloring the overbought side (positive score) bull and the oversold side (negative score) bear — backwards from every other color cue in the panel (gradient line, Bull/Bear Extreme triangles), where `colBull` marks the oversold/bullish-reversal side and `colBear` the overbought/bearish-reversal side. Swapped to match.
 
