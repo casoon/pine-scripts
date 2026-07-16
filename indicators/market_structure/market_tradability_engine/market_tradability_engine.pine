@@ -1,0 +1,1758 @@
+//@version=6
+// ============================================================================
+// Market Tradability Engine [WavesUnchained]
+// Version: 1.3.2
+// Author: WavesUnchained
+// Build: 2026-07-16
+// ============================================================================
+// Market quality and no-trade filter.
+//
+// Primary purpose:
+//   Detect market phases in which directional trading has little statistical
+//   justification and identify the transition from balance/compression into
+//   a potentially tradeable expansion.
+//
+// States:
+//   NO TRADE   - inefficient, noisy and directionless market
+//   BALANCE    - established sideways auction with stable boundaries
+//   COMPRESSION- volatility contracts inside balance
+//   READY      - compression plus directional pressure near a range boundary
+//   BREAKOUT   - confirmed departure from the balance area
+//   TREND      - efficient directional expansion
+//   AFTERMATH  - a recent directional impulse has gone quiet; ADX is still
+//                elevated but current efficiency has collapsed
+//   EXHAUSTION - extended trend with declining quality
+//
+// Main outputs:
+//   Tradability Score  0-100
+//   Compression Score  0-100
+//   Balance Score      0-100
+//   Direction Score   -100 to +100
+//
+// Features:
+//   ✓ Weighted multi-factor Tradability / Balance / Compression / Direction scores
+//   ✓ Eight-state market machine with disagreement-streak confirmation and
+//     minimum-duration hysteresis
+//   ✓ ADX contribution to Tradability gated by current efficiency, so a
+//     lagging post-impulse ADX reading can't prop up the score
+//   ✓ Dual-window efficiency ratio (fast/slow) distinguishes a genuine
+//     range from a pause right after a directional impulse
+//   ✓ Post-breakout Balance lock prevents an immediate consolidation from
+//     re-qualifying as a new Balance
+//   ✓ Breakout acceptance: requires price to hold beyond the boundary for
+//     several bars instead of confirming on a single spike candle
+//   ✓ Ready requires volatility ticking up off a recent trough (energy
+//     building), not just directional pressure at a boundary
+//   ✓ Compression score includes a coiling-energy component (shrinking
+//     bodies, growing wicks) alongside the ATR/bandwidth contraction reading
+//   ✓ Ratio-based scores (ATR, bandwidth, efficiency, ADX, candle shape,
+//     volume) are ranked against their own recent history (percentile rank)
+//     instead of fixed constants, so the same defaults generalize across
+//     timeframes and instruments
+//   ✓ Balance-boundary lines, midline and transition markers
+//   ✓ Dashboard with score breakdown, live candidate state and
+//     plain-language action hint
+//   ✓ Pine-Log calibration logging (config snapshot, per-bar raw scores,
+//     state-transition context) for offline threshold tuning
+//
+// This indicator does not generate unconditional buy/sell signals.
+// Breakout markers identify a market-state transition, not a complete setup.
+// ============================================================================
+
+indicator(
+     "Market Tradability Engine [WavesUnchained]",
+     shorttitle = "MTE",
+     overlay = true,
+     max_labels_count = 200
+)
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+int STATE_NO_TRADE   = 0
+int STATE_BALANCE    = 1
+int STATE_COMPRESSION = 2
+int STATE_READY      = 3
+int STATE_BREAKOUT   = 4
+int STATE_TREND      = 5
+int STATE_EXHAUSTION = 6
+int STATE_AFTERMATH  = 7
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+string groupPreset = "Preset"
+string groupCore = "Core Calculation"
+string groupRange = "Balance & Compression"
+string groupTransition = "Transition & Breakout"
+string groupState = "State Machine"
+string groupAftermath = "Impulse Aftermath"
+string groupVisual = "Display"
+string groupAlerts = "Alerts"
+string groupCalibration = "Calibration"
+
+// ----------------------------------------------------------------------------
+// Preset
+// ----------------------------------------------------------------------------
+
+string preset = input.string(
+     "Balanced",
+     "Preset",
+     options = [
+         "Very Fast",
+         "Fast",
+         "Balanced",
+         "Calm",
+         "Position",
+         "Custom"
+     ],
+     group = groupPreset
+)
+
+// ----------------------------------------------------------------------------
+// Custom parameters
+// ----------------------------------------------------------------------------
+
+int customQualityLength = input.int(
+     20,
+     "Quality Window",
+     minval = 8,
+     maxval = 100,
+     group = groupCore
+)
+
+int customRangeLength = input.int(
+     30,
+     "Range Window",
+     minval = 10,
+     maxval = 200,
+     group = groupRange
+)
+
+int customBaselineLength = input.int(
+     34,
+     "Baseline Length",
+     minval = 5,
+     maxval = 200,
+     group = groupCore
+)
+
+int customAtrLength = input.int(
+     14,
+     "ATR Length",
+     minval = 5,
+     maxval = 100,
+     group = groupCore
+)
+
+int customAdxLength = input.int(
+     14,
+     "ADX Length",
+     minval = 5,
+     maxval = 50,
+     group = groupCore
+)
+
+int customRankLength = input.int(
+     150,
+     "Rank Window",
+     minval = 50,
+     maxval = 500,
+     group = groupCore,
+     tooltip = "Lookback used to rank ATR/bandwidth/efficiency/ADX/candle ratios against their " +
+          "own recent history, instead of comparing them to fixed constants that would only " +
+          "fit one timeframe/instrument. Longer = more stable but slower to adapt to a genuine " +
+          "regime shift."
+)
+
+// ----------------------------------------------------------------------------
+// Balance and compression
+// ----------------------------------------------------------------------------
+
+float balanceThreshold = input.float(
+     58.0,
+     "Balance Threshold",
+     minval = 30.0,
+     maxval = 90.0,
+     step = 1.0,
+     group = groupRange
+)
+
+float compressionThreshold = input.float(
+     62.0,
+     "Compression Threshold",
+     minval = 30.0,
+     maxval = 95.0,
+     step = 1.0,
+     group = groupRange
+)
+
+float maximumRangeAtr = input.float(
+     7.0,
+     "Max Range Width (ATR)",
+     minval = 2.0,
+     maxval = 20.0,
+     step = 0.25,
+     group = groupRange,
+     tooltip = "Wider ranges are no longer treated as a compact balance."
+)
+
+// ----------------------------------------------------------------------------
+// Transition and breakout
+// ----------------------------------------------------------------------------
+
+float readyDirectionThreshold = input.float(
+     24.0,
+     "Min Direction Pressure for Ready",
+     minval = 5.0,
+     maxval = 70.0,
+     step = 1.0,
+     group = groupTransition
+)
+
+float breakoutBufferAtr = input.float(
+     0.12,
+     "Breakout Buffer (ATR)",
+     minval = 0.0,
+     maxval = 1.0,
+     step = 0.01,
+     group = groupTransition
+)
+
+float breakoutQualityThreshold = input.float(
+     46.0,
+     "Min Quality at Breakout",
+     minval = 20.0,
+     maxval = 90.0,
+     step = 1.0,
+     group = groupTransition
+)
+
+int breakoutAcceptanceBars = input.int(
+     2,
+     "Breakout Acceptance Bars",
+     minval = 1,
+     maxval = 5,
+     group = groupTransition,
+     tooltip = "Consecutive bars price must hold beyond the boundary before the breakout is " +
+          "accepted, instead of confirming on a single spike bar."
+)
+
+bool requireVolumeConfirmation = input.bool(
+     false,
+     "Require Volume Confirmation",
+     group = groupTransition,
+     tooltip = "Best left off for markets without meaningful volume data."
+)
+
+float volumeConfirmationRatio = input.float(
+     1.05,
+     "Volume Factor",
+     minval = 0.5,
+     maxval = 3.0,
+     step = 0.05,
+     group = groupTransition
+)
+
+// ----------------------------------------------------------------------------
+// State machine
+// ----------------------------------------------------------------------------
+
+int confirmationBars = input.int(
+     2,
+     "Confirmation Bars",
+     minval = 1,
+     maxval = 10,
+     group = groupState
+)
+
+int minimumStateBars = input.int(
+     3,
+     "Minimum State Duration",
+     minval = 0,
+     maxval = 20,
+     group = groupState
+)
+
+int breakoutHoldBars = input.int(
+     3,
+     "Hold Breakout State",
+     minval = 1,
+     maxval = 10,
+     group = groupState
+)
+
+int postBreakoutLockBars = input.int(
+     10,
+     "Post-Breakout Balance Lock",
+     minval = 0,
+     maxval = 50,
+     group = groupState,
+     tooltip = "Prevents a tight consolidation right after a breakout from immediately " +
+          "re-qualifying as a new balance."
+)
+
+// ----------------------------------------------------------------------------
+// Impulse aftermath
+// ----------------------------------------------------------------------------
+
+int impulseLookback = input.int(
+     10,
+     "Impulse Lookback (Bars)",
+     minval = 3,
+     maxval = 50,
+     group = groupAftermath,
+     tooltip = "Window in which a recent directional impulse (high direction + tradability) " +
+          "is looked for."
+)
+
+float impulseDirectionThreshold = input.float(
+     55.0,
+     "Min Direction Score for Impulse",
+     minval = 20.0,
+     maxval = 90.0,
+     step = 1.0,
+     group = groupAftermath
+)
+
+float impulseTradabilityThreshold = input.float(
+     60.0,
+     "Min Tradability for Impulse",
+     minval = 30.0,
+     maxval = 90.0,
+     step = 1.0,
+     group = groupAftermath
+)
+
+float aftermathAdxMin = input.float(
+     25.0,
+     "Aftermath ADX Minimum",
+     minval = 10.0,
+     maxval = 50.0,
+     step = 1.0,
+     group = groupAftermath,
+     tooltip = "ADX must still be at least this high - i.e. lagging from the recent impulse."
+)
+
+float aftermathEfficiencyMax = input.float(
+     0.12,
+     "Aftermath Efficiency Ceiling",
+     minval = 0.02,
+     maxval = 0.40,
+     step = 0.01,
+     group = groupAftermath,
+     tooltip = "The fast efficiency ratio must have dropped to or below this to count as quiet."
+)
+
+int fastEfficiencyLength = input.int(
+     8,
+     "Fast Efficiency Length",
+     minval = 3,
+     maxval = 50,
+     group = groupAftermath,
+     tooltip = "Short window used alongside the Quality Window's efficiency ratio to tell a " +
+          "genuine range apart from a pause right after a directional impulse."
+)
+
+// ----------------------------------------------------------------------------
+// Visuals
+// ----------------------------------------------------------------------------
+
+bool showBackground = input.bool(
+     true,
+     "State in Background",
+     group = groupVisual
+)
+
+bool showRange = input.bool(
+     true,
+     "Show Balance Boundaries",
+     group = groupVisual
+)
+
+bool showBaseline = input.bool(
+     false,
+     "Show Baseline",
+     group = groupVisual
+)
+
+bool showSignals = input.bool(
+     true,
+     "Transition Markers",
+     group = groupVisual
+)
+
+bool showDashboard = input.bool(
+     true,
+     "Show Dashboard",
+     group = groupVisual
+)
+
+bool showScorePane = input.bool(
+     false,
+     "Scores in Data Window",
+     group = groupVisual,
+     tooltip = "Scores appear in the data window. The indicator stays on the main chart."
+)
+
+// ----------------------------------------------------------------------------
+// Alerts
+// ----------------------------------------------------------------------------
+
+bool enableDynamicAlerts = input.bool(
+     false,
+     "Enable Dynamic Aggregate Alerts",
+     group = groupAlerts
+)
+
+// ----------------------------------------------------------------------------
+// Calibration logging
+// ----------------------------------------------------------------------------
+
+bool enableCalibrationLog = input.bool(
+     false,
+     "Enable Calibration Log",
+     group = groupCalibration,
+     tooltip = "Writes one config line, one line per confirmed bar with all raw values/scores, " +
+          "and one line per state change to the Pine Logs. Meant for CSV export and offline " +
+          "threshold calibration - produces a lot of log lines over long ranges, so it's off " +
+          "by default."
+)
+
+// ============================================================================
+// PRESET RESOLUTION
+// ============================================================================
+
+int qualityLength =
+     preset == "Very Fast" ? 10 :
+     preset == "Fast"      ? 14 :
+     preset == "Balanced"  ? 20 :
+     preset == "Calm"      ? 30 :
+     preset == "Position"  ? 45 :
+     customQualityLength
+
+int rangeLength =
+     preset == "Very Fast" ? 16 :
+     preset == "Fast"      ? 22 :
+     preset == "Balanced"  ? 30 :
+     preset == "Calm"      ? 45 :
+     preset == "Position"  ? 70 :
+     customRangeLength
+
+int baselineLength =
+     preset == "Very Fast" ? 18 :
+     preset == "Fast"      ? 25 :
+     preset == "Balanced"  ? 34 :
+     preset == "Calm"      ? 50 :
+     preset == "Position"  ? 80 :
+     customBaselineLength
+
+int atrLength =
+     preset == "Very Fast" ? 10 :
+     preset == "Fast"      ? 12 :
+     preset == "Balanced"  ? 14 :
+     preset == "Calm"      ? 18 :
+     preset == "Position"  ? 21 :
+     customAtrLength
+
+int adxLength =
+     preset == "Very Fast" ? 8 :
+     preset == "Fast"      ? 10 :
+     preset == "Balanced"  ? 14 :
+     preset == "Calm"      ? 18 :
+     preset == "Position"  ? 21 :
+     customAdxLength
+
+int rankLength =
+     preset == "Very Fast" ? 80 :
+     preset == "Fast"      ? 110 :
+     preset == "Balanced"  ? 150 :
+     preset == "Calm"      ? 220 :
+     preset == "Position"  ? 350 :
+     customRankLength
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+f_clamp(float value, float minimum, float maximum) =>
+    math.max(minimum, math.min(maximum, value))
+
+f_safeDiv(float numerator, float denominator, float fallback) =>
+    math.abs(denominator) > 0.0000001 ? numerator / denominator : fallback
+
+f_scale(float value, float lower, float upper) =>
+    float span = upper - lower
+    span != 0.0 ? f_clamp((value - lower) / span, 0.0, 1.0) : 0.0
+
+f_inverseScale(float value, float lower, float upper) =>
+    1.0 - f_scale(value, lower, upper)
+
+f_scoreColor(float score) =>
+    score >= 70.0 ? color.rgb(31, 164, 99) :
+     score >= 50.0 ? color.rgb(214, 164, 45) :
+     color.rgb(195, 65, 65)
+
+f_directionColor(float score) =>
+    score >= 20.0 ? color.rgb(31, 164, 99) :
+     score <= -20.0 ? color.rgb(195, 65, 65) :
+     color.rgb(130, 136, 145)
+
+f_stateName(int state) =>
+    switch state
+        STATE_NO_TRADE    => "NO TRADE"
+        STATE_BALANCE     => "BALANCE"
+        STATE_COMPRESSION => "COMPRESSION"
+        STATE_READY       => "READY"
+        STATE_BREAKOUT    => "BREAKOUT"
+        STATE_TREND       => "TREND"
+        STATE_AFTERMATH   => "AFTERMATH"
+        STATE_EXHAUSTION  => "EXHAUSTION"
+        => "UNKNOWN"
+
+f_stateColor(int state, int transparency) =>
+    color baseColor =
+         state == STATE_NO_TRADE    ? color.rgb(120, 124, 132) :
+         state == STATE_BALANCE     ? color.rgb(67, 105, 160) :
+         state == STATE_COMPRESSION ? color.rgb(136, 91, 181) :
+         state == STATE_READY       ? color.rgb(218, 151, 38) :
+         state == STATE_BREAKOUT    ? color.rgb(29, 172, 119) :
+         state == STATE_TREND       ? color.rgb(23, 139, 91) :
+         state == STATE_AFTERMATH   ? color.rgb(150, 140, 90) :
+         state == STATE_EXHAUSTION  ? color.rgb(204, 92, 52) :
+         color.gray
+
+    color.new(baseColor, transparency)
+
+f_directionText(float score) =>
+    score >= 55.0  ? "STRONG UP" :
+     score >= 20.0 ? "UP" :
+     score <= -55.0 ? "STRONG DOWN" :
+     score <= -20.0 ? "DOWN" :
+     "NEUTRAL"
+
+f_formatScore(float score) =>
+    str.tostring(math.round(score))
+
+// ============================================================================
+// BASE CALCULATIONS
+// ============================================================================
+
+// Bar offset used everywhere a "recent trough" or "N bars ago" comparison is
+// needed (energy building, momentum decay). Scales with the Quality Window
+// instead of a flat hardcoded 3/5 bars, which would mean a very different
+// amount of real time depending on the chart's timeframe.
+
+int shortWindow = math.max(3, qualityLength / 4)
+
+float atr = ta.atr(atrLength)
+float atrReference = ta.ema(atr, qualityLength * 2)
+float atrRatio = f_safeDiv(atr, atrReference, 1.0)
+
+float baseline = ta.ema(close, baselineLength)
+float baselineSlope = baseline - baseline[qualityLength]
+float normalizedSlope = f_safeDiv(baselineSlope, atr * math.sqrt(qualityLength), 0.0)
+
+[plusDi, minusDi, adx] = ta.dmi(adxLength, adxLength)
+
+float barRange = math.max(high - low, syminfo.mintick)
+float bodySize = math.abs(close - open)
+float bodyRatio = f_safeDiv(bodySize, barRange, 0.0)
+
+float upperWick = high - math.max(open, close)
+float lowerWick = math.min(open, close) - low
+float totalWick = upperWick + lowerWick
+float wickRatio = f_safeDiv(totalWick, barRange, 0.0)
+
+float averageBodyRatio = ta.ema(bodyRatio, qualityLength)
+float averageWickRatio = ta.ema(wickRatio, qualityLength)
+
+float priceTravel = math.sum(math.abs(ta.change(close)), qualityLength)
+float netMovement = math.abs(close - close[qualityLength])
+float efficiencyRatio = f_safeDiv(netMovement, priceTravel, 0.0)
+
+// Dual-window efficiency: efficiencyRatio above is the slow/base reading
+// (Quality Window). fastEfficiencyRatio uses a shorter window so a genuine
+// range can be told apart from a pause right after a directional impulse -
+// fast low while the impulse lookback still shows a recent strong move is
+// the Aftermath signature, not Balance/Compression.
+
+float fastPriceTravel = math.sum(math.abs(ta.change(close)), fastEfficiencyLength)
+float fastNetMovement = math.abs(close - close[fastEfficiencyLength])
+float fastEfficiencyRatio = f_safeDiv(fastNetMovement, fastPriceTravel, 0.0)
+
+float directionStep =
+     close > close[1] ? 1.0 :
+     close < close[1] ? -1.0 :
+     0.0
+
+float directionalConsistency =
+     f_safeDiv(
+         math.abs(math.sum(directionStep, qualityLength)),
+         qualityLength,
+         0.0
+     )
+
+float signedConsistency =
+     f_safeDiv(
+         math.sum(directionStep, qualityLength),
+         qualityLength,
+         0.0
+     )
+
+float baselineCross =
+     ta.cross(close, baseline) ? 1.0 : 0.0
+
+float baselineCrossRate =
+     f_safeDiv(
+         math.sum(baselineCross, qualityLength),
+         qualityLength,
+         0.0
+     )
+
+float closeDisplacement =
+     f_safeDiv(close - baseline, atr, 0.0)
+
+// ============================================================================
+// RANGE STRUCTURE
+// ============================================================================
+
+// Previous-bar boundaries prevent the current breakout candle from moving
+// its own breakout threshold.
+
+float rollingRangeHigh = ta.highest(high[1], rangeLength)
+float rollingRangeLow = ta.lowest(low[1], rangeLength)
+float rollingRangeWidth = rollingRangeHigh - rollingRangeLow
+float rangeWidthAtr = f_safeDiv(rollingRangeWidth, atr, maximumRangeAtr * 2.0)
+
+float rangePosition =
+     f_safeDiv(
+         close - rollingRangeLow,
+         rollingRangeWidth,
+         0.5
+     )
+
+rangePosition := f_clamp(rangePosition, 0.0, 1.0)
+
+float rangeMidpoint = (rollingRangeHigh + rollingRangeLow) * 0.5
+
+float previousRangeHigh =
+     ta.highest(high[rangeLength + 1], rangeLength)
+
+float previousRangeLow =
+     ta.lowest(low[rangeLength + 1], rangeLength)
+
+float upperBoundaryChange =
+     f_safeDiv(
+         math.abs(rollingRangeHigh - previousRangeHigh),
+         atr,
+         0.0
+     )
+
+float lowerBoundaryChange =
+     f_safeDiv(
+         math.abs(rollingRangeLow - previousRangeLow),
+         atr,
+         0.0
+     )
+
+float boundaryStability =
+     1.0 - f_clamp(
+         (upperBoundaryChange + lowerBoundaryChange) * 0.5,
+         0.0,
+         1.0
+     )
+
+// ============================================================================
+// VOLATILITY AND COMPRESSION
+// ============================================================================
+
+float basis = ta.sma(close, qualityLength)
+float deviation = ta.stdev(close, qualityLength)
+float bandWidth = f_safeDiv(deviation * 4.0, basis, 0.0)
+float bandWidthReference = ta.ema(bandWidth, qualityLength * 2)
+float bandWidthRatio = f_safeDiv(bandWidth, bandWidthReference, 1.0)
+
+// Ranked against each series' own recent history (rankLength) instead of
+// fixed constants - a fixed 0.72-1.08 band on atrRatio, tuned by eye on one
+// chart, would silently misclassify on a different timeframe or instrument
+// where that ratio naturally swings wider or narrower.
+
+float atrContractionScore =
+     100.0 - ta.percentrank(atrRatio, rankLength)
+
+float bandContractionScore =
+     100.0 - ta.percentrank(bandWidthRatio, rankLength)
+
+float rangeCompactnessScore =
+     100.0 - ta.percentrank(rangeWidthAtr, rankLength)
+
+float volatilityExpansionScore =
+     ta.percentrank(atrRatio, rankLength)
+
+// ============================================================================
+// VOLUME
+// ============================================================================
+
+float volumeReference = ta.ema(volume, qualityLength)
+float volumeRatio =
+     na(volume) or na(volumeReference) ?
+     1.0 :
+     f_safeDiv(volume, volumeReference, 1.0)
+
+bool volumeConfirmed =
+     not requireVolumeConfirmation or
+     na(volume) or
+     volumeRatio >= volumeConfirmationRatio
+
+float participationScore =
+     na(volume) ?
+     50.0 :
+     ta.percentrank(volumeRatio, rankLength)
+
+// ============================================================================
+// COMPONENT SCORES
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Efficiency
+// ----------------------------------------------------------------------------
+
+float efficiencyScore =
+     ta.percentrank(efficiencyRatio, rankLength)
+
+float consistencyScore =
+     ta.percentrank(directionalConsistency, rankLength)
+
+// ----------------------------------------------------------------------------
+// Trend quality
+// ----------------------------------------------------------------------------
+
+// ADX lags: it stays elevated for a while after an impulse has already gone
+// quiet. Gating its score by the *current* efficiency ratio stops a stale,
+// post-impulse ADX reading from propping up the tradability score.
+
+float rawAdxScore =
+     ta.percentrank(adx, rankLength)
+
+float adxEfficiencyGate =
+     ta.percentrank(efficiencyRatio, rankLength) / 100.0
+
+float adxScore =
+     rawAdxScore * adxEfficiencyGate
+
+float slopeScore =
+     ta.percentrank(math.abs(normalizedSlope), rankLength)
+
+float baselineCleanlinessScore =
+     100.0 - ta.percentrank(baselineCrossRate, rankLength)
+
+float candleQualityScore =
+     ta.percentrank(averageBodyRatio, rankLength) * 0.65 +
+     (100.0 - ta.percentrank(averageWickRatio, rankLength)) * 0.35
+
+// ----------------------------------------------------------------------------
+// Balance
+// ----------------------------------------------------------------------------
+
+float balanceEfficiencyComponent =
+     100.0 - ta.percentrank(efficiencyRatio, rankLength)
+
+float balanceAdxComponent =
+     100.0 - ta.percentrank(adx, rankLength)
+
+float balanceCrossComponent =
+     ta.percentrank(baselineCrossRate, rankLength)
+
+float balanceBoundaryComponent =
+     boundaryStability * 100.0
+
+float balanceWidthComponent =
+     f_inverseScale(
+         rangeWidthAtr,
+         maximumRangeAtr * 0.65,
+         maximumRangeAtr * 1.25
+     ) * 100.0
+
+float balanceScore =
+     balanceEfficiencyComponent * 0.26 +
+     balanceAdxComponent * 0.18 +
+     balanceCrossComponent * 0.18 +
+     balanceBoundaryComponent * 0.24 +
+     balanceWidthComponent * 0.14
+
+balanceScore := f_clamp(balanceScore, 0.0, 100.0)
+
+// ----------------------------------------------------------------------------
+// Compression
+// ----------------------------------------------------------------------------
+
+// Coiling energy: shrinking candle bodies plus growing wicks describe
+// indecision building up under the surface, on top of the plain "volatility
+// is low" reading the ATR/bandwidth components already give.
+
+float bodyContractionScore =
+     100.0 - ta.percentrank(averageBodyRatio, rankLength)
+
+float wickExpansionScore =
+     ta.percentrank(averageWickRatio, rankLength)
+
+float compressionEnergyComponent =
+     bodyContractionScore * 0.5 + wickExpansionScore * 0.5
+
+float compressionScore =
+     atrContractionScore * 0.27 +
+     bandContractionScore * 0.27 +
+     rangeCompactnessScore * 0.16 +
+     balanceBoundaryComponent * 0.12 +
+     balanceEfficiencyComponent * 0.06 +
+     compressionEnergyComponent * 0.12
+
+compressionScore := f_clamp(compressionScore, 0.0, 100.0)
+
+// ----------------------------------------------------------------------------
+// Direction
+// ----------------------------------------------------------------------------
+
+float slopeDirection =
+     f_clamp(normalizedSlope / 0.75, -1.0, 1.0)
+
+float baselineDirection =
+     f_clamp(closeDisplacement / 2.0, -1.0, 1.0)
+
+float diDenominator = plusDi + minusDi
+float diDirection =
+     f_safeDiv(plusDi - minusDi, diDenominator, 0.0)
+
+float rangePressure =
+     f_clamp((rangePosition - 0.5) * 2.0, -1.0, 1.0)
+
+float directionScore =
+     (
+         slopeDirection * 0.28 +
+         baselineDirection * 0.20 +
+         diDirection * 0.20 +
+         signedConsistency * 0.18 +
+         rangePressure * 0.14
+     ) * 100.0
+
+directionScore := f_clamp(directionScore, -100.0, 100.0)
+
+// ----------------------------------------------------------------------------
+// Tradability
+// ----------------------------------------------------------------------------
+
+float tradabilityScore =
+     efficiencyScore * 0.24 +
+     adxScore * 0.16 +
+     slopeScore * 0.15 +
+     consistencyScore * 0.13 +
+     baselineCleanlinessScore * 0.12 +
+     candleQualityScore * 0.10 +
+     volatilityExpansionScore * 0.06 +
+     participationScore * 0.04
+
+tradabilityScore := f_clamp(tradabilityScore, 0.0, 100.0)
+
+// ============================================================================
+// TRANSITION CONDITIONS
+// ============================================================================
+
+bool dataReady =
+     bar_index >
+     math.max(
+         math.max(
+             rangeLength * 2 + 5,
+             qualityLength * 3 + 5
+         ),
+         rankLength
+     )
+
+// Tracks bars since the last confirmed breakout condition. Read here at the
+// previous bar's value (updated further down, once breakoutCondition for
+// this bar is known) to gate re-entry into Balance without a forward
+// reference to the later breakout-logic block.
+
+var int barsSinceBreakout = 100000
+
+bool balanceAllowed =
+     barsSinceBreakout > postBreakoutLockBars
+
+bool establishedBalance =
+     dataReady and
+     balanceAllowed and
+     balanceScore >= balanceThreshold and
+     rangeWidthAtr <= maximumRangeAtr
+
+bool establishedCompression =
+     dataReady and
+     establishedBalance and
+     compressionScore >= compressionThreshold
+
+bool nearUpperBoundary =
+     rangePosition >= 0.68
+
+bool nearLowerBoundary =
+     rangePosition <= 0.32
+
+bool bullishPressure =
+     directionScore >= readyDirectionThreshold and
+     nearUpperBoundary
+
+bool bearishPressure =
+     directionScore <= -readyDirectionThreshold and
+     nearLowerBoundary
+
+// Energy building: volatility has bottomed out (a squeeze) and is now
+// ticking up off that trough. Without this, Ready fired on directional
+// pressure near a boundary alone, even while volatility was still flat -
+// pressure without energy behind it produced a lot of setups that just sat
+// at the boundary instead of resolving.
+
+float atrRatioTrough = ta.lowest(atrRatio, shortWindow)
+float bandWidthRatioTrough = ta.lowest(bandWidthRatio, shortWindow)
+
+bool energyBuilding =
+     atrRatio > atrRatioTrough * 1.03 or
+     bandWidthRatio > bandWidthRatioTrough * 1.03
+
+bool readyCondition =
+     establishedCompression and
+     energyBuilding and
+     (bullishPressure or bearishPressure)
+
+// ----------------------------------------------------------------------------
+// Impulse aftermath
+// ----------------------------------------------------------------------------
+
+// A recent bar showed a strong directional impulse (high |direction| and
+// high tradability at the same time) within the lookback window ...
+
+bool recentDirectionalImpulse =
+     ta.highest(math.abs(directionScore), impulseLookback) >= impulseDirectionThreshold and
+     ta.highest(tradabilityScore, impulseLookback) >= impulseTradabilityThreshold
+
+// ... but current (fast) efficiency has already collapsed while ADX is
+// still elevated from that impulse and volatility isn't expanding again.
+// This is the "impulse just went quiet" case that used to get mislabeled
+// as a fresh Balance/Compression once the post-breakout lock alone wasn't
+// enough to hold it back.
+
+bool impulseAftermath =
+     recentDirectionalImpulse and
+     adx >= aftermathAdxMin and
+     fastEfficiencyRatio <= aftermathEfficiencyMax and
+     atrRatio <= atrRatio[3]
+
+// ----------------------------------------------------------------------------
+// Breakout logic
+// ----------------------------------------------------------------------------
+
+float breakoutBuffer = atr * breakoutBufferAtr
+
+// Ranked body ratio: this candle's body must be unusually large *for this
+// instrument/timeframe*, not just above a flat 0.42 that assumes a specific
+// candle-shape distribution.
+
+float bodyRatioRank = ta.percentrank(bodyRatio, rankLength)
+
+bool rawBullishBreakout =
+     dataReady and
+     close > rollingRangeHigh + breakoutBuffer
+
+bool rawBearishBreakout =
+     dataReady and
+     close < rollingRangeLow - breakoutBuffer
+
+// Acceptance: require price to hold beyond the boundary for several bars in a
+// row instead of confirming off a single spike candle that might snap back
+// inside the range on the very next bar.
+
+var int bullishAcceptanceStreak = 0
+var int bearishAcceptanceStreak = 0
+
+bullishAcceptanceStreak := rawBullishBreakout ? bullishAcceptanceStreak + 1 : 0
+bearishAcceptanceStreak := rawBearishBreakout ? bearishAcceptanceStreak + 1 : 0
+
+bool bullishAccepted = bullishAcceptanceStreak >= breakoutAcceptanceBars
+bool bearishAccepted = bearishAcceptanceStreak >= breakoutAcceptanceBars
+
+bool bullishBreakout =
+     rawBullishBreakout and
+     bullishAccepted and
+     directionScore > 0.0 and
+     tradabilityScore >= breakoutQualityThreshold and
+     volatilityExpansionScore >= 35.0 and
+     bodyRatioRank >= 60.0 and
+     volumeConfirmed
+
+bool bearishBreakout =
+     rawBearishBreakout and
+     bearishAccepted and
+     directionScore < 0.0 and
+     tradabilityScore >= breakoutQualityThreshold and
+     volatilityExpansionScore >= 35.0 and
+     bodyRatioRank >= 60.0 and
+     volumeConfirmed
+
+bool breakoutCondition =
+     bullishBreakout or bearishBreakout
+
+if breakoutCondition
+    barsSinceBreakout := 0
+else
+    barsSinceBreakout += 1
+
+// ----------------------------------------------------------------------------
+// Trend and exhaustion
+// ----------------------------------------------------------------------------
+
+bool bullishTrend =
+     tradabilityScore >= 55.0 and
+     directionScore >= 28.0 and
+     efficiencyRatio >= 0.20 and
+     close > baseline
+
+bool bearishTrend =
+     tradabilityScore >= 55.0 and
+     directionScore <= -28.0 and
+     efficiencyRatio >= 0.20 and
+     close < baseline
+
+bool trendCondition =
+     bullishTrend or bearishTrend
+
+float extensionFromBaseline =
+     math.abs(f_safeDiv(close - baseline, atr, 0.0))
+
+bool momentumDecay =
+     efficiencyRatio < efficiencyRatio[shortWindow] and
+     averageBodyRatio < averageBodyRatio[shortWindow]
+
+bool exhaustionCondition =
+     trendCondition and
+     extensionFromBaseline >= 2.6 and
+     (
+         momentumDecay or
+         ta.percentrank(averageWickRatio, rankLength) >= 80.0 or
+         ta.percentrank(atrRatio, rankLength) >= 90.0
+     )
+
+// ============================================================================
+// STATE CANDIDATE
+// ============================================================================
+
+int candidateState =
+     not dataReady          ? STATE_NO_TRADE :
+     breakoutCondition      ? STATE_BREAKOUT :
+     exhaustionCondition    ? STATE_EXHAUSTION :
+     trendCondition         ? STATE_TREND :
+     readyCondition         ? STATE_READY :
+     impulseAftermath       ? STATE_AFTERMATH :
+     establishedCompression ? STATE_COMPRESSION :
+     establishedBalance     ? STATE_BALANCE :
+     STATE_NO_TRADE
+
+// ============================================================================
+// STATE MACHINE
+// ============================================================================
+
+var int marketState = STATE_NO_TRADE
+var int disagreementStreak = 0
+var int stateBars = 0
+var int breakoutBarsRemaining = 0
+var int activeDirection = 0
+
+// Counts consecutive bars where the live candidate disagrees with the
+// confirmed state, regardless of which specific alternate candidate shows up
+// each bar. A candidate that keeps flipping between e.g. NO_TRADE and READY
+// still erodes a stale BALANCE label just as fast as one that holds steady -
+// the old version reset its counter on every candidate flip and could get
+// stuck on a state none of the current scores support anymore.
+
+bool candidateDisagrees =
+     candidateState != marketState
+
+disagreementStreak := candidateDisagrees ? disagreementStreak + 1 : 0
+
+if bullishBreakout
+    activeDirection := 1
+else if bearishBreakout
+    activeDirection := -1
+else if marketState == STATE_TREND
+    if directionScore >= 20.0
+        activeDirection := 1
+    else if directionScore <= -20.0
+        activeDirection := -1
+
+if breakoutCondition
+    breakoutBarsRemaining := breakoutHoldBars
+
+if breakoutBarsRemaining > 0
+    breakoutBarsRemaining -= 1
+
+bool forceBreakout =
+     candidateState == STATE_BREAKOUT
+
+bool holdBreakout =
+     marketState == STATE_BREAKOUT and
+     breakoutBarsRemaining > 0 and
+     not exhaustionCondition
+
+bool mayLeaveCurrentState =
+     stateBars >= minimumStateBars or
+     forceBreakout or
+     marketState == STATE_BREAKOUT
+
+int requiredConfirmation =
+     candidateState == STATE_BREAKOUT ? 1 :
+     candidateState == STATE_NO_TRADE ? confirmationBars + 1 :
+     confirmationBars
+
+bool stateConfirmed =
+     disagreementStreak >= requiredConfirmation
+
+int previousMarketState = marketState
+int previousStateBars = stateBars
+
+if holdBreakout
+    marketState := STATE_BREAKOUT
+    stateBars += 1
+else if stateConfirmed and mayLeaveCurrentState and candidateState != marketState
+    marketState := candidateState
+    stateBars := 0
+else
+    stateBars += 1
+
+// ============================================================================
+// STATE EVENTS
+// ============================================================================
+
+bool stateChanged =
+     marketState != marketState[1]
+
+bool enteredNoTrade =
+     stateChanged and marketState == STATE_NO_TRADE
+
+bool enteredBalance =
+     stateChanged and marketState == STATE_BALANCE
+
+bool enteredCompression =
+     stateChanged and marketState == STATE_COMPRESSION
+
+bool enteredReady =
+     stateChanged and marketState == STATE_READY
+
+bool enteredBreakout =
+     stateChanged and marketState == STATE_BREAKOUT
+
+bool enteredTrend =
+     stateChanged and marketState == STATE_TREND
+
+bool enteredAftermath =
+     stateChanged and marketState == STATE_AFTERMATH
+
+bool enteredExhaustion =
+     stateChanged and marketState == STATE_EXHAUSTION
+
+bool bullishBreakoutEvent =
+     enteredBreakout and activeDirection == 1
+
+bool bearishBreakoutEvent =
+     enteredBreakout and activeDirection == -1
+
+bool bullishReadyEvent =
+     enteredReady and directionScore > 0.0
+
+bool bearishReadyEvent =
+     enteredReady and directionScore < 0.0
+
+// ============================================================================
+// CALIBRATION LOGGING
+// ============================================================================
+
+// One-off config snapshot so a later CSV export of the Pine Logs is
+// self-contained and doesn't depend on remembering the input panel state.
+
+var bool calibrationConfigLogged = false
+
+if enableCalibrationLog and not calibrationConfigLogged and barstate.isconfirmed
+    log.info(str.format(
+         'MTE CONFIG | preset={0} | qualityLen={1} | rangeLen={2} | baselineLen={3} | atrLen={4} | adxLen={5} | rankLen={6} | balanceTh={7} | compressionTh={8} | maxRangeAtr={9} | readyDirTh={10} | breakoutBufferAtr={11} | breakoutQualityTh={12} | breakoutAcceptanceBars={13} | confirmBars={14} | minStateBars={15} | breakoutHoldBars={16} | postBreakoutLockBars={17} | fastEffLen={18} | impulseLookback={19} | impulseDirTh={20} | impulseTradTh={21} | aftermathAdxMin={22} | aftermathEffMax={23} | tf={24} | symbol={25}',
+         preset, qualityLength, rangeLength, baselineLength, atrLength, adxLength, rankLength,
+         str.tostring(balanceThreshold, '#.#'), str.tostring(compressionThreshold, '#.#'),
+         str.tostring(maximumRangeAtr, '#.##'),
+         str.tostring(readyDirectionThreshold, '#.#'), str.tostring(breakoutBufferAtr, '#.##'),
+         str.tostring(breakoutQualityThreshold, '#.#'), breakoutAcceptanceBars, confirmationBars,
+         minimumStateBars, breakoutHoldBars, postBreakoutLockBars, fastEfficiencyLength, impulseLookback,
+         str.tostring(impulseDirectionThreshold, '#.#'), str.tostring(impulseTradabilityThreshold, '#.#'),
+         str.tostring(aftermathAdxMin, '#.#'), str.tostring(aftermathEfficiencyMax, '#.##'),
+         timeframe.period, syminfo.ticker
+    ))
+    calibrationConfigLogged := true
+
+// Per-bar raw scores and inputs behind the state machine, meant for offline
+// distribution analysis (percentile buckets per state, threshold sweeps).
+
+if enableCalibrationLog and barstate.isconfirmed
+    log.info(str.format(
+         'MTE CAL | bar={0} | state={1} | candidate={2} | tradability={3} | balance={4} | compression={5} | direction={6} | atrRatio={7} | bandWidthRatio={8} | rangeWidthAtr={9} | efficiencyRatio={10} | fastEfficiencyRatio={11} | adx={12} | boundaryStability={13} | rangePosition={14} | volumeRatio={15} | bodyRatio={16} | wickRatio={17} | compressionEnergy={18} | tf={19}',
+         bar_index, f_stateName(marketState), f_stateName(candidateState),
+         str.tostring(tradabilityScore, '#.##'), str.tostring(balanceScore, '#.##'),
+         str.tostring(compressionScore, '#.##'), str.tostring(directionScore, '#.##'),
+         str.tostring(atrRatio, '#.###'), str.tostring(bandWidthRatio, '#.###'),
+         str.tostring(rangeWidthAtr, '#.##'), str.tostring(efficiencyRatio, '#.###'),
+         str.tostring(fastEfficiencyRatio, '#.###'),
+         str.tostring(adx, '#.##'), str.tostring(boundaryStability, '#.###'),
+         str.tostring(rangePosition, '#.###'), str.tostring(volumeRatio, '#.###'),
+         str.tostring(bodyRatio, '#.###'), str.tostring(wickRatio, '#.###'),
+         str.tostring(compressionEnergyComponent, '#.##'),
+         timeframe.period
+    ))
+
+// State-transition context: what the machine looked like right before and
+// right after a state change, and how long the previous state held.
+
+if enableCalibrationLog and stateChanged and barstate.isconfirmed
+    log.info(str.format(
+         'MTE TRANSITION | bar={0} | from={1} | to={2} | prevStateBars={3} | dirActive={4} | tradability={5} | balance={6} | compression={7} | direction={8} | tf={9}',
+         bar_index, f_stateName(previousMarketState), f_stateName(marketState),
+         previousStateBars, activeDirection,
+         str.tostring(tradabilityScore, '#.##'), str.tostring(balanceScore, '#.##'),
+         str.tostring(compressionScore, '#.##'), str.tostring(directionScore, '#.##'),
+         timeframe.period
+    ))
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Background
+// ----------------------------------------------------------------------------
+
+color backgroundColor =
+     marketState == STATE_NO_TRADE    ? f_stateColor(marketState, 90) :
+     marketState == STATE_BALANCE     ? f_stateColor(marketState, 92) :
+     marketState == STATE_COMPRESSION ? f_stateColor(marketState, 88) :
+     marketState == STATE_READY       ? f_stateColor(marketState, 86) :
+     marketState == STATE_BREAKOUT    ? f_stateColor(marketState, 82) :
+     marketState == STATE_TREND       ? f_stateColor(marketState, 92) :
+     marketState == STATE_AFTERMATH   ? f_stateColor(marketState, 88) :
+     marketState == STATE_EXHAUSTION  ? f_stateColor(marketState, 86) :
+     na
+
+bgcolor(showBackground ? backgroundColor : na)
+
+// ----------------------------------------------------------------------------
+// Range boundaries
+// ----------------------------------------------------------------------------
+
+bool rangeState =
+     marketState == STATE_BALANCE or
+     marketState == STATE_COMPRESSION or
+     marketState == STATE_READY
+
+color rangeLineColor =
+     marketState == STATE_READY ?
+     color.new(f_directionColor(directionScore), 5) :
+     marketState == STATE_COMPRESSION ?
+     color.new(color.rgb(151, 101, 196), 10) :
+     color.new(color.rgb(75, 112, 164), 25)
+
+plotRangeHigh = plot(
+     showRange and rangeState ? rollingRangeHigh : na,
+     "Balance Upper",
+     color = rangeLineColor,
+     linewidth = 2,
+     style = plot.style_linebr
+)
+
+plotRangeLow = plot(
+     showRange and rangeState ? rollingRangeLow : na,
+     "Balance Lower",
+     color = rangeLineColor,
+     linewidth = 2,
+     style = plot.style_linebr
+)
+
+plotRangeMid = plot(
+     showRange and rangeState ? rangeMidpoint : na,
+     "Balance Midline",
+     color = color.new(rangeLineColor, 55),
+     linewidth = 1,
+     style = plot.style_linebr
+)
+
+fill(
+     plotRangeHigh,
+     plotRangeLow,
+     color = showRange and rangeState ?
+         color.new(rangeLineColor, 91) :
+         na,
+     title = "Balance Area"
+)
+
+// ----------------------------------------------------------------------------
+// Baseline
+// ----------------------------------------------------------------------------
+
+plot(
+     showBaseline ? baseline : na,
+     "Quality Baseline",
+     color = color.new(f_directionColor(directionScore), 25),
+     linewidth = 2
+)
+
+// ----------------------------------------------------------------------------
+// Transition markers
+// ----------------------------------------------------------------------------
+
+plotshape(
+     showSignals and bullishReadyEvent,
+     title = "Bullish Ready",
+     style = shape.diamond,
+     location = location.belowbar,
+     color = color.rgb(218, 151, 38),
+     size = size.tiny,
+     text = "R",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+plotshape(
+     showSignals and bearishReadyEvent,
+     title = "Bearish Ready",
+     style = shape.diamond,
+     location = location.abovebar,
+     color = color.rgb(218, 151, 38),
+     size = size.tiny,
+     text = "R",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+plotshape(
+     showSignals and bullishBreakoutEvent,
+     title = "Bullish Balance Breakout",
+     style = shape.triangleup,
+     location = location.belowbar,
+     color = color.rgb(24, 170, 108),
+     size = size.small,
+     text = "BREAK",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+plotshape(
+     showSignals and bearishBreakoutEvent,
+     title = "Bearish Balance Breakout",
+     style = shape.triangledown,
+     location = location.abovebar,
+     color = color.rgb(197, 66, 66),
+     size = size.small,
+     text = "BREAK",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+plotshape(
+     showSignals and enteredNoTrade,
+     title = "No Trade",
+     style = shape.xcross,
+     location = location.abovebar,
+     color = color.rgb(130, 134, 141),
+     size = size.tiny,
+     text = "STOP",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+plotshape(
+     showSignals and enteredAftermath and activeDirection >= 0,
+     title = "Aftermath (above)",
+     style = shape.square,
+     location = location.abovebar,
+     color = color.rgb(150, 140, 90),
+     size = size.tiny,
+     text = "AM",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+plotshape(
+     showSignals and enteredAftermath and activeDirection < 0,
+     title = "Aftermath (below)",
+     style = shape.square,
+     location = location.belowbar,
+     color = color.rgb(150, 140, 90),
+     size = size.tiny,
+     text = "AM",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+plotshape(
+     showSignals and enteredExhaustion and activeDirection >= 0,
+     title = "Exhaustion (above)",
+     style = shape.circle,
+     location = location.abovebar,
+     color = color.rgb(207, 94, 49),
+     size = size.tiny,
+     text = "EX",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+plotshape(
+     showSignals and enteredExhaustion and activeDirection < 0,
+     title = "Exhaustion (below)",
+     style = shape.circle,
+     location = location.belowbar,
+     color = color.rgb(207, 94, 49),
+     size = size.tiny,
+     text = "EX",
+     textcolor = color.rgb(40, 44, 51)
+)
+
+// ----------------------------------------------------------------------------
+// Data-window values
+// ----------------------------------------------------------------------------
+
+plot(
+     showScorePane ? tradabilityScore : na,
+     "Tradability Score",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? compressionScore : na,
+     "Compression Score",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? balanceScore : na,
+     "Balance Score",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? directionScore : na,
+     "Direction Score",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? efficiencyRatio * 100.0 : na,
+     "Efficiency Ratio × 100",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? fastEfficiencyRatio * 100.0 : na,
+     "Fast Efficiency Ratio × 100",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? adx : na,
+     "ADX",
+     display = display.data_window
+)
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+var table dashboard = table.new(
+     position.top_right,
+     2,
+     9,
+     border_width = 1,
+     frame_width = 1
+)
+
+if barstate.islast and showDashboard
+    color stateColor = f_stateColor(marketState, 0)
+
+    table.cell(
+         dashboard,
+         0,
+         0,
+         "MARKET STATE",
+         text_color = color.white,
+         bgcolor = color.rgb(42, 45, 51),
+         text_size = size.small
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         0,
+         f_stateName(marketState),
+         text_color = color.white,
+         bgcolor = stateColor,
+         text_size = size.small
+    )
+
+    // Live candidate vs. the confirmed state above - lets a stale label be
+    // spotted at a glance instead of only inferring it from the raw scores.
+
+    table.cell(
+         dashboard,
+         0,
+         1,
+         "Candidate",
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 15)
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         1,
+         f_stateName(candidateState),
+         text_color = color.white,
+         bgcolor = f_stateColor(candidateState, 0)
+    )
+
+    table.cell(
+         dashboard,
+         0,
+         2,
+         "Tradability",
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 15)
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         2,
+         f_formatScore(tradabilityScore),
+         text_color = color.white,
+         bgcolor = f_scoreColor(tradabilityScore)
+    )
+
+    table.cell(
+         dashboard,
+         0,
+         3,
+         "Balance",
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 15)
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         3,
+         f_formatScore(balanceScore),
+         text_color = color.white,
+         bgcolor = f_scoreColor(balanceScore)
+    )
+
+    table.cell(
+         dashboard,
+         0,
+         4,
+         "Compression",
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 15)
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         4,
+         f_formatScore(compressionScore),
+         text_color = color.white,
+         bgcolor = f_scoreColor(compressionScore)
+    )
+
+    table.cell(
+         dashboard,
+         0,
+         5,
+         "Direction",
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 15)
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         5,
+         f_directionText(directionScore),
+         text_color = color.white,
+         bgcolor = f_directionColor(directionScore)
+    )
+
+    table.cell(
+         dashboard,
+         0,
+         6,
+         "Efficiency",
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 15)
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         6,
+         f_formatScore(efficiencyRatio * 100.0),
+         text_color = color.white,
+         bgcolor = f_scoreColor(efficiencyScore)
+    )
+
+    table.cell(
+         dashboard,
+         0,
+         7,
+         "ADX",
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 15)
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         7,
+         str.tostring(adx, "#.0"),
+         text_color = color.white,
+         bgcolor = f_scoreColor(adxScore)
+    )
+
+    string actionText =
+         marketState == STATE_NO_TRADE ?
+         "IGNORE CHART" :
+         marketState == STATE_BALANCE ?
+         "DON'T TRADE THE MIDDLE" :
+         marketState == STATE_COMPRESSION ?
+         "WATCH" :
+         marketState == STATE_READY ?
+         "WAIT FOR BREAKOUT" :
+         marketState == STATE_BREAKOUT ?
+         "CHECK CONFIRMATION" :
+         marketState == STATE_TREND ?
+         "ALLOW SETUPS" :
+         marketState == STATE_AFTERMATH ?
+         "WAIT - DON'T CHASE" :
+         "REDUCE RISK"
+
+    table.cell(
+         dashboard,
+         0,
+         8,
+         "Action",
+         text_color = color.silver,
+         bgcolor = color.new(color.black, 15)
+    )
+
+    table.cell(
+         dashboard,
+         1,
+         8,
+         actionText,
+         text_color = color.white,
+         bgcolor = stateColor,
+         text_size = size.small
+    )
+
+if barstate.islast and not showDashboard
+    table.clear(dashboard, 0, 0, 1, 8)
+
+// ============================================================================
+// ALERT CONDITIONS
+// ============================================================================
+
+alertcondition(
+     enteredNoTrade,
+     "MTE: No Trade",
+     "Market Tradability Engine: the market has shifted into a non-tradable state."
+)
+
+alertcondition(
+     enteredCompression,
+     "MTE: Compression",
+     "Market Tradability Engine: a balance with increasing compression has been detected."
+)
+
+alertcondition(
+     bullishReadyEvent,
+     "MTE: Bullish Ready",
+     "Market Tradability Engine: compression with bullish pressure near the upper boundary."
+)
+
+alertcondition(
+     bearishReadyEvent,
+     "MTE: Bearish Ready",
+     "Market Tradability Engine: compression with bearish pressure near the lower boundary."
+)
+
+alertcondition(
+     bullishBreakoutEvent,
+     "MTE: Bullish Breakout",
+     "Market Tradability Engine: confirmed bullish breakout from the balance."
+)
+
+alertcondition(
+     bearishBreakoutEvent,
+     "MTE: Bearish Breakout",
+     "Market Tradability Engine: confirmed bearish breakout from the balance."
+)
+
+alertcondition(
+     enteredTrend,
+     "MTE: Trend Confirmed",
+     "Market Tradability Engine: the market has shifted into a tradable trend state."
+)
+
+alertcondition(
+     enteredAftermath,
+     "MTE: Aftermath",
+     "Market Tradability Engine: a recent impulse has gone quiet - avoid chasing until new structure forms."
+)
+
+alertcondition(
+     enteredExhaustion,
+     "MTE: Exhaustion",
+     "Market Tradability Engine: the current trend shows overextension or declining quality."
+)
+
+// ----------------------------------------------------------------------------
+// Optional dynamic aggregate alerts
+// ----------------------------------------------------------------------------
+
+if enableDynamicAlerts and barstate.isconfirmed
+    if enteredNoTrade
+        alert(
+             "MTE | NO TRADE | Tradability: " +
+             str.tostring(tradabilityScore, "#") +
+             " | Balance: " +
+             str.tostring(balanceScore, "#"),
+             alert.freq_once_per_bar_close
+        )
+
+    if bullishReadyEvent or bearishReadyEvent
+        alert(
+             "MTE | READY | Direction: " +
+             f_directionText(directionScore) +
+             " | Compression: " +
+             str.tostring(compressionScore, "#"),
+             alert.freq_once_per_bar_close
+        )
+
+    if bullishBreakoutEvent or bearishBreakoutEvent
+        alert(
+             "MTE | BREAKOUT | Direction: " +
+             f_directionText(directionScore) +
+             " | Tradability: " +
+             str.tostring(tradabilityScore, "#"),
+             alert.freq_once_per_bar_close
+        )
+
+    if enteredAftermath
+        alert(
+             "MTE | AFTERMATH | Direction: " +
+             f_directionText(directionScore) +
+             " | Tradability: " +
+             str.tostring(tradabilityScore, "#"),
+             alert.freq_once_per_bar_close
+        )
