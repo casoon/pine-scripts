@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.14 — 2026-07-15
+- Rewrote the score into 8 continuous weighted criteria — swing path (20), traversal (20), realized expansion (15), touch quality (15), line quality (10), anchor span (10), duration (5), relevance (5) — replacing the old 5-criterion binary structure/expansion/touch/lineQuality/duration score
+- `minExpansionRatio` renamed to `projectedExpansionTarget` (now blended into the realized-expansion score instead of gating on its own); added `minTraversalRatio`, `minRealizedExpansionRatio`, `minAnchorSpanRatio`, and `maxBoundaryDriftAtr` inputs backing the new traversal/realized-expansion/anchor-span/drift gates
+- `barsInsideOk` changed from a hard veto (any single bar breaching a boundary rejected the whole pattern) to a soft ≥90% bar-containment ratio that now feeds the line-quality score instead of vetoing outright
+- `f_best_boundary` tie-break: when violations and touch count are equal, the wider-spaced anchor pair now wins instead of leaving the tie to insertion order
+- Candidate preview now redraws as a bounded, capped line segment (instead of an unbounded 2-point line) with a `WATCH · <type> · <score> · Blocker: <reason>` label naming the specific gate still failing
+- Dashboard status now distinguishes ACTIVE / READY / WATCH / SCAN (previously only ACTIVE/SCAN), and its Score/Type/Window row now reads the raw best-in-window candidate (`best`) directly. Also fixed `bestTrackable`: it read `localBestTrackable` before the candidate loop that actually populates it had run, so it was always `emptyPattern()` — now assigned after that loop completes
+
 ## v1.13 — 2026-07-06
 - Idea evaluated from a reference indicator (Wedge and Flag Finder by Trendoscope, MPL/CC BY-NC-SA — analyzed for technique only, no code adopted per license and repo convention): its validity check tests every single bar's high/low against the channel, not just the chosen swing points. This scanner only ever checked the sampled swing highs/lows via `touchOk` — a bar between two swings could poke through the channel without ever registering as a swing itself, so a "wedge" could hold only at the sampled points, not for real across the whole window
 - Added `barsInsideOk` as a new hard veto (like `structureOk`): loops every bar from `windowStartX` to `windowEndX` and rejects the pattern if any bar's high/low breaches either boundary beyond `touchTolAtr`. Added `max_bars_back(high, 2000)`/`max_bars_back(low, 2000)` since the check can index a few hundred bars back with a variable (non-constant) offset

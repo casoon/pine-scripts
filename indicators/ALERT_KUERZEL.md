@@ -81,6 +81,7 @@ Message-Kanon: `<Kürzel> · <EVENT> · {{ticker}} {{interval}}` (optionaler Sta
 | wolfe_wave_scanner_pro | WWSP |
 | triangle_compression_scanner_pro | TCS |
 | broadening_wedge_scanner_pro | BWS |
+| pivot_momentum_structure | PMS |
 
 **Kollisions-Hinweis `CFR` / `CHFR`:** `CFR` gehört `compression_fractal_release` (exaktes Akronym,
 tief verankert: Indicator-Shorttitle, Log-Rows `CFR BREAK`/`CFR BAR`, Tabelle). `chandelier_flip_radar`

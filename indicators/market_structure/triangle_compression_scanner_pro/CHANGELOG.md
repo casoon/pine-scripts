@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.14 — 2026-07-15
+- Score rebuilt from 5 binary criteria (structure/compression/touch/lineQuality/duration, all-or-nothing) to 8 continuous weighted criteria: swing path (20), traversal (20), realized compression (15), boundary proximity (15), line quality (10), boundary/apex (10), duration (5), relevance (5) — each now contributes a graded amount instead of a flat pass/fail
+- New hard gates alongside the existing `structureOk`/`lineQualityOk`/`durationOk`: `pathOk` (alternating swing sequence plus monotonic same-side progression), `traversalOk` (≥3 consecutive legs each traversing ≥`minTraversalRatio` of the local channel width), `realizedCompressionOk` (actual price-leg amplitudes shrink, not just the fitted geometry), `boundaryOk` (anchor span ≥ `minAnchorSpanRatio`, mean residual ≤ `maxMeanResidualAtr`, zero swing violations, contacts spread across the window's early/middle/late thirds, and an extra touch confirming the flat side for ascending/descending), and `apexOk` (the two boundaries' intersection must lie ahead of the window but within `maxApexDistanceMult`× its width)
+- `minCompressionRatio` renamed `projectedCompressionTarget` (same meaning: target end/start width ratio); added `minTraversalRatio`, `maxRealizedCompressionRatio`, `minAnchorSpanRatio`, `maxMeanResidualAtr`, `maxApexDistanceMult`, `breakoutBufferAtr`
+- `barsInsideOk` (previously a hard veto — any single bar breaching either boundary killed the pattern) softened to a ≥90% bar-containment ratio; it's no longer a hard gate, only a continuous input to the line-quality score
+- Breakout and still-open checks now use an ATR buffer (`breakoutBufferAtr`) around each boundary instead of a bare `close` beyond the line
+- `f_best_boundary` tie-break extended: after fewest violations, now prefers the widest anchor span, then the lowest mean residual, before falling back to touch count
+- Candidate preview redrawn: dashed lines now span from the window start to the same capped extension used by tracked patterns (previously anchor-to-anchor only), and a label now shows the candidate's score plus which specific gate is currently blocking it
+- Fixed `bestTrackable`: it was reassigned from `localBestTrackable` immediately after the search loop, before the pattern loop that actually populates `localBestTrackable` had run, so it always evaluated to an empty pattern; the assignment now happens after that loop
+- Dashboard status gained a `READY`/`WATCH` distinction (previously only `ACTIVE`/`SCAN`) for a best-in-window candidate that clears `candidateThreshold` but isn't (yet) tracked
+
 ## v1.13 — 2026-07-14
 - Ported the near-miss candidate-preview mechanism from Wolfe Wave Scanner Pro / Broadening Wedge Scanner Pro (was missing here): `showCandidate` toggle, `candidateThreshold` (Debug group), dashed preview lines for the current best-in-window shape once it scores between `candidateThreshold` and `minScore`, and a "Triangle Candidate" watch marker
 

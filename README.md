@@ -125,6 +125,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`oscillator_divergence_zones.pine`](indicators/momentum/oscillator_divergence_zones/oscillator_divergence_zones.pine) | Oscillator divergence zones — RSI, CCI, MFI, Fisher, TSI, STC, DPO, Roofing, Cyber Cycle; regular + hidden; ATR-wide zones with retest counter |
 | [`market_pressure_scale.pine`](indicators/momentum/market_pressure_scale/market_pressure_scale.pine) | Dual-component oscillator — Setup Pressure (coiling) vs Impulse Pressure (expansion), Range Chop Filter, Move Strength gauge, DMI-free Reversal signal, phase labels and Action-readout dashboard |
 | [`mtf_stochrsi_pair_score.pine`](indicators/momentum/mtf_stochrsi_pair_score/mtf_stochrsi_pair_score.pine) | Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus and conflict penalty, weighted total, Bias/Quality/Timing state-engine readout, signal markers |
+| [`pivot_momentum_structure.pine`](indicators/momentum/pivot_momentum_structure/pivot_momentum_structure.pine) | RSI/WaveTrend/Stochastic RSI/CCI/Fisher/TSI/Williams %R/CMO — HH/HL/LH/LL structure on price and momentum, best-of-window divergence/alignment anchor search, structure presets, ATR-tolerant labels — [published on TradingView](https://de.tradingview.com/script/eWSJ4MNi/) |
 
 ### Liquidity & Order Flow
 

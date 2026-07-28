@@ -1,5 +1,7 @@
 # Trend Persistence Score
 
+**TradingView:** https://de.tradingview.com/script/iVyNujT3/
+
 A single-role **trend-strength** oscillator that grades how *persistent, clean and durable* the current trend is on one continuous 0–100 axis. It fuses four trend-efficiency sensors — **Regression R²**, **Kaufman Efficiency Ratio**, **ADX strength + slope**, and a **Fractal Dimension Index** — each measuring the same property (how directly price travels vs. how much it chops). The score answers one question only: *"how strong is the trend right now?"* It is **direction-agnostic** by design — the magnitude is the signal; direction is shown as visual context, never mixed into the score.
 
 This sits alongside [`regime_classifier`](../regime_classifier/) as the *graded-magnitude* complement: `regime_classifier` produces a categorical Trend / Range / Chaos *permission* gate for the reversal pipeline, while TPS produces a continuous *how-strong* reading you can plot, threshold and alert on.
@@ -14,7 +16,7 @@ This sits alongside [`regime_classifier`](../regime_classifier/) as the *graded-
 - **Calibration anchors** (ADX range/trend, FDI trend/range, damp threshold/factor) exposed as inputs — no hardcoded thresholds buried in the signal logic
 - **Two-dimensional oscillator read** (default `Direction × Strength`): the line **height** is persistence, its **colour** is direction (green = up-efficiency, red = down, grey = no clear direction, from the regression sign), and its **saturation** scales with strength (vivid in a clean trend, pale in a dead market) — plus an optional **heat column** fill to zero. A strong green column = clean uptrend; a fading green column = uptrend losing power; a shift to red = down-structure forming. Direction stays *visual only*, never fed into the score. Switch to `Persistence State` mode for the classic band colours.
 - **Directional context** (▲ Up / ▼ Down / • Flat / • Compress) also in the table — the flat read distinguishes measured **Compression** (Bollinger-width percentile rank) from plain Flat
-- Optional light-theme dashboard (default **off**) and a **debug log** on every state change (records which sensor drove the move)
+- Compact mobile-friendly info label (default **on**) and a **debug log** on every state change (records which sensor drove the move)
 - Weakening / Transition / Recovery / Transition-Risk-High **alerts**
 
 ## Sensors

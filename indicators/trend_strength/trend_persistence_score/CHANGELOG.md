@@ -2,6 +2,7 @@
 
 ## v1.1.1 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
+- Docs: header Features list still said "Light-theme dashboard" after the table was replaced by the compact info label — corrected to match README/DESCRIPTION_TV wording
 
 ## v1.1.0 — 2026-06-30
 - Color rework: green/red is now reserved for trend **direction** only. Trend strength (State, zones, hlines) uses a neutral cool ramp — Strong/Healthy in blue, Transition in amber, Weak/Dead in grey — so color no longer carries two meanings at once

@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Market Tradability Engine v2 [WavesUnchained]
-// Version: 2.2.1
+// Version: 2.5.0
 // Author: WavesUnchained
-// Build: 2026-07-16
+// Build: 2026-07-28
 // ============================================================================
 // Market quality and no-trade filter - v2 research build.
 //
@@ -22,12 +22,17 @@
 //                            rejected (wicked away), and which way?
 //
 // States (same eight as v1, now derived from Structure/Energy/Acceptance):
-//   NO TRADE   - no coherent structure (chaos or a dead market)
+//   NO TRADE   - no named regime/setup currently qualifies; the logged
+//                blocker distinguishes poor structure from a near-transition
 //   BALANCE    - range-flavored structure, low energy, neutral acceptance
 //   COMPRESSION- balance plus energy contracted further
-//   READY      - compression plus energy building off its trough plus
-//                acceptance pressure near a boundary
-//   BREAKOUT   - price held beyond the boundary for several bars with
+//   READY      - a compression was established (armed), energy is building
+//                off its trough and acceptance pressure appears near a
+//                boundary - the compression does not need to still be
+//                neutral on the Ready bar itself
+//   BREAKOUT   - price held beyond the armed balance boundary (frozen when
+//                the balance was established, not a rolling window that
+//                would chase the breakout bars) for several bars with
 //                energy and acceptance both confirming
 //   TREND      - trend-flavored structure, high energy, strong acceptance
 //   AFTERMATH  - energy and acceptance were both recently strong but energy
@@ -65,8 +70,8 @@
 //     Approx) for the Quality Baseline, matching the advanced-smoothing
 //     pattern from wavetrend_advanced_smoothing.pine
 //   ✓ Pine-Log calibration logging (config snapshot, per-bar raw scores,
-//     state-transition context), event-prefixed MTE2 so it can run
-//     side-by-side with v1's MTE log on the same chart
+//     decision gates, OHLC/ATR outcome inputs and state-transition context)
+//     for offline state-quality and forward-outcome analysis
 //
 // This indicator does not generate unconditional buy/sell signals.
 // Breakout markers identify a market-state transition, not a complete setup.
@@ -102,6 +107,7 @@ string groupStructure = "Structure"
 string groupEnergy = "Energy"
 string groupAcceptance = "Acceptance"
 string groupTransition = "Transition & Breakout"
+string groupBoundary = "Boundary Quality"
 string groupState = "State Machine"
 string groupAftermath = "Impulse Aftermath"
 string groupSmoothing = "Smoothing"
@@ -342,6 +348,81 @@ float volumeConfirmationRatio = input.float(
      maxval = 3.0,
      step = 0.05,
      group = groupTransition
+)
+
+// ----------------------------------------------------------------------------
+// Boundary quality
+// ----------------------------------------------------------------------------
+
+float boundaryTouchDistanceAtr = input.float(
+     0.20,
+     "Boundary Touch Distance (ATR)",
+     minval = 0.02,
+     maxval = 1.00,
+     step = 0.01,
+     group = groupBoundary,
+     tooltip = "Maximum ATR distance from a frozen balance boundary for a bar to count as a boundary test."
+)
+
+int boundaryTestCooldownBarsInput = input.int(
+     0,
+     "Boundary Test Cooldown",
+     minval = 0,
+     maxval = 30,
+     group = groupBoundary,
+     tooltip = "Minimum bars between separately counted tests of the same boundary. Zero uses an automatic value derived from the Quality Window."
+)
+
+int boundaryFreshTestMaximum = input.int(
+     2,
+     "Fresh Boundary: Maximum Tests",
+     minval = 1,
+     maxval = 10,
+     group = groupBoundary,
+     tooltip = "A boundary with no more than this many distinct tests is considered fresh."
+)
+
+int boundaryStressedTestMinimum = input.int(
+     4,
+     "Stressed Boundary: Minimum Tests",
+     minval = 2,
+     maxval = 15,
+     group = groupBoundary,
+     tooltip = "A boundary with at least this many distinct tests is considered repeatedly stressed."
+)
+
+float weakRejectionThreshold = input.float(
+     0.25,
+     "Weak Rejection Threshold",
+     minval = 0.05,
+     maxval = 0.75,
+     step = 0.05,
+     group = groupBoundary,
+     tooltip = "Rejection quality below this level means price remained close to the tested boundary instead of rotating meaningfully back into the range."
+)
+
+bool requireBoundaryStressForReady = input.bool(
+     false,
+     "Require Boundary Stress for Ready",
+     group = groupBoundary,
+     tooltip = "When enabled, Ready requires repeated asymmetric tests of the pressured boundary in addition to compression, rising energy and directional acceptance."
+)
+
+bool detectFailedBreakouts = input.bool(
+     true,
+     "Detect Failed Breakouts",
+     group = groupBoundary,
+     tooltip = "Identifies sweeps beyond an armed range boundary that close back inside the range with opposing bar acceptance."
+)
+
+float failedBreakoutReentryAtr = input.float(
+     0.10,
+     "Failed Breakout Re-entry (ATR)",
+     minval = 0.0,
+     maxval = 0.75,
+     step = 0.01,
+     group = groupBoundary,
+     tooltip = "Required close distance back inside the frozen range for a boundary sweep to qualify as a failed breakout."
 )
 
 // ----------------------------------------------------------------------------
@@ -587,21 +668,21 @@ float structureThreshold =
      customStructureThreshold
 
 float energyLowThreshold =
-     reactivity == "Early"        ? 42.0 :
-     reactivity == "Balanced"     ? 35.0 :
-     reactivity == "Conservative" ? 28.0 :
+     reactivity == "Early"        ? 36.0 :
+     reactivity == "Balanced"     ? 30.0 :
+     reactivity == "Conservative" ? 24.0 :
      customEnergyLowThreshold
 
 float energyVeryLowThreshold =
-     reactivity == "Early"        ? 28.0 :
-     reactivity == "Balanced"     ? 22.0 :
-     reactivity == "Conservative" ? 16.0 :
+     reactivity == "Early"        ? 23.0 :
+     reactivity == "Balanced"     ? 18.0 :
+     reactivity == "Conservative" ? 13.0 :
      customEnergyVeryLowThreshold
 
 float energyHighThreshold =
-     reactivity == "Early"        ? 48.0 :
-     reactivity == "Balanced"     ? 60.0 :
-     reactivity == "Conservative" ? 70.0 :
+     reactivity == "Early"        ? 43.0 :
+     reactivity == "Balanced"     ? 53.0 :
+     reactivity == "Conservative" ? 63.0 :
      customEnergyHighThreshold
 
 float acceptanceNeutralBand =
@@ -663,10 +744,22 @@ f_scale(float value, float lower, float upper) =>
 f_inverseScale(float value, float lower, float upper) =>
     1.0 - f_scale(value, lower, upper)
 
-f_scoreColor(float score) =>
-    score >= 70.0 ? color.rgb(31, 164, 99) :
-     score >= 50.0 ? color.rgb(214, 164, 45) :
-     color.rgb(195, 65, 65)
+// Structure and Energy are properties, not good/bad verdicts - a high
+// Structure in a dead downtrend is still a valid No Trade, and low Energy is
+// exactly what Compression looks like. Neutral scales (blue = present/quiet,
+// orange = active, gray = indistinct) avoid the green-means-go misread.
+
+f_structureColor(float score) =>
+    score >= structureThreshold ?
+     color.rgb(48, 121, 170) :
+     color.rgb(110, 114, 122)
+
+f_energyColor(float score) =>
+    score >= energyHighThreshold ?
+     color.rgb(218, 151, 38) :
+     score < energyVeryLowThreshold ?
+     color.rgb(90, 120, 170) :
+     color.rgb(130, 136, 145)
 
 f_acceptanceColor(float score) =>
     score >= 20.0 ? color.rgb(31, 164, 99) :
@@ -676,6 +769,18 @@ f_acceptanceColor(float score) =>
 f_stateName(int state) =>
     switch state
         STATE_NO_TRADE    => "NO TRADE"
+        STATE_BALANCE     => "BALANCE"
+        STATE_COMPRESSION => "COMPRESSION"
+        STATE_READY       => "READY"
+        STATE_BREAKOUT    => "BREAKOUT"
+        STATE_TREND       => "TREND"
+        STATE_AFTERMATH   => "AFTERMATH"
+        STATE_EXHAUSTION  => "EXHAUSTION"
+        => "UNKNOWN"
+
+f_stateKey(int state) =>
+    switch state
+        STATE_NO_TRADE    => "NO_TRADE"
         STATE_BALANCE     => "BALANCE"
         STATE_COMPRESSION => "COMPRESSION"
         STATE_READY       => "READY"
@@ -865,13 +970,11 @@ float rangePosition =
 
 rangePosition := f_clamp(rangePosition, 0.0, 1.0)
 
-float rangeMidpoint = (rollingRangeHigh + rollingRangeLow) * 0.5
-
 float previousRangeHigh =
-     ta.highest(high[rangeLength + 1], rangeLength)
+     rollingRangeHigh[1]
 
 float previousRangeLow =
-     ta.lowest(low[rangeLength + 1], rangeLength)
+     rollingRangeLow[1]
 
 float upperBoundaryChange =
      f_safeDiv(
@@ -939,10 +1042,60 @@ bool volumeConfirmed =
 // market that's clearly one or the other), take whichever framework
 // currently fits better.
 
-float rangeStructureQuality = boundaryStability * 100.0
+// A single bar without a new rolling extreme is not enough evidence for a
+// respected range. Smooth boundary stability across the Quality Window so a
+// range framework requires sustained, not momentary, boundary persistence.
+
+float sustainedBoundaryStability =
+     ta.ema(boundaryStability, qualityLength)
+
+// Boundary persistence alone stays high in a directional market whenever only
+// one side of the window advances. Require the rolling range to be compact as
+// well. The geometric mean makes both properties necessary without another
+// hand-tuned weight; Max Range Width remains the user-facing scale anchor.
+
+float rangeCompactness =
+     f_inverseScale(
+         rangeWidthAtr,
+         maximumRangeAtr * 0.5,
+         maximumRangeAtr
+     )
+
+float rangeStructureQuality =
+     math.sqrt(sustainedBoundaryStability * rangeCompactness) * 100.0
+
+// Rare baseline crosses alone don't make a clean trend - a quiet drift that
+// happens to sit on one side of a slow baseline would score high. Blend the
+// cross rate with efficiency, ADX, slope and directional consistency so a
+// high trend quality actually means "directed and efficient".
+
+float trendCrossQuality =
+     ta.percentrank(-baselineCrossRate, rankLength)
+
+float trendEfficiencyQuality =
+     ta.percentrank(efficiencyRatio, rankLength)
+
+float trendAdxQuality =
+     ta.percentrank(adx, rankLength)
+
+// Ranked against their own recent history like the other three components,
+// not a fixed f_scale/multiply-by-100 - those average well below 50 (strong
+// slope/consistency readings are rare by nature), which silently dragged the
+// whole composite's average below the Structure Threshold regardless of
+// instrument or timeframe.
+
+float trendSlopeQuality =
+     ta.percentrank(math.abs(normalizedSlope), rankLength)
+
+float trendConsistencyQuality =
+     ta.percentrank(math.abs(signedConsistency), rankLength)
 
 float trendStructureQuality =
-     100.0 - ta.percentrank(baselineCrossRate, rankLength)
+     trendCrossQuality       * 0.25 +
+     trendEfficiencyQuality  * 0.25 +
+     trendAdxQuality         * 0.20 +
+     trendSlopeQuality       * 0.20 +
+     trendConsistencyQuality * 0.10
 
 float structureScore = math.max(rangeStructureQuality, trendStructureQuality)
 
@@ -995,8 +1148,20 @@ float energyEfficiency =
 // construction, so its bar-to-bar delta doesn't need ranking the same way a
 // raw ratio does - only the bar offset needs to scale with the timeframe.
 
+float acceptanceMagnitudeChange =
+     math.abs(acceptanceScore) -
+     math.abs(acceptanceScore[shortWindow])
+
+// This component measures positive acceleration only.
+// Flat or declining acceptance magnitude contributes zero energy instead of
+// receiving a neutral midpoint contribution of 50.
+
 float energyMomentumAccel =
-     f_scale(math.abs(acceptanceScore) - math.abs(acceptanceScore[shortWindow]), -20.0, 20.0) * 100.0
+     f_clamp(
+         acceptanceMagnitudeChange / 20.0,
+         0.0,
+         1.0
+     ) * 100.0
 
 float candleCommitmentScore =
      ta.percentrank(averageBodyRatio, rankLength)
@@ -1074,24 +1239,323 @@ bool bearishPressure =
      acceptanceScore <= -acceptancePressureThreshold and
      nearLowerBoundary
 
-bool readyCondition =
-     establishedCompression and
-     energyBuilding and
-     (bullishPressure or bearishPressure)
+// ----------------------------------------------------------------------------
+// Armed balance / breakout logic
+// ----------------------------------------------------------------------------
 
-// ----------------------------------------------------------------------------
-// Breakout logic
-// ----------------------------------------------------------------------------
+// The rolling range window would chase the breakout bars: one bar after a
+// breakout, high[1] already contains the first breakout bar, so a multi-bar
+// acceptance check against the rolling boundary demands ever-new highs/lows
+// instead of "price holds outside the same range". Freeze the boundaries
+// while a balance is established and measure the breakout against those.
+//
+// READY has the mirrored problem: requiring neutral acceptance (compression)
+// and directional pressure on the same bar is contradictory at every
+// reactivity level. Compression arms a memory state instead; READY then only
+// needs pressure to appear while that armed compression is still valid.
+
+var float armedRangeHigh = na
+var float armedRangeLow = na
+var bool breakoutArmed = false
+var bool compressionArmed = false
+var int barsSinceBalance = 100000
+
+barsSinceBalance := establishedBalance ? 0 : barsSinceBalance + 1
+
+if establishedBalance
+    armedRangeHigh := rollingRangeHigh
+    armedRangeLow := rollingRangeLow
+    breakoutArmed := true
+
+if establishedCompression
+    compressionArmed := true
+
+// An armed balance that hasn't re-confirmed within its own window width is
+// stale - the frozen boundaries no longer describe the current market.
+
+if barsSinceBalance > rangeLength
+    breakoutArmed := false
+    compressionArmed := false
+
+if not rangeFramework
+    compressionArmed := false
+
+float breakoutReferenceHigh =
+     breakoutArmed and not na(armedRangeHigh) ?
+     armedRangeHigh :
+     rollingRangeHigh
+
+float breakoutReferenceLow =
+     breakoutArmed and not na(armedRangeLow) ?
+     armedRangeLow :
+     rollingRangeLow
 
 float breakoutBuffer = atr * breakoutBufferAtr
 
+// ============================================================================
+// BOUNDARY QUALITY / FATIGUE
+// ============================================================================
+
+// Consecutive bars pressing against one boundary count as one test sequence,
+// not as multiple independent tests.
+
+int boundaryTestCooldownBars =
+     boundaryTestCooldownBarsInput > 0 ?
+     boundaryTestCooldownBarsInput :
+     math.max(2, qualityLength / 5)
+
+float boundaryTouchBuffer =
+     atr * boundaryTouchDistanceAtr
+
+bool upperBoundaryContact =
+     dataReady and
+     breakoutArmed and
+     not na(breakoutReferenceHigh) and
+     high >= breakoutReferenceHigh - boundaryTouchBuffer and
+     close <= breakoutReferenceHigh + breakoutBuffer
+
+bool lowerBoundaryContact =
+     dataReady and
+     breakoutArmed and
+     not na(breakoutReferenceLow) and
+     low <= breakoutReferenceLow + boundaryTouchBuffer and
+     close >= breakoutReferenceLow - breakoutBuffer
+
+var int upperBoundaryTests = 0
+var int lowerBoundaryTests = 0
+var int lastUpperBoundaryTestBar = na
+var int lastLowerBoundaryTestBar = na
+var float upperRejectionQuality = na
+var float lowerRejectionQuality = na
+var float averageUpperRejectionQuality = na
+var float averageLowerRejectionQuality = na
+var int activeBalanceGeneration = 0
+
+bool newArmedBalance =
+     establishedBalance and
+     (
+         not establishedBalance[1] or
+         not breakoutArmed[1]
+     )
+
+if newArmedBalance
+    activeBalanceGeneration += 1
+    upperBoundaryTests := 0
+    lowerBoundaryTests := 0
+    lastUpperBoundaryTestBar := na
+    lastLowerBoundaryTestBar := na
+    upperRejectionQuality := na
+    lowerRejectionQuality := na
+    averageUpperRejectionQuality := na
+    averageLowerRejectionQuality := na
+
+bool upperCooldownComplete =
+     na(lastUpperBoundaryTestBar) or
+     bar_index - lastUpperBoundaryTestBar >= boundaryTestCooldownBars
+
+bool lowerCooldownComplete =
+     na(lastLowerBoundaryTestBar) or
+     bar_index - lastLowerBoundaryTestBar >= boundaryTestCooldownBars
+
+bool newUpperBoundaryTest =
+     upperBoundaryContact and
+     upperCooldownComplete
+
+bool newLowerBoundaryTest =
+     lowerBoundaryContact and
+     lowerCooldownComplete
+
+float frozenRangeWidth =
+     breakoutReferenceHigh - breakoutReferenceLow
+
+float frozenRangeMid =
+     (breakoutReferenceHigh + breakoutReferenceLow) * 0.5
+
+// A close at the boundary has rejection quality 0.
+// A close at or beyond the range midpoint has rejection quality 1.
+
+float currentUpperRejectionQuality =
+     newUpperBoundaryTest ?
+     f_clamp(
+         f_safeDiv(
+             breakoutReferenceHigh - close,
+             breakoutReferenceHigh - frozenRangeMid,
+             0.0
+         ),
+         0.0,
+         1.0
+     ) :
+     na
+
+float currentLowerRejectionQuality =
+     newLowerBoundaryTest ?
+     f_clamp(
+         f_safeDiv(
+             close - breakoutReferenceLow,
+             frozenRangeMid - breakoutReferenceLow,
+             0.0
+         ),
+         0.0,
+         1.0
+     ) :
+     na
+
+if newUpperBoundaryTest
+    upperBoundaryTests += 1
+    lastUpperBoundaryTestBar := bar_index
+    upperRejectionQuality := currentUpperRejectionQuality
+    averageUpperRejectionQuality :=
+         na(averageUpperRejectionQuality) ?
+         currentUpperRejectionQuality :
+         averageUpperRejectionQuality * 0.70 +
+         currentUpperRejectionQuality * 0.30
+
+if newLowerBoundaryTest
+    lowerBoundaryTests += 1
+    lastLowerBoundaryTestBar := bar_index
+    lowerRejectionQuality := currentLowerRejectionQuality
+    averageLowerRejectionQuality :=
+         na(averageLowerRejectionQuality) ?
+         currentLowerRejectionQuality :
+         averageLowerRejectionQuality * 0.70 +
+         currentLowerRejectionQuality * 0.30
+
+bool upperBoundaryFresh =
+     upperBoundaryTests <= boundaryFreshTestMaximum
+
+bool lowerBoundaryFresh =
+     lowerBoundaryTests <= boundaryFreshTestMaximum
+
+bool upperBoundaryRepeatedlyTested =
+     upperBoundaryTests >= boundaryStressedTestMinimum
+
+bool lowerBoundaryRepeatedlyTested =
+     lowerBoundaryTests >= boundaryStressedTestMinimum
+
+bool upperRejectionWeak =
+     upperBoundaryRepeatedlyTested and
+     not na(averageUpperRejectionQuality) and
+     averageUpperRejectionQuality < weakRejectionThreshold
+
+bool lowerRejectionWeak =
+     lowerBoundaryRepeatedlyTested and
+     not na(averageLowerRejectionQuality) and
+     averageLowerRejectionQuality < weakRejectionThreshold
+
+// Boundary stress means repeated attacks plus weak rotational rejection.
+// Test count alone is not enough: repeated strong rejection can still
+// describe a respected range boundary.
+
+bool bullishBoundaryStress =
+     upperBoundaryRepeatedlyTested and
+     upperBoundaryTests > lowerBoundaryTests and
+     (
+         upperRejectionWeak or
+         acceptanceScore >= acceptancePressureThreshold
+     )
+
+bool bearishBoundaryStress =
+     lowerBoundaryRepeatedlyTested and
+     lowerBoundaryTests > upperBoundaryTests and
+     (
+         lowerRejectionWeak or
+         acceptanceScore <= -acceptancePressureThreshold
+     )
+
+float upperBoundaryFatigue =
+     f_clamp(
+         f_safeDiv(
+             upperBoundaryTests - boundaryFreshTestMaximum,
+             math.max(
+                 boundaryStressedTestMinimum -
+                 boundaryFreshTestMaximum,
+                 1
+             ),
+             0.0
+         ),
+         0.0,
+         1.0
+     ) *
+     (
+         na(averageUpperRejectionQuality) ?
+         0.5 :
+         1.0 - averageUpperRejectionQuality
+     )
+
+float lowerBoundaryFatigue =
+     f_clamp(
+         f_safeDiv(
+             lowerBoundaryTests - boundaryFreshTestMaximum,
+             math.max(
+                 boundaryStressedTestMinimum -
+                 boundaryFreshTestMaximum,
+                 1
+             ),
+             0.0
+         ),
+         0.0,
+         1.0
+     ) *
+     (
+         na(averageLowerRejectionQuality) ?
+         0.5 :
+         1.0 - averageLowerRejectionQuality
+     )
+
+float dominantBoundaryFatigue =
+     math.max(
+         upperBoundaryFatigue,
+         lowerBoundaryFatigue
+     )
+
+int dominantBoundaryDirection =
+     upperBoundaryFatigue > lowerBoundaryFatigue ? 1 :
+     lowerBoundaryFatigue > upperBoundaryFatigue ? -1 :
+     0
+
 bool rawBullishBreakout =
      dataReady and
-     close > rollingRangeHigh + breakoutBuffer
+     breakoutArmed and
+     close > breakoutReferenceHigh + breakoutBuffer
 
 bool rawBearishBreakout =
      dataReady and
-     close < rollingRangeLow - breakoutBuffer
+     breakoutArmed and
+     close < breakoutReferenceLow - breakoutBuffer
+
+// ----------------------------------------------------------------------------
+// Failed breakout / boundary sweep
+// ----------------------------------------------------------------------------
+
+// A failed breakout is evaluated from the wick excursion, not from the raw
+// breakout condition, because raw breakout requires the close itself to be
+// outside the balance.
+
+bool bullishBoundarySweep =
+     detectFailedBreakouts and
+     dataReady and
+     breakoutArmed and
+     high > breakoutReferenceHigh + breakoutBuffer and
+     close <= breakoutReferenceHigh - atr * failedBreakoutReentryAtr
+
+bool bearishBoundarySweep =
+     detectFailedBreakouts and
+     dataReady and
+     breakoutArmed and
+     low < breakoutReferenceLow - breakoutBuffer and
+     close >= breakoutReferenceLow + atr * failedBreakoutReentryAtr
+
+bool bullishFailedBreakout =
+     bullishBoundarySweep and
+     barAcceptance < 0.0
+
+bool bearishFailedBreakout =
+     bearishBoundarySweep and
+     barAcceptance > 0.0
+
+bool failedBreakoutCondition =
+     bullishFailedBreakout or
+     bearishFailedBreakout
 
 // Acceptance: require price to hold beyond the boundary for several bars in
 // a row instead of confirming off a single spike candle.
@@ -1101,6 +1565,12 @@ var int bearishAcceptanceStreak = 0
 
 bullishAcceptanceStreak := rawBullishBreakout ? bullishAcceptanceStreak + 1 : 0
 bearishAcceptanceStreak := rawBearishBreakout ? bearishAcceptanceStreak + 1 : 0
+
+if bullishFailedBreakout
+    bullishAcceptanceStreak := 0
+
+if bearishFailedBreakout
+    bearishAcceptanceStreak := 0
 
 bool bullishHeld = bullishAcceptanceStreak >= breakoutAcceptanceBars
 bool bearishHeld = bearishAcceptanceStreak >= breakoutAcceptanceBars
@@ -1124,8 +1594,32 @@ bool breakoutCondition =
 
 if breakoutCondition
     barsSinceBreakout := 0
+    breakoutArmed := false
+    compressionArmed := false
 else
     barsSinceBreakout += 1
+
+bool bullishReadyPressure =
+     bullishPressure and
+     (
+         not requireBoundaryStressForReady or
+         bullishBoundaryStress
+     )
+
+bool bearishReadyPressure =
+     bearishPressure and
+     (
+         not requireBoundaryStressForReady or
+         bearishBoundaryStress
+     )
+
+bool readyCondition =
+     compressionArmed and
+     energyBuilding and
+     (
+         bullishReadyPressure or
+         bearishReadyPressure
+     )
 
 // ----------------------------------------------------------------------------
 // Trend and exhaustion
@@ -1167,9 +1661,22 @@ bool exhaustionCondition =
 // Impulse aftermath
 // ----------------------------------------------------------------------------
 
+// Energy and acceptance must peak on the same bar to count as one impulse -
+// two separate highs inside the lookback are two unrelated events, not an
+// impulse. The impulse direction is stored so Aftermath stays attributable
+// to the move that actually caused it.
+
+bool impulseBar =
+     energyScore >= recentImpulseEnergyThreshold and
+     math.abs(acceptanceScore) >= recentImpulseAcceptanceThreshold
+
+var int impulseDirection = 0
+
+if impulseBar
+    impulseDirection := acceptanceScore > 0.0 ? 1 : -1
+
 bool recentImpulse =
-     ta.highest(energyScore, impulseLookback) >= recentImpulseEnergyThreshold and
-     ta.highest(math.abs(acceptanceScore), impulseLookback) >= recentImpulseAcceptanceThreshold
+     ta.barssince(impulseBar) <= impulseLookback
 
 bool impulseAftermath =
      recentImpulse and
@@ -1191,25 +1698,79 @@ int candidateState =
      establishedBalance     ? STATE_BALANCE :
      STATE_NO_TRADE
 
+// NO_TRADE is the fallback when no named setup/regime is currently proven.
+// Record the dominant blocker so offline analysis can distinguish genuinely
+// poor structure from a nearly-qualified transition instead of treating every
+// fallback bar as the same market condition.
+
+bool anyRawBreakout =
+     rawBullishBreakout or rawBearishBreakout
+
+bool breakoutHoldPending =
+     (rawBullishBreakout and not bullishHeld) or
+     (rawBearishBreakout and not bearishHeld)
+
+bool breakoutAcceptanceWeak =
+     (rawBullishBreakout and bullishHeld and acceptanceScore < breakoutAcceptanceThreshold) or
+     (rawBearishBreakout and bearishHeld and acceptanceScore > -breakoutAcceptanceThreshold)
+
+string noTradeReason =
+     candidateState != STATE_NO_TRADE ? "NONE" :
+     not dataReady ? "WARMUP" :
+     not hasFramework ? "NO_FRAMEWORK" :
+     bullishFailedBreakout ? "FAILED_BREAKOUT_UP" :
+     bearishFailedBreakout ? "FAILED_BREAKOUT_DOWN" :
+     anyRawBreakout and breakoutHoldPending ? "BREAKOUT_HOLD_PENDING" :
+     anyRawBreakout and energyScore < energyHighThreshold ? "BREAKOUT_ENERGY_LOW" :
+     anyRawBreakout and breakoutAcceptanceWeak ? "BREAKOUT_ACCEPTANCE_WEAK" :
+     anyRawBreakout and not volumeConfirmed ? "BREAKOUT_VOLUME_WEAK" :
+     rangeFramework and not balanceAllowed ? "POST_BREAKOUT_LOCK" :
+     rangeFramework and rangeWidthAtr > maximumRangeAtr ? "RANGE_TOO_WIDE" :
+     rangeFramework and compressionArmed and not energyBuilding ?
+          "READY_ENERGY_FLAT" :
+     rangeFramework and compressionArmed and energyBuilding and
+     requireBoundaryStressForReady and
+     not bullishBoundaryStress and
+     not bearishBoundaryStress ?
+          "READY_BOUNDARY_STRESS_MISSING" :
+     rangeFramework and compressionArmed and energyBuilding ?
+          "READY_NO_BOUNDARY_PRESSURE" :
+     rangeFramework and upperRejectionWeak and acceptanceScore > 0.0 ?
+          "UPPER_BOUNDARY_FATIGUED" :
+     rangeFramework and lowerRejectionWeak and acceptanceScore < 0.0 ?
+          "LOWER_BOUNDARY_FATIGUED" :
+     rangeFramework and energyScore >= energyHighThreshold ? "RANGE_EXPANSION_UNCONFIRMED" :
+     rangeFramework and energyScore >= energyLowThreshold ? "RANGE_MID_ENERGY" :
+     rangeFramework and math.abs(acceptanceScore) >= acceptanceNeutralBand ? "RANGE_DIRECTIONAL_UNCONFIRMED" :
+     rangeFramework ? "RANGE_UNCLASSIFIED" :
+     energyScore < energyHighThreshold ? "TREND_ENERGY_LOW" :
+     math.abs(acceptanceScore) < acceptanceStrongThreshold ? "TREND_ACCEPTANCE_WEAK" :
+     "TREND_DIRECTION_MISMATCH"
+
 // ============================================================================
 // STATE MACHINE
 // ============================================================================
 
 var int marketState = STATE_NO_TRADE
-var int disagreementStreak = 0
+var int pendingState = STATE_NO_TRADE
+var int pendingStateBars = 0
+var int invalidCurrentStateBars = 0
 var int stateBars = 0
 var int breakoutBarsRemaining = 0
 var int activeDirection = 0
 
-// Counts consecutive bars where the live candidate disagrees with the
-// confirmed state, regardless of which specific alternate candidate shows up
-// each bar - see v1's CHANGELOG for why this replaced a same-candidate
-// streak (it could get stuck on a stale state during candidate churn).
+// Track one specific target state. Alternating candidates no longer combine
+// into a false confirmation merely because all of them disagree with the
+// current confirmed state.
 
-bool candidateDisagrees =
-     candidateState != marketState
-
-disagreementStreak := candidateDisagrees ? disagreementStreak + 1 : 0
+if candidateState == marketState
+    pendingState := marketState
+    pendingStateBars := 0
+else if candidateState == pendingState
+    pendingStateBars += 1
+else
+    pendingState := candidateState
+    pendingStateBars := 1
 
 if bullishBreakout
     activeDirection := 1
@@ -1228,25 +1789,67 @@ if breakoutBarsRemaining > 0
     breakoutBarsRemaining -= 1
 
 bool forceBreakout =
-     candidateState == STATE_BREAKOUT
+     pendingState == STATE_BREAKOUT
 
 bool holdBreakout =
      marketState == STATE_BREAKOUT and
      breakoutBarsRemaining > 0 and
      not exhaustionCondition
 
+// Separate state invalidation from target-state confirmation. This prevents
+// stale-state lock without allowing candidate churn to confirm an arbitrary
+// one-bar target.
+
+bool currentStateStillValid =
+     marketState == STATE_NO_TRADE ?
+         candidateState == STATE_NO_TRADE :
+     marketState == STATE_BALANCE ?
+         establishedBalance :
+     marketState == STATE_COMPRESSION ?
+         establishedCompression or
+         readyCondition :
+     marketState == STATE_READY ?
+         compressionArmed and
+         (
+             readyCondition or
+             energyBuilding
+         ) :
+     marketState == STATE_BREAKOUT ?
+         breakoutBarsRemaining > 0 or
+         trendCondition :
+     marketState == STATE_TREND ?
+         trendCondition or
+         exhaustionCondition :
+     marketState == STATE_AFTERMATH ?
+         impulseAftermath :
+     marketState == STATE_EXHAUSTION ?
+         exhaustionCondition :
+     false
+
+invalidCurrentStateBars :=
+     currentStateStillValid ?
+     0 :
+     invalidCurrentStateBars + 1
+
+bool currentStateInvalidated =
+     invalidCurrentStateBars >= confirmationBars
+
 bool mayLeaveCurrentState =
      stateBars >= minimumStateBars or
      forceBreakout or
-     marketState == STATE_BREAKOUT
+     marketState == STATE_BREAKOUT or
+     currentStateInvalidated
 
 int requiredConfirmation =
-     candidateState == STATE_BREAKOUT ? 1 :
-     candidateState == STATE_NO_TRADE ? confirmationBars + 1 :
+     pendingState == STATE_BREAKOUT ?
+     1 :
+     pendingState == STATE_NO_TRADE ?
+     confirmationBars + 1 :
      confirmationBars
 
-bool stateConfirmed =
-     disagreementStreak >= requiredConfirmation
+bool pendingStateConfirmed =
+     pendingState != marketState and
+     pendingStateBars >= requiredConfirmation
 
 int previousMarketState = marketState
 int previousStateBars = stateBars
@@ -1254,9 +1857,11 @@ int previousStateBars = stateBars
 if holdBreakout
     marketState := STATE_BREAKOUT
     stateBars += 1
-else if stateConfirmed and mayLeaveCurrentState and candidateState != marketState
-    marketState := candidateState
+else if pendingStateConfirmed and mayLeaveCurrentState
+    marketState := pendingState
     stateBars := 0
+    pendingStateBars := 0
+    invalidCurrentStateBars := 0
 else
     stateBars += 1
 
@@ -1303,18 +1908,40 @@ bool bullishReadyEvent =
 bool bearishReadyEvent =
      enteredReady and acceptanceScore < 0.0
 
+// The event is independent of the state change. It can occur inside
+// BALANCE, COMPRESSION, or READY.
+
+bool bullishFailedBreakoutEvent =
+     bullishFailedBreakout and
+     not bullishFailedBreakout[1]
+
+bool bearishFailedBreakoutEvent =
+     bearishFailedBreakout and
+     not bearishFailedBreakout[1]
+
+// Marking every No-Trade entry drowns the chart in stop-like markers. Only
+// the transitions that actually end a tradable phase are worth a marker.
+
+bool leftTradableState =
+     enteredNoTrade and
+     (
+         marketState[1] == STATE_READY or
+         marketState[1] == STATE_BREAKOUT or
+         marketState[1] == STATE_TREND
+     )
+
 // ============================================================================
 // CALIBRATION LOGGING
 // ============================================================================
 
-// Event-prefixed MTE2 (vs. v1's MTE) so both indicators can run on the same
-// chart and log to the same Pine Logs panel without the lines mixing up.
+// Event-prefixed MTE2 (vs. v1's MTE) so separately exported Pine Logs from
+// both indicators can be joined by timestamp without mixing event schemas.
 
 var bool calibrationConfigLogged = false
 
 if enableCalibrationLog and not calibrationConfigLogged and barstate.isconfirmed
     log.info(str.format(
-         'MTE2 CONFIG | preset={0} | reactivity={1} | qualityLen={2} | rangeLen={3} | baselineLen={4} | atrLen={5} | adxLen={6} | rankLen={7} | baselineType={8} | structureTh={9} | maxRangeAtr={10} | energyLowTh={11} | energyVeryLowTh={12} | energyHighTh={13} | acceptNeutral={14} | acceptPressure={15} | acceptStrong={16} | breakoutAcceptTh={17} | breakoutBufferAtr={18} | breakoutAcceptBars={19} | confirmBars={20} | minStateBars={21} | breakoutHoldBars={22} | postBreakoutLockBars={23} | impulseLookback={24} | recentImpulseEnergyTh={25} | recentImpulseAcceptTh={26} | aftermathEnergyMax={27} | tf={28} | symbol={29}',
+         'MTE2 CONFIG | modelVersion=2.5.0 | preset={0} | reactivity={1} | qualityLen={2} | rangeLen={3} | baselineLen={4} | atrLen={5} | adxLen={6} | rankLen={7} | baselineType={8} | structureTh={9} | maxRangeAtr={10} | energyLowTh={11} | energyVeryLowTh={12} | energyHighTh={13} | acceptNeutral={14} | acceptPressure={15} | acceptStrong={16} | breakoutAcceptTh={17} | breakoutBufferAtr={18} | breakoutAcceptBars={19} | confirmBars={20} | minStateBars={21} | breakoutHoldBars={22} | postBreakoutLockBars={23} | impulseLookback={24} | recentImpulseEnergyTh={25} | recentImpulseAcceptTh={26} | aftermathEnergyMax={27} | tf={28} | symbol={29} | requireVolume={30} | volumeFactor={31} | jmaPhase={32} | jmaPower={33} | boundaryTouchDistanceAtr={34} | boundaryTestCooldownBars={35} | boundaryFreshTestMax={36} | boundaryStressedTestMin={37} | weakRejectionTh={38} | requireBoundaryStressForReady={39} | detectFailedBreakouts={40} | failedBreakoutReentryAtr={41}',
          preset, reactivity, qualityLength, rangeLength, baselineLength, atrLength, adxLength, rankLength, baselineType,
          str.tostring(structureThreshold, '#.#'), str.tostring(maximumRangeAtr, '#.##'),
          str.tostring(energyLowThreshold, '#.#'), str.tostring(energyVeryLowThreshold, '#.#'),
@@ -1325,28 +1952,100 @@ if enableCalibrationLog and not calibrationConfigLogged and barstate.isconfirmed
          postBreakoutLockBars, impulseLookback,
          str.tostring(recentImpulseEnergyThreshold, '#.#'), str.tostring(recentImpulseAcceptanceThreshold, '#.#'),
          str.tostring(aftermathEnergyMax, '#.#'),
-         timeframe.period, syminfo.ticker
+         timeframe.period, syminfo.tickerid,
+         str.tostring(requireVolumeConfirmation), str.tostring(volumeConfirmationRatio, '#.##'),
+         jmaPhase, str.tostring(jmaPower, '#.##'),
+         str.tostring(boundaryTouchDistanceAtr, '#.##'), boundaryTestCooldownBarsInput,
+         boundaryFreshTestMaximum, boundaryStressedTestMinimum,
+         str.tostring(weakRejectionThreshold, '#.##'), str.tostring(requireBoundaryStressForReady),
+         str.tostring(detectFailedBreakouts), str.tostring(failedBreakoutReentryAtr, '#.##')
     ))
     calibrationConfigLogged := true
 
 if enableCalibrationLog and barstate.isconfirmed
-    log.info(str.format(
-         'MTE2 CAL | bar={0} | state={1} | candidate={2} | structure={3} | energy={4} | acceptance={5} | rangeFramework={6} | atrRatio={7} | bandWidthRatio={8} | rangeWidthAtr={9} | efficiencyRatio={10} | adx={11} | boundaryStability={12} | rangePosition={13} | volumeRatio={14} | bodyRatio={15} | wickRatio={16} | tf={17}',
-         bar_index, f_stateName(marketState), f_stateName(candidateState),
-         str.tostring(structureScore, '#.##'), str.tostring(energyScore, '#.##'),
-         str.tostring(acceptanceScore, '#.##'), str.tostring(rangeFramework),
-         str.tostring(atrRatio, '#.###'), str.tostring(bandWidthRatio, '#.###'),
-         str.tostring(rangeWidthAtr, '#.##'), str.tostring(efficiencyRatio, '#.###'),
-         str.tostring(adx, '#.##'), str.tostring(boundaryStability, '#.###'),
-         str.tostring(rangePosition, '#.###'), str.tostring(volumeRatio, '#.###'),
-         str.tostring(bodyRatio, '#.###'), str.tostring(wickRatio, '#.###'),
-         timeframe.period
-    ))
+    log.info(
+         'MTE2 CAL' +
+         ' | bar=' + str.tostring(bar_index) +
+         ' | time=' + str.tostring(time) +
+         ' | symbol=' + syminfo.tickerid +
+         ' | tf=' + timeframe.period +
+         ' | state=' + f_stateKey(marketState) +
+         ' | candidate=' + f_stateKey(candidateState) +
+         ' | noTradeReason=' + noTradeReason +
+         ' | open=' + str.tostring(open, format.mintick) +
+         ' | high=' + str.tostring(high, format.mintick) +
+         ' | low=' + str.tostring(low, format.mintick) +
+         ' | close=' + str.tostring(close, format.mintick) +
+         ' | atr=' + str.tostring(atr, format.mintick) +
+         ' | structure=' + str.tostring(structureScore, '#.##') +
+         ' | rangeStructure=' + str.tostring(rangeStructureQuality, '#.##') +
+         ' | rangeCompactness=' + str.tostring(rangeCompactness, '#.###') +
+         ' | trendStructure=' + str.tostring(trendStructureQuality, '#.##') +
+         ' | trendCross=' + str.tostring(trendCrossQuality, '#.##') +
+         ' | trendEfficiency=' + str.tostring(trendEfficiencyQuality, '#.##') +
+         ' | trendAdx=' + str.tostring(trendAdxQuality, '#.##') +
+         ' | trendSlope=' + str.tostring(trendSlopeQuality, '#.##') +
+         ' | trendConsistency=' + str.tostring(trendConsistencyQuality, '#.##') +
+         ' | energy=' + str.tostring(energyScore, '#.##') +
+         ' | acceptance=' + str.tostring(acceptanceScore, '#.##') +
+         ' | dataReady=' + str.tostring(dataReady) +
+         ' | hasFramework=' + str.tostring(hasFramework) +
+         ' | rangeFramework=' + str.tostring(rangeFramework) +
+         ' | balanceAllowed=' + str.tostring(balanceAllowed) +
+         ' | balance=' + str.tostring(establishedBalance) +
+         ' | compression=' + str.tostring(establishedCompression) +
+         ' | ready=' + str.tostring(readyCondition) +
+         ' | breakout=' + str.tostring(breakoutCondition) +
+         ' | trend=' + str.tostring(trendCondition) +
+         ' | aftermath=' + str.tostring(impulseAftermath) +
+         ' | exhaustion=' + str.tostring(exhaustionCondition) +
+         ' | energyBuilding=' + str.tostring(energyBuilding) +
+         ' | bullPressure=' + str.tostring(bullishPressure) +
+         ' | bearPressure=' + str.tostring(bearishPressure) +
+         ' | rawBullBreak=' + str.tostring(rawBullishBreakout) +
+         ' | rawBearBreak=' + str.tostring(rawBearishBreakout) +
+         ' | volumeConfirmed=' + str.tostring(volumeConfirmed) +
+         ' | compressionArmed=' + str.tostring(compressionArmed) +
+         ' | breakoutArmed=' + str.tostring(breakoutArmed) +
+         ' | bullHoldStreak=' + str.tostring(bullishAcceptanceStreak) +
+         ' | bearHoldStreak=' + str.tostring(bearishAcceptanceStreak) +
+         ' | pendingState=' + f_stateKey(pendingState) +
+         ' | pendingStateBars=' + str.tostring(pendingStateBars) +
+         ' | invalidCurrentStateBars=' + str.tostring(invalidCurrentStateBars) +
+         ' | stateBars=' + str.tostring(stateBars) +
+         ' | atrRatio=' + str.tostring(atrRatio, '#.###') +
+         ' | bandWidthRatio=' + str.tostring(bandWidthRatio, '#.###') +
+         ' | rangeWidthAtr=' + str.tostring(rangeWidthAtr, '#.##') +
+         ' | efficiencyRatio=' + str.tostring(efficiencyRatio, '#.###') +
+         ' | adx=' + str.tostring(adx, '#.##') +
+         ' | boundaryStability=' + str.tostring(boundaryStability, '#.###') +
+         ' | sustainedBoundaryStability=' + str.tostring(sustainedBoundaryStability, '#.###') +
+         ' | rangePosition=' + str.tostring(rangePosition, '#.###') +
+         ' | volumeRatio=' + str.tostring(volumeRatio, '#.###') +
+         ' | bodyRatio=' + str.tostring(bodyRatio, '#.###') +
+         ' | wickRatio=' + str.tostring(wickRatio, '#.###') +
+         ' | activeBalanceGeneration=' + str.tostring(activeBalanceGeneration) +
+         ' | upperBoundaryTests=' + str.tostring(upperBoundaryTests) +
+         ' | lowerBoundaryTests=' + str.tostring(lowerBoundaryTests) +
+         ' | upperBoundaryFresh=' + str.tostring(upperBoundaryFresh) +
+         ' | lowerBoundaryFresh=' + str.tostring(lowerBoundaryFresh) +
+         ' | upperRejectionQuality=' + str.tostring(upperRejectionQuality, '#.###') +
+         ' | lowerRejectionQuality=' + str.tostring(lowerRejectionQuality, '#.###') +
+         ' | avgUpperRejectionQuality=' + str.tostring(averageUpperRejectionQuality, '#.###') +
+         ' | avgLowerRejectionQuality=' + str.tostring(averageLowerRejectionQuality, '#.###') +
+         ' | upperBoundaryFatigue=' + str.tostring(upperBoundaryFatigue, '#.###') +
+         ' | lowerBoundaryFatigue=' + str.tostring(lowerBoundaryFatigue, '#.###') +
+         ' | dominantBoundaryFatigue=' + str.tostring(dominantBoundaryFatigue, '#.###') +
+         ' | bullishBoundaryStress=' + str.tostring(bullishBoundaryStress) +
+         ' | bearishBoundaryStress=' + str.tostring(bearishBoundaryStress) +
+         ' | bullishFailedBreakout=' + str.tostring(bullishFailedBreakout) +
+         ' | bearishFailedBreakout=' + str.tostring(bearishFailedBreakout)
+    )
 
 if enableCalibrationLog and stateChanged and barstate.isconfirmed
     log.info(str.format(
          'MTE2 TRANSITION | bar={0} | from={1} | to={2} | prevStateBars={3} | dirActive={4} | structure={5} | energy={6} | acceptance={7} | tf={8}',
-         bar_index, f_stateName(previousMarketState), f_stateName(marketState),
+         bar_index, f_stateKey(previousMarketState), f_stateKey(marketState),
          previousStateBars, activeDirection,
          str.tostring(structureScore, '#.##'), str.tostring(energyScore, '#.##'),
          str.tostring(acceptanceScore, '#.##'),
@@ -1390,8 +2089,11 @@ color rangeLineColor =
      color.new(color.rgb(151, 101, 196), 10) :
      color.new(color.rgb(75, 112, 164), 25)
 
+// While armed, the drawn boundary is the frozen breakout reference - the
+// level the breakout is actually measured against, not the rolling window.
+
 plotRangeHigh = plot(
-     showRange and rangeState ? rollingRangeHigh : na,
+     showRange and rangeState ? breakoutReferenceHigh : na,
      "Balance Upper",
      color = rangeLineColor,
      linewidth = 2,
@@ -1399,7 +2101,7 @@ plotRangeHigh = plot(
 )
 
 plotRangeLow = plot(
-     showRange and rangeState ? rollingRangeLow : na,
+     showRange and rangeState ? breakoutReferenceLow : na,
      "Balance Lower",
      color = rangeLineColor,
      linewidth = 2,
@@ -1407,7 +2109,7 @@ plotRangeLow = plot(
 )
 
 plotRangeMid = plot(
-     showRange and rangeState ? rangeMidpoint : na,
+     showRange and rangeState ? (breakoutReferenceHigh + breakoutReferenceLow) * 0.5 : na,
      "Balance Midline",
      color = color.new(rangeLineColor, 55),
      linewidth = 1,
@@ -1483,18 +2185,40 @@ plotshape(
 )
 
 plotshape(
-     showSignals and enteredNoTrade,
+     showSignals and bullishFailedBreakoutEvent,
+     title = "Bullish Failed Breakout",
+     style = shape.triangledown,
+     location = location.abovebar,
+     color = color.rgb(204, 92, 52),
+     size = size.tiny,
+     text = "FAIL",
+     textcolor = color.white
+)
+
+plotshape(
+     showSignals and bearishFailedBreakoutEvent,
+     title = "Bearish Failed Breakout",
+     style = shape.triangleup,
+     location = location.belowbar,
+     color = color.rgb(204, 92, 52),
+     size = size.tiny,
+     text = "FAIL",
+     textcolor = color.white
+)
+
+plotshape(
+     showSignals and leftTradableState,
      title = "No Trade",
      style = shape.xcross,
      location = location.abovebar,
      color = color.rgb(130, 134, 141),
      size = size.tiny,
-     text = "STOP",
+     text = "PAUSE",
      textcolor = color.rgb(40, 44, 51)
 )
 
 plotshape(
-     showSignals and enteredAftermath and activeDirection >= 0,
+     showSignals and enteredAftermath and impulseDirection >= 0,
      title = "Aftermath (above)",
      style = shape.square,
      location = location.abovebar,
@@ -1505,7 +2229,7 @@ plotshape(
 )
 
 plotshape(
-     showSignals and enteredAftermath and activeDirection < 0,
+     showSignals and enteredAftermath and impulseDirection < 0,
      title = "Aftermath (below)",
      style = shape.square,
      location = location.belowbar,
@@ -1571,6 +2295,42 @@ plot(
      display = display.data_window
 )
 
+plot(
+     showScorePane ? upperBoundaryTests : na,
+     "Upper Boundary Tests",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? lowerBoundaryTests : na,
+     "Lower Boundary Tests",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? upperBoundaryFatigue * 100.0 : na,
+     "Upper Boundary Fatigue",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? lowerBoundaryFatigue * 100.0 : na,
+     "Lower Boundary Fatigue",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? averageUpperRejectionQuality * 100.0 : na,
+     "Upper Rejection Quality",
+     display = display.data_window
+)
+
+plot(
+     showScorePane ? averageLowerRejectionQuality * 100.0 : na,
+     "Lower Rejection Quality",
+     display = display.data_window
+)
+
 // ============================================================================
 // DASHBOARD
 // ============================================================================
@@ -1613,7 +2373,7 @@ if barstate.islast and showDashboard
          dashboard,
          0,
          1,
-         "Candidate",
+         candidateState == STATE_NO_TRADE ? "Blocker" : "Candidate",
          text_color = color.silver,
          bgcolor = color.new(color.black, 15)
     )
@@ -1622,9 +2382,10 @@ if barstate.islast and showDashboard
          dashboard,
          1,
          1,
-         f_stateName(candidateState),
+         candidateState == STATE_NO_TRADE ? noTradeReason : f_stateName(candidateState),
          text_color = color.white,
-         bgcolor = f_stateColor(candidateState, 0)
+         bgcolor = f_stateColor(candidateState, 0),
+         text_size = size.tiny
     )
 
     table.cell(
@@ -1642,7 +2403,7 @@ if barstate.islast and showDashboard
          2,
          f_formatScore(structureScore),
          text_color = color.white,
-         bgcolor = f_scoreColor(structureScore)
+         bgcolor = f_structureColor(structureScore)
     )
 
     table.cell(
@@ -1660,7 +2421,7 @@ if barstate.islast and showDashboard
          3,
          f_formatScore(energyScore),
          text_color = color.white,
-         bgcolor = f_scoreColor(energyScore)
+         bgcolor = f_energyColor(energyScore)
     )
 
     table.cell(
@@ -1681,21 +2442,41 @@ if barstate.islast and showDashboard
          bgcolor = f_acceptanceColor(acceptanceScore)
     )
 
+    string balanceAction =
+         bullishFailedBreakout ?
+         "FAILED UPSIDE BREAK" :
+         bearishFailedBreakout ?
+         "FAILED DOWNSIDE BREAK" :
+         upperRejectionWeak and acceptanceScore > 0.0 ?
+         "AVOID SHORTING UPPER EDGE" :
+         lowerRejectionWeak and acceptanceScore < 0.0 ?
+         "AVOID BUYING LOWER EDGE" :
+         not upperBoundaryFresh or
+         not lowerBoundaryFresh ?
+         "WAIT FOR CONFIRMATION" :
+         "TRADE FRESH EDGES"
+
     string actionText =
          marketState == STATE_NO_TRADE ?
-         "IGNORE CHART" :
+         candidateState != STATE_NO_TRADE ?
+         "WAITING CONFIRMATION" :
+         hasFramework ?
+         "NO QUALIFIED SETUP" :
+         "STAND ASIDE" :
          marketState == STATE_BALANCE ?
-         "DON'T TRADE THE MIDDLE" :
+         balanceAction :
          marketState == STATE_COMPRESSION ?
-         "WATCH" :
+         dominantBoundaryFatigue >= 0.50 ?
+         "BOUNDARY UNDER STRESS" :
+         "WATCH BOUNDARIES" :
          marketState == STATE_READY ?
-         "WAIT FOR BREAKOUT" :
+         "PREPARE FOR BREAKOUT" :
          marketState == STATE_BREAKOUT ?
-         "CHECK CONFIRMATION" :
+         "CHECK RETEST / SETUP" :
          marketState == STATE_TREND ?
-         "ALLOW SETUPS" :
+         "ALLOW TREND SETUPS" :
          marketState == STATE_AFTERMATH ?
-         "WAIT - DON'T CHASE" :
+         "DON'T CHASE" :
          "REDUCE RISK"
 
     table.cell(
@@ -1778,6 +2559,18 @@ alertcondition(
      "Market Tradability Engine v2: the current trend shows overextension or declining quality."
 )
 
+alertcondition(
+     bullishFailedBreakoutEvent,
+     "MTE2: Failed Bullish Breakout",
+     "Market Tradability Engine v2: price swept above the armed balance boundary but was rejected back into the range."
+)
+
+alertcondition(
+     bearishFailedBreakoutEvent,
+     "MTE2: Failed Bearish Breakout",
+     "Market Tradability Engine v2: price swept below the armed balance boundary but was rejected back into the range."
+)
+
 // ----------------------------------------------------------------------------
 // Optional dynamic aggregate alerts
 // ----------------------------------------------------------------------------
@@ -1816,5 +2609,22 @@ if enableDynamicAlerts and barstate.isconfirmed
              f_acceptanceText(acceptanceScore) +
              " | Energy: " +
              str.tostring(energyScore, "#"),
+             alert.freq_once_per_bar_close
+        )
+
+    if bullishFailedBreakoutEvent or bearishFailedBreakoutEvent
+        alert(
+             "MTE2 | FAILED BREAKOUT | Direction: " +
+             (
+                 bullishFailedBreakoutEvent ?
+                 "UP" :
+                 "DOWN"
+             ) +
+             " | Acceptance: " +
+             f_acceptanceText(acceptanceScore) +
+             " | Upper tests: " +
+             str.tostring(upperBoundaryTests) +
+             " | Lower tests: " +
+             str.tostring(lowerBoundaryTests),
              alert.freq_once_per_bar_close
         )

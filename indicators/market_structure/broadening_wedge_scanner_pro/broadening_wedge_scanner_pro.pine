@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Broadening Wedge Scanner Pro [WavesUnchained]
-// Version: 1.13
+// Version: 1.14
 // Author: WavesUnchained
-// Build: 2026-07-06 19:00:00
+// Build: 2026-07-15 12:00:00
 // ============================================================================
 // Slides a fixed-size window of confirmed swings across the search depth and
 // fits two boundary lines (upper from the window's outer highs, lower from
@@ -15,12 +15,11 @@
 // breakout resolves it.
 //
 // Features:
-//   ✓ Sliding-window search across non-consecutive swing combinations
-//     implied by window position, not a fixed point count
+//   ✓ Sliding-window search across consecutive, alternating swing windows
 //   ✓ Tracks multiple simultaneously valid, non-overlapping wedges at once,
 //     each with its own drawings and breakout state
-//   ✓ Weighted 0-100 score: structure, expansion, touch quality, line
-//     quality, duration
+//   ✓ Weighted 0-100 score: swing path, traversal, realized expansion,
+//     boundary reliability, line quality, duration, and current relevance
 //   ✓ Live breakout tracking (either direction resolves the pattern) + alert
 //   ✓ Near-miss candidate marker and score-breakdown debug table
 //
@@ -42,9 +41,13 @@ maxPatternAgeMult     = input.float(1.5, "Max. Pattern-Alter (× Fensterbreite)"
 minScore           = input.int(60, "Mindestqualität", minval=0, maxval=100)
 atrLen             = input.int(14, "ATR-Länge")
 touchTolAtr        = input.float(0.5, "Touch-Toleranz ATR", minval=0.05, step=0.05)
-minExpansionRatio  = input.float(1.3, "Min. Endbreite / Startbreite", minval=1.05, maxval=3.0, step=0.05)
+projectedExpansionTarget = input.float(1.3, "Ziel proj. Endbreite / Startbreite", minval=1.05, maxval=3.0, step=0.05)
 minWidthAtr        = input.float(1.0, "Mindest-Endbreite ATR", minval=0.2, step=0.1)
 fasterRatioMin     = input.float(1.2, "Min. Geschwindigkeits-Verhältnis (DBW/ABW)", minval=1.0, maxval=3.0, step=0.05)
+minTraversalRatio  = input.float(0.60, "Min. Traversal pro Leg", minval=0.40, maxval=0.90, step=0.05)
+minRealizedExpansionRatio = input.float(1.15, "Min. realisierte Leg-Expansion", minval=1.0, maxval=3.0, step=0.05)
+minAnchorSpanRatio = input.float(0.55, "Min. Anker-Span / Pattern-Dauer", minval=0.30, maxval=0.90, step=0.05)
+maxBoundaryDriftAtr = input.float(8.0, "Max. Boundary-Drift ATR", minval=1.0, maxval=20.0, step=0.5)
 
 showOldPatterns   = input.bool(false, "Aufgelöste Patterns behalten")
 showCandidate     = input.bool(true, "Kandidaten anzeigen")
@@ -74,6 +77,7 @@ atr = ta.atr(atrLen)
 // auto-detected historical buffer for a variable (non-constant) offset.
 max_bars_back(high, 2000)
 max_bars_back(low, 2000)
+max_bars_back(close, 2000)
 
 // ============================================================================
 // Types
@@ -99,11 +103,37 @@ type Pattern
     int windowStartX
     int windowEndX
     bool structureOk
-    bool expansionOk
-    bool touchOk
+    bool pathOk
+    bool traversalOk
+    bool realizedExpansionOk
+    bool boundaryOk
     bool lineQualityOk
     bool durationOk
     bool barsInsideOk
+    bool boundariesOrderedOk
+    bool widthOk
+    bool anchorSpanOk
+    bool driftOk
+    float upperAnchorSpanRatio
+    float lowerAnchorSpanRatio
+    float upperDriftAtr
+    float lowerDriftAtr
+    float containmentRatio
+    int progressionMatches
+    int progressionTests
+    float realizedExpansionRatio
+    int legGrowthMatches
+    int legGrowthTests
+    float legGrowthRatio
+    float projectedExpansionRatio
+    int pathScore
+    int traversalScore
+    int rangeScore
+    int touchScore
+    int lineScore
+    int anchorScore
+    int durationScore
+    int relevanceScore
 
 // A tracked, currently-live pattern owns its own drawing objects so it can
 // be cleaned up independently of every other tracked pattern.
@@ -119,6 +149,7 @@ type TrackedPattern
 
 var swings = array.new<Swing>()
 var candidateLines = array.new_line()
+var candidateLabels = array.new_label()
 
 // Tracks the newest swing's bar index, not the array LENGTH — once `swings`
 // hits its `maxSwings` cap, every push is paired with a shift, so the length
@@ -127,7 +158,11 @@ var candidateLines = array.new_line()
 var int lastSwingX = -1
 
 emptyPattern() =>
-    Pattern.new(false, "None", 0, na, na, na, na, na, na, na, na, na, na, false, false, false, false, false, false)
+    Pattern.new(false, "None", 0, na, na, na, na, na, na, na, na, na, na,
+         false, false, false, false, false, false, false, false,
+         false, false, false, false, na, na, na, na, na,
+         0, 0, na, 0, 0, na, na,
+         0, 0, 0, 0, 0, 0, 0, 0)
 
 // Single best-in-window candidate, regardless of whether it could ever
 // actually be tracked — kept only for the debug table (explains why the
@@ -152,7 +187,7 @@ var table dash = table.new(position.top_right, 2, 5,
      frame_color=color.new(color.gray, 40),
      frame_width=1)
 
-var table dbgTable = table.new(position.bottom_right, 2, 7,
+var table dbgTable = table.new(position.bottom_right, 2, 15,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -169,6 +204,8 @@ color hd = color.new(color.gray, 90)
 f_clear_candidate() =>
     while array.size(candidateLines) > 0
         line.delete(array.pop(candidateLines))
+    while array.size(candidateLabels) > 0
+        label.delete(array.pop(candidateLabels))
 
 f_log(string msg) =>
     if enableLogging
@@ -185,11 +222,15 @@ f_price(int x1, float y1, int x2, float y2, int x) =>
 f_slope(int x1, float y1, int x2, float y2) =>
     x2 == x1 ? na : (y2 - y1) / float(x2 - x1)
 
+f_clamp01(float value) =>
+    math.min(math.max(value, 0.0), 1.0)
+
 // Picks the two REAL touch points (not a computed average) that best act as
 // a boundary: the pair with the fewest other points violating it (poking
 // through by more than `tolPrice` on the wrong side — above for an upper/
 // resistance line, below for a lower/support one), tie-broken by the most
-// points touching it within tolerance. This is how a chartist actually draws
+// points touching it within tolerance and then by the widest anchor span.
+// This is how a chartist actually draws
 // a trendline — through real highs/lows that define the edge — not a
 // least-squares fit, which pulls the line through the middle of the point
 // cloud and can miss every real touch when a few points cluster together.
@@ -203,6 +244,7 @@ f_best_boundary(int[] xs, float[] ys, float tolPrice, bool isUpper) =>
     bestJ = n - 1
     bestViolations = 1000000
     bestTouches = -1
+    bestSpan = -1
     for i = 0 to n - 2
         xi = array.get(xs, i)
         yi = array.get(ys, i)
@@ -221,10 +263,12 @@ f_best_boundary(int[] xs, float[] ys, float tolPrice, bool isUpper) =>
                     violations += 1
                 else if not isUpper and dist < -tolPrice
                     violations += 1
-            better = violations < bestViolations or (violations == bestViolations and touches > bestTouches)
+            span = xj - xi
+            better = violations < bestViolations or (violations == bestViolations and (touches > bestTouches or (touches == bestTouches and span > bestSpan)))
             if better
                 bestViolations := violations
                 bestTouches := touches
+                bestSpan := span
                 bestI := i
                 bestJ := j
     [array.get(xs, bestI), array.get(ys, bestI), array.get(xs, bestJ), array.get(ys, bestJ)]
@@ -353,9 +397,10 @@ f_dedupe_overlaps() =>
 // Scoring Engine
 // ============================================================================
 
-f_eval_wedge(int[] highX, float[] highY, int[] lowX, float[] lowY, int windowStartX, int windowEndX) =>
+f_eval_wedge(int[] pathX, float[] pathY, int[] pathDir, int[] highX, float[] highY, int[] lowX, float[] lowY, int windowStartX, int windowEndX) =>
     nH = array.size(highX)
     nL = array.size(lowX)
+    nPath = array.size(pathX)
 
     touchTolPrice = touchTolAtr * atr
 
@@ -373,11 +418,9 @@ f_eval_wedge(int[] highX, float[] highY, int[] lowX, float[] lowY, int windowSta
     bothRising  = not na(slopeU) and not na(slopeL) and slopeU > 0 and slopeL > 0
     diverging   = not na(slopeU) and not na(slopeL) and slopeU > 0 and slopeL < 0
 
-    // Core, non-negotiable shape: DBW needs the lower line falling faster
-    // than the upper (range widens as both decline); ABW is the mirror.
-    // "How much faster" is a quality nicety scored separately below, not a
-    // hard gate — matches the structure/quality split used throughout this
-    // scanner family.
+    // Geometric family classification remains necessary, but is no longer
+    // sufficient. The swing path below must independently confirm the same
+    // higher-high/lower-low progression.
     isDescendingBroadening = bothFalling and math.abs(slopeL) > math.abs(slopeU)
     isAscendingBroadening  = bothRising and math.abs(slopeU) > math.abs(slopeL)
     isSymmetricBroadening  = diverging
@@ -398,29 +441,159 @@ f_eval_wedge(int[] highX, float[] highY, int[] lowX, float[] lowY, int windowSta
     widthMid   = math.abs(upperAtMid - lowerAtMid)
     widthEnd   = math.abs(upperAtEnd - lowerAtEnd)
 
-    // Mirror of the compression check in Triangle/Wolfe: requires a real
-    // expansion ratio AND monotonic widening through the midpoint, so a
-    // channel that narrows anywhere before widening again doesn't qualify.
-    expansionOk = widthEnd > minWidthAtr * atr and widthMid >= widthStart and widthEnd >= widthMid and widthEnd >= widthStart * minExpansionRatio
+    boundariesOrdered = upperAtStart > lowerAtStart and upperAtMid > lowerAtMid and upperAtEnd > lowerAtEnd
+    projectedExpansionRatio = widthStart > 0 ? widthEnd / widthStart : 0.0
 
-    touchHighCount = 0
+    // The type-specific extremum sequence is a hard gate. Because `swings`
+    // is already de-duplicated to alternating highs/lows, the remaining
+    // question is whether every same-side step progresses in the direction
+    // required by the classified broadening family.
+    progressionTests = 0
+    progressionMatches = 0
+    alternatingPath = true
+    if nPath > 1
+        for i = 1 to nPath - 1
+            if array.get(pathDir, i) == array.get(pathDir, i - 1)
+                alternatingPath := false
+    if nH > 1
+        for i = 1 to nH - 1
+            previous = array.get(highY, i - 1)
+            current = array.get(highY, i)
+            expectedUp = isAscendingBroadening or isSymmetricBroadening
+            progressionTests += 1
+            if (expectedUp and current > previous) or (not expectedUp and current < previous)
+                progressionMatches += 1
+    if nL > 1
+        for i = 1 to nL - 1
+            previous = array.get(lowY, i - 1)
+            current = array.get(lowY, i)
+            expectedDown = isDescendingBroadening or isSymmetricBroadening
+            progressionTests += 1
+            if (expectedDown and current < previous) or (not expectedDown and current > previous)
+                progressionMatches += 1
+    progressionRatio = progressionTests > 0 ? float(progressionMatches) / float(progressionTests) : 0.0
+    pathOk = structureOk and alternatingPath and nPath >= 6 and nH >= 3 and nL >= 3 and progressionMatches == progressionTests
+    pathScore = structureOk and alternatingPath ? int(math.round(20.0 * progressionRatio)) : 0
+
+    // Measure each alternating leg as a fraction of the local channel width.
+    // A large extrapolated envelope with price trapped around its midpoint
+    // therefore scores poorly even when every bar technically remains inside.
+    traversalSum = 0.0
+    traversalCount = 0
+    qualifyingTraversals = 0
+    currentTraversalRun = 0
+    longestTraversalRun = 0
+    legAmplitudes = array.new_float()
+    if nPath > 1
+        for i = 1 to nPath - 1
+            x1 = array.get(pathX, i - 1)
+            y1 = array.get(pathY, i - 1)
+            x2 = array.get(pathX, i)
+            y2 = array.get(pathY, i)
+            upper1 = f_price(xU1, yU1, xU2, yU2, x1)
+            lower1 = f_price(xL1, yL1, xL2, yL2, x1)
+            upper2 = f_price(xU1, yU1, xU2, yU2, x2)
+            lower2 = f_price(xL1, yL1, xL2, yL2, x2)
+            width1 = upper1 - lower1
+            width2 = upper2 - lower2
+            pos1 = width1 > 0 ? (y1 - lower1) / width1 : 0.5
+            pos2 = width2 > 0 ? (y2 - lower2) / width2 : 0.5
+            traversal = f_clamp01(math.abs(pos2 - pos1))
+            traversalSum += traversal
+            traversalCount += 1
+            array.push(legAmplitudes, math.abs(y2 - y1))
+            if traversal >= minTraversalRatio
+                qualifyingTraversals += 1
+                currentTraversalRun += 1
+                longestTraversalRun := math.max(longestTraversalRun, currentTraversalRun)
+            else
+                currentTraversalRun := 0
+    averageTraversal = traversalCount > 0 ? traversalSum / float(traversalCount) : 0.0
+    qualifyingTraversalRatio = traversalCount > 0 ? float(qualifyingTraversals) / float(traversalCount) : 0.0
+    traversalOk = longestTraversalRun >= 3
+    traversalScore = int(math.round(20.0 * (0.65 * f_clamp01(averageTraversal / minTraversalRatio) + 0.35 * qualifyingTraversalRatio)))
+
+    // Realized expansion comes from actual alternating swing legs, not from
+    // the projected distance between two lines. Compare the first and last
+    // two legs and require most same-direction leg amplitudes to grow. The
+    // direction-aware comparison avoids penalizing the natural impulse/
+    // retracement size alternation in ascending and descending patterns.
+    legCount = array.size(legAmplitudes)
+    firstLegAverage = legCount >= 2 ? (array.get(legAmplitudes, 0) + array.get(legAmplitudes, 1)) / 2.0 : 0.0
+    lastLegAverage = legCount >= 2 ? (array.get(legAmplitudes, legCount - 2) + array.get(legAmplitudes, legCount - 1)) / 2.0 : 0.0
+    realizedExpansionRatio = firstLegAverage > 0 ? lastLegAverage / firstLegAverage : 0.0
+    legGrowthTests = 0
+    legGrowthMatches = 0
+    float previousUpLeg = na
+    float previousDownLeg = na
+    if legCount > 0
+        for i = 0 to legCount - 1
+            legAmplitude = array.get(legAmplitudes, i)
+            legEndsAtHigh = array.get(pathDir, i + 1) == 1
+            previousSameDirection = legEndsAtHigh ? previousUpLeg : previousDownLeg
+            if not na(previousSameDirection)
+                legGrowthTests += 1
+                if legAmplitude >= previousSameDirection * 0.95
+                    legGrowthMatches += 1
+            if legEndsAtHigh
+                previousUpLeg := legAmplitude
+            else
+                previousDownLeg := legAmplitude
+    legGrowthRatio = legGrowthTests > 0 ? float(legGrowthMatches) / float(legGrowthTests) : 0.0
+    realizedExpansionOk = legCount >= 5 and realizedExpansionRatio >= minRealizedExpansionRatio and legGrowthRatio >= 0.60
+    realizedRatioQuality = minRealizedExpansionRatio > 1.0 ? f_clamp01((realizedExpansionRatio - 1.0) / (minRealizedExpansionRatio - 1.0)) : f_clamp01(realizedExpansionRatio)
+    projectedRatioQuality = f_clamp01((projectedExpansionRatio - 1.0) / (projectedExpansionTarget - 1.0))
+    rangeScore = int(math.round(15.0 * (0.70 * realizedRatioQuality + 0.20 * legGrowthRatio + 0.10 * projectedRatioQuality)))
+
+    // Both defining pairs must span most of the pattern. A tie in boundary
+    // selection already prefers the widest-spaced anchor pair, preventing a
+    // close pair from winning and then being extrapolated across the window.
+    windowBars = windowEndX - windowStartX
+    upperAnchorSpanRatio = windowBars > 0 ? float(xU2 - xU1) / float(windowBars) : 0.0
+    lowerAnchorSpanRatio = windowBars > 0 ? float(xL2 - xL1) / float(windowBars) : 0.0
+    upperDriftAtr = atr > 0 ? math.abs(slopeU) * float(windowBars) / atr : 1000000.0
+    lowerDriftAtr = atr > 0 ? math.abs(slopeL) * float(windowBars) / atr : 1000000.0
+    widthOk = widthEnd > minWidthAtr * atr
+    anchorSpanOk = upperAnchorSpanRatio >= minAnchorSpanRatio and lowerAnchorSpanRatio >= minAnchorSpanRatio
+    driftOk = upperDriftAtr <= maxBoundaryDriftAtr and lowerDriftAtr <= maxBoundaryDriftAtr
+    boundaryOk = boundariesOrdered and widthOk and anchorSpanOk and driftOk
+    anchorScore = int(math.round(10.0 * (f_clamp01(upperAnchorSpanRatio) + f_clamp01(lowerAnchorSpanRatio)) / 2.0))
+
+    // The two defining anchors are necessary, but do not earn touch-quality
+    // points. Only independent confirmations beyond those anchors contribute.
+    extraHighTouches = 0
+    highResidualSum = 0.0
+    highViolations = 0
     if nH > 0
         for i = 0 to nH - 1
             hx = array.get(highX, i)
             hy = array.get(highY, i)
             lineY = f_price(xU1, yU1, xU2, yU2, hx)
+            dist = hy - lineY
+            highResidualSum += math.abs(dist)
             if math.abs(hy - lineY) <= touchTolPrice
-                touchHighCount += 1
-    touchLowCount = 0
+                if hx != xU1 and hx != xU2
+                    extraHighTouches += 1
+            else if dist > touchTolPrice
+                highViolations += 1
+    extraLowTouches = 0
+    lowResidualSum = 0.0
+    lowViolations = 0
     if nL > 0
         for i = 0 to nL - 1
             lx = array.get(lowX, i)
             ly = array.get(lowY, i)
             lineY = f_price(xL1, yL1, xL2, yL2, lx)
+            dist = ly - lineY
+            lowResidualSum += math.abs(dist)
             if math.abs(ly - lineY) <= touchTolPrice
-                touchLowCount += 1
-    touchRatio = (float(touchHighCount) / float(nH) + float(touchLowCount) / float(nL)) / 2.0
-    touchOk = touchRatio >= 0.7
+                if lx != xL1 and lx != xL2
+                    extraLowTouches += 1
+            else if dist < -touchTolPrice
+                lowViolations += 1
+    extraHighQuality = f_clamp01(float(extraHighTouches) / 2.0)
+    extraLowQuality = f_clamp01(float(extraLowTouches) / 2.0)
+    touchScore = int(math.round(15.0 * (extraHighQuality + extraLowQuality) / 2.0))
 
     // DBW/ABW: the faster side must be meaningfully faster (not just
     // technically faster by a hair) to look like a real diverging wedge.
@@ -429,45 +602,61 @@ f_eval_wedge(int[] highX, float[] highY, int[] lowX, float[] lowY, int windowSta
     fasterRatio = isDescendingBroadening and math.abs(slopeU) > 0.0000001 ? math.abs(slopeL) / math.abs(slopeU) : isAscendingBroadening and math.abs(slopeL) > 0.0000001 ? math.abs(slopeU) / math.abs(slopeL) : na
     symRatio = isSymmetricBroadening and math.abs(slopeL) > 0.0000001 ? math.abs(slopeU) / math.abs(slopeL) : na
 
-    lineQualityOk = (isDescendingBroadening or isAscendingBroadening) ? (not na(fasterRatio) and fasterRatio >= fasterRatioMin) : isSymmetricBroadening ? (not na(symRatio) and symRatio >= 0.3 and symRatio <= 3.0) : false
-
-    windowBars = windowEndX - windowStartX
+    slopeQualityOk = (isDescendingBroadening or isAscendingBroadening) ? (not na(fasterRatio) and fasterRatio >= fasterRatioMin) : isSymmetricBroadening ? (not na(symRatio) and symRatio >= 0.3 and symRatio <= 3.0) : false
     durationOk = windowBars >= pivotLen * 3
+    durationScore = int(math.round(5.0 * f_clamp01(float(windowBars) / float(pivotLen * 6))))
 
-    // touchOk above only checks the chosen swing highs/lows against the
-    // boundaries — a bar between two swings can still poke through the
-    // channel without ever registering as a swing itself, so the wedge held
-    // only at the sampled points, not for real across the whole window. A
-    // reference indicator (Wedge and Flag Finder by Trendoscope) checks
-    // every single bar's high/low this way; ported the same principle here
-    // as a hard veto, like `structureOk` — a channel that was actually
-    // breached somewhere in the middle isn't a real wedge, regardless of how
-    // well the sampled swings alone score.
-    barsInsideOk = true
+    // Containment is intentionally soft: count inside bars and middle-zone
+    // occupancy instead of allowing an oversized envelope to pass a binary
+    // veto. Traversal supplies the complementary boundary-utilization test.
+    barsInsideCount = 0
+    midZoneCount = 0
+    evaluatedBars = 0
     for i = windowStartX to windowEndX
         upperAt = f_price(xU1, yU1, xU2, yU2, i)
         lowerAt = f_price(xL1, yL1, xL2, yL2, i)
         barHigh = high[bar_index - i]
         barLow = low[bar_index - i]
-        if barHigh > upperAt + touchTolPrice or barLow < lowerAt - touchTolPrice
-            barsInsideOk := false
-            break
+        barClose = close[bar_index - i]
+        evaluatedBars += 1
+        if barHigh <= upperAt + touchTolPrice and barLow >= lowerAt - touchTolPrice
+            barsInsideCount += 1
+        localWidth = upperAt - lowerAt
+        if localWidth > 0
+            closePosition = (barClose - lowerAt) / localWidth
+            if closePosition >= 0.30 and closePosition <= 0.70
+                midZoneCount += 1
+    containmentRatio = evaluatedBars > 0 ? float(barsInsideCount) / float(evaluatedBars) : 0.0
+    midZoneRatio = evaluatedBars > 0 ? float(midZoneCount) / float(evaluatedBars) : 1.0
+    barsInsideOk = containmentRatio >= 0.90
 
-    score = 0
-    score += structureOk ? 30 : 0
-    score += expansionOk ? 25 : 0
-    score += touchOk ? 20 : 0
-    score += lineQualityOk ? 15 : 0
-    score += durationOk ? 10 : 0
+    pointCount = nH + nL
+    meanResidual = pointCount > 0 ? (highResidualSum + lowResidualSum) / float(pointCount) : touchTolPrice * 2.0
+    residualQuality = touchTolPrice > 0 ? 1.0 - f_clamp01(meanResidual / (touchTolPrice * 2.0)) : 0.0
+    violationRatio = pointCount > 0 ? float(highViolations + lowViolations) / float(pointCount) : 1.0
+    lineScore = int(math.round(10.0 * (0.40 * residualQuality + 0.35 * containmentRatio + 0.15 * (1.0 - violationRatio) + 0.10 * (1.0 - midZoneRatio))))
+    lineQualityOk = slopeQualityOk
+
+    maxRelevantAge = maxPatternAgeMult * float(math.max(windowBars, 1))
+    candidateAge = float(math.max(bar_index - windowEndX, 0))
+    relevanceScore = int(math.round(5.0 * (maxRelevantAge > 0 ? 1.0 - f_clamp01(candidateAge / maxRelevantAge) : 0.0)))
+
+    score = pathScore + traversalScore + rangeScore + touchScore + lineScore + anchorScore + durationScore + relevanceScore
+    hardGatesOk = structureOk and pathOk and traversalOk and realizedExpansionOk and boundaryOk and lineQualityOk and durationOk
 
     Pattern.new(
-         score >= minScore and structureOk and barsInsideOk,
+         score >= minScore and hardGatesOk,
          ttype,
          score,
          xU1, xU2, yU1, yU2,
          xL1, xL2, yL1, yL2,
          windowStartX, windowEndX,
-         structureOk, expansionOk, touchOk, lineQualityOk, durationOk, barsInsideOk)
+         structureOk, pathOk, traversalOk, realizedExpansionOk, boundaryOk, lineQualityOk, durationOk, barsInsideOk,
+         boundariesOrdered, widthOk, anchorSpanOk, driftOk,
+         upperAnchorSpanRatio, lowerAnchorSpanRatio, upperDriftAtr, lowerDriftAtr, containmentRatio,
+         progressionMatches, progressionTests, realizedExpansionRatio,
+         legGrowthMatches, legGrowthTests, legGrowthRatio, projectedExpansionRatio,
+         pathScore, traversalScore, rangeScore, touchScore, lineScore, anchorScore, durationScore, relevanceScore)
 
 // ============================================================================
 // Pattern drawing — builds one self-contained TrackedPattern
@@ -525,9 +714,8 @@ if not na(pl)
 // ============================================================================
 // Slides a fixed-size window across the search depth; for each window end,
 // the outer highs/lows within it define the two boundary lines. Every
-// window end's own best-scoring valid wedge is kept, not just the single
-// overall best, so two genuinely separate wedges in the same window can
-// both surface.
+// window end contributes one fixed-size candidate, so two genuinely separate
+// wedges in the search depth can both surface.
 
 sz = array.size(swings)
 currentSwingX = sz > 0 ? array.get(swings, sz - 1).x : -1
@@ -541,7 +729,7 @@ if newSwing and sz < wedgeWindow
 
 if newSwing and sz >= wedgeWindow
     start = math.max(0, sz - searchDepth)
-    perEndBest = array.new<Pattern>()
+    candidatesPerWindowEnd = array.new<Pattern>()
     localBest = emptyPattern()
     localBestTrackable = emptyPattern()
 
@@ -557,9 +745,15 @@ if newSwing and sz >= wedgeWindow
             highY = array.new_float()
             lowX  = array.new_int()
             lowY  = array.new_float()
+            pathX = array.new_int()
+            pathY = array.new_float()
+            pathDir = array.new_int()
 
             for k = winStart to end
                 s = array.get(swings, k)
+                array.push(pathX, s.x)
+                array.push(pathY, s.y)
+                array.push(pathDir, s.dir)
                 if s.dir == 1
                     array.push(highX, s.x)
                     array.push(highY, s.y)
@@ -571,39 +765,57 @@ if newSwing and sz >= wedgeWindow
             if array.size(highX) >= 2 and array.size(lowX) >= 2
                 windowStartX = array.get(swings, winStart).x
                 windowEndX = array.get(swings, end).x
-                candidate := f_eval_wedge(highX, highY, lowX, lowY, windowStartX, windowEndX)
+                candidate := f_eval_wedge(pathX, pathY, pathDir, highX, highY, lowX, lowY, windowStartX, windowEndX)
 
             if candidate.score > localBest.score
                 localBest := candidate
 
-            array.push(perEndBest, candidate)
+            array.push(candidatesPerWindowEnd, candidate)
 
     best := localBest
-    bestTrackable := localBestTrackable
     f_log("SEARCH sz=" + str.tostring(sz) + " best.score=" + str.tostring(best.score) + " type=" + best.ttype + " valid=" + str.tostring(best.valid)
-         + " structure=" + str.tostring(best.structureOk) + " expansion=" + str.tostring(best.expansionOk)
-         + " touch=" + str.tostring(best.touchOk) + " lineQuality=" + str.tostring(best.lineQualityOk) + " duration=" + str.tostring(best.durationOk))
+         + " structure=" + str.tostring(best.structureOk) + " path=" + str.tostring(best.pathOk)
+         + " progression=" + str.tostring(best.progressionMatches) + "/" + str.tostring(best.progressionTests)
+         + " traversal=" + str.tostring(best.traversalOk) + " realizedExpansion=" + str.tostring(best.realizedExpansionOk)
+         + " realizedRatio=" + str.tostring(best.realizedExpansionRatio, "#.###")
+         + " legGrowth=" + str.tostring(best.legGrowthMatches) + "/" + str.tostring(best.legGrowthTests)
+         + " projectedRatio=" + str.tostring(best.projectedExpansionRatio, "#.###")
+         + " boundary=" + str.tostring(best.boundaryOk) + " ordered=" + str.tostring(best.boundariesOrderedOk)
+         + " width=" + str.tostring(best.widthOk) + " anchorSpan=" + str.tostring(best.anchorSpanOk)
+         + " anchorU=" + str.tostring(best.upperAnchorSpanRatio, "#.###") + " anchorL=" + str.tostring(best.lowerAnchorSpanRatio, "#.###")
+         + " drift=" + str.tostring(best.driftOk) + " driftU=" + str.tostring(best.upperDriftAtr, "#.##")
+         + " driftL=" + str.tostring(best.lowerDriftAtr, "#.##")
+         + " lineQuality=" + str.tostring(best.lineQualityOk) + " duration=" + str.tostring(best.durationOk))
 
     // Lightweight candidate wedge for the current best-in-window, redrawn on
     // every search regardless of whether it clears minScore.
     f_clear_candidate()
-    if showCandidate and best.structureOk and best.score >= candidateThreshold and best.score < minScore
-        candLn1 = line.new(best.xU1, best.yU1, best.xU2, best.yU2, color=candidateCol, style=line.style_dashed, width=1)
-        candLn2 = line.new(best.xL1, best.yL1, best.xL2, best.yL2, color=candidateCol, style=line.style_dashed, width=1)
+    if showCandidate and best.structureOk and best.score >= candidateThreshold and not best.valid
+        candidateEndX = math.min(bar_index, f_line_cap_x(best))
+        candidateUpperStart = f_price(best.xU1, best.yU1, best.xU2, best.yU2, best.windowStartX)
+        candidateUpperEnd = f_price(best.xU1, best.yU1, best.xU2, best.yU2, candidateEndX)
+        candidateLowerStart = f_price(best.xL1, best.yL1, best.xL2, best.yL2, best.windowStartX)
+        candidateLowerEnd = f_price(best.xL1, best.yL1, best.xL2, best.yL2, candidateEndX)
+        candidateReason = not best.pathOk ? "Swing-Pfad" : not best.traversalOk ? "Traversal" : not best.realizedExpansionOk ? "Realisierte Expansion" : not best.anchorSpanOk ? "Anker-Span" : not best.driftOk ? "Boundary-Drift" : not best.boundariesOrderedOk ? "Linienordnung" : not best.widthOk ? "Mindestbreite" : not best.lineQualityOk ? "Linienqualität" : not best.durationOk ? "Dauer" : "Hard Gate"
+        candLn1 = line.new(best.windowStartX, candidateUpperStart, candidateEndX, candidateUpperEnd, color=candidateCol, style=line.style_dashed, width=2)
+        candLn2 = line.new(best.windowStartX, candidateLowerStart, candidateEndX, candidateLowerEnd, color=candidateCol, style=line.style_dashed, width=2)
         array.push(candidateLines, candLn1)
         array.push(candidateLines, candLn2)
+        candidateLabelY = math.min(math.max(close, math.min(candidateLowerEnd, candidateUpperEnd)), math.max(candidateLowerEnd, candidateUpperEnd))
+        candLabel = label.new(candidateEndX, candidateLabelY, "WATCH · " + best.ttype + " · " + str.tostring(best.score) + "\nBlocker: " + candidateReason, style=label.style_label_down, color=candidateCol, textcolor=color.white, size=size.small)
+        array.push(candidateLabels, candLabel)
 
     // Every distinct, non-overlapping valid wedge gets its own tracked
     // pattern. An overlapping candidate only replaces the existing one at
     // that spot if it scores higher and isn't literally the same window.
-    if array.size(perEndBest) > 0
-        for i = 0 to array.size(perEndBest) - 1
-            c = array.get(perEndBest, i)
+    if array.size(candidatesPerWindowEnd) > 0
+        for i = 0 to array.size(candidatesPerWindowEnd) - 1
+            c = array.get(candidatesPerWindowEnd, i)
             if c.valid
                 // The newest swing needs pivotLen bars of opposite-direction
                 // movement to even confirm — and that's often the same move
                 // that already carries price through a boundary that, by
-                // expansionOk's own definition, was already tight at
+                // the candidate's own end width, was already tight at
                 // windowEndX. Log-confirmed: 84% of all FIRED/REPLACED/EVICTED
                 // events had a BREAKOUT logged on the exact same bar — without
                 // this check, most detected wedges are stillborn: already
@@ -673,6 +885,10 @@ if newSwing and sz >= wedgeWindow
                             array.set(trackedPatterns, overlapIdx, newTp)
                             newWedgeFound := true
                             f_log("PATTERN REPLACED type=" + c.ttype + " score=" + str.tostring(c.score))
+
+    // `localBestTrackable` is populated only while processing candidates;
+    // assigning it earlier left the SCAN dashboard permanently empty.
+    bestTrackable := localBestTrackable
 
     // Cleans up any same-direction overlap chain the pairwise checks above
     // can miss (A overlaps B, B overlaps C, but A and C don't directly
@@ -754,7 +970,7 @@ if array.size(trackedPatterns) > 0
 // Near-miss candidate marker (Watch signal, visual only)
 // ============================================================================
 
-plotshape(showCandidate and best.score >= candidateThreshold and best.score < minScore and best.structureOk, title="Wedge Candidate", style=shape.circle, location=location.abovebar, size=size.tiny, color=candidateCol)
+plotshape(newSwing and showCandidate and best.score >= candidateThreshold and not best.valid and best.structureOk, title="Wedge Candidate", style=shape.circle, location=location.abovebar, size=size.tiny, color=candidateCol)
 
 // ============================================================================
 // Dashboard
@@ -769,10 +985,12 @@ if showDashboard and barstate.islast
     // stillborn or already-aged window-end that will never fire, making the
     // dashboard show a misleadingly high score/type for a shape that was
     // never going to appear on the chart.
-    Pattern dashPattern = statusActive ? array.get(trackedPatterns, f_find_best_active_index()).p : bestTrackable
+    Pattern dashPattern = statusActive ? array.get(trackedPatterns, f_find_best_active_index()).p : best
+    dashWatch = not statusActive and best.structureOk and best.score >= candidateThreshold
+    dashStatus = statusActive ? "ACTIVE" : dashWatch ? (best.valid ? "READY" : "WATCH") : "SCAN"
 
     table.cell(dash, 0, 0, "Broadening Scanner", text_color=tc, bgcolor=hd, text_size=size.small)
-    table.cell(dash, 1, 0, statusActive ? "ACTIVE" : "SCAN", text_color=color.white, bgcolor=statusActive ? color.new(wedgeCol, 0) : color.new(color.gray, 80), text_size=size.small)
+    table.cell(dash, 1, 0, dashStatus, text_color=color.white, bgcolor=statusActive ? color.new(wedgeCol, 0) : dashWatch ? candidateCol : color.new(color.gray, 80), text_size=size.small)
 
     table.cell(dash, 0, 1, "Active Patterns", text_color=tc, text_size=size.small)
     table.cell(dash, 1, 1, str.tostring(array.size(trackedPatterns)) + " / " + str.tostring(maxConcurrentPatterns), text_color=tc, text_size=size.small)
@@ -781,7 +999,7 @@ if showDashboard and barstate.islast
     table.cell(dash, 1, 2, str.tostring(dashPattern.score) + " / " + str.tostring(minScore), text_color=tc, text_size=size.small)
 
     table.cell(dash, 0, 3, "Type", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 3, dashPattern.valid ? dashPattern.ttype : "—", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, dashPattern.structureOk ? dashPattern.ttype : "—", text_color=tc, text_size=size.small)
 
     table.cell(dash, 0, 4, "Window", text_color=tc, text_size=size.small)
     table.cell(dash, 1, 4, na(dashPattern.windowStartX) ? "—" : (str.tostring(dashPattern.windowEndX - dashPattern.windowStartX) + " Bars"), text_color=tc, text_size=size.small)
@@ -794,23 +1012,47 @@ if showDebug and barstate.islast
     table.cell(dbgTable, 0, 0, "Score-Breakdown", text_color=tc, bgcolor=hd, text_size=size.small)
     table.cell(dbgTable, 1, 0, str.tostring(best.score) + " / " + str.tostring(minScore), text_color=tc, bgcolor=hd, text_size=size.small)
 
-    table.cell(dbgTable, 0, 1, "Struktur (30)", text_color=tc, text_size=size.tiny)
-    table.cell(dbgTable, 1, 1, best.structureOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 0, 1, "Swing-Pfad (20)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 1, str.tostring(best.pathScore) + (best.pathOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.tiny)
 
-    table.cell(dbgTable, 0, 2, "Expansion (25)", text_color=tc, text_size=size.tiny)
-    table.cell(dbgTable, 1, 2, best.expansionOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 0, 2, "Pfad-Fortschritt", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 2, str.tostring(best.progressionMatches) + "/" + str.tostring(best.progressionTests), text_color=tc, text_size=size.tiny)
 
-    table.cell(dbgTable, 0, 3, "Touch-Qualität (20)", text_color=tc, text_size=size.tiny)
-    table.cell(dbgTable, 1, 3, best.touchOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 0, 3, "Traversal (20)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 3, str.tostring(best.traversalScore) + (best.traversalOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.tiny)
 
-    table.cell(dbgTable, 0, 4, "Linien-Qualität (15)", text_color=tc, text_size=size.tiny)
-    table.cell(dbgTable, 1, 4, best.lineQualityOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 0, 4, "Real. Expansion (15)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 4, str.tostring(best.rangeScore) + (best.realizedExpansionOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.tiny)
 
-    table.cell(dbgTable, 0, 5, "Dauer (10)", text_color=tc, text_size=size.tiny)
-    table.cell(dbgTable, 1, 5, best.durationOk ? "OK" : "—", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 0, 5, "Real Ratio / Wachstum", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 5, str.tostring(best.realizedExpansionRatio, "#.##") + " / " + str.tostring(best.legGrowthMatches) + "/" + str.tostring(best.legGrowthTests), text_color=tc, text_size=size.tiny)
 
-    table.cell(dbgTable, 0, 6, "Bars Inside (Veto)", text_color=tc, text_size=size.tiny)
-    table.cell(dbgTable, 1, 6, best.barsInsideOk ? "OK" : "VERLETZT", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 0, 6, "Proj. Expansion", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 6, str.tostring(best.projectedExpansionRatio, "#.##") + "×", text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 7, "Zusatzkontakte (15)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 7, str.tostring(best.touchScore), text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 8, "Linienqualität (10)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 8, str.tostring(best.lineScore) + (best.lineQualityOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 9, "Anker-Span (10)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 9, str.tostring(best.anchorScore) + " · " + str.tostring(best.upperAnchorSpanRatio, "#.##") + "/" + str.tostring(best.lowerAnchorSpanRatio, "#.##") + (best.anchorSpanOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 10, "Boundary-Drift (ATR)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 10, str.tostring(best.upperDriftAtr, "#.##") + "/" + str.tostring(best.lowerDriftAtr, "#.##") + (best.driftOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 11, "Linienordnung / Breite", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 11, (best.boundariesOrderedOk ? "O" : "O GATE") + " / " + (best.widthOk ? "B" : "B GATE"), text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 12, "Dauer (5)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 12, str.tostring(best.durationScore) + (best.durationOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 13, "Aktualität (5)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 13, str.tostring(best.relevanceScore), text_color=tc, text_size=size.tiny)
+
+    table.cell(dbgTable, 0, 14, "Containment (soft)", text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 1, 14, str.tostring(best.containmentRatio * 100.0, "#.0") + " %" + (best.barsInsideOk ? " · OK" : ""), text_color=tc, text_size=size.tiny)
 
 // ============================================================================
 // Alerts

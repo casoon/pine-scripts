@@ -9,21 +9,26 @@ Shares its core approach with Wolfe Wave Scanner Pro and Triangle Compression Sc
 - Alternating swing engine (`ta.pivothigh`/`ta.pivotlow`) with bounded history
 - Sliding-window search: for every possible window end within `Suchbereich letzte Swings`, the `Swings pro Keil-Fenster` most recent swings up to that point define the two boundary lines
 - Tracks multiple simultaneously valid, non-overlapping wedges at once, each with its own drawings and breakout state. An overlapping candidate only replaces an already-tracked wedge if it scores higher
-- Weighted 0-100 score across five criteria: structure, expansion, touch quality, line quality, duration
+- Weighted 0-100 score across eight criteria: swing path, traversal, realized expansion, touch quality, line quality, anchor span, duration, relevance
 - Live breakout tracking: either boundary being closed beyond resolves the pattern and fires a directional alert
 - Near-miss candidate marker and score-breakdown debug table for tuning thresholds
 
 ## Scoring
 
+Boundary slopes still classify the geometric family first (`structureOk`: descending broadening — both falling, lower faster; ascending broadening — both rising, upper faster; symmetric broadening — upper rising, lower falling), but that classification alone is no longer sufficient. The weighted score below is built from the actual alternating swing path, not just the two fitted lines.
+
 | Criterion | Points | What it checks |
 |---|---|---|
-| Structure | 30 | The upper/lower boundary slopes match one of the three valid broadening shapes: descending broadening (both falling, lower faster), ascending broadening (both rising, upper faster), symmetric broadening (upper rising, lower falling) |
-| Expansion | 25 | Channel width widens by at least `Min. Endbreite / Startbreite` end-to-start *and* widens monotonically through the midpoint (no narrowing anywhere mid-window), with a minimum ending width (`Mindest-Endbreite ATR`) to rule out degenerate near-zero-width windows |
-| Touch quality | 20 | Fraction of the window's highs within `Touch-Toleranz ATR` of the upper line, averaged with the same for lows |
-| Line quality | 15 | For descending/ascending broadening, the faster side must be at least `Min. Geschwindigkeits-Verhältnis` times faster than the slower one (rules out a "technically faster by a hair" divergence that doesn't look real). For symmetric broadening, the two boundary slopes must be within a 3x magnitude ratio of each other |
-| Duration | 10 | The window must span at least `3×` `Swing-Stärke` bars |
+| Swing path | 20 | Every same-side swing step progresses in the direction the classified shape requires (higher highs for ascending/symmetric, lower lows for descending/symmetric). Hard-gated (`pathOk`): the path must alternate cleanly, have ≥3 highs and ≥3 lows, and every progression step must match — scored by the fraction of progression steps that match |
+| Traversal | 20 | Each alternating swing leg's move across the channel width (as a fraction of the local channel width at each end), so a shape where price stays trapped near the midpoint scores poorly even if every bar is technically inside. Gated (`traversalOk`) on at least 3 consecutive legs clearing `Min. Traversal pro Leg` |
+| Realized expansion | 15 | Actual swing-leg amplitude growth (last two legs vs. first two, direction-aware) plus per-leg growth consistency, blended with the projected end/start width ratio (`Ziel proj. Endbreite / Startbreite`). Gated (`realizedExpansionOk`) on ≥5 legs, a ratio ≥ `Min. realisierte Leg-Expansion`, and ≥60% of legs growing |
+| Touch quality | 15 | Extra highs/lows beyond the two anchor points that land within `Touch-Toleranz ATR` of their boundary — the anchors themselves earn no points here, only independent confirmations do |
+| Line quality | 10 | Blend of mean residual distance to each boundary, bar-level containment ratio, violation ratio, and mid-channel occupancy. Gated (`lineQualityOk`) on the faster-diverging side being at least `Min. Geschwindigkeits-Verhältnis` times faster (descending/ascending) or within a 3x magnitude ratio of each other (symmetric) |
+| Anchor span | 10 | How much of the window each boundary's two anchor points actually spans, rewarding a wide-spaced anchor pair over a close pair that then gets extrapolated across the whole window. Gated (`boundaryOk`, together with line ordering, minimum end width, and `Max. Boundary-Drift ATR`) at ≥ `Min. Anker-Span / Pattern-Dauer` |
+| Duration | 5 | Window length relative to `6×` `Swing-Stärke`. Gated (`durationOk`) at ≥ `3×` `Swing-Stärke` |
+| Relevance | 5 | How recently the window ended relative to `Max. Pattern-Alter (× Fensterbreite)` — an already-stale candidate scores near zero here even if every other criterion is strong |
 
-A pattern only fires when its boundary slopes actually match a valid broadening shape (`structureOk`) *and* the weighted score clears `Mindestqualität`.
+A pattern only fires when every hard gate (`structureOk`, `pathOk`, `traversalOk`, `realizedExpansionOk`, `boundaryOk`, `lineQualityOk`, `durationOk`) passes *and* the weighted score clears `Mindestqualität`. Bar-level containment (`barsInsideOk`, ≥90% of bars inside `Touch-Toleranz ATR`) is soft — it feeds into the line-quality score instead of vetoing the pattern outright.
 
 ## Breakout
 
