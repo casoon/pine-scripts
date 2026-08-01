@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.4.1 — 2026-07-31
+- Fixed a runtime crash ("requested historical offset is beyond the historical buffer's limit") on long history: Stop Hunt / Exhaustion labels anchor to bar indices up to 500 bars back, but Pine's auto-sized buffer for resolving those anchors could end up smaller than that on some charts — now explicitly sized via `max_bars_back(time, 500)`
+
 ## v3.4.0 — 2026-07-07
 - Fixed a critical Fair Value Gap bug: the fill check compared price against the wrong boundary of the gap (the one derived from the current bar itself), so every FVG was marked filled and removed on the very bar it was created — FVGs now persist correctly until price actually trades back through the far side of the gap
 - Fixed level lifecycle: a swept level (sweep or breakout) is now excluded from primary/secondary BSL/SSL scoring immediately, instead of being able to reappear as an "active" level later if price drifts back near it without a qualifying reclaim

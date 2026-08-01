@@ -1,0 +1,1358 @@
+//@version=6
+// ============================================================================
+// Edge Atlas [WavesUnchained]
+// Version: 1.3.3
+// Author: WavesUnchained
+// Build: 2026-08-01
+// ============================================================================
+// Right-edge price-level atlas.
+//
+// Core idea:
+//   • Calculation modules produce normalized price levels.
+//   • A shared registry filters and renders them.
+//   • Each level renders as a label a fixed bar count past the last real
+//     candle — pointer facing right, price/zone detail in the hover tooltip
+//     only — with a short, fixed-length rail picking up just past the label.
+//     The rail does not reach the chart's true right edge; keeping the
+//     current price area clear of labels matters more than the rail
+//     visually touching the price scale.
+//   • Nothing about the label/rail's calendar-time position depends on the
+//     current viewport (no chart.right_visible_bar_time/left_visible_bar_time
+//     reads) — panning or zooming the chart moves them exactly like any
+//     normal drawing, with nothing to jump or freeze mid-drag.
+//
+// Features:
+//   ✓ Previous/current day, week, and month reference levels
+//   ✓ Traditional and Fibonacci pivot points
+//   ✓ Swing-based Fibonacci retracements/extensions
+//   ✓ Pivot-cluster support/resistance zones
+//   ✓ Asia, London, and New York session ranges
+//   ✓ Automatic or manual round-number levels
+//   ✓ Granular sub-level switches and explanatory tooltips
+//   ✓ Distance, priority, count, and side filters
+//   ✓ Minimum label spacing scaled to the instrument's own ATR, so crowded
+//     levels don't collapse into a solid overlapping block, and which levels
+//     are shown stays stable while scrolling or zooming the chart
+//   ✓ Optional source zones in the chart
+//   ✓ Trend Curves — up to three JMA-style/EMA/SMA moving averages with
+//     Responsive/Balanced/Structural/Custom presets, plotted as familiar,
+//     always-on chart lines (separate from the right-edge level registry)
+//
+// Important TradingView limitation:
+// Pine drawings can bind to chart time and price, but not to arbitrary screen
+// pixels or the price scale itself. The label anchor is a simple forward
+// offset — last real bar's time plus a fixed bar count — deliberately NOT a
+// percentage of the visible time range, and NOT computed by subtracting from
+// chart.right_visible_bar_time either. Both of those were tried:
+//   • A percentage of the visible range recomputes on every scroll/zoom.
+//     Since Pine only redraws when the script recalculates (not continuously
+//     during a drag), the label would freeze mid-pan and then visibly jump
+//     to a new position whenever the next recalculation happened, instead of
+//     panning smoothly like a normal drawing.
+//   • Subtracting from chart.right_visible_bar_time is even less stable: that
+//     live edge value can itself shift because of this script's own
+//     future-projected drawings, which made labels behave unpredictably
+//     (ending up right back at the last candle instead of near the edge).
+// A forward offset from "time" (which only changes when new data arrives,
+// never on chart navigation) keeps the label at a fixed calendar-time
+// position — redraws land exactly where it already was, so there is nothing
+// to jump.
+//
+// Labels use label.style_label_right — the pointer sits at that anchor,
+// facing right, and the box extends back toward price from there. That
+// growth direction is inherently riskier than growing away from price (an
+// earlier version deliberately avoided it after repeated overlap bugs), so
+// two things keep it safe here: the label body is short (code/name only, no
+// price — full detail is in the hover tooltip), and the offset defaults
+// generously (180 bars, capped at 300). If labels ever start touching
+// candles again on an extremely zoomed-out chart, increase "Label offset ·
+// bars" first.
+//
+// Two independent bugs produced the same visual symptom — a vertical
+// multi-colored bar through the label stack — while this was being tuned,
+// and both are relevant if it ever reappears:
+//   1. Every level's rail shared the exact same starting x-coordinate
+//      (computed once outside the per-level loop). Several differently-
+//      colored horizontal lines beginning at the identical pixel column,
+//      stacked closely in price, read as a vertical bar regardless of
+//      segment length — fixed by staggering each rail's start by render
+//      rank, so no two levels can ever share an origin.
+//   2. Pine only allows drawings a bounded number of bars into the future
+//      (roughly 500). A percentage of a wide 15m/1h visible history could
+//      exceed that, silently clamping every level to the same maximum
+//      allowed point regardless of the stagger above — fixed by capping
+//      gapTime well under that ceiling.
+// The rail no longer uses extend.right to reach the true edge (dropped on
+// request), which incidentally removes most of the exposure to bug #2 for
+// the rail itself — but the label's own anchor is still a raw future
+// coordinate, so the gapTime cap remains necessary regardless.
+// ============================================================================
+
+indicator(
+     "Edge Atlas [WavesUnchained]",
+     shorttitle = "Edge Atlas",
+     overlay = true,
+     max_lines_count = 500,
+     max_labels_count = 500,
+     max_boxes_count = 100
+)
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+string G_GENERAL  = "00 — General"
+string G_RENDER   = "01 — Right-edge rendering"
+string G_DAY      = "02 — Period levels · Day"
+string G_WEEK     = "03 — Period levels · Week"
+string G_MONTH    = "04 — Period levels · Month"
+string G_SESSIONS = "05 — Sessions"
+string G_PIVOTS   = "06 — Pivot points"
+string G_FIB      = "07 — Swing Fibonacci"
+string G_SR       = "08 — Support / Resistance"
+string G_ROUND    = "09 — Round numbers"
+string G_TREND    = "10 — Trend Curves"
+
+string TT_EDGE =
+     "How many bars past the last real candle the label sits — higher values keep the current price area clearer of labels.\n" +
+     "A fixed bar count rather than a percentage of the visible time range on purpose: a percentage-based offset changes every time the visible range changes (any scroll or zoom), which made the label freeze mid-drag and then jump to a new position on the next recalculation instead of following the pan smoothly. A fixed bar count stays at the same calendar time regardless of scroll position, so it pans with the chart like a normal drawing.\n" +
+     "On a chart showing a lot of history (many bars in view), a fixed bar count is a smaller fraction of the visible width, so it can still end up looking tight against the last candle — increase it if that happens; there is no single value that looks the same at every zoom level.\n" +
+     "Limited to 400 bars here, well clear of Pine's bounded future-drawing distance (roughly 500 bars) — the rails for the highest-priority rendered levels are separately clamped even closer to that limit, so raising \"Maximum rendered levels\" a lot at the same time as this can't push anything past it."
+
+string TT_DISTANCE =
+     "Only levels within this ATR distance from the current close are eligible.\n" +
+     "Set a high value to deliberately allow a dense or overloaded display."
+
+string TT_MISSING =
+     "A level is not registered when its source value is na.\n" +
+     "Session ranges therefore remain absent when no chart bars exist inside the configured window."
+
+string TT_TREND_PRESET =
+     "Responsive (JMA-style 9 / 21 / 50): intraday and short-term swing trading, fast markets (oil, indices, forex, crypto) — early pullback and trend-change detection. Three fast adaptive lines react alike but can still whipsaw in choppy sideways phases.\n" +
+     "Balanced (JMA-style 21 / EMA 50 / SMA 200): classic day/swing trading, stocks/indices/commodities — a movement line, a tradable-trend line, and a slow regime anchor. Default.\n" +
+     "Structural (EMA 20 / SMA 50 / SMA 200): swing/position trading, daily/weekly charts — filters short-term noise, reads broader trend structure and regime shifts (e.g. the 50/200 cross).\n" +
+     "Custom: set type, length, phase, and power per line below. Lengths are always in bars of the current chart timeframe and are not auto-adjusted — 20 always means 20 candles, whatever the timeframe."
+
+string TT_JMA =
+     "JMA-style: an open-source, Jurik-inspired adaptive smoothing approximation (tunable phase/power) — not Mark Jurik's patented, proprietary original algorithm."
+
+// ============================================================================
+// Inputs · General
+// ============================================================================
+
+string presetInput = input.string(
+     "Clean",
+     "Preset",
+     options = ["Clean", "Intraday", "Structure", "Everything", "Custom"],
+     tooltip =
+         "Clean: period references + nearest S/R.\n" +
+         "Intraday: adds session ranges and daily pivots.\n" +
+         "Structure: adds swing Fibonacci and S/R.\n" +
+         "Everything: activates every calculation module.\n" +
+         "Custom: uses only the individual module switches below.",
+     group = G_GENERAL
+)
+
+bool masterEnableInput = input.bool(true, "Enable indicator", group = G_GENERAL)
+int maxLevelsInput = input.int(
+     24, "Maximum rendered levels",
+     minval = 1, maxval = 120,
+     tooltip = "Hard cap after all active modules have registered their levels.",
+     group = G_GENERAL
+)
+float maxDistanceAtrInput = input.float(
+     12.0, "Maximum distance from price · ATR",
+     minval = 0.25, maxval = 500.0, step = 0.25,
+     tooltip = TT_DISTANCE,
+     group = G_GENERAL
+)
+bool showAboveInput = input.bool(true, "Levels above price", inline = "sides", group = G_GENERAL)
+bool showBelowInput = input.bool(true, "Levels below price", inline = "sides", group = G_GENERAL)
+int minPriorityInput = input.int(
+     1, "Minimum priority",
+     minval = 1, maxval = 10,
+     tooltip = "1 keeps everything. Higher values remove less important levels first.",
+     group = G_GENERAL
+)
+
+// ============================================================================
+// Inputs · Rendering
+// ============================================================================
+
+int labelOffsetBarsInput = input.int(
+     250, "Label offset · bars",
+     minval = 5, maxval = 400, step = 5,
+     tooltip = TT_EDGE,
+     group = G_RENDER
+)
+float minLabelSpacingAtrInput = input.float(
+     3.0, "Minimum label spacing · ATR",
+     minval = 0.0, maxval = 20.0, step = 0.1,
+     tooltip =
+         "Levels closer than this ATR distance to an already-selected, higher-priority level are skipped.\n" +
+         "Tied to the instrument's own volatility rather than the current scroll position, so which levels are shown stays stable while panning the chart — an earlier percentage-of-visible-range version changed the level selection as you scrolled, since the visible price range itself changed.\n" +
+         "ATR is an imperfect proxy for the label's actual pixel height: a low-volatility instrument/timeframe combination can still overlap even at a fairly high multiple. If labels still overlap with several modules enabled at once, increase this first; \"Maximum rendered levels\" and \"Maximum distance from price · ATR\" (both in Right-edge rendering) are the other two levers if a preset simply has too many modules active for the available vertical space.\n" +
+         "Without this, nearby levels stack into overlapping label boxes that read as a solid colored block.\n" +
+         "Set to 0 to disable and show every eligible level regardless of crowding.",
+     group = G_RENDER
+)
+string labelContentInput = input.string(
+     "Code",
+     "Label content",
+     options = ["Code", "Full name"],
+     tooltip = "Price, zone bounds, and touch count are never shown in the label body — they're always in the hover tooltip, keeping the label itself short.",
+     group = G_RENDER
+)
+string labelSizeInput = input.string(
+     "Small",
+     "Label size",
+     options = ["Tiny", "Small", "Normal"],
+     group = G_RENDER
+)
+int lineWidthInput = input.int(2, "Line width", minval = 1, maxval = 4, group = G_RENDER)
+int lineTransparencyInput = input.int(
+     10, "Line transparency",
+     minval = 0, maxval = 95,
+     group = G_RENDER
+)
+int labelTransparencyInput = input.int(
+     10, "Label transparency",
+     minval = 0, maxval = 95,
+     group = G_RENDER
+)
+bool showCategoryInput = input.bool(
+     false, "Prefix category",
+     tooltip = "Example: PERIOD · PDH 24,500.00",
+     group = G_RENDER
+)
+bool showSourceZonesInput = input.bool(
+     false, "Show S/R source zones in chart",
+     tooltip = "Draws the selected support/resistance zones backward through the chart.",
+     group = G_RENDER
+)
+
+// ============================================================================
+// Inputs · Period levels
+// ============================================================================
+
+bool periodModuleInput = input.bool(
+     true, "Enable day levels",
+     tooltip = "Master switch for daily period references. Only takes effect on the Custom preset — the other presets decide this module on/off themselves.",
+     group = G_DAY, active = presetInput == "Custom"
+)
+bool showPDHInput = input.bool(
+     true, "PDH",
+     tooltip = "PDH — Previous Day High\nHighest price of the previous daily period.\nOften watched as intraday resistance/liquidity — a clean break can extend a rally, a rejection can mark the day's high.",
+     inline = "d1", group = G_DAY, active = presetInput == "Custom" and periodModuleInput
+)
+bool showPDLInput = input.bool(
+     true, "PDL",
+     tooltip = "PDL — Previous Day Low\nLowest price of the previous daily period.\nOften watched as intraday support/liquidity — a clean break can extend a decline, a rejection can mark the day's low.",
+     inline = "d1", group = G_DAY, active = presetInput == "Custom" and periodModuleInput
+)
+bool showPDCInput = input.bool(
+     true, "PDC",
+     tooltip = "PDC — Previous Day Close\nClosing price of the previous daily period.\nReference for gap analysis (today's open above/below PDC = gap up/down) and a common mean-reversion magnet.",
+     inline = "d1", group = G_DAY, active = presetInput == "Custom" and periodModuleInput
+)
+bool showPDOInput = input.bool(
+     false, "PDO",
+     tooltip = "PDO — Previous Day Open\nOpening price of the previous daily period.\nMarks where the previous day's own trend began — useful for judging how far that day's move ran.",
+     inline = "d2", group = G_DAY, active = presetInput == "Custom" and periodModuleInput
+)
+bool showDOInput = input.bool(
+     true, "DO",
+     tooltip = "DO — Current Day Open\nOpening price of the current daily period.\nMany intraday systems key bias off price's position relative to DO (above = long-favored, below = short-favored).",
+     inline = "d2", group = G_DAY, active = presetInput == "Custom" and periodModuleInput
+)
+bool showPDMInput = input.bool(
+     false, "PDM",
+     tooltip = "PDM — Previous Day Midpoint\nArithmetic midpoint of previous day high and low.\nRough fair-value reference for the prior day — trading in the upper/lower half frames intraday strength/weakness.",
+     inline = "d2", group = G_DAY, active = presetInput == "Custom" and periodModuleInput
+)
+
+bool weekModuleInput = input.bool(
+     true, "Enable week levels",
+     tooltip = "Master switch for weekly period references. Only takes effect on the Custom preset.",
+     group = G_WEEK, active = presetInput == "Custom"
+)
+bool showPWHInput = input.bool(
+     true, "PWH",
+     tooltip = "PWH — Previous Week High.\nSwing resistance/liquidity — stops often cluster just above it, so a sweep followed by a reclaim is a common reversal pattern here.",
+     inline = "w1", group = G_WEEK, active = presetInput == "Custom" and weekModuleInput
+)
+bool showPWLInput = input.bool(
+     true, "PWL",
+     tooltip = "PWL — Previous Week Low.\nSwing support/liquidity — stops often cluster just below it, so a sweep followed by a reclaim is a common reversal pattern here.",
+     inline = "w1", group = G_WEEK, active = presetInput == "Custom" and weekModuleInput
+)
+bool showPWCInput = input.bool(
+     false, "PWC",
+     tooltip = "PWC — Previous Week Close.\nReference for weekly gap analysis and a slower-moving mean-reversion magnet than PDC.",
+     inline = "w1", group = G_WEEK, active = presetInput == "Custom" and weekModuleInput
+)
+bool showPWOInput = input.bool(
+     false, "PWO",
+     tooltip = "PWO — Previous Week Open.\nMarks where the previous week's own trend began — useful for judging how far that week's move ran.",
+     inline = "w2", group = G_WEEK, active = presetInput == "Custom" and weekModuleInput
+)
+bool showWOInput = input.bool(
+     true, "WO",
+     tooltip = "WO — Current Week Open.\nCommon weekly bias reference — many swing traders read above/below WO as the week's directional lean.",
+     inline = "w2", group = G_WEEK, active = presetInput == "Custom" and weekModuleInput
+)
+bool showPWMInput = input.bool(
+     false, "PWM",
+     tooltip = "PWM — Previous Week Midpoint.\nFair-value reference for the prior week — trading in the upper/lower half frames swing strength/weakness.",
+     inline = "w2", group = G_WEEK, active = presetInput == "Custom" and weekModuleInput
+)
+
+bool monthModuleInput = input.bool(
+     true, "Enable month levels",
+     tooltip = "Master switch for monthly period references. Only takes effect on the Custom preset.",
+     group = G_MONTH, active = presetInput == "Custom"
+)
+bool showPMHInput = input.bool(
+     false, "PMH",
+     tooltip = "PMH — Previous Month High.\nHigher-timeframe structure — a major liquidity/resistance level that tends to matter across many lower timeframes at once.",
+     inline = "m1", group = G_MONTH, active = presetInput == "Custom" and monthModuleInput
+)
+bool showPMLInput = input.bool(
+     false, "PML",
+     tooltip = "PML — Previous Month Low.\nHigher-timeframe structure — a major liquidity/support level that tends to matter across many lower timeframes at once.",
+     inline = "m1", group = G_MONTH, active = presetInput == "Custom" and monthModuleInput
+)
+bool showPMCInput = input.bool(
+     false, "PMC",
+     tooltip = "PMC — Previous Month Close.\nReference for monthly gap analysis and a slow, higher-timeframe mean-reversion magnet.",
+     inline = "m1", group = G_MONTH, active = presetInput == "Custom" and monthModuleInput
+)
+bool showPMOInput = input.bool(
+     false, "PMO",
+     tooltip = "PMO — Previous Month Open.\nMarks where the previous month's own trend began — useful for judging how far that month's move ran.",
+     inline = "m2", group = G_MONTH, active = presetInput == "Custom" and monthModuleInput
+)
+bool showMOInput = input.bool(
+     true, "MO",
+     tooltip = "MO — Current Month Open.\nCommon macro bias reference — many position traders read above/below MO as the month's directional lean.",
+     inline = "m2", group = G_MONTH, active = presetInput == "Custom" and monthModuleInput
+)
+bool showPMMInput = input.bool(
+     false, "PMM",
+     tooltip = "PMM — Previous Month Midpoint.\nFair-value reference for the prior month — trading in the upper/lower half frames longer-term strength/weakness.",
+     inline = "m2", group = G_MONTH, active = presetInput == "Custom" and monthModuleInput
+)
+
+// ============================================================================
+// Inputs · Sessions
+// ============================================================================
+
+bool sessionsModuleInput = input.bool(
+     false, "Enable session ranges",
+     tooltip = TT_MISSING + "\nOnly takes effect on the Custom preset — Intraday/Everything decide this module themselves.",
+     group = G_SESSIONS, active = presetInput == "Custom"
+)
+string sessionTimezoneInput = input.string(
+     "Etc/UTC", "Session timezone",
+     tooltip =
+         "Use an IANA timezone, e.g. America/New_York, Europe/London, Asia/Tokyo, or Etc/UTC.\n" +
+         "Session relevance depends on the instrument and exchange.",
+     group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput
+)
+
+bool asiaEnableInput = input.bool(false, "Asia", inline = "asia0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput)
+string asiaSessionInput = input.session("0000-0800", "", inline = "asia0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
+bool asiaHighInput = input.bool(true, "ASH", inline = "asia1", tooltip = "ASH — Asia Session High.\nOften used as a breakout reference for the following London/NY session (e.g. \"London breaks the Asia range\").", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
+bool asiaLowInput = input.bool(true, "ASL", inline = "asia1", tooltip = "ASL — Asia Session Low.\nOften used as a breakout reference for the following London/NY session (e.g. \"London breaks the Asia range\").", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
+bool asiaMidInput = input.bool(false, "ASM", inline = "asia1", tooltip = "ASM — Asia Session Midpoint.\nFair-value reference within the Asia range.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
+
+bool londonEnableInput = input.bool(false, "London", inline = "lon0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput)
+string londonSessionInput = input.session("0700-1600", "", inline = "lon0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
+bool londonHighInput = input.bool(true, "LDH", inline = "lon1", tooltip = "LDH — London Session High.\nOften used as a breakout/liquidity reference for the New York session that follows.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
+bool londonLowInput = input.bool(true, "LDL", inline = "lon1", tooltip = "LDL — London Session Low.\nOften used as a breakout/liquidity reference for the New York session that follows.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
+bool londonMidInput = input.bool(false, "LDM", inline = "lon1", tooltip = "LDM — London Session Midpoint.\nFair-value reference within the London range.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
+
+bool nyEnableInput = input.bool(false, "New York", inline = "ny0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput)
+string nySessionInput = input.session("1330-2100", "", inline = "ny0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
+bool nyHighInput = input.bool(true, "NYH", inline = "ny1", tooltip = "NYH — New York Session High.\nOften the most liquid session's range extreme — a common intraday reversal/breakout reference into the close.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
+bool nyLowInput = input.bool(true, "NYL", inline = "ny1", tooltip = "NYL — New York Session Low.\nOften the most liquid session's range extreme — a common intraday reversal/breakout reference into the close.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
+bool nyMidInput = input.bool(false, "NYM", inline = "ny1", tooltip = "NYM — New York Session Midpoint.\nFair-value reference within the New York range.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
+
+bool useCompletedSessionInput = input.bool(
+     true, "Use last completed range",
+     tooltip =
+         "On: the previous completed session remains stable.\n" +
+         "Off: the current developing session is displayed while it is active.",
+     group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput
+)
+
+// ============================================================================
+// Inputs · Pivot points
+// ============================================================================
+
+bool pivotModuleInput = input.bool(
+     false, "Enable pivot points",
+     tooltip = "Only takes effect on the Custom preset — Intraday/Everything decide this module themselves.",
+     group = G_PIVOTS, active = presetInput == "Custom"
+)
+string pivotMethodInput = input.string(
+     "Traditional", "Method",
+     options = ["Traditional", "Fibonacci"],
+     group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput
+)
+string pivotPeriodInput = input.string(
+     "Daily", "Reference period",
+     options = ["Daily", "Weekly", "Monthly"],
+     group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput
+)
+bool showPPInput = input.bool(true, "PP", inline = "p1", tooltip = "PP — Central Pivot Point.\nCommon intraday bias line: trading above PP favors longs, below favors shorts.", group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput)
+bool showR1Input = input.bool(true, "R1", inline = "p1", tooltip = "R1 — First pivot resistance.\nClosest, most commonly reached target/reaction level above PP.", group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput)
+bool showS1Input = input.bool(true, "S1", inline = "p1", tooltip = "S1 — First pivot support.\nClosest, most commonly reached target/reaction level below PP.", group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput)
+bool showR2Input = input.bool(true, "R2", inline = "p2", tooltip = "R2 — Second pivot resistance.\nLess frequently reached than R1 — often used as a stronger, higher-conviction target.", group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput)
+bool showS2Input = input.bool(true, "S2", inline = "p2", tooltip = "S2 — Second pivot support.\nLess frequently reached than S1 — often used as a stronger, higher-conviction target.", group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput)
+bool showR3Input = input.bool(false, "R3", inline = "p2", tooltip = "R3 — Third pivot resistance.\nReached only on strong trend days — a stretch/exhaustion reference more than a typical target.", group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput)
+bool showS3Input = input.bool(false, "S3", inline = "p2", tooltip = "S3 — Third pivot support.\nReached only on strong trend days — a stretch/exhaustion reference more than a typical target.", group = G_PIVOTS, active = presetInput == "Custom" and pivotModuleInput)
+
+// ============================================================================
+// Inputs · Swing Fibonacci
+// ============================================================================
+
+bool fibModuleInput = input.bool(
+     false, "Enable swing Fibonacci",
+     tooltip =
+         "Uses the latest confirmed opposite pivot pair.\n" +
+         "The newest pivot determines whether the active leg is bullish or bearish.\n" +
+         "Only takes effect on the Custom preset — Structure/Everything decide this module themselves.",
+     group = G_FIB, active = presetInput == "Custom"
+)
+int fibPivotLeftInput = input.int(
+     5, "Pivot left", minval = 1, maxval = 50, inline = "fp", group = G_FIB, active = fibModuleInput,
+     tooltip = "The swing-pivot calculation itself always runs (feeds fib validity across every preset) — only \"Enable swing Fibonacci\" is Custom-only."
+)
+int fibPivotRightInput = input.int(5, "Pivot right", minval = 1, maxval = 50, inline = "fp", group = G_FIB, active = fibModuleInput)
+float fibMinLegAtrInput = input.float(
+     2.0, "Minimum leg · ATR",
+     minval = 0.25, maxval = 100.0, step = 0.25,
+     group = G_FIB, active = fibModuleInput
+)
+bool fib236Input = input.bool(false, "23.6", inline = "f1", tooltip = "Shallow retracement — in a strong trend, price often barely pulls back this far before continuing.", group = G_FIB, active = presetInput == "Custom" and fibModuleInput)
+bool fib382Input = input.bool(true, "38.2", inline = "f1", tooltip = "Shallow-to-moderate retracement — a common pullback-continuation entry zone in a healthy trend.", group = G_FIB, active = presetInput == "Custom" and fibModuleInput)
+bool fib500Input = input.bool(true, "50.0", inline = "f1", tooltip = "Not a true Fibonacci ratio, but widely watched as the psychological halfway retracement of the leg.", group = G_FIB, active = presetInput == "Custom" and fibModuleInput)
+bool fib618Input = input.bool(true, "61.8", inline = "f1", tooltip = "The \"golden ratio\" — the classic deep-retracement, last-defense level before the leg is considered structurally invalidated.", group = G_FIB, active = presetInput == "Custom" and fibModuleInput)
+bool fib786Input = input.bool(false, "78.6", inline = "f2", tooltip = "Very deep retracement — often marks trend exhaustion or elevated reversal risk rather than a continuation entry.", group = G_FIB, active = presetInput == "Custom" and fibModuleInput)
+bool fib100Input = input.bool(false, "100", inline = "f2", tooltip = "Full retracement back to the leg's origin — beyond this the leg is fully round-tripped.", group = G_FIB, active = presetInput == "Custom" and fibModuleInput)
+bool fib1272Input = input.bool(false, "127.2", inline = "f2", tooltip = "Extension level — a common first profit-taking/target zone for the continuation leg beyond the prior extreme.", group = G_FIB, active = presetInput == "Custom" and fibModuleInput)
+bool fib1618Input = input.bool(false, "161.8", inline = "f2", tooltip = "Extension level — a common further profit-taking/target zone for a strongly continuing leg.", group = G_FIB, active = presetInput == "Custom" and fibModuleInput)
+
+// ============================================================================
+// Inputs · Support / Resistance
+// ============================================================================
+
+bool srModuleInput = input.bool(
+     true, "Enable pivot-cluster S/R",
+     tooltip =
+         "Confirmed pivot highs and lows are clustered by ATR distance.\n" +
+         "The nearest qualifying support and resistance zones are sent to the edge rail.\n" +
+         "Zones with more touches (×N in the label) are considered more significant — repeated tests without a break suggest the level is being actively defended.\n" +
+         "Every non-Custom preset includes S/R, so this checkbox only takes effect on Custom — but the calculation params below it always run.",
+     group = G_SR, active = presetInput == "Custom"
+)
+int srPivotLeftInput = input.int(5, "Pivot left", minval = 1, maxval = 50, inline = "srp", group = G_SR, active = srModuleInput)
+int srPivotRightInput = input.int(5, "Pivot right", minval = 1, maxval = 50, inline = "srp", group = G_SR, active = srModuleInput)
+float srClusterAtrInput = input.float(
+     0.35, "Cluster tolerance · ATR",
+     minval = 0.05, maxval = 5.0, step = 0.05,
+     group = G_SR, active = srModuleInput
+)
+float srZoneWidthAtrInput = input.float(
+     0.25, "Zone width · ATR",
+     minval = 0.05, maxval = 3.0, step = 0.05,
+     group = G_SR, active = srModuleInput
+)
+int srMinTouchesInput = input.int(
+     2, "Minimum touches",
+     minval = 1, maxval = 20,
+     group = G_SR, active = srModuleInput
+)
+int srMaxAgeInput = input.int(
+     1500, "Maximum age · bars",
+     minval = 20, maxval = 20000,
+     group = G_SR, active = srModuleInput
+)
+int srSupportsInput = input.int(
+     2, "Nearest supports",
+     minval = 0, maxval = 10,
+     inline = "src", group = G_SR, active = srModuleInput
+)
+int srResistancesInput = input.int(
+     2, "Nearest resistances",
+     minval = 0, maxval = 10,
+     inline = "src", group = G_SR, active = srModuleInput
+)
+
+// ============================================================================
+// Inputs · Round numbers
+// ============================================================================
+
+bool roundModuleInput = input.bool(
+     false, "Enable round numbers",
+     tooltip = "Only takes effect on the Custom preset — Everything always includes round numbers regardless of this checkbox.",
+     group = G_ROUND, active = presetInput == "Custom"
+)
+bool roundActive = presetInput == "Custom" ? roundModuleInput : presetInput == "Everything"
+bool roundAutoStepInput = input.bool(
+     true, "Automatic step",
+     tooltip = "Chooses a visually useful 1/2/5 × 10ⁿ step from current price magnitude.",
+     group = G_ROUND, active = roundActive
+)
+float roundManualStepInput = input.float(
+     100.0, "Manual major step",
+     minval = 0.0000001, step = 0.1,
+     group = G_ROUND, active = roundActive and not roundAutoStepInput
+)
+bool roundMajorInput = input.bool(true, "Major", inline = "rn", tooltip = "Major whole-step levels.\nRound numbers attract resting orders and often cause price to pause, stall, or reverse nearby, independent of any chart structure.", group = G_ROUND, active = roundActive)
+bool roundHalfInput = input.bool(false, "Half", inline = "rn", tooltip = "Half-step levels.\nSecondary psychological levels — usually weaker magnets than Major but still occasionally watched.", group = G_ROUND, active = roundActive)
+bool roundQuarterInput = input.bool(false, "Quarter", inline = "rn", tooltip = "Quarter-step levels.\nThe weakest, most granular round-number tier — mainly useful on instruments with very fine tick sizes.", group = G_ROUND, active = roundActive)
+int roundLevelsEachSideInput = input.int(
+     3, "Levels each side",
+     minval = 1, maxval = 20,
+     group = G_ROUND, active = roundActive
+)
+
+// ============================================================================
+// Inputs · Trend Curves
+// ============================================================================
+
+bool trendModuleInput = input.bool(false, "Show Trend Curves", group = G_TREND)
+string trendPresetInput = input.string(
+     "Balanced", "Preset",
+     options = ["Responsive", "Balanced", "Structural", "Custom"],
+     tooltip = TT_TREND_PRESET,
+     group = G_TREND
+)
+float trendSourceInput = input.source(close, "Source", group = G_TREND, active = trendModuleInput)
+int trendOffsetInput = input.int(
+     0, "Line offset · bars",
+     minval = -500, maxval = 500,
+     group = G_TREND, active = trendModuleInput
+)
+string trendEmphasisInput = input.string(
+     "Normal", "Visual emphasis",
+     options = ["Subtle", "Normal", "Bold"],
+     tooltip = "Line thickness only — colors stay editable per line in the chart's Style tab.",
+     group = G_TREND, active = trendModuleInput
+)
+
+bool showFastInput = input.bool(true, "Show Fast Curve", inline = "tf0", group = G_TREND, active = trendModuleInput)
+string fastTypeInput = input.string(
+     "JMA-style", "Type", inline = "tf1",
+     options = ["JMA-style", "EMA", "SMA"],
+     tooltip = TT_JMA,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom"
+)
+int fastLengthInput = input.int(
+     21, "Length", inline = "tf1",
+     minval = 1, maxval = 1000,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom"
+)
+float fastPhaseInput = input.float(
+     0.0, "Phase", inline = "tf2",
+     minval = -100.0, maxval = 100.0,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom" and fastTypeInput == "JMA-style"
+)
+float fastPowerInput = input.float(
+     2.0, "Power", inline = "tf2",
+     minval = 0.5, maxval = 4.0, step = 0.1,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom" and fastTypeInput == "JMA-style"
+)
+
+bool showBaseInput = input.bool(true, "Show Base Curve", inline = "tb0", group = G_TREND, active = trendModuleInput)
+string baseTypeInput = input.string(
+     "EMA", "Type", inline = "tb1",
+     options = ["JMA-style", "EMA", "SMA"],
+     tooltip = TT_JMA,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom"
+)
+int baseLengthInput = input.int(
+     50, "Length", inline = "tb1",
+     minval = 1, maxval = 1000,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom"
+)
+float basePhaseInput = input.float(
+     0.0, "Phase", inline = "tb2",
+     minval = -100.0, maxval = 100.0,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom" and baseTypeInput == "JMA-style"
+)
+float basePowerInput = input.float(
+     2.0, "Power", inline = "tb2",
+     minval = 0.5, maxval = 4.0, step = 0.1,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom" and baseTypeInput == "JMA-style"
+)
+
+bool showAnchorInput = input.bool(true, "Show Anchor Curve", inline = "ta0", group = G_TREND, active = trendModuleInput)
+string anchorTypeInput = input.string(
+     "SMA", "Type", inline = "ta1",
+     options = ["JMA-style", "EMA", "SMA"],
+     tooltip = TT_JMA,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom"
+)
+int anchorLengthInput = input.int(
+     200, "Length", inline = "ta1",
+     minval = 1, maxval = 2000,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom"
+)
+float anchorPhaseInput = input.float(
+     0.0, "Phase", inline = "ta2",
+     minval = -100.0, maxval = 100.0,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom" and anchorTypeInput == "JMA-style"
+)
+float anchorPowerInput = input.float(
+     2.0, "Power", inline = "ta2",
+     minval = 0.5, maxval = 4.0, step = 0.1,
+     group = G_TREND, active = trendModuleInput and trendPresetInput == "Custom" and anchorTypeInput == "JMA-style"
+)
+
+// ============================================================================
+// Preset resolution
+// ============================================================================
+
+bool presetClean      = presetInput == "Clean"
+bool presetIntraday   = presetInput == "Intraday"
+bool presetStructure  = presetInput == "Structure"
+bool presetEverything = presetInput == "Everything"
+bool presetCustom     = presetInput == "Custom"
+
+bool useDayLevels   = presetCustom ? periodModuleInput : true
+bool useWeekLevels  = presetCustom ? weekModuleInput : true
+bool useMonthLevels = presetCustom ? monthModuleInput : presetEverything
+bool useSessions    = presetCustom ? sessionsModuleInput : (presetIntraday or presetEverything)
+bool usePivots      = presetCustom ? pivotModuleInput : (presetIntraday or presetEverything)
+bool useFib         = presetCustom ? fibModuleInput : (presetStructure or presetEverything)
+bool useSR          = presetCustom ? srModuleInput : (presetClean or presetIntraday or presetStructure or presetEverything)
+bool useRound       = presetCustom ? roundModuleInput : presetEverything
+
+// ============================================================================
+// Types and registries
+// ============================================================================
+
+type Level
+    float price
+    float upper
+    float lower
+    string code
+    string fullName
+    string category
+    int priority
+    color levelColor
+    bool isZone
+    int touches
+
+var array<Level> levels = array.new<Level>()
+var array<line> renderedLines = array.new<line>()
+var array<label> renderedLabels = array.new<label>()
+var array<box> renderedBoxes = array.new<box>()
+
+f_clearDrawings() =>
+    for ln in renderedLines
+        line.delete(ln)
+    for lb in renderedLabels
+        label.delete(lb)
+    for bx in renderedBoxes
+        box.delete(bx)
+    array.clear(renderedLines)
+    array.clear(renderedLabels)
+    array.clear(renderedBoxes)
+
+f_addLevel(
+     float price,
+     float upper,
+     float lower,
+     string code,
+     string fullName,
+     string category,
+     int priority,
+     color levelColor,
+     bool isZone,
+     int touches,
+     bool enabled
+ ) =>
+    if enabled and not na(price)
+        array.push(
+             levels,
+             Level.new(
+                 price,
+                 na(upper) ? price : upper,
+                 na(lower) ? price : lower,
+                 code,
+                 fullName,
+                 category,
+                 priority,
+                 levelColor,
+                 isZone,
+                 touches
+             )
+        )
+
+f_labelSize() =>
+    labelSizeInput == "Tiny" ? size.tiny :
+     labelSizeInput == "Normal" ? size.normal : size.small
+
+f_text(Level level) =>
+    string base = labelContentInput == "Full name" ? level.fullName : level.code
+    string withTouches = level.isZone and level.touches > 0 ? base + "  ×" + str.tostring(level.touches) : base
+    showCategoryInput ? level.category + " · " + withTouches : withTouches
+
+f_autoRoundStep(float price) =>
+    float safePrice = math.max(math.abs(price), syminfo.mintick)
+    float exponent = math.floor(math.log10(safePrice))
+    float magnitude = math.pow(10.0, exponent)
+    float normalized = safePrice / magnitude
+    float factor = normalized < 2.0 ? 0.02 : normalized < 5.0 ? 0.05 : 0.10
+    math.max(magnitude * factor, syminfo.mintick)
+
+// JMA-style adaptive smoothing — an open-source, Jurik-inspired approximation,
+// not Mark Jurik's patented, proprietary original algorithm. Same formula used
+// elsewhere in this repo (jma_struct.pine, candle_pressure_response_jma.pine).
+f_jma(float src, int length, float phase, float power) =>
+    float phaseRatio = phase < -100 ? 0.5 : phase > 100 ? 2.5 : phase / 100 + 1.5
+    float beta = 0.45 * (length - 1) / (0.45 * (length - 1) + 2)
+    float alpha = math.pow(beta, power)
+
+    var float e0 = na
+    var float e1 = na
+    var float e2 = na
+    var float jma = na
+
+    e0 := (1 - alpha) * src + alpha * nz(e0[1], src)
+    e1 := (src - e0) * (1 - beta) + beta * nz(e1[1], 0)
+    e2 := (e0 + phaseRatio * e1 - nz(jma[1], src)) * math.pow(1 - alpha, 2) + math.pow(alpha, 2) * nz(e2[1], 0)
+    jma := e2 + nz(jma[1], src)
+    jma
+
+f_maValue(string maType, float src, int length, float phase, float power) =>
+    switch maType
+        "JMA-style" => f_jma(src, length, phase, power)
+        "EMA" => ta.ema(src, length)
+        => ta.sma(src, length)
+
+// ============================================================================
+// Core series
+// ============================================================================
+
+float atr = ta.atr(14)
+float safeAtr = math.max(nz(atr, syminfo.mintick), syminfo.mintick)
+
+// Duration of one bar in ms — the only per-bar timing metric the render block
+// still needs now that label/rail positioning no longer reads the viewport.
+int atlasBarMs = int(math.max(nz(time - time[1], timeframe.in_seconds() * 1000.0), 1.0))
+
+float pdh = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_on)
+float pdl = request.security(syminfo.tickerid, "D", low[1], lookahead = barmerge.lookahead_on)
+float pdo = request.security(syminfo.tickerid, "D", open[1], lookahead = barmerge.lookahead_on)
+float pdc = request.security(syminfo.tickerid, "D", close[1], lookahead = barmerge.lookahead_on)
+float dayOpen = request.security(syminfo.tickerid, "D", open, lookahead = barmerge.lookahead_on)
+
+float pwh = request.security(syminfo.tickerid, "W", high[1], lookahead = barmerge.lookahead_on)
+float pwl = request.security(syminfo.tickerid, "W", low[1], lookahead = barmerge.lookahead_on)
+float pwo = request.security(syminfo.tickerid, "W", open[1], lookahead = barmerge.lookahead_on)
+float pwc = request.security(syminfo.tickerid, "W", close[1], lookahead = barmerge.lookahead_on)
+float weekOpen = request.security(syminfo.tickerid, "W", open, lookahead = barmerge.lookahead_on)
+
+float pmh = request.security(syminfo.tickerid, "M", high[1], lookahead = barmerge.lookahead_on)
+float pml = request.security(syminfo.tickerid, "M", low[1], lookahead = barmerge.lookahead_on)
+float pmo = request.security(syminfo.tickerid, "M", open[1], lookahead = barmerge.lookahead_on)
+float pmc = request.security(syminfo.tickerid, "M", close[1], lookahead = barmerge.lookahead_on)
+float monthOpen = request.security(syminfo.tickerid, "M", open, lookahead = barmerge.lookahead_on)
+
+// ============================================================================
+// Session tracking
+// ============================================================================
+
+bool inAsia = not na(time(timeframe.period, asiaSessionInput, sessionTimezoneInput))
+bool asiaStart = inAsia and not inAsia[1]
+bool asiaEnd = not inAsia and inAsia[1]
+var float asiaDevHigh = na
+var float asiaDevLow = na
+var float asiaDoneHigh = na
+var float asiaDoneLow = na
+if asiaStart
+    asiaDevHigh := high
+    asiaDevLow := low
+else if inAsia
+    asiaDevHigh := math.max(nz(asiaDevHigh, high), high)
+    asiaDevLow := math.min(nz(asiaDevLow, low), low)
+if asiaEnd
+    asiaDoneHigh := asiaDevHigh
+    asiaDoneLow := asiaDevLow
+
+bool inLondon = not na(time(timeframe.period, londonSessionInput, sessionTimezoneInput))
+bool londonStart = inLondon and not inLondon[1]
+bool londonEnd = not inLondon and inLondon[1]
+var float londonDevHigh = na
+var float londonDevLow = na
+var float londonDoneHigh = na
+var float londonDoneLow = na
+if londonStart
+    londonDevHigh := high
+    londonDevLow := low
+else if inLondon
+    londonDevHigh := math.max(nz(londonDevHigh, high), high)
+    londonDevLow := math.min(nz(londonDevLow, low), low)
+if londonEnd
+    londonDoneHigh := londonDevHigh
+    londonDoneLow := londonDevLow
+
+bool inNY = not na(time(timeframe.period, nySessionInput, sessionTimezoneInput))
+bool nyStart = inNY and not inNY[1]
+bool nyEnd = not inNY and inNY[1]
+var float nyDevHigh = na
+var float nyDevLow = na
+var float nyDoneHigh = na
+var float nyDoneLow = na
+if nyStart
+    nyDevHigh := high
+    nyDevLow := low
+else if inNY
+    nyDevHigh := math.max(nz(nyDevHigh, high), high)
+    nyDevLow := math.min(nz(nyDevLow, low), low)
+if nyEnd
+    nyDoneHigh := nyDevHigh
+    nyDoneLow := nyDevLow
+
+float asiaHigh = useCompletedSessionInput ? asiaDoneHigh : (inAsia ? asiaDevHigh : asiaDoneHigh)
+float asiaLow = useCompletedSessionInput ? asiaDoneLow : (inAsia ? asiaDevLow : asiaDoneLow)
+float londonHigh = useCompletedSessionInput ? londonDoneHigh : (inLondon ? londonDevHigh : londonDoneHigh)
+float londonLow = useCompletedSessionInput ? londonDoneLow : (inLondon ? londonDevLow : londonDoneLow)
+float nyHigh = useCompletedSessionInput ? nyDoneHigh : (inNY ? nyDevHigh : nyDoneHigh)
+float nyLow = useCompletedSessionInput ? nyDoneLow : (inNY ? nyDevLow : nyDoneLow)
+
+// ============================================================================
+// Pivot points
+// ============================================================================
+
+string pivotTf = pivotPeriodInput == "Weekly" ? "W" : pivotPeriodInput == "Monthly" ? "M" : "D"
+float pivotHigh = request.security(syminfo.tickerid, pivotTf, high[1], lookahead = barmerge.lookahead_on)
+float pivotLow = request.security(syminfo.tickerid, pivotTf, low[1], lookahead = barmerge.lookahead_on)
+float pivotClose = request.security(syminfo.tickerid, pivotTf, close[1], lookahead = barmerge.lookahead_on)
+float pp = (pivotHigh + pivotLow + pivotClose) / 3.0
+float pivotRange = pivotHigh - pivotLow
+
+float r1 = pivotMethodInput == "Fibonacci" ? pp + 0.382 * pivotRange : 2.0 * pp - pivotLow
+float s1 = pivotMethodInput == "Fibonacci" ? pp - 0.382 * pivotRange : 2.0 * pp - pivotHigh
+float r2 = pivotMethodInput == "Fibonacci" ? pp + 0.618 * pivotRange : pp + pivotRange
+float s2 = pivotMethodInput == "Fibonacci" ? pp - 0.618 * pivotRange : pp - pivotRange
+float r3 = pivotMethodInput == "Fibonacci" ? pp + 1.000 * pivotRange : pivotHigh + 2.0 * (pp - pivotLow)
+float s3 = pivotMethodInput == "Fibonacci" ? pp - 1.000 * pivotRange : pivotLow - 2.0 * (pivotHigh - pp)
+
+// ============================================================================
+// Swing Fibonacci tracking
+// ============================================================================
+
+float fibPH = ta.pivothigh(high, fibPivotLeftInput, fibPivotRightInput)
+float fibPL = ta.pivotlow(low, fibPivotLeftInput, fibPivotRightInput)
+
+var float lastFibHigh = na
+var float lastFibLow = na
+var int lastFibHighBar = na
+var int lastFibLowBar = na
+
+if not na(fibPH)
+    lastFibHigh := fibPH
+    lastFibHighBar := bar_index - fibPivotRightInput
+if not na(fibPL)
+    lastFibLow := fibPL
+    lastFibLowBar := bar_index - fibPivotRightInput
+
+bool fibBullLeg = not na(lastFibHighBar) and not na(lastFibLowBar) and lastFibLowBar < lastFibHighBar
+bool fibBearLeg = not na(lastFibHighBar) and not na(lastFibLowBar) and lastFibHighBar < lastFibLowBar
+float fibLegSize = math.abs(lastFibHigh - lastFibLow)
+bool validFibLeg = fibLegSize >= fibMinLegAtrInput * safeAtr
+
+f_fibPrice(float ratio) =>
+    fibBullLeg ? lastFibHigh - fibLegSize * ratio :
+     fibBearLeg ? lastFibLow + fibLegSize * ratio : na
+
+f_extensionPrice(float ratio) =>
+    fibBullLeg ? lastFibLow + fibLegSize * ratio :
+     fibBearLeg ? lastFibHigh - fibLegSize * ratio : na
+
+// ============================================================================
+// Pivot-cluster S/R
+// ============================================================================
+
+var array<float> supportCenters = array.new_float()
+var array<int> supportTouches = array.new_int()
+var array<int> supportLastBars = array.new_int()
+
+var array<float> resistanceCenters = array.new_float()
+var array<int> resistanceTouches = array.new_int()
+var array<int> resistanceLastBars = array.new_int()
+
+f_updateCluster(
+     array<float> centers,
+     array<int> touches,
+     array<int> lastBars,
+     float pivotPrice,
+     int pivotBar,
+     float tolerance
+ ) =>
+    int bestIndex = -1
+    float bestDistance = 1e100
+    if array.size(centers) > 0
+        for i = 0 to array.size(centers) - 1
+            float distance = math.abs(array.get(centers, i) - pivotPrice)
+            if distance <= tolerance and distance < bestDistance
+                bestDistance := distance
+                bestIndex := i
+    if bestIndex >= 0
+        int oldTouches = array.get(touches, bestIndex)
+        float oldCenter = array.get(centers, bestIndex)
+        float newCenter = (oldCenter * oldTouches + pivotPrice) / (oldTouches + 1)
+        array.set(centers, bestIndex, newCenter)
+        array.set(touches, bestIndex, oldTouches + 1)
+        array.set(lastBars, bestIndex, pivotBar)
+    else
+        array.push(centers, pivotPrice)
+        array.push(touches, 1)
+        array.push(lastBars, pivotBar)
+
+float srPH = ta.pivothigh(high, srPivotLeftInput, srPivotRightInput)
+float srPL = ta.pivotlow(low, srPivotLeftInput, srPivotRightInput)
+
+if not na(srPH)
+    f_updateCluster(
+         resistanceCenters,
+         resistanceTouches,
+         resistanceLastBars,
+         srPH,
+         bar_index - srPivotRightInput,
+         srClusterAtrInput * safeAtr
+    )
+
+if not na(srPL)
+    f_updateCluster(
+         supportCenters,
+         supportTouches,
+         supportLastBars,
+         srPL,
+         bar_index - srPivotRightInput,
+         srClusterAtrInput * safeAtr
+    )
+
+// Prevent unlimited historical growth.
+int MAX_CLUSTERS = 80
+while array.size(supportCenters) > MAX_CLUSTERS
+    array.shift(supportCenters)
+    array.shift(supportTouches)
+    array.shift(supportLastBars)
+while array.size(resistanceCenters) > MAX_CLUSTERS
+    array.shift(resistanceCenters)
+    array.shift(resistanceTouches)
+    array.shift(resistanceLastBars)
+
+// ============================================================================
+// Build normalized level registry
+// ============================================================================
+
+array.clear(levels)
+
+color dayColor = color.rgb(68, 138, 255)
+color weekColor = color.rgb(139, 92, 246)
+color monthColor = color.rgb(236, 72, 153)
+color sessionColor = color.rgb(14, 165, 233)
+color pivotColor = color.rgb(245, 158, 11)
+color fibColor = color.rgb(34, 197, 94)
+color resistanceColor = color.rgb(239, 68, 68)
+color supportColor = color.rgb(16, 185, 129)
+color roundColor = color.rgb(148, 163, 184)
+
+bool customOrEverything = presetCustom or presetEverything
+
+// Day levels
+f_addLevel(pdh, na, na, "PDH", "Previous Day High", "DAY", 9, dayColor, false, 0,
+     useDayLevels and (presetCustom ? showPDHInput : true))
+f_addLevel(pdl, na, na, "PDL", "Previous Day Low", "DAY", 9, dayColor, false, 0,
+     useDayLevels and (presetCustom ? showPDLInput : true))
+f_addLevel(pdc, na, na, "PDC", "Previous Day Close", "DAY", 7, dayColor, false, 0,
+     useDayLevels and (presetCustom ? showPDCInput : true))
+f_addLevel(pdo, na, na, "PDO", "Previous Day Open", "DAY", 5, dayColor, false, 0,
+     useDayLevels and customOrEverything and showPDOInput)
+f_addLevel(dayOpen, na, na, "DO", "Current Day Open", "DAY", 8, dayColor, false, 0,
+     useDayLevels and (presetCustom ? showDOInput : true))
+f_addLevel((pdh + pdl) / 2.0, na, na, "PDM", "Previous Day Midpoint", "DAY", 4, dayColor, false, 0,
+     useDayLevels and customOrEverything and showPDMInput)
+
+// Week levels
+f_addLevel(pwh, na, na, "PWH", "Previous Week High", "WEEK", 9, weekColor, false, 0,
+     useWeekLevels and (presetCustom ? showPWHInput : true))
+f_addLevel(pwl, na, na, "PWL", "Previous Week Low", "WEEK", 9, weekColor, false, 0,
+     useWeekLevels and (presetCustom ? showPWLInput : true))
+f_addLevel(pwc, na, na, "PWC", "Previous Week Close", "WEEK", 6, weekColor, false, 0,
+     useWeekLevels and customOrEverything and showPWCInput)
+f_addLevel(pwo, na, na, "PWO", "Previous Week Open", "WEEK", 5, weekColor, false, 0,
+     useWeekLevels and customOrEverything and showPWOInput)
+f_addLevel(weekOpen, na, na, "WO", "Current Week Open", "WEEK", 8, weekColor, false, 0,
+     useWeekLevels and (presetCustom ? showWOInput : true))
+f_addLevel((pwh + pwl) / 2.0, na, na, "PWM", "Previous Week Midpoint", "WEEK", 4, weekColor, false, 0,
+     useWeekLevels and customOrEverything and showPWMInput)
+
+// Month levels
+f_addLevel(pmh, na, na, "PMH", "Previous Month High", "MONTH", 8, monthColor, false, 0,
+     useMonthLevels and (presetCustom ? showPMHInput : true))
+f_addLevel(pml, na, na, "PML", "Previous Month Low", "MONTH", 8, monthColor, false, 0,
+     useMonthLevels and (presetCustom ? showPMLInput : true))
+f_addLevel(pmc, na, na, "PMC", "Previous Month Close", "MONTH", 5, monthColor, false, 0,
+     useMonthLevels and (presetCustom ? showPMCInput : true))
+f_addLevel(pmo, na, na, "PMO", "Previous Month Open", "MONTH", 5, monthColor, false, 0,
+     useMonthLevels and (presetCustom ? showPMOInput : true))
+f_addLevel(monthOpen, na, na, "MO", "Current Month Open", "MONTH", 7, monthColor, false, 0,
+     useMonthLevels and (presetCustom ? showMOInput : true))
+f_addLevel((pmh + pml) / 2.0, na, na, "PMM", "Previous Month Midpoint", "MONTH", 4, monthColor, false, 0,
+     useMonthLevels and (presetCustom ? showPMMInput : true))
+
+// Sessions
+bool asiaActive = useSessions and (presetCustom ? asiaEnableInput : presetEverything)
+bool londonActive = useSessions and (presetCustom ? londonEnableInput : presetIntraday or presetEverything)
+bool nyActive = useSessions and (presetCustom ? nyEnableInput : presetIntraday or presetEverything)
+
+f_addLevel(asiaHigh, na, na, "ASH", "Asia Session High", "SESSION", 7, sessionColor, false, 0,
+     asiaActive and (presetCustom ? asiaHighInput : true))
+f_addLevel(asiaLow, na, na, "ASL", "Asia Session Low", "SESSION", 7, sessionColor, false, 0,
+     asiaActive and (presetCustom ? asiaLowInput : true))
+f_addLevel((asiaHigh + asiaLow) / 2.0, na, na, "ASM", "Asia Session Midpoint", "SESSION", 4, sessionColor, false, 0,
+     asiaActive and presetCustom and asiaMidInput)
+
+f_addLevel(londonHigh, na, na, "LDH", "London Session High", "SESSION", 7, sessionColor, false, 0,
+     londonActive and (presetCustom ? londonHighInput : true))
+f_addLevel(londonLow, na, na, "LDL", "London Session Low", "SESSION", 7, sessionColor, false, 0,
+     londonActive and (presetCustom ? londonLowInput : true))
+f_addLevel((londonHigh + londonLow) / 2.0, na, na, "LDM", "London Session Midpoint", "SESSION", 4, sessionColor, false, 0,
+     londonActive and presetCustom and londonMidInput)
+
+f_addLevel(nyHigh, na, na, "NYH", "New York Session High", "SESSION", 7, sessionColor, false, 0,
+     nyActive and (presetCustom ? nyHighInput : true))
+f_addLevel(nyLow, na, na, "NYL", "New York Session Low", "SESSION", 7, sessionColor, false, 0,
+     nyActive and (presetCustom ? nyLowInput : true))
+f_addLevel((nyHigh + nyLow) / 2.0, na, na, "NYM", "New York Session Midpoint", "SESSION", 4, sessionColor, false, 0,
+     nyActive and presetCustom and nyMidInput)
+
+// Pivot points
+f_addLevel(pp, na, na, "PP", "Central Pivot Point", "PIVOT", 8, pivotColor, false, 0,
+     usePivots and (presetCustom ? showPPInput : true))
+f_addLevel(r1, na, na, "R1", "Pivot Resistance 1", "PIVOT", 7, pivotColor, false, 0,
+     usePivots and (presetCustom ? showR1Input : true))
+f_addLevel(s1, na, na, "S1", "Pivot Support 1", "PIVOT", 7, pivotColor, false, 0,
+     usePivots and (presetCustom ? showS1Input : true))
+f_addLevel(r2, na, na, "R2", "Pivot Resistance 2", "PIVOT", 6, pivotColor, false, 0,
+     usePivots and (presetCustom ? showR2Input : true))
+f_addLevel(s2, na, na, "S2", "Pivot Support 2", "PIVOT", 6, pivotColor, false, 0,
+     usePivots and (presetCustom ? showS2Input : true))
+f_addLevel(r3, na, na, "R3", "Pivot Resistance 3", "PIVOT", 5, pivotColor, false, 0,
+     usePivots and presetCustom and showR3Input)
+f_addLevel(s3, na, na, "S3", "Pivot Support 3", "PIVOT", 5, pivotColor, false, 0,
+     usePivots and presetCustom and showS3Input)
+
+// Swing Fibonacci
+bool fibActive = useFib and validFibLeg
+f_addLevel(f_fibPrice(0.236), na, na, "F23.6", "Fibonacci 23.6%", "FIB", 5, fibColor, false, 0,
+     fibActive and (presetCustom ? fib236Input : presetEverything))
+f_addLevel(f_fibPrice(0.382), na, na, "F38.2", "Fibonacci 38.2%", "FIB", 7, fibColor, false, 0,
+     fibActive and (presetCustom ? fib382Input : true))
+f_addLevel(f_fibPrice(0.500), na, na, "F50.0", "Fibonacci 50.0%", "FIB", 7, fibColor, false, 0,
+     fibActive and (presetCustom ? fib500Input : true))
+f_addLevel(f_fibPrice(0.618), na, na, "F61.8", "Fibonacci 61.8%", "FIB", 8, fibColor, false, 0,
+     fibActive and (presetCustom ? fib618Input : true))
+f_addLevel(f_fibPrice(0.786), na, na, "F78.6", "Fibonacci 78.6%", "FIB", 5, fibColor, false, 0,
+     fibActive and (presetCustom ? fib786Input : presetEverything))
+f_addLevel(f_fibPrice(1.000), na, na, "F100", "Fibonacci 100.0%", "FIB", 5, fibColor, false, 0,
+     fibActive and (presetCustom ? fib100Input : presetEverything))
+f_addLevel(f_extensionPrice(1.272), na, na, "F127", "Fibonacci Extension 127.2%", "FIB", 5, fibColor, false, 0,
+     fibActive and (presetCustom ? fib1272Input : presetEverything))
+f_addLevel(f_extensionPrice(1.618), na, na, "F162", "Fibonacci Extension 161.8%", "FIB", 6, fibColor, false, 0,
+     fibActive and (presetCustom ? fib1618Input : presetEverything))
+
+// S/R candidates: collect eligible indices and sort by distance.
+if useSR
+    array<float> supportDistances = array.new_float()
+    array<int> supportIndices = array.new_int()
+    if array.size(supportCenters) > 0
+        for i = 0 to array.size(supportCenters) - 1
+            float center = array.get(supportCenters, i)
+            int touches = array.get(supportTouches, i)
+            int age = bar_index - array.get(supportLastBars, i)
+            if center < close and touches >= srMinTouchesInput and age <= srMaxAgeInput
+                array.push(supportDistances, close - center)
+                array.push(supportIndices, i)
+    array<int> supportOrder = array.sort_indices(supportDistances)
+    int supportsToRender = math.min(srSupportsInput, array.size(supportOrder))
+    if supportsToRender > 0
+        for rank = 0 to supportsToRender - 1
+            int distanceIndex = array.get(supportOrder, rank)
+            int clusterIndex = array.get(supportIndices, distanceIndex)
+            float center = array.get(supportCenters, clusterIndex)
+            int touches = array.get(supportTouches, clusterIndex)
+            float halfWidth = srZoneWidthAtrInput * safeAtr * 0.5
+            f_addLevel(center, center + halfWidth, center - halfWidth, "S" + str.tostring(rank + 1),
+                 "Support Zone " + str.tostring(rank + 1), "S/R", 8, supportColor, true, touches, true)
+
+    array<float> resistanceDistances = array.new_float()
+    array<int> resistanceIndices = array.new_int()
+    if array.size(resistanceCenters) > 0
+        for i = 0 to array.size(resistanceCenters) - 1
+            float center = array.get(resistanceCenters, i)
+            int touches = array.get(resistanceTouches, i)
+            int age = bar_index - array.get(resistanceLastBars, i)
+            if center > close and touches >= srMinTouchesInput and age <= srMaxAgeInput
+                array.push(resistanceDistances, center - close)
+                array.push(resistanceIndices, i)
+    array<int> resistanceOrder = array.sort_indices(resistanceDistances)
+    int resistancesToRender = math.min(srResistancesInput, array.size(resistanceOrder))
+    if resistancesToRender > 0
+        for rank = 0 to resistancesToRender - 1
+            int distanceIndex = array.get(resistanceOrder, rank)
+            int clusterIndex = array.get(resistanceIndices, distanceIndex)
+            float center = array.get(resistanceCenters, clusterIndex)
+            int touches = array.get(resistanceTouches, clusterIndex)
+            float halfWidth = srZoneWidthAtrInput * safeAtr * 0.5
+            f_addLevel(center, center + halfWidth, center - halfWidth, "R" + str.tostring(rank + 1),
+                 "Resistance Zone " + str.tostring(rank + 1), "S/R", 8, resistanceColor, true, touches, true)
+
+// Round numbers
+if useRound
+    float majorStep = roundAutoStepInput ? f_autoRoundStep(close) : roundManualStepInput
+    float smallestStep = roundQuarterInput ? majorStep * 0.25 : roundHalfInput ? majorStep * 0.5 : majorStep
+    int baseIndex = int(math.floor(close / smallestStep))
+    for offset = -roundLevelsEachSideInput to roundLevelsEachSideInput
+        if offset != 0
+            float levelPrice = (baseIndex + offset) * smallestStep
+            float normalizedMajor = levelPrice / majorStep
+            float fraction = math.abs(normalizedMajor - math.round(normalizedMajor))
+            bool isMajor = fraction < 0.000001
+            bool isHalf = math.abs(fraction - 0.5) < 0.000001
+            bool allowed = isMajor ? roundMajorInput : isHalf ? roundHalfInput : roundQuarterInput
+            string code = isMajor ? "RN" : isHalf ? "RN½" : "RN¼"
+            f_addLevel(levelPrice, na, na, code, "Round Number", "ROUND", isMajor ? 5 : 3,
+                 roundColor, false, 0, allowed)
+
+// ============================================================================
+// Trend Curves — preset resolution
+// ============================================================================
+// Lengths are always in bars of the current chart timeframe, never auto-scaled
+// by resolution — a "20" means 20 candles whether the chart is on 5m or 1D.
+
+string fastTrendType = switch trendPresetInput
+    "Custom"     => fastTypeInput
+    "Structural" => "EMA"
+    => "JMA-style"
+int fastTrendLength = switch trendPresetInput
+    "Custom"     => fastLengthInput
+    "Responsive" => 9
+    "Structural" => 20
+    => 21
+float fastTrendPhase = switch trendPresetInput
+    "Custom" => fastPhaseInput
+    => 0.0
+float fastTrendPower = switch trendPresetInput
+    "Custom" => fastPowerInput
+    => 2.0
+
+string baseTrendType = switch trendPresetInput
+    "Custom"     => baseTypeInput
+    "Responsive" => "JMA-style"
+    "Balanced"   => "EMA"
+    => "SMA"
+int baseTrendLength = switch trendPresetInput
+    "Custom"     => baseLengthInput
+    "Responsive" => 21
+    => 50
+float baseTrendPhase = switch trendPresetInput
+    "Custom" => basePhaseInput
+    => 0.0
+float baseTrendPower = switch trendPresetInput
+    "Custom" => basePowerInput
+    => 2.0
+
+string anchorTrendType = switch trendPresetInput
+    "Custom"     => anchorTypeInput
+    "Responsive" => "JMA-style"
+    => "SMA"
+int anchorTrendLength = switch trendPresetInput
+    "Custom"     => anchorLengthInput
+    "Responsive" => 50
+    => 200
+float anchorTrendPhase = switch trendPresetInput
+    "Custom" => anchorPhaseInput
+    => 0.0
+float anchorTrendPower = switch trendPresetInput
+    "Custom" => anchorPowerInput
+    => 2.0
+
+float fastTrendValue = f_maValue(fastTrendType, trendSourceInput, fastTrendLength, fastTrendPhase, fastTrendPower)
+float baseTrendValue = f_maValue(baseTrendType, trendSourceInput, baseTrendLength, baseTrendPhase, baseTrendPower)
+float anchorTrendValue = f_maValue(anchorTrendType, trendSourceInput, anchorTrendLength, anchorTrendPhase, anchorTrendPower)
+
+int trendLineWidth = switch trendEmphasisInput
+    "Subtle" => 1
+    "Bold" => 3
+    => 2
+
+color fastTrendColor = color.rgb(41, 98, 255)
+color baseTrendColor = color.rgb(255, 152, 0)
+color anchorTrendColor = color.rgb(120, 123, 134)
+
+plot(trendModuleInput and showFastInput ? fastTrendValue : na, "Fast Curve",
+     color = fastTrendColor, linewidth = trendLineWidth, offset = trendOffsetInput)
+plot(trendModuleInput and showBaseInput ? baseTrendValue : na, "Base Curve",
+     color = baseTrendColor, linewidth = trendLineWidth, offset = trendOffsetInput)
+plot(trendModuleInput and showAnchorInput ? anchorTrendValue : na, "Anchor Curve",
+     color = anchorTrendColor, linewidth = trendLineWidth, offset = trendOffsetInput)
+
+// ============================================================================
+// Render
+// ============================================================================
+
+if barstate.islast
+    f_clearDrawings()
+
+    if masterEnableInput
+        // Label anchor is always a simple forward offset from the last real bar —
+        // a fixed bar count, not a percentage of the visible time range. That
+        // earlier version recomputed a different offset on every scroll/zoom, and
+        // since Pine only redraws when the script recalculates (not continuously
+        // during a drag), the label would freeze mid-pan and then jump to the new
+        // position once a recalculation happened, instead of panning smoothly like
+        // a normal drawing. A fixed bar count keeps the label at the same calendar
+        // time regardless of scroll position, so redraws land exactly where the
+        // label already was — nothing to jump. "time" itself only moves when new
+        // data arrives, not on chart navigation, so the anchor is fully stable.
+        // Deliberately NOT computed by subtracting from chart.right_visible_bar_time
+        // either, which this script's own future-projected drawings can shift on
+        // the next recalculation, making that a moving target too.
+        //
+        // The rail no longer tries to reach the chart's true right edge (dropped on
+        // request — keeping the current price area uncluttered matters more than
+        // the rail visually touching the price scale). It's a fixed-length segment
+        // starting just past the label, extend.none instead of extend.right.
+        int gapTime = labelOffsetBarsInput * atlasBarMs
+        int labelAnchorTime = time + gapTime
+        // Visual gap between the label and where the rail picks up.
+        int labelToRailGap = int(math.max(gapTime * 0.03, atlasBarMs * 2.0))
+        int railStartTime = labelAnchorTime + labelToRailGap
+        int railSeedEnd = railStartTime + int(math.max(gapTime * 0.5, atlasBarMs * 5.0))
+        // Hard ceiling on how far into the future ANY rail endpoint can land, well
+        // under Pine's bounded future-drawing distance (roughly 500 bars). Without
+        // this, a large "Label offset · bars" combined with a high "Maximum
+        // rendered levels" (which pushes each rank further out via the stagger
+        // below) could push the highest-ranked rails past that limit and get
+        // silently clamped — recreating the shared-coordinate vertical-bar bug
+        // this script has already hit twice, just via inputs instead of zoom.
+        int futureLimitTime = time + atlasBarMs * 480
+
+        // Build candidate distances and sort by priority first, then distance.
+        array<float> sortKeys = array.new_float()
+        array<int> candidateIndices = array.new_int()
+
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                Level level = array.get(levels, i)
+                float distanceAtr = math.abs(level.price - close) / safeAtr
+                bool sideAllowed = level.price >= close ? showAboveInput : showBelowInput
+                bool eligible = sideAllowed and distanceAtr <= maxDistanceAtrInput and level.priority >= minPriorityInput
+                if eligible
+                    // Lower key sorts first: priority dominates, distance breaks ties.
+                    float key = (10 - level.priority) * 1000000.0 + distanceAtr
+                    array.push(sortKeys, key)
+                    array.push(candidateIndices, i)
+
+        // ATR-based rather than visible-price-range-based: tied to the instrument's
+        // own volatility, so which levels get culled doesn't change just because the
+        // user scrolled or zoomed to a different price range.
+        float minLabelSpacing = minLabelSpacingAtrInput * safeAtr
+
+        array<int> order = array.sort_indices(sortKeys)
+
+        // Greedily accept candidates in priority/distance order, skipping any level
+        // that sits too close (relative to ATR) to an already-accepted level so the
+        // right-edge stack does not collapse into overlapping label boxes.
+        array<float> acceptedPrices = array.new_float()
+        array<int> acceptedIndices = array.new_int()
+        if array.size(order) > 0
+            for rank = 0 to array.size(order) - 1
+                int candidatePos = array.get(order, rank)
+                int levelIndex = array.get(candidateIndices, candidatePos)
+                Level candidate = array.get(levels, levelIndex)
+                bool tooClose = false
+                if minLabelSpacing > 0 and array.size(acceptedPrices) > 0
+                    for j = 0 to array.size(acceptedPrices) - 1
+                        if math.abs(array.get(acceptedPrices, j) - candidate.price) < minLabelSpacing
+                            tooClose := true
+                if not tooClose
+                    array.push(acceptedPrices, candidate.price)
+                    array.push(acceptedIndices, levelIndex)
+                if array.size(acceptedIndices) >= maxLevelsInput
+                    break
+
+        int renderCount = array.size(acceptedIndices)
+
+        if renderCount > 0
+            for rank = 0 to renderCount - 1
+                int levelIndex = array.get(acceptedIndices, rank)
+                Level level = array.get(levels, levelIndex)
+
+                color railColor = color.new(level.levelColor, lineTransparencyInput)
+                color labelColor = color.new(level.levelColor, labelTransparencyInput)
+                string labelText = f_text(level)
+
+                // Every rail is staggered by rank so no two levels ever share the exact
+                // same starting x-coordinate. Without this, several differently-colored
+                // horizontal lines all beginning at the identical pixel column, stacked
+                // closely in price, read as a vertical multi-colored bar at that column
+                // regardless of how long each segment then runs — tuning the segment
+                // length alone (tried repeatedly) only ever reduces the odds at whatever
+                // zoom level happens to get tested, it doesn't remove the shared origin.
+                int levelRailStart = math.min(railStartTime + rank * atlasBarMs, futureLimitTime - atlasBarMs)
+                int levelRailEnd = math.min(railSeedEnd + rank * atlasBarMs, futureLimitTime)
+
+                line rail = line.new(
+                     levelRailStart,
+                     level.price,
+                     levelRailEnd,
+                     level.price,
+                     xloc = xloc.bar_time,
+                     extend = extend.none,
+                     color = railColor,
+                     width = lineWidthInput
+                )
+                array.push(renderedLines, rail)
+
+                label tag = label.new(
+                     labelAnchorTime,
+                     level.price,
+                     labelText,
+                     xloc = xloc.bar_time,
+                     yloc = yloc.price,
+                     style = label.style_label_right,
+                     color = labelColor,
+                     textcolor = color.white,
+                     size = f_labelSize(),
+                     tooltip =
+                         level.code + " — " + level.fullName + "\n" +
+                         "Price: " + str.tostring(level.price, format.mintick) +
+                         (level.isZone ? "\nZone: " + str.tostring(level.lower, format.mintick) +
+                             " – " + str.tostring(level.upper, format.mintick) +
+                             "\nTouches: " + str.tostring(level.touches) : "")
+                )
+                array.push(renderedLabels, tag)
+
+                if showSourceZonesInput and level.isZone
+                    int zoneStartTime = time - math.min(srMaxAgeInput, bar_index) * atlasBarMs
+                    box zoneBox = box.new(
+                         zoneStartTime,
+                         level.upper,
+                         time,
+                         level.lower,
+                         xloc = xloc.bar_time,
+                         bgcolor = color.new(level.levelColor, 90),
+                         border_color = color.new(level.levelColor, 65)
+                    )
+                    array.push(renderedBoxes, zoneBox)

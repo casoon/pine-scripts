@@ -1,0 +1,1093 @@
+//@version=6
+// ============================================================================
+// Directional Probability Engine [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2026-07-30
+// ============================================================================
+// Three-factor directional setup engine:
+//
+//   1. STRUCTURE
+//      - Confirmed price pivots and HH/HL/LH/LL context
+//      - Movement efficiency, candle overlap, directional persistence
+//      - Classifies the active leg as impulsive or corrective
+//
+//   2. LOCATION
+//      - ATR-softened Fibonacci retracement zones
+//      - Uses the latest confirmed directional swing
+//      - Zone preference adapts to the quality of the preceding impulse
+//
+//   3. RESPONSE
+//      - Selectable RSI / Stochastic RSI / WaveTrend / CMO
+//      - Oscillator slope, acceleration and directional regime
+//      - Regular/hidden divergence at confirmed price pivots
+//      - Candle acceptance and rejection
+//
+// Outputs:
+//   - Long score:  0..100, plotted above zero
+//   - Short score: 0..100, plotted below zero
+//   - Directional balance: Long - Short
+//
+// IMPORTANT:
+//   These are rule-based probability scores, not statistically calibrated
+//   win-rate percentages. A separate strategy/outcome model is required for
+//   empirical probability calibration.
+//
+// Repainting policy:
+//   - Price pivots only become available after right-side confirmation.
+//   - Optional HTF context uses the previous confirmed HTF bar.
+//   - The live chart bar can naturally fluctuate until it closes.
+// ============================================================================
+
+indicator(
+     "Directional Probability Engine [WavesUnchained]",
+     shorttitle = "DPE [WU]",
+     overlay = false,
+     precision = 1,
+     max_bars_back = 5000
+)
+
+// ============================================================================
+// Constants and helper functions
+// ============================================================================
+
+float EPS = 1e-10
+
+f_clamp(float value, float minimum, float maximum) =>
+    math.max(minimum, math.min(maximum, value))
+
+f_safeDiv(float numerator, float denominator, float fallback) =>
+    math.abs(denominator) > EPS ? numerator / denominator : fallback
+
+f_normSigned(float value, float scale) =>
+    f_clamp(50.0 + 50.0 * f_safeDiv(value, scale, 0.0), 0.0, 100.0)
+
+f_lerp(float a, float b, float t) =>
+    a + (b - a) * f_clamp(t, 0.0, 1.0)
+
+f_triangular(float x, float center, float halfWidth) =>
+    halfWidth > EPS ? f_clamp(1.0 - math.abs(x - center) / halfWidth, 0.0, 1.0) : 0.0
+
+f_weightedAverage3(
+     bool enabled1, float value1, float weight1,
+     bool enabled2, float value2, float weight2,
+     bool enabled3, float value3, float weight3
+ ) =>
+    float activeWeight =
+         (enabled1 ? math.max(weight1, 0.0) : 0.0) +
+         (enabled2 ? math.max(weight2, 0.0) : 0.0) +
+         (enabled3 ? math.max(weight3, 0.0) : 0.0)
+    float weightedSum =
+         (enabled1 ? value1 * math.max(weight1, 0.0) : 0.0) +
+         (enabled2 ? value2 * math.max(weight2, 0.0) : 0.0) +
+         (enabled3 ? value3 * math.max(weight3, 0.0) : 0.0)
+    activeWeight > EPS ? weightedSum / activeWeight : 50.0
+
+f_overlapRatio(int length) =>
+    float total = 0.0
+    int count = 0
+    for i = 0 to length - 1
+        float currentHigh = high[i]
+        float currentLow = low[i]
+        float previousHigh = high[i + 1]
+        float previousLow = low[i + 1]
+        float overlap = math.max(0.0, math.min(currentHigh, previousHigh) - math.max(currentLow, previousLow))
+        float smallerRange = math.min(currentHigh - currentLow, previousHigh - previousLow)
+        if not na(overlap) and not na(smallerRange) and smallerRange > EPS
+            total += overlap / smallerRange
+            count += 1
+    count > 0 ? total / count : 0.5
+
+f_directionalPersistence(int length) =>
+    float bullish = 0.0
+    float bearish = 0.0
+    float total = 0.0
+    for i = 0 to length - 1
+        float body = close[i] - open[i]
+        float barRange = high[i] - low[i]
+        float commitment = barRange > EPS ? math.abs(body) / barRange : 0.0
+        if body > 0
+            bullish += commitment
+        else if body < 0
+            bearish += commitment
+        total += commitment
+    float signed = total > EPS ? (bullish - bearish) / total : 0.0
+    signed
+
+f_gaussianLike(float x, float center, float width) =>
+    // Lightweight bell-shaped score without relying on statistical libraries.
+    float z = width > EPS ? (x - center) / width : 0.0
+    math.exp(-0.5 * z * z)
+
+f_autoHtf() =>
+    float chartSeconds = timeframe.in_seconds()
+    string result = "1M"
+    if chartSeconds <= 5 * 60
+        result := "15"
+    else if chartSeconds <= 15 * 60
+        result := "60"
+    else if chartSeconds <= 60 * 60
+        result := "240"
+    else if chartSeconds <= 4 * 60 * 60
+        result := "1D"
+    else if chartSeconds <= 24 * 60 * 60
+        result := "1W"
+    result
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+string GROUP_GENERAL = "01 · General"
+string GROUP_STRUCTURE = "02 · Structure"
+string GROUP_LOCATION = "03 · Fibonacci Location"
+string GROUP_RESPONSE = "04 · Momentum & Response"
+string GROUP_HTF = "05 · Higher-Timeframe Context"
+string GROUP_DISPLAY = "06 · Display"
+
+string presetInput = input.string(
+     "Auto",
+     "Timeframe preset",
+     options = ["Auto", "Scalping", "Intraday", "Swing", "Position", "Custom"],
+     group = GROUP_GENERAL
+)
+
+string scoreModeInput = input.string(
+     "Independent",
+     "Score mode",
+     options = ["Independent", "Relative"],
+     tooltip = "Independent preserves setup quality on both sides. Relative normalizes Long + Short to 100.",
+     group = GROUP_GENERAL
+)
+
+int smoothingInput = input.int(3, "Final score smoothing", minval = 1, maxval = 20, group = GROUP_GENERAL)
+bool confirmedBarOnlyInput = input.bool(
+     false,
+     "Freeze scores until chart bar closes",
+     tooltip = "When enabled, the displayed score updates only after the chart bar is confirmed.",
+     group = GROUP_GENERAL
+)
+
+// Component toggles and weights
+bool structureEnabled = input.bool(true, "Enable Structure", group = GROUP_STRUCTURE)
+float structureWeight = input.float(40.0, "Structure weight", minval = 0.0, maxval = 100.0, step = 1.0, group = GROUP_STRUCTURE)
+bool locationEnabled = input.bool(true, "Enable Fibonacci Location", group = GROUP_LOCATION)
+float locationWeight = input.float(30.0, "Location weight", minval = 0.0, maxval = 100.0, step = 1.0, group = GROUP_LOCATION)
+bool responseEnabled = input.bool(true, "Enable Momentum & Response", group = GROUP_RESPONSE)
+float responseWeight = input.float(30.0, "Response weight", minval = 0.0, maxval = 100.0, step = 1.0, group = GROUP_RESPONSE)
+
+// Custom lengths
+int customPivotLen = input.int(8, "Custom pivot leg length", minval = 2, maxval = 50, group = GROUP_STRUCTURE)
+int customStructureLen = input.int(21, "Custom structure lookback", minval = 5, maxval = 100, group = GROUP_STRUCTURE)
+int customAtrLen = input.int(14, "Custom ATR length", minval = 5, maxval = 100, group = GROUP_STRUCTURE)
+float pivotAtrToleranceInput = input.float(
+     0.12,
+     "Pivot equality tolerance (ATR)",
+     minval = 0.0,
+     maxval = 1.0,
+     step = 0.01,
+     tooltip = "Small differences inside this ATR fraction are treated as structurally equal.",
+     group = GROUP_STRUCTURE
+)
+float minSwingAtrInput = input.float(
+     1.0,
+     "Minimum relevant swing size (ATR)",
+     minval = 0.25,
+     maxval = 10.0,
+     step = 0.25,
+     group = GROUP_STRUCTURE
+)
+
+// Structure subweights
+float efficiencyWeightInput = input.float(35.0, "Efficiency contribution", minval = 0, maxval = 100, group = GROUP_STRUCTURE)
+float overlapWeightInput = input.float(25.0, "Low-overlap contribution", minval = 0, maxval = 100, group = GROUP_STRUCTURE)
+float persistenceWeightInput = input.float(20.0, "Candle persistence contribution", minval = 0, maxval = 100, group = GROUP_STRUCTURE)
+float swingStructureWeightInput = input.float(20.0, "Pivot structure contribution", minval = 0, maxval = 100, group = GROUP_STRUCTURE)
+
+// Location settings
+float fibToleranceAtrInput = input.float(
+     0.20,
+     "Fibonacci zone softness (ATR)",
+     minval = 0.0,
+     maxval = 2.0,
+     step = 0.05,
+     tooltip = "Widens retracement preferences so levels behave as zones, not exact prices.",
+     group = GROUP_LOCATION
+)
+float shallowCenterInput = input.float(0.382, "Strong-impulse preferred retracement", minval = 0.20, maxval = 0.65, step = 0.001, group = GROUP_LOCATION)
+float normalCenterInput = input.float(0.500, "Normal-impulse preferred retracement", minval = 0.25, maxval = 0.75, step = 0.001, group = GROUP_LOCATION)
+float weakCenterInput = input.float(0.618, "Weak-impulse preferred retracement", minval = 0.35, maxval = 0.90, step = 0.001, group = GROUP_LOCATION)
+float invalidationFibInput = input.float(0.886, "Soft invalidation retracement", minval = 0.618, maxval = 1.50, step = 0.001, group = GROUP_LOCATION)
+bool retestBonusInput = input.bool(true, "Reward retest of broken pivot", group = GROUP_LOCATION)
+
+// Response settings
+string oscillatorInput = input.string(
+     "Stochastic RSI",
+     "Oscillator",
+     options = ["Stochastic RSI", "RSI", "WaveTrend", "CMO"],
+     group = GROUP_RESPONSE
+)
+int customOscLen = input.int(14, "Custom oscillator length", minval = 5, maxval = 100, group = GROUP_RESPONSE)
+int customOscSmooth = input.int(3, "Custom oscillator smoothing", minval = 1, maxval = 20, group = GROUP_RESPONSE)
+bool divergenceEnabledInput = input.bool(true, "Use regular and hidden divergence", group = GROUP_RESPONSE)
+float divergenceStrengthInput = input.float(18.0, "Divergence maximum contribution", minval = 0.0, maxval = 40.0, step = 1.0, group = GROUP_RESPONSE)
+int divergenceMaxBarsInput = input.int(120, "Maximum bars between divergence pivots", minval = 10, maxval = 500, group = GROUP_RESPONSE)
+float acceptanceWeightInput = input.float(30.0, "Price acceptance share", minval = 0.0, maxval = 100.0, group = GROUP_RESPONSE)
+float oscillatorWeightInput = input.float(45.0, "Oscillator share", minval = 0.0, maxval = 100.0, group = GROUP_RESPONSE)
+float accelerationWeightInput = input.float(25.0, "Momentum-change share", minval = 0.0, maxval = 100.0, group = GROUP_RESPONSE)
+
+// HTF
+bool htfEnabledInput = input.bool(true, "Enable confirmed HTF context", group = GROUP_HTF)
+string htfModeInput = input.string("Auto", "HTF selection", options = ["Auto", "Manual"], group = GROUP_HTF)
+string manualHtfInput = input.timeframe("240", "Manual higher timeframe", group = GROUP_HTF)
+float htfInfluenceInput = input.float(
+     15.0,
+     "HTF influence",
+     minval = 0.0,
+     maxval = 40.0,
+     step = 1.0,
+     tooltip = "Adds/subtracts up to this many points from the structure component.",
+     group = GROUP_HTF
+)
+int htfFastEmaInput = input.int(21, "HTF fast EMA", minval = 2, maxval = 200, group = GROUP_HTF)
+int htfSlowEmaInput = input.int(55, "HTF slow EMA", minval = 3, maxval = 400, group = GROUP_HTF)
+
+// Display
+string displayModeInput = input.string(
+     "Mirrored histogram + balance",
+     "Display mode",
+     options = ["Mirrored histogram + balance", "Long/Short lines", "Balance only"],
+     group = GROUP_DISPLAY
+)
+bool showComponentsInput = input.bool(false, "Show component scores", group = GROUP_DISPLAY)
+bool showAgreementInput = input.bool(false, "Show component agreement", group = GROUP_DISPLAY)
+bool showThresholdsInput = input.bool(true, "Show thresholds", group = GROUP_DISPLAY)
+float inclinationThresholdInput = input.float(55.0, "Inclination threshold", minval = 0, maxval = 100, group = GROUP_DISPLAY)
+float setupThresholdInput = input.float(65.0, "Setup threshold", minval = 0, maxval = 100, group = GROUP_DISPLAY)
+float strongThresholdInput = input.float(75.0, "Strong threshold", minval = 0, maxval = 100, group = GROUP_DISPLAY)
+float minimumEdgeInput = input.float(15.0, "Minimum directional edge", minval = 0, maxval = 100, group = GROUP_DISPLAY)
+bool highlightRegimesInput = input.bool(true, "Highlight strong regimes", group = GROUP_DISPLAY)
+
+// ============================================================================
+// Timeframe-adaptive parameter resolution
+// ============================================================================
+
+float chartSeconds = timeframe.in_seconds()
+
+string resolvedPreset = presetInput
+if presetInput == "Auto"
+    if chartSeconds <= 5 * 60
+        resolvedPreset := "Scalping"
+    else if chartSeconds <= 30 * 60
+        resolvedPreset := "Intraday"
+    else if chartSeconds <= 4 * 60 * 60
+        resolvedPreset := "Swing"
+    else
+        resolvedPreset := "Position"
+
+int pivotLen = customPivotLen
+if resolvedPreset == "Scalping"
+    pivotLen := 4
+else if resolvedPreset == "Intraday"
+    pivotLen := 6
+else if resolvedPreset == "Swing"
+    pivotLen := 9
+else if resolvedPreset == "Position"
+    pivotLen := 13
+
+int structureLen = customStructureLen
+if resolvedPreset == "Scalping"
+    structureLen := 13
+else if resolvedPreset == "Intraday"
+    structureLen := 21
+else if resolvedPreset == "Swing"
+    structureLen := 34
+else if resolvedPreset == "Position"
+    structureLen := 55
+
+int atrLen = customAtrLen
+if resolvedPreset == "Scalping"
+    atrLen := 10
+else if resolvedPreset == "Intraday"
+    atrLen := 14
+else if resolvedPreset == "Swing"
+    atrLen := 21
+else if resolvedPreset == "Position"
+    atrLen := 34
+
+int oscLen = customOscLen
+if resolvedPreset == "Scalping"
+    oscLen := 9
+else if resolvedPreset == "Intraday"
+    oscLen := 14
+else if resolvedPreset == "Swing"
+    oscLen := 21
+else if resolvedPreset == "Position"
+    oscLen := 34
+
+int oscSmooth = customOscSmooth
+if resolvedPreset == "Scalping"
+    oscSmooth := 2
+else if resolvedPreset == "Intraday"
+    oscSmooth := 3
+else if resolvedPreset == "Swing"
+    oscSmooth := 4
+else if resolvedPreset == "Position"
+    oscSmooth := 5
+
+// ============================================================================
+// Base series and confirmed pivots
+// ============================================================================
+
+float atr = ta.atr(atrLen)
+float atrSafe = math.max(nz(atr, syminfo.mintick), syminfo.mintick)
+
+float pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+float pivotLow = ta.pivotlow(low, pivotLen, pivotLen)
+
+bool newPivotHigh = not na(pivotHigh)
+bool newPivotLow = not na(pivotLow)
+
+var float lastHigh = na
+var float previousHigh = na
+var int lastHighBar = na
+var int previousHighBar = na
+
+var float lastLow = na
+var float previousLow = na
+var int lastLowBar = na
+var int previousLowBar = na
+
+if newPivotHigh
+    previousHigh := lastHigh
+    previousHighBar := lastHighBar
+    lastHigh := pivotHigh
+    lastHighBar := bar_index - pivotLen
+
+if newPivotLow
+    previousLow := lastLow
+    previousLowBar := lastLowBar
+    lastLow := pivotLow
+    lastLowBar := bar_index - pivotLen
+
+float pivotTolerance = atrSafe * pivotAtrToleranceInput
+
+bool higherHigh = not na(lastHigh) and not na(previousHigh) and lastHigh > previousHigh + pivotTolerance
+bool lowerHigh = not na(lastHigh) and not na(previousHigh) and lastHigh < previousHigh - pivotTolerance
+bool equalHigh = not na(lastHigh) and not na(previousHigh) and math.abs(lastHigh - previousHigh) <= pivotTolerance
+
+bool higherLow = not na(lastLow) and not na(previousLow) and lastLow > previousLow + pivotTolerance
+bool lowerLow = not na(lastLow) and not na(previousLow) and lastLow < previousLow - pivotTolerance
+bool equalLow = not na(lastLow) and not na(previousLow) and math.abs(lastLow - previousLow) <= pivotTolerance
+
+float bullishPivotEvidence =
+     (higherHigh ? 0.5 : lowerHigh ? -0.5 : 0.0) +
+     (higherLow ? 0.5 : lowerLow ? -0.5 : 0.0)
+
+float pivotTrendSigned = f_clamp(bullishPivotEvidence, -1.0, 1.0)
+
+// Swing ordering determines the latest confirmed directional leg.
+bool latestLegBullish =
+     not na(lastHighBar) and not na(lastLowBar) and
+     lastHighBar > lastLowBar and
+     lastHigh > lastLow and
+     (lastHigh - lastLow) / atrSafe >= minSwingAtrInput
+
+bool latestLegBearish =
+     not na(lastHighBar) and not na(lastLowBar) and
+     lastLowBar > lastHighBar and
+     lastHigh > lastLow and
+     (lastHigh - lastLow) / atrSafe >= minSwingAtrInput
+
+// ============================================================================
+// Component 1: Structure and impulse/correction quality
+// ============================================================================
+
+float pathLength = math.sum(math.abs(close - close[1]), structureLen)
+float netChange = close - close[structureLen]
+float efficiency = f_clamp(f_safeDiv(math.abs(netChange), pathLength, 0.0), 0.0, 1.0)
+
+float overlapRatio = f_clamp(f_overlapRatio(structureLen), 0.0, 1.0)
+float lowOverlapQuality = 1.0 - overlapRatio
+
+float persistenceSigned = f_directionalPersistence(structureLen)
+float directionSigned = netChange == 0.0 ? 0.0 : math.sign(netChange)
+
+// Clean directional movement gets rewarded; choppy directional claims are reduced.
+float impulseQualityRaw =
+     (
+         efficiency * efficiencyWeightInput +
+         lowOverlapQuality * overlapWeightInput +
+         math.abs(persistenceSigned) * persistenceWeightInput
+     ) /
+     math.max(efficiencyWeightInput + overlapWeightInput + persistenceWeightInput, EPS)
+
+float impulseQuality = f_clamp(impulseQualityRaw, 0.0, 1.0)
+
+// Blend price-path direction with confirmed swing structure.
+// Confirmed pivots dominate when available; the path direction fills gaps.
+float structuralDirection =
+     f_clamp(
+         0.55 * pivotTrendSigned +
+         0.25 * directionSigned * efficiency +
+         0.20 * persistenceSigned,
+         -1.0,
+         1.0
+     )
+
+// Determine whether the CURRENT move is likely impulse or correction relative
+// to the confirmed structural direction.
+bool currentMoveAgainstStructure =
+     (structuralDirection > 0.15 and netChange < 0) or
+     (structuralDirection < -0.15 and netChange > 0)
+
+float correctionQuality = 0.0
+if currentMoveAgainstStructure
+    correctionQuality := f_clamp(0.55 * overlapRatio + 0.45 * (1.0 - efficiency), 0.0, 1.0)
+
+// A countertrend move that is overlapping/inefficient supports continuation
+// of the underlying structure rather than the countertrend side.
+float continuationEvidence =
+     currentMoveAgainstStructure ? correctionQuality * math.abs(structuralDirection) : 0.0
+
+float baseStructureLong =
+     50.0 +
+     36.0 * structuralDirection +
+     (structuralDirection > 0 ? 14.0 * impulseQuality : -10.0 * impulseQuality) +
+     (structuralDirection > 0 ? 18.0 * continuationEvidence : 0.0)
+
+float baseStructureShort =
+     50.0 -
+     36.0 * structuralDirection +
+     (structuralDirection < 0 ? 14.0 * impulseQuality : -10.0 * impulseQuality) +
+     (structuralDirection < 0 ? 18.0 * continuationEvidence : 0.0)
+
+// Explicit swing-structure contribution.
+float swingStructureLong = f_clamp(50.0 + 50.0 * pivotTrendSigned, 0.0, 100.0)
+float swingStructureShort = 100.0 - swingStructureLong
+
+float structureSubweightTotal = math.max(
+     efficiencyWeightInput + overlapWeightInput + persistenceWeightInput + swingStructureWeightInput,
+     EPS
+)
+
+float pathQualityLong = 50.0 - 35.0 * impulseQuality
+if structuralDirection >= 0
+    pathQualityLong := 50.0 + 50.0 * impulseQuality
+
+float pathQualityShort = 50.0 - 35.0 * impulseQuality
+if structuralDirection <= 0
+    pathQualityShort := 50.0 + 50.0 * impulseQuality
+
+float structureLong =
+     (
+         f_clamp(baseStructureLong, 0.0, 100.0) *
+             (efficiencyWeightInput + overlapWeightInput + persistenceWeightInput) +
+         swingStructureLong * swingStructureWeightInput
+     ) / structureSubweightTotal
+
+float structureShort =
+     (
+         f_clamp(baseStructureShort, 0.0, 100.0) *
+             (efficiencyWeightInput + overlapWeightInput + persistenceWeightInput) +
+         swingStructureShort * swingStructureWeightInput
+     ) / structureSubweightTotal
+
+// ============================================================================
+// Confirmed higher-timeframe context
+// ============================================================================
+
+string selectedHtf = htfModeInput == "Auto" ? f_autoHtf() : manualHtfInput
+bool validHigherTimeframe = timeframe.in_seconds(selectedHtf) > chartSeconds
+
+[htfFastConfirmed, htfSlowConfirmed, htfCloseConfirmed] = request.security(
+     syminfo.tickerid,
+     selectedHtf,
+     [ta.ema(close, htfFastEmaInput)[1], ta.ema(close, htfSlowEmaInput)[1], close[1]],
+     lookahead = barmerge.lookahead_on
+)
+
+float htfSpread = htfFastConfirmed - htfSlowConfirmed
+float htfScale = math.max(math.abs(htfFastConfirmed - htfSlowConfirmed) + atrSafe, atrSafe)
+float htfTrendSigned = 0.0
+if validHigherTimeframe
+    htfTrendSigned := f_clamp(
+         0.70 * f_safeDiv(htfSpread, htfScale, 0.0) +
+         0.30 * f_safeDiv(htfCloseConfirmed - htfSlowConfirmed, htfScale, 0.0),
+         -1.0,
+         1.0
+       )
+
+if htfEnabledInput and validHigherTimeframe
+    structureLong := f_clamp(structureLong + htfInfluenceInput * htfTrendSigned, 0.0, 100.0)
+    structureShort := f_clamp(structureShort - htfInfluenceInput * htfTrendSigned, 0.0, 100.0)
+
+// ============================================================================
+// Component 2: Fibonacci location
+// ============================================================================
+
+// For a bullish confirmed leg, retracement is measured downward from its high.
+// For a bearish confirmed leg, retracement is measured upward from its low.
+float bullishLegRange = latestLegBullish ? lastHigh - lastLow : na
+float bearishLegRange = latestLegBearish ? lastHigh - lastLow : na
+
+float bullishRetracement = na
+if latestLegBullish and bullishLegRange > EPS
+    bullishRetracement := (lastHigh - close) / bullishLegRange
+
+float bearishRetracement = na
+if latestLegBearish and bearishLegRange > EPS
+    bearishRetracement := (close - lastLow) / bearishLegRange
+
+// Preferred correction depth adapts continuously:
+// strong impulse -> shallower center, weak impulse -> deeper center.
+float preferredFibCenter = f_lerp(weakCenterInput, normalCenterInput, impulseQuality / 0.67)
+if impulseQuality >= 0.67
+    preferredFibCenter := f_lerp(normalCenterInput, shallowCenterInput, (impulseQuality - 0.67) / 0.33)
+
+float activeLegRange = latestLegBullish ? bullishLegRange : latestLegBearish ? bearishLegRange : na
+float fibSoftness = 0.12
+if not na(activeLegRange) and activeLegRange > EPS
+    fibSoftness := 0.075 + fibToleranceAtrInput * atrSafe / activeLegRange
+fibSoftness := f_clamp(fibSoftness, 0.05, 0.30)
+
+float bullZoneFit = not na(bullishRetracement) ? f_gaussianLike(bullishRetracement, preferredFibCenter, fibSoftness) : 0.0
+float bearZoneFit = not na(bearishRetracement) ? f_gaussianLike(bearishRetracement, preferredFibCenter, fibSoftness) : 0.0
+
+// Retracement health decreases beyond the soft invalidation level.
+float bullIntegrity = 0.0
+if not na(bullishRetracement)
+    if bullishRetracement <= invalidationFibInput
+        bullIntegrity := 1.0
+    else
+        bullIntegrity := f_clamp(1.0 - (bullishRetracement - invalidationFibInput) / math.max(1.20 - invalidationFibInput, 0.05), 0.0, 1.0)
+
+float bearIntegrity = 0.0
+if not na(bearishRetracement)
+    if bearishRetracement <= invalidationFibInput
+        bearIntegrity := 1.0
+    else
+        bearIntegrity := f_clamp(1.0 - (bearishRetracement - invalidationFibInput) / math.max(1.20 - invalidationFibInput, 0.05), 0.0, 1.0)
+
+// Avoid rewarding a "retracement" before price has actually pulled back.
+float bullCorrectionPresence = 0.0
+if not na(bullishRetracement)
+    bullCorrectionPresence := f_clamp(bullishRetracement / 0.236, 0.0, 1.0)
+
+float bearCorrectionPresence = 0.0
+if not na(bearishRetracement)
+    bearCorrectionPresence := f_clamp(bearishRetracement / 0.236, 0.0, 1.0)
+
+// Optional retest bonus near the former breakout pivot.
+float bullRetestDistance =
+     not na(previousHigh) ? math.abs(close - previousHigh) / atrSafe : 999.0
+float bearRetestDistance =
+     not na(previousLow) ? math.abs(close - previousLow) / atrSafe : 999.0
+
+float bullRetestBonus = 0.0
+if retestBonusInput and latestLegBullish and bullRetestDistance <= 0.5
+    bullRetestBonus := 10.0 * (1.0 - bullRetestDistance / 0.5)
+
+float bearRetestBonus = 0.0
+if retestBonusInput and latestLegBearish and bearRetestDistance <= 0.5
+    bearRetestBonus := 10.0 * (1.0 - bearRetestDistance / 0.5)
+
+float locationLong = 50.0
+if latestLegBullish
+    locationLong := f_clamp(
+         20.0 +
+         55.0 * bullZoneFit * bullIntegrity * bullCorrectionPresence +
+         15.0 * bullIntegrity +
+         bullRetestBonus,
+         0.0,
+         100.0
+       )
+else if latestLegBearish
+    locationLong := f_clamp(35.0 - 25.0 * bearZoneFit * bearIntegrity, 0.0, 100.0)
+
+float locationShort = 50.0
+if latestLegBearish
+    locationShort := f_clamp(
+         20.0 +
+         55.0 * bearZoneFit * bearIntegrity * bearCorrectionPresence +
+         15.0 * bearIntegrity +
+         bearRetestBonus,
+         0.0,
+         100.0
+       )
+else if latestLegBullish
+    locationShort := f_clamp(35.0 - 25.0 * bullZoneFit * bullIntegrity, 0.0, 100.0)
+
+// If price extends beyond the impulse in its original direction, location
+// shifts from retracement logic toward continuation rather than becoming NA.
+if latestLegBullish and bullishRetracement < 0
+    float extension = math.abs(bullishRetracement)
+    locationLong := f_clamp(58.0 + 20.0 * f_clamp(extension / 0.272, 0.0, 1.0), 0.0, 100.0)
+    locationShort := f_clamp(32.0 - 12.0 * f_clamp(extension / 0.272, 0.0, 1.0), 0.0, 100.0)
+
+if latestLegBearish and bearishRetracement < 0
+    float extension = math.abs(bearishRetracement)
+    locationShort := f_clamp(58.0 + 20.0 * f_clamp(extension / 0.272, 0.0, 1.0), 0.0, 100.0)
+    locationLong := f_clamp(32.0 - 12.0 * f_clamp(extension / 0.272, 0.0, 1.0), 0.0, 100.0)
+
+// ============================================================================
+// Component 3: Momentum, divergence and price response
+// ============================================================================
+
+float rsi = ta.rsi(close, oscLen)
+float rsiLowest = ta.lowest(rsi, oscLen)
+float rsiHighest = ta.highest(rsi, oscLen)
+float stochRsiRaw = 100.0 * f_safeDiv(rsi - rsiLowest, rsiHighest - rsiLowest, 0.5)
+float stochRsi = ta.ema(stochRsiRaw, oscSmooth)
+
+// WaveTrend, normalized approximately to 0..100.
+int wtChannelLen = math.max(5, oscLen)
+int wtAverageLen = math.max(3, oscLen * 2)
+float wtEsa = ta.ema(hlc3, wtChannelLen)
+float wtDeviation = ta.ema(math.abs(hlc3 - wtEsa), wtChannelLen)
+float wtCi = f_safeDiv(hlc3 - wtEsa, 0.015 * wtDeviation, 0.0)
+float wtRaw = ta.ema(wtCi, wtAverageLen)
+float wtNorm = f_clamp(50.0 + wtRaw * 0.65, 0.0, 100.0)
+
+float cmoRaw = ta.cmo(close, oscLen)
+float cmoNorm = f_clamp(50.0 + cmoRaw * 0.5, 0.0, 100.0)
+
+float oscillator = stochRsi
+if oscillatorInput == "RSI"
+    oscillator := rsi
+else if oscillatorInput == "WaveTrend"
+    oscillator := wtNorm
+else if oscillatorInput == "CMO"
+    oscillator := cmoNorm
+
+float oscillatorSmoothed = ta.ema(oscillator, oscSmooth)
+float oscillatorVelocity = oscillatorSmoothed - oscillatorSmoothed[1]
+float oscillatorAcceleration = oscillatorVelocity - oscillatorVelocity[1]
+float oscillatorVolatility = ta.stdev(oscillatorVelocity, math.max(5, oscLen))
+float velocityNorm = f_clamp(f_safeDiv(oscillatorVelocity, math.max(oscillatorVolatility, 0.5), 0.0), -2.0, 2.0)
+float accelerationNorm = f_clamp(f_safeDiv(oscillatorAcceleration, math.max(oscillatorVolatility, 0.5), 0.0), -2.0, 2.0)
+
+// Absolute oscillator location matters less than its turn and direction.
+float oscillatorLongBase =
+     f_clamp(
+         50.0 +
+         22.0 * velocityNorm +
+         8.0 * accelerationNorm +
+         10.0 * f_safeDiv(50.0 - oscillatorSmoothed, 50.0, 0.0),
+         0.0,
+         100.0
+     )
+
+float oscillatorShortBase =
+     f_clamp(
+         50.0 -
+         22.0 * velocityNorm -
+         8.0 * accelerationNorm +
+         10.0 * f_safeDiv(oscillatorSmoothed - 50.0, 50.0, 0.0),
+         0.0,
+         100.0
+     )
+
+// Candle acceptance/rejection.
+float candleRange = math.max(high - low, syminfo.mintick)
+float bodySigned = (close - open) / candleRange
+float closeLocation = (close - low) / candleRange
+float lowerWick = (math.min(open, close) - low) / candleRange
+float upperWick = (high - math.max(open, close)) / candleRange
+
+float bullishAcceptanceRaw =
+     0.40 * closeLocation +
+     0.30 * f_clamp(bodySigned, 0.0, 1.0) +
+     0.30 * lowerWick
+
+float bearishAcceptanceRaw =
+     0.40 * (1.0 - closeLocation) +
+     0.30 * f_clamp(-bodySigned, 0.0, 1.0) +
+     0.30 * upperWick
+
+float acceptanceLong = 100.0 * f_clamp(bullishAcceptanceRaw, 0.0, 1.0)
+float acceptanceShort = 100.0 * f_clamp(bearishAcceptanceRaw, 0.0, 1.0)
+
+// Divergence is anchored to confirmed PRICE pivots. Oscillator values are read
+// from those same pivot bars, avoiding independent oscillator-pivot mismatch.
+var float lastLowPivotOsc = na
+var float previousLowPivotOsc = na
+var float lastLowPivotPrice = na
+var float previousLowPivotPrice = na
+var int lastLowPivotDivBar = na
+var int previousLowPivotDivBar = na
+
+var float lastHighPivotOsc = na
+var float previousHighPivotOsc = na
+var float lastHighPivotPrice = na
+var float previousHighPivotPrice = na
+var int lastHighPivotDivBar = na
+var int previousHighPivotDivBar = na
+
+if newPivotLow
+    previousLowPivotOsc := lastLowPivotOsc
+    previousLowPivotPrice := lastLowPivotPrice
+    previousLowPivotDivBar := lastLowPivotDivBar
+    lastLowPivotOsc := oscillatorSmoothed[pivotLen]
+    lastLowPivotPrice := pivotLow
+    lastLowPivotDivBar := bar_index - pivotLen
+
+if newPivotHigh
+    previousHighPivotOsc := lastHighPivotOsc
+    previousHighPivotPrice := lastHighPivotPrice
+    previousHighPivotDivBar := lastHighPivotDivBar
+    lastHighPivotOsc := oscillatorSmoothed[pivotLen]
+    lastHighPivotPrice := pivotHigh
+    lastHighPivotDivBar := bar_index - pivotLen
+
+bool validLowDivSpan =
+     not na(lastLowPivotDivBar) and not na(previousLowPivotDivBar) and
+     lastLowPivotDivBar - previousLowPivotDivBar <= divergenceMaxBarsInput
+
+bool validHighDivSpan =
+     not na(lastHighPivotDivBar) and not na(previousHighPivotDivBar) and
+     lastHighPivotDivBar - previousHighPivotDivBar <= divergenceMaxBarsInput
+
+bool regularBullDiv =
+     divergenceEnabledInput and validLowDivSpan and
+     lastLowPivotPrice < previousLowPivotPrice - pivotTolerance and
+     lastLowPivotOsc > previousLowPivotOsc
+
+bool hiddenBullDiv =
+     divergenceEnabledInput and validLowDivSpan and
+     lastLowPivotPrice > previousLowPivotPrice + pivotTolerance and
+     lastLowPivotOsc < previousLowPivotOsc
+
+bool regularBearDiv =
+     divergenceEnabledInput and validHighDivSpan and
+     lastHighPivotPrice > previousHighPivotPrice + pivotTolerance and
+     lastHighPivotOsc < previousHighPivotOsc
+
+bool hiddenBearDiv =
+     divergenceEnabledInput and validHighDivSpan and
+     lastHighPivotPrice < previousHighPivotPrice - pivotTolerance and
+     lastHighPivotOsc > previousHighPivotOsc
+
+// Divergence contribution decays after confirmation instead of persisting forever.
+var int lastBullDivConfirmationBar = na
+var int lastBearDivConfirmationBar = na
+var float lastBullDivTypeStrength = 0.0
+var float lastBearDivTypeStrength = 0.0
+
+if regularBullDiv or hiddenBullDiv
+    lastBullDivConfirmationBar := bar_index
+    lastBullDivTypeStrength := regularBullDiv ? 1.0 : 0.75
+
+if regularBearDiv or hiddenBearDiv
+    lastBearDivConfirmationBar := bar_index
+    lastBearDivTypeStrength := regularBearDiv ? 1.0 : 0.75
+
+int divergenceDecayBars = math.max(structureLen, pivotLen * 3)
+
+float bullDivDecay = 0.0
+if not na(lastBullDivConfirmationBar)
+    bullDivDecay := f_clamp(1.0 - float(bar_index - lastBullDivConfirmationBar) / divergenceDecayBars, 0.0, 1.0)
+
+float bearDivDecay = 0.0
+if not na(lastBearDivConfirmationBar)
+    bearDivDecay := f_clamp(1.0 - float(bar_index - lastBearDivConfirmationBar) / divergenceDecayBars, 0.0, 1.0)
+
+float bullDivergenceBonus = divergenceStrengthInput * bullDivDecay * lastBullDivTypeStrength
+float bearDivergenceBonus = divergenceStrengthInput * bearDivDecay * lastBearDivTypeStrength
+
+float responseSubweightTotal = math.max(
+     oscillatorWeightInput + acceptanceWeightInput + accelerationWeightInput,
+     EPS
+)
+
+float accelerationLong = f_clamp(50.0 + 25.0 * accelerationNorm + 15.0 * velocityNorm, 0.0, 100.0)
+float accelerationShort = f_clamp(50.0 - 25.0 * accelerationNorm - 15.0 * velocityNorm, 0.0, 100.0)
+
+float responseLong =
+     (
+         oscillatorLongBase * oscillatorWeightInput +
+         acceptanceLong * acceptanceWeightInput +
+         accelerationLong * accelerationWeightInput
+     ) / responseSubweightTotal +
+     bullDivergenceBonus -
+     0.40 * bearDivergenceBonus
+
+float responseShort =
+     (
+         oscillatorShortBase * oscillatorWeightInput +
+         acceptanceShort * acceptanceWeightInput +
+         accelerationShort * accelerationWeightInput
+     ) / responseSubweightTotal +
+     bearDivergenceBonus -
+     0.40 * bullDivergenceBonus
+
+responseLong := f_clamp(responseLong, 0.0, 100.0)
+responseShort := f_clamp(responseShort, 0.0, 100.0)
+
+// ============================================================================
+// Composite scores
+// ============================================================================
+
+float rawLong = f_weightedAverage3(
+     structureEnabled, structureLong, structureWeight,
+     locationEnabled, locationLong, locationWeight,
+     responseEnabled, responseLong, responseWeight
+)
+
+float rawShort = f_weightedAverage3(
+     structureEnabled, structureShort, structureWeight,
+     locationEnabled, locationShort, locationWeight,
+     responseEnabled, responseShort, responseWeight
+)
+
+if scoreModeInput == "Relative"
+    float relativeTotal = rawLong + rawShort
+    rawLong := relativeTotal > EPS ? 100.0 * rawLong / relativeTotal : 50.0
+    rawShort := 100.0 - rawLong
+
+float smoothedLong = ta.ema(rawLong, smoothingInput)
+float smoothedShort = ta.ema(rawShort, smoothingInput)
+
+var float frozenLong = na
+var float frozenShort = na
+
+if barstate.isconfirmed or not confirmedBarOnlyInput
+    frozenLong := smoothedLong
+    frozenShort := smoothedShort
+
+float longScore = confirmedBarOnlyInput ? nz(frozenLong, smoothedLong) : smoothedLong
+float shortScore = confirmedBarOnlyInput ? nz(frozenShort, smoothedShort) : smoothedShort
+float balance = longScore - shortScore
+
+// Agreement is based on dispersion between enabled component scores.
+float activeCount =
+     (structureEnabled ? 1.0 : 0.0) +
+     (locationEnabled ? 1.0 : 0.0) +
+     (responseEnabled ? 1.0 : 0.0)
+
+float longMean = 50.0
+if activeCount > 0
+    longMean := ((structureEnabled ? structureLong : 0.0) +
+       (locationEnabled ? locationLong : 0.0) +
+       (responseEnabled ? responseLong : 0.0)) / activeCount
+
+float shortMean = 50.0
+if activeCount > 0
+    shortMean := ((structureEnabled ? structureShort : 0.0) +
+       (locationEnabled ? locationShort : 0.0) +
+       (responseEnabled ? responseShort : 0.0)) / activeCount
+
+float longVariance = 0.0
+if activeCount > 0
+    longVariance := ((structureEnabled ? math.pow(structureLong - longMean, 2) : 0.0) +
+       (locationEnabled ? math.pow(locationLong - longMean, 2) : 0.0) +
+       (responseEnabled ? math.pow(responseLong - longMean, 2) : 0.0)) / activeCount
+
+float shortVariance = 0.0
+if activeCount > 0
+    shortVariance := ((structureEnabled ? math.pow(structureShort - shortMean, 2) : 0.0) +
+       (locationEnabled ? math.pow(locationShort - shortMean, 2) : 0.0) +
+       (responseEnabled ? math.pow(responseShort - shortMean, 2) : 0.0)) / activeCount
+
+float averageDispersion = 0.5 * (math.sqrt(longVariance) + math.sqrt(shortVariance))
+float agreement = f_clamp(100.0 - 2.5 * averageDispersion, 0.0, 100.0)
+
+// ============================================================================
+// Regime states and alerts
+// ============================================================================
+
+bool longInclination = longScore >= inclinationThresholdInput and balance >= minimumEdgeInput * 0.5
+bool shortInclination = shortScore >= inclinationThresholdInput and balance <= -minimumEdgeInput * 0.5
+
+bool longSetup = longScore >= setupThresholdInput and balance >= minimumEdgeInput
+bool shortSetup = shortScore >= setupThresholdInput and balance <= -minimumEdgeInput
+
+bool strongLong = longScore >= strongThresholdInput and balance >= minimumEdgeInput * 1.5
+bool strongShort = shortScore >= strongThresholdInput and balance <= -minimumEdgeInput * 1.5
+
+bool newLongSetup = longSetup and not longSetup[1]
+bool newShortSetup = shortSetup and not shortSetup[1]
+bool newStrongLong = strongLong and not strongLong[1]
+bool newStrongShort = strongShort and not strongShort[1]
+
+alertcondition(newLongSetup, "DPE Long Setup", "Directional Probability Engine: new Long setup")
+alertcondition(newShortSetup, "DPE Short Setup", "Directional Probability Engine: new Short setup")
+alertcondition(newStrongLong, "DPE Strong Long", "Directional Probability Engine: new strong Long regime")
+alertcondition(newStrongShort, "DPE Strong Short", "Directional Probability Engine: new strong Short regime")
+alertcondition(regularBullDiv, "DPE Regular Bullish Divergence", "Directional Probability Engine: confirmed regular bullish divergence")
+alertcondition(regularBearDiv, "DPE Regular Bearish Divergence", "Directional Probability Engine: confirmed regular bearish divergence")
+alertcondition(hiddenBullDiv, "DPE Hidden Bullish Divergence", "Directional Probability Engine: confirmed hidden bullish divergence")
+alertcondition(hiddenBearDiv, "DPE Hidden Bearish Divergence", "Directional Probability Engine: confirmed hidden bearish divergence")
+
+// ============================================================================
+// Visuals
+// ============================================================================
+
+bool histogramMode = displayModeInput == "Mirrored histogram + balance"
+bool lineMode = displayModeInput == "Long/Short lines"
+bool balanceOnlyMode = displayModeInput == "Balance only"
+
+color longColor = color.new(color.green, 60)
+if strongLong
+    longColor := color.new(color.lime, 0)
+else if longSetup
+    longColor := color.new(color.green, 0)
+else if longInclination
+    longColor := color.new(color.green, 25)
+
+color shortColor = color.new(color.red, 60)
+if strongShort
+    shortColor := color.new(color.red, 0)
+else if shortSetup
+    shortColor := color.new(color.maroon, 0)
+else if shortInclination
+    shortColor := color.new(color.red, 25)
+
+color balanceColor = color.new(color.gray, 20)
+if balance > minimumEdgeInput
+    balanceColor := color.new(color.lime, 0)
+else if balance < -minimumEdgeInput
+    balanceColor := color.new(color.red, 0)
+
+plot(
+     histogramMode ? longScore : na,
+     "Long Probability Score",
+     color = longColor,
+     style = plot.style_columns,
+     linewidth = 2,
+     histbase = 0
+)
+
+plot(
+     histogramMode ? -shortScore : na,
+     "Short Probability Score",
+     color = shortColor,
+     style = plot.style_columns,
+     linewidth = 2,
+     histbase = 0
+)
+
+plot(
+     histogramMode or balanceOnlyMode ? balance : na,
+     "Directional Balance",
+     color = balanceColor,
+     linewidth = 2
+)
+
+plot(
+     lineMode ? longScore : na,
+     "Long Score Line",
+     color = longColor,
+     linewidth = 2
+)
+
+plot(
+     lineMode ? shortScore : na,
+     "Short Score Line",
+     color = shortColor,
+     linewidth = 2
+)
+
+hline(0, "Zero", color = color.new(color.gray, 65))
+
+plot(
+     showThresholdsInput and histogramMode ? inclinationThresholdInput : na,
+     "Long inclination threshold",
+     color = color.new(color.gray, 80),
+     linewidth = 1
+)
+plot(
+     showThresholdsInput and histogramMode ? -inclinationThresholdInput : na,
+     "Short inclination threshold",
+     color = color.new(color.gray, 80),
+     linewidth = 1
+)
+plot(
+     showThresholdsInput and histogramMode ? setupThresholdInput : na,
+     "Long setup threshold",
+     color = color.new(color.gray, 65),
+     linewidth = 1
+)
+plot(
+     showThresholdsInput and histogramMode ? -setupThresholdInput : na,
+     "Short setup threshold",
+     color = color.new(color.gray, 65),
+     linewidth = 1
+)
+plot(
+     showThresholdsInput and histogramMode ? strongThresholdInput : na,
+     "Long strong threshold",
+     color = color.new(color.gray, 50),
+     linewidth = 1
+)
+plot(
+     showThresholdsInput and histogramMode ? -strongThresholdInput : na,
+     "Short strong threshold",
+     color = color.new(color.gray, 50),
+     linewidth = 1
+)
+
+plot(
+     showComponentsInput ? structureLong : na,
+     "Structure Long",
+     color = color.new(color.blue, 0),
+     linewidth = 1
+)
+plot(
+     showComponentsInput ? -structureShort : na,
+     "Structure Short",
+     color = color.new(color.blue, 45),
+     linewidth = 1
+)
+plot(
+     showComponentsInput ? locationLong : na,
+     "Location Long",
+     color = color.new(color.orange, 0),
+     linewidth = 1
+)
+plot(
+     showComponentsInput ? -locationShort : na,
+     "Location Short",
+     color = color.new(color.orange, 45),
+     linewidth = 1
+)
+plot(
+     showComponentsInput ? responseLong : na,
+     "Response Long",
+     color = color.new(color.purple, 0),
+     linewidth = 1
+)
+plot(
+     showComponentsInput ? -responseShort : na,
+     "Response Short",
+     color = color.new(color.purple, 45),
+     linewidth = 1
+)
+plot(
+     showAgreementInput ? agreement : na,
+     "Component Agreement",
+     color = color.new(color.aqua, 0),
+     linewidth = 2
+)
+
+color regimeBackground = na
+if highlightRegimesInput
+    if strongLong
+        regimeBackground := color.new(color.green, 88)
+    else if strongShort
+        regimeBackground := color.new(color.red, 88)
+
+bgcolor(regimeBackground, title = "Strong regime background")
+
+// Data-window diagnostics
+plot(structuralDirection, "Diagnostic: Structural direction", display = display.data_window)
+plot(impulseQuality * 100.0, "Diagnostic: Impulse quality", display = display.data_window)
+plot(correctionQuality * 100.0, "Diagnostic: Correction quality", display = display.data_window)
+plot(overlapRatio * 100.0, "Diagnostic: Overlap ratio", display = display.data_window)
+plot(efficiency * 100.0, "Diagnostic: Efficiency ratio", display = display.data_window)
+plot(preferredFibCenter * 100.0, "Diagnostic: Preferred Fib %", display = display.data_window)
+plot(bullishRetracement * 100.0, "Diagnostic: Bullish retracement %", display = display.data_window)
+plot(bearishRetracement * 100.0, "Diagnostic: Bearish retracement %", display = display.data_window)
+plot(oscillatorSmoothed, "Diagnostic: Oscillator", display = display.data_window)
+plot(htfTrendSigned * 100.0, "Diagnostic: HTF direction", display = display.data_window)
+plot(agreement, "Diagnostic: Agreement", display = display.data_window)

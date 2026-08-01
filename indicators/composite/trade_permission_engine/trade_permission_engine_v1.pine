@@ -1,0 +1,1924 @@
+//@version=6
+// ============================================================================
+// Trade Permission Engine [WavesUnchained]
+// Version: 1.1.0
+// Author: WavesUnchained
+// Build: 2026-08-01
+// ============================================================================
+// Answers "does the market currently permit trading Long or Short here", not
+// "how probable is this specific setup" - the successor to Directional
+// Probability Engine (archived; see archive/indicators/directional_probability_engine/),
+// whose five iterations (v1-v3.5) settled on a rule-based read of setup
+// readiness rather than a calibrated probability. This indicator keeps that
+// entire architecture (alternating confirmed swing as the reference leg,
+// unified Continuation/Reversal Maturity on one retracement ratio, separated
+// impulse-vs-counter-move Exhaustion, a Trigger state machine, scenario-aware
+// Target/Invalidation) and adds two mechanisms aimed specifically at the
+// permission framing:
+//
+// Features:
+//   ✓ Continuation AND Reversal scenarios from one retracement ratio against
+//     an alternating confirmed reference leg (no pipeline duplication)
+//   ✓ Live Trend Quality - a second, continuously-updated quality read
+//     (recency-weighted efficiency across the last few legs) alongside the
+//     quality frozen when the reference leg formed, answering "is this
+//     impulse still healthy", not just "was it good when it formed"
+//   ✓ Permission Decay - permission fades over bars with no new extreme,
+//     accelerating momentum or ATR expansion, instead of sitting at a stale
+//     high value once the move that earned it has gone quiet
+//   ✓ Exhaustion split by role: counter-move exhaustion feeds Continuation,
+//     reference-impulse exhaustion (via divergence at the leg's own
+//     endpoint) feeds Reversal - using counter-move exhaustion for Reversal
+//     was backwards (a strong counter-move is what a reversal thesis wants)
+//   ✓ Trigger state machine (UNTRIGGERED -> BROKEN -> CONFIRMED -> ACCEPTED)
+//     with a same-bar rejection-at-extreme (genuinely leading) and a
+//     validity window so Permission clearing its threshold a few bars late
+//     doesn't lose the signal
+//   ✓ Target/Invalidation via a real recent-pivot search (not just the
+//     latest swing), scenario-aware T2, CRV feasibility gating the score,
+//     drawn on the price chart via force_overlay
+//   ✓ Color-coded histogram only (light = Permission, solid = confirmed/
+//     Active Permission) plus a Permission line, a velocity line and a
+//     rising/falling confidence-band background - no table
+//   ✓ Position Health (Long/Short) - a second, fully decoupled score answering
+//     "is an ALREADY-OPEN position still structurally healthy", not "is a new
+//     entry attractive here". Weighted (not multiplicative-gated) blend of
+//     continuous Live Quality, Pullback Health, Trend Progress, Trend Fatigue,
+//     Structure Intact and Regime/Sideways-Risk, classified into four states
+//     (HOLD/PROTECT/REDUCE/EXIT) - never reads CRV, Trigger state or the
+//     trade-lifecycle machinery below it
+//
+// Deliberately not implemented (see README "Deliberate scope cuts"):
+// Opportunity Window lifecycle staging, event-only score updates, a full
+// multi-leg trend-development breakdown beyond Live Trend Quality's
+// recency-weighted history (Trend Fatigue is now exposed as its own score
+// within Position Health, but as a lighter recency-weighted read, not the
+// originally-floated explicit point-schedule).
+//
+// IMPORTANT: rule-based 0..100 evidence scores, not calibrated probabilities.
+// ============================================================================
+
+indicator(
+     "Trade Permission Engine [WavesUnchained]",
+     shorttitle = "TPE1 [WU]",
+     overlay = false,
+     precision = 1,
+     max_bars_back = 5000,
+     max_labels_count = 200
+)
+
+// ============================================================================
+// Constants and helper functions
+// ============================================================================
+
+float EPS = 1e-10
+
+f_clamp(float value, float minimum, float maximum) =>
+    math.max(minimum, math.min(maximum, value))
+
+f_safeDiv(float numerator, float denominator, float fallback) =>
+    math.abs(denominator) > EPS ? numerator / denominator : fallback
+
+f_lerp(float a, float b, float t) =>
+    a + (b - a) * f_clamp(t, 0.0, 1.0)
+
+f_gaussianLike(float x, float center, float width) =>
+    float z = width > EPS ? (x - center) / width : 0.0
+    math.exp(-0.5 * z * z)
+
+f_autoHtf() =>
+    float chartSeconds = timeframe.in_seconds()
+    string result = "1M"
+    if chartSeconds <= 5 * 60
+        result := "15"
+    else if chartSeconds <= 15 * 60
+        result := "60"
+    else if chartSeconds <= 60 * 60
+        result := "240"
+    else if chartSeconds <= 4 * 60 * 60
+        result := "1D"
+    else if chartSeconds <= 24 * 60 * 60
+        result := "1W"
+    result
+
+f_weightedAvg2(float v1, float w1, float v2, float w2) =>
+    float totalWeight = math.max(w1 + w2, EPS)
+    (v1 * w1 + v2 * w2) / totalWeight
+
+f_gatedFactor(float value100, float floorFraction) =>
+    floorFraction + (1.0 - floorFraction) * f_clamp(value100, 0.0, 100.0) / 100.0
+
+// Nearest confirmed pivot at least minDist above/below price - a real target
+// search over recent structure instead of only ever checking the single most
+// recent swing high/low.
+f_nearestPivotAbove(array<float> arr, float price, float minDist) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            float v = array.get(arr, i)
+            if v - price >= minDist and (na(best) or v < best)
+                best := v
+    best
+
+f_nearestPivotBelow(array<float> arr, float price, float minDist) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            float v = array.get(arr, i)
+            if price - v >= minDist and (na(best) or v > best)
+                best := v
+    best
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+string GROUP_GENERAL = "01 · General"
+string GROUP_LEG = "02 · Reference Leg"
+string GROUP_MATURITY = "03 · Maturity (Continuation + Reversal)"
+string GROUP_EXHAUSTION = "04 · Exhaustion (Deterioration)"
+string GROUP_TRIGGER = "05 · Trigger & Acceptance"
+string GROUP_TARGET = "06 · Target & Invalidation"
+string GROUP_HTF = "07 · Higher-Timeframe Context"
+string GROUP_DISPLAY = "08 · Display"
+string GROUP_POSITION_HEALTH = "09 · Position Health"
+
+string presetInput = input.string("Auto", "Timeframe preset", options = ["Auto", "Scalping", "Intraday", "Swing", "Position", "Custom"], group = GROUP_GENERAL)
+int smoothingInput = input.int(3, "Final score smoothing", minval = 1, maxval = 20, group = GROUP_GENERAL)
+bool confirmedBarOnlyInput = input.bool(false, "Update displayed scores only on confirmed bars", tooltip = "Only smooths/freezes the DISPLAYED score. Pivots, Trigger state and Target/Invalidation events are always computed live.", group = GROUP_GENERAL)
+
+int customPivotLen = input.int(8, "Custom pivot leg length", minval = 2, maxval = 50, group = GROUP_LEG)
+int customAtrLen = input.int(14, "Custom ATR length", minval = 5, maxval = 100, group = GROUP_LEG)
+float pivotAtrToleranceInput = input.float(0.12, "Pivot equality tolerance (ATR)", minval = 0.0, maxval = 1.0, step = 0.01, group = GROUP_LEG)
+float minSwingAtrInput = input.float(1.0, "Minimum relevant swing size (ATR)", minval = 0.25, maxval = 10.0, step = 0.25, group = GROUP_LEG)
+float legInvalidationRetracementInput = input.float(0.90, "Retracement to invalidate the reference leg (promote counter-move)", minval = 0.50, maxval = 1.50, step = 0.05, tooltip = "An opposite-type pivot only replaces the reference leg once price has retraced (near-)fully back to the leg's own origin - an ordinary pullback into the Continuation zone (~0.38-0.62) must NOT replace the leg it's a pullback within. Below this threshold the pivot is ignored for reference-leg purposes; the counter-move can still contain its own internal pivots without becoming the new reference.", group = GROUP_LEG)
+float contextFloorInput = input.float(0.25, "Reference-leg quality floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_LEG)
+int maxLegHistoryInput = input.int(4, "Legs tracked for Live Trend Quality", minval = 2, maxval = 8, tooltip = "How many of the most recent completed legs feed Live Trend Quality - is the trend still healthy, not just how good the reference leg was when it formed.", group = GROUP_LEG)
+float liveTrendQualityFloorInput = input.float(0.25, "Live Trend Quality floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_LEG)
+float decayPerBarInput = input.float(0.5, "Permission decay per stale bar (%)", minval = 0.0, maxval = 3.0, step = 0.1, tooltip = "A bar with no fresh extreme, no accelerating momentum and no ATR expansion in the relevant direction is 'stale' - each stale bar fades Permission by this percentage, so it doesn't sit at a high value once the move that earned it has gone quiet. 0 disables decay.", group = GROUP_LEG)
+int decayAtrLookbackInput = input.int(10, "ATR expansion lookback (bars)", minval = 3, maxval = 50, group = GROUP_LEG)
+
+float shallowCenterInput = input.float(0.382, "Strong-leg preferred pullback depth", minval = 0.20, maxval = 0.65, step = 0.001, group = GROUP_MATURITY)
+float normalCenterInput = input.float(0.500, "Normal-leg preferred pullback depth", minval = 0.25, maxval = 0.75, step = 0.001, group = GROUP_MATURITY)
+float weakCenterInput = input.float(0.618, "Weak-leg preferred pullback depth", minval = 0.35, maxval = 0.90, step = 0.001, group = GROUP_MATURITY)
+float fibToleranceAtrInput = input.float(0.20, "Zone softness (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = GROUP_MATURITY)
+float correctionPresenceMinInput = input.float(0.10, "Minimum retracement counted as a real correction", minval = 0.02, maxval = 0.30, step = 0.01, group = GROUP_MATURITY)
+float reversalCenterInput = input.float(1.272, "Reversal preferred round-trip extension", minval = 0.90, maxval = 2.00, step = 0.001, group = GROUP_MATURITY)
+float reversalWidthInput = input.float(0.28, "Reversal zone softness", minval = 0.10, maxval = 0.60, step = 0.01, group = GROUP_MATURITY)
+float timeMaturityCenterInput = input.float(0.35, "Preferred correction duration (fraction of leg duration)", minval = 0.10, maxval = 1.00, step = 0.05, group = GROUP_MATURITY)
+float timeMaturityWidthInput = input.float(0.35, "Duration zone softness", minval = 0.10, maxval = 1.00, step = 0.05, group = GROUP_MATURITY)
+float reversalTimeMaturityCenterInput = input.float(0.80, "Preferred reversal duration (fraction of leg duration)", minval = 0.10, maxval = 2.00, step = 0.05, tooltip = "A structural-failure reversal (full round-trip) is typically a bigger, slower move than a continuation pullback - centered later and wider than the Continuation duration curve.", group = GROUP_MATURITY)
+float reversalTimeMaturityWidthInput = input.float(0.60, "Reversal duration zone softness", minval = 0.10, maxval = 1.50, step = 0.05, group = GROUP_MATURITY)
+float overextensionAtrInput = input.float(3.0, "Impulse overextension threshold (ATR)", minval = 0.5, maxval = 15.0, step = 0.5, tooltip = "Endpoint Reversal: a reference leg larger than this many ATRs is scored as overextended, independent of how much it has retraced yet - captures a reversal starting right at the impulse's own top instead of waiting for a deep round-trip.", group = GROUP_MATURITY)
+float endpointPresenceMaxInput = input.float(0.30, "Endpoint Reversal presence window (retracement)", minval = 0.05, maxval = 0.60, step = 0.05, tooltip = "Endpoint Reversal fades out once retracement grows past this fraction - beyond that point the existing structural-failure Reversal curve (centered further out) takes over.", group = GROUP_MATURITY)
+float maturityFloorInput = input.float(0.15, "Maturity floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_MATURITY)
+
+string oscillatorInput = input.string("Stochastic RSI", "Oscillator", options = ["Stochastic RSI", "RSI", "WaveTrend", "CMO"], group = GROUP_EXHAUSTION)
+int customOscLen = input.int(14, "Custom oscillator length", minval = 5, maxval = 100, group = GROUP_EXHAUSTION)
+int customOscSmooth = input.int(3, "Custom oscillator smoothing", minval = 1, maxval = 20, group = GROUP_EXHAUSTION)
+int exhaustionRecentBarsInput = input.int(5, "Recent-bars window (deterioration check)", minval = 2, maxval = 20, group = GROUP_EXHAUSTION)
+bool divergenceEnabledInput = input.bool(true, "Use regular and hidden divergence", group = GROUP_EXHAUSTION)
+float divergenceStrengthInput = input.float(18.0, "Divergence maximum contribution", minval = 0.0, maxval = 40.0, step = 1.0, group = GROUP_EXHAUSTION)
+int divergenceMaxBarsInput = input.int(120, "Maximum bars between divergence pivots", minval = 10, maxval = 500, group = GROUP_EXHAUSTION)
+float exhaustionFloorInput = input.float(0.15, "Exhaustion floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_EXHAUSTION)
+
+bool microPivotLenAutoInput = input.bool(true, "Auto micro-swing length (pivotLen / 3)", group = GROUP_TRIGGER)
+int customMicroPivotLenInput = input.int(3, "Custom micro-swing length", minval = 1, maxval = 20, group = GROUP_TRIGGER)
+float rejectionCloseLocInput = input.float(0.6, "Rejection-at-extreme close location", minval = 0.3, maxval = 0.95, step = 0.05, tooltip = "Same-bar leading trigger: a marginal new extreme that closes back this far into the bar's range.", group = GROUP_TRIGGER)
+int acceptanceBarsInput = input.int(3, "Bars to reach full Acceptance after confirmation", minval = 1, maxval = 20, group = GROUP_TRIGGER)
+float triggerWeightInput = input.float(70.0, "Trigger weight (Confirmation)", minval = 0.0, maxval = 100.0, group = GROUP_TRIGGER)
+float acceptanceWeightInput = input.float(30.0, "Acceptance weight (Confirmation)", minval = 0.0, maxval = 100.0, group = GROUP_TRIGGER)
+float confirmationFloorInput = input.float(0.35, "Confirmation floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_TRIGGER)
+int cooldownBarsInput = input.int(5, "Cooldown bars after a trigger", minval = 0, maxval = 100, group = GROUP_TRIGGER)
+int triggerValidityBarsInput = input.int(8, "Trigger validity window (bars)", minval = 1, maxval = 50, tooltip = "A confirmed Trigger stays armed for this many bars. If Permission only clears its threshold a few bars after the Trigger confirmed (not on the exact same bar), the signal can still fire anywhere within this window instead of being lost.", group = GROUP_TRIGGER)
+
+bool useT2Input = input.bool(true, "Show T2 (extension) target", group = GROUP_TARGET)
+float extensionMultInput = input.float(1.272, "T2 extension multiple", minval = 1.0, maxval = 3.0, step = 0.001, group = GROUP_TARGET)
+float invalidationAtrBufferInput = input.float(0.5, "Invalidation ATR buffer", minval = 0.0, maxval = 3.0, step = 0.1, group = GROUP_TARGET)
+float minTargetDistanceAtrInput = input.float(0.5, "Minimum T1 distance (ATR) - else fallback target", minval = 0.1, maxval = 3.0, step = 0.1, group = GROUP_TARGET)
+float minCrvInput = input.float(1.0, "Minimum reward:risk for full Target Feasibility", minval = 0.25, maxval = 5.0, step = 0.25, group = GROUP_TARGET)
+float crvFloorInput = input.float(0.30, "Target Feasibility floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_TARGET)
+bool showTargetsInput = input.bool(true, "Draw Target/Invalidation lines on price chart", group = GROUP_TARGET)
+int targetLineBarsInput = input.int(30, "Target line length (bars)", minval = 5, maxval = 200, group = GROUP_TARGET)
+int maxPivotHistoryInput = input.int(20, "Max tracked pivots for T1 search", minval = 5, maxval = 50, tooltip = "T1 searches this many of the most recent confirmed pivots (both types) for the nearest one that qualifies as a target, instead of only ever checking the single most recent swing high/low.", group = GROUP_TARGET)
+
+bool htfEnabledInput = input.bool(true, "Enable confirmed HTF context", group = GROUP_HTF)
+string htfModeInput = input.string("Auto", "HTF selection", options = ["Auto", "Manual"], group = GROUP_HTF)
+string manualHtfInput = input.timeframe("240", "Manual higher timeframe", group = GROUP_HTF)
+float htfInfluenceInput = input.float(15.0, "HTF influence", minval = 0.0, maxval = 40.0, step = 1.0, group = GROUP_HTF)
+float reversalHtfAlignedFactorInput = input.float(0.5, "Reversal HTF-aligned bonus factor", minval = 0.0, maxval = 1.0, step = 0.1, tooltip = "A Reversal thesis needs less help from an agreeing HTF trend than a Continuation does - the aligned bonus is scaled down by this factor relative to Continuation's.", group = GROUP_HTF)
+float reversalHtfConflictFactorInput = input.float(1.5, "Reversal HTF-conflict penalty factor", minval = 1.0, maxval = 3.0, step = 0.1, tooltip = "A Reversal thesis fighting an established HTF trend is riskier than a Continuation with the trend - the conflict penalty is scaled up by this factor relative to Continuation's.", group = GROUP_HTF)
+int htfFastEmaInput = input.int(21, "HTF fast EMA", minval = 2, maxval = 200, group = GROUP_HTF)
+int htfSlowEmaInput = input.int(55, "HTF slow EMA", minval = 3, maxval = 400, group = GROUP_HTF)
+int htfAtrLenInput = input.int(14, "HTF ATR length", minval = 5, maxval = 100, group = GROUP_HTF)
+float scenarioHysteresisMarginInput = input.float(10.0, "Continuation/Reversal dominance margin (hysteresis)", minval = 0.0, maxval = 50.0, step = 1.0, tooltip = "The dominant scenario only flips to the other one once it leads by this many points - prevents the Target/Invalidation geometry from flickering between Continuation and Reversal when the two are close.", group = GROUP_MATURITY)
+
+float permissionThresholdInput = input.float(55.0, "Permission threshold (Setup/Watch)", minval = 0, maxval = 100, group = GROUP_DISPLAY)
+float confirmationThresholdInput = input.float(50.0, "Active Permission threshold (fully qualified signal)", minval = 0, maxval = 100, tooltip = "Gates both the background highlight AND the TPE1 Long/Short Signal alerts.", group = GROUP_DISPLAY)
+bool highlightRegimesInput = input.bool(true, "Highlight confirmed triggers", group = GROUP_DISPLAY)
+
+// Position Health answers a different question than Permission above ("is an
+// EXISTING position still structurally healthy", not "is a NEW entry attractive
+// here") - so it's a weighted combination (a single weak factor must not crash
+// it), never the multiplicative floored-gate style used for Permission, and it
+// never reads CRV/Trigger/Decay/trade-lifecycle state.
+float wLiveQualityInput = input.float(25.0, "Live Trend Quality weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+float wPullbackHealthInput = input.float(20.0, "Pullback Health weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+float wTrendProgressInput = input.float(20.0, "Trend Progress weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+float wFatigueInput = input.float(15.0, "Trend Fatigue weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+float wStructureIntactInput = input.float(10.0, "Structure Intact weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+float wRegimeInput = input.float(10.0, "Regime/Sideways-Risk weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+int structuralProgressLookbackInput = input.int(20, "Trend Progress lookback (bars)", minval = 5, maxval = 100, group = GROUP_POSITION_HEALTH)
+float trendProgressFullCreditAtrInput = input.float(2.0, "Trend Progress full-credit distance (ATR)", minval = 0.25, maxval = 10.0, step = 0.25, tooltip = "Net directional move over the lookback window, in ATR, that earns the full Trend Progress score of 100.", group = GROUP_POSITION_HEALTH)
+int regimeLookbackInput = input.int(20, "Regime efficiency lookback (bars)", minval = 5, maxval = 100, group = GROUP_POSITION_HEALTH)
+float trendFatigueGrowthScaleInput = input.float(3.0, "Trend Fatigue growth compression", minval = 1.0, maxval = 10.0, step = 0.5, tooltip = "Recent-vs-older leg range ratio is naturally asymmetric (shrinking is bounded at -100%, growing is not) - a ratio of this many x100% growth earns the full Trend Fatigue score of 100, so one bigger leg alone doesn't saturate it.", group = GROUP_POSITION_HEALTH)
+// Defaults calibrated against 34,776 bars of backtested Pine Logs (4 sessions,
+// multiple instruments/timeframes/years) rather than picked round numbers -
+// with all 6 components in their current (post-fix) form, the combined score
+// empirically tops out around 76 (Live Quality alone rarely exceeds ~75-85
+// even in a clean trend, since real efficiency - net move / path length -
+// is rarely close to 1.0 in noisy price action; this looks like a genuine
+// property of real market data, not a formula defect). 85/65/40 made HOLD
+// literally unreachable (0% of 34,776 bars) - these track the actual
+// distribution instead: HOLD ~top 2% (p98), PROTECT ~next 16% (p82-98),
+// REDUCE ~next 50% (p32-82), EXIT ~bottom 32%.
+float healthHoldThresholdInput = input.float(68.0, "HOLD threshold", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+float healthProtectThresholdInput = input.float(54.0, "PROTECT threshold", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+float healthReduceThresholdInput = input.float(36.0, "REDUCE threshold", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+bool showPositionHealthInput = input.bool(true, "Show Position Health lines", group = GROUP_POSITION_HEALTH)
+bool showPositionHealthBackgroundInput = input.bool(true, "Show Position Health background", tooltip = "Shades the pane background by the dominant side's state (color) and whether it's currently deteriorating (gray override, regardless of state) - a separate background from the Permission confidence band above; both can be on at once (they blend) or toggle either off independently.", group = GROUP_POSITION_HEALTH)
+bool debugLogPositionHealthInput = input.bool(false, "Debug: log Position Health components (Pine Logs)", tooltip = "Logs all 6 components + final score + state per bar via log.info() - does NOT count against the plot/alertcondition output cap. Open the Pine Logs panel to read.", group = GROUP_POSITION_HEALTH)
+bool showDivergenceMarkersInput = input.bool(true, "Show divergence warning markers", tooltip = "Marks bearish divergence (warning for an existing LONG) and bullish divergence (warning for an existing SHORT) on the price chart, reusing this file's existing divergence detection. Purely visual - does not feed the Position Health score itself.", group = GROUP_POSITION_HEALTH)
+
+// ============================================================================
+// Timeframe-adaptive parameter resolution
+// ============================================================================
+
+float chartSeconds = timeframe.in_seconds()
+
+string resolvedPreset = presetInput
+if presetInput == "Auto"
+    if chartSeconds <= 5 * 60
+        resolvedPreset := "Scalping"
+    else if chartSeconds <= 30 * 60
+        resolvedPreset := "Intraday"
+    else if chartSeconds <= 4 * 60 * 60
+        resolvedPreset := "Swing"
+    else
+        resolvedPreset := "Position"
+
+int pivotLen = customPivotLen
+if resolvedPreset == "Scalping"
+    pivotLen := 4
+else if resolvedPreset == "Intraday"
+    pivotLen := 6
+else if resolvedPreset == "Swing"
+    pivotLen := 9
+else if resolvedPreset == "Position"
+    pivotLen := 13
+
+int atrLen = customAtrLen
+if resolvedPreset == "Scalping"
+    atrLen := 10
+else if resolvedPreset == "Intraday"
+    atrLen := 14
+else if resolvedPreset == "Swing"
+    atrLen := 21
+else if resolvedPreset == "Position"
+    atrLen := 34
+
+int oscLen = customOscLen
+if resolvedPreset == "Scalping"
+    oscLen := 9
+else if resolvedPreset == "Intraday"
+    oscLen := 14
+else if resolvedPreset == "Swing"
+    oscLen := 21
+else if resolvedPreset == "Position"
+    oscLen := 34
+
+int oscSmooth = customOscSmooth
+if resolvedPreset == "Scalping"
+    oscSmooth := 2
+else if resolvedPreset == "Intraday"
+    oscSmooth := 3
+else if resolvedPreset == "Swing"
+    oscSmooth := 4
+else if resolvedPreset == "Position"
+    oscSmooth := 5
+
+int microPivotLen = customMicroPivotLenInput
+if microPivotLenAutoInput
+    microPivotLen := math.max(2, pivotLen / 3)
+
+// ============================================================================
+// Base series and ATR
+// ============================================================================
+
+float atr = ta.atr(atrLen)
+float atrSafe = math.max(nz(atr, syminfo.mintick), syminfo.mintick)
+
+float pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+float pivotLow = ta.pivotlow(low, pivotLen, pivotLen)
+bool newPivotHigh = not na(pivotHigh)
+bool newPivotLow = not na(pivotLow)
+
+// Rolling history of recent confirmed pivots, for a real T1 target search
+// (fix #16) instead of only ever checking the single most recent swing.
+var array<float> pivotHighHistory = array.new_float()
+var array<float> pivotLowHistory = array.new_float()
+
+if newPivotHigh
+    array.push(pivotHighHistory, pivotHigh)
+    if array.size(pivotHighHistory) > maxPivotHistoryInput
+        array.shift(pivotHighHistory)
+
+if newPivotLow
+    array.push(pivotLowHistory, pivotLow)
+    if array.size(pivotLowHistory) > maxPivotHistoryInput
+        array.shift(pivotLowHistory)
+
+// ============================================================================
+// Alternating confirmed swing (fix #1). A same-type pivot only extends the
+// current endpoint; only an opposite-type pivot confirms a NEW leg and bumps
+// referenceEpoch. lastHigh/lastLow/lastHighBar/lastLowBar are derived from
+// this state so all downstream leg-range/retracement/target code is unchanged.
+// ============================================================================
+
+float pivotTolerance = atrSafe * pivotAtrToleranceInput
+
+var int swingDirection = 0
+var float swingOriginPrice = na
+var int swingOriginBar = na
+var float swingEndPrice = na
+var int swingEndBar = na
+var int referenceEpoch = 0
+
+bool newReferenceLeg = false
+
+// A shallow opposite-type pivot (e.g. a normal pullback into the Continuation
+// zone) must not hijack the reference leg away from the larger trend it's
+// actually a pullback within - it only replaces the reference leg once price
+// has retraced (near-)fully back to the leg's own origin
+// (legInvalidationRetracementInput). Below that, the counter-move can
+// contain its own internal pivots without ever becoming the new reference.
+// A same-type pivot only extends the endpoint if it's an actual new extreme
+// (beyond tolerance) - a smaller same-type pivot must not shrink the leg.
+bool highEndpointUpdated = false
+bool lowEndpointUpdated = false
+
+if newPivotHigh
+    if swingDirection == -1
+        float currentLegRange = math.abs(swingEndPrice - swingOriginPrice)
+        // Bootstrap: before the first real leg exists, swingOriginPrice is na
+        // and there is nothing to compare a retracement against yet - accept
+        // unconditionally so the very first leg can ever form. Without this,
+        // currentLegRange stays na forever and swingOriginPrice never sets.
+        if na(swingOriginPrice) or (currentLegRange > EPS and (pivotHigh - swingEndPrice) / currentLegRange >= legInvalidationRetracementInput)
+            swingOriginPrice := swingEndPrice
+            swingOriginBar := swingEndBar
+            swingEndPrice := pivotHigh
+            swingEndBar := bar_index - pivotLen
+            swingDirection := 1
+            referenceEpoch += 1
+            newReferenceLeg := true
+            highEndpointUpdated := true
+    else
+        if na(swingEndPrice) or pivotHigh > swingEndPrice + pivotTolerance
+            swingEndPrice := pivotHigh
+            swingEndBar := bar_index - pivotLen
+            highEndpointUpdated := true
+        swingDirection := 1
+
+if newPivotLow
+    if swingDirection == 1
+        float currentLegRange = math.abs(swingEndPrice - swingOriginPrice)
+        if na(swingOriginPrice) or (currentLegRange > EPS and (swingEndPrice - pivotLow) / currentLegRange >= legInvalidationRetracementInput)
+            swingOriginPrice := swingEndPrice
+            swingOriginBar := swingEndBar
+            swingEndPrice := pivotLow
+            swingEndBar := bar_index - pivotLen
+            swingDirection := -1
+            referenceEpoch += 1
+            newReferenceLeg := true
+            lowEndpointUpdated := true
+    else
+        if na(swingEndPrice) or pivotLow < swingEndPrice - pivotTolerance
+            swingEndPrice := pivotLow
+            swingEndBar := bar_index - pivotLen
+            lowEndpointUpdated := true
+        swingDirection := -1
+
+float lastHigh = na
+float lastLow = na
+int lastHighBar = na
+int lastLowBar = na
+if swingDirection == 1
+    lastHigh := swingEndPrice
+    lastHighBar := swingEndBar
+    lastLow := swingOriginPrice
+    lastLowBar := swingOriginBar
+else if swingDirection == -1
+    lastLow := swingEndPrice
+    lastLowBar := swingEndBar
+    lastHigh := swingOriginPrice
+    lastHighBar := swingOriginBar
+
+bool latestLegBullish =
+     swingDirection == 1 and not na(swingOriginPrice) and
+     (lastHigh - lastLow) / atrSafe >= minSwingAtrInput
+
+bool latestLegBearish =
+     swingDirection == -1 and not na(swingOriginPrice) and
+     (lastHigh - lastLow) / atrSafe >= minSwingAtrInput
+
+// ATR frozen at the moment the leg's endpoint was last set/extended, so a
+// completed leg's overextension score doesn't drift as later volatility
+// (during the counter-move that follows) rises or falls - overextension is a
+// property of the impulse itself, not of what happens after it.
+var float atrAtLegEnd = na
+if highEndpointUpdated or lowEndpointUpdated
+    atrAtLegEnd := atrSafe
+
+// Running extremes since each endpoint - Continuation (since the CURRENT
+// endpoint) and Reversal (retest depth since the SAME endpoint, in the
+// opposite sub-direction) both need their own tracker; see fix #10.
+//
+// Reset on an ACCEPTED endpoint update (highEndpointUpdated/
+// lowEndpointUpdated), not on the raw pivot event: a pivot rejected by the
+// leg-significance filter still fires newPivotHigh/newPivotLow, but lastHigh/
+// lastLow don't actually change - resetting on the raw event would make the
+// tracker measure "since some rejected pivot" instead of "since the true
+// (accepted) endpoint", silently understating the counter-move's real depth.
+var float lowSinceLastHigh = na
+if highEndpointUpdated
+    lowSinceLastHigh := low
+else if not na(lastHigh)
+    lowSinceLastHigh := na(lowSinceLastHigh) ? low : math.min(lowSinceLastHigh, low)
+
+var float highSinceLastLow = na
+if lowEndpointUpdated
+    highSinceLastLow := high
+else if not na(lastLow)
+    highSinceLastLow := na(highSinceLastLow) ? high : math.max(highSinceLastLow, high)
+
+var float lowSinceLastLow = na
+if lowEndpointUpdated
+    lowSinceLastLow := low
+else if not na(lastLow)
+    lowSinceLastLow := na(lowSinceLastLow) ? low : math.min(lowSinceLastLow, low)
+
+var float highSinceLastHigh = na
+if highEndpointUpdated
+    highSinceLastHigh := high
+else if not na(lastHigh)
+    highSinceLastHigh := na(highSinceLastHigh) ? high : math.max(highSinceLastHigh, high)
+
+// ============================================================================
+// Leg-scoped accumulators. Resets ONLY on a genuine new reference leg (fix
+// #1/#2) - so leg quality always refers to the exact leg the retracement is
+// measured against, not a rolling window that can mix multiple legs.
+//
+// KNOWN RESIDUAL IMPRECISION (fix #2 is partial, as flagged in review): the
+// numerator (|swingEndPrice - swingOriginPrice|) uses the true pivot prices,
+// but legPathSum only starts accumulating from the PREVIOUS reset, which
+// happened at the origin's own CONFIRMATION bar (pivotLen bars after the
+// origin's true bar) - not from the origin's true bar itself. Each leg's
+// path sum therefore undercounts by up to ~pivotLen bars, biasing measured
+// efficiency slightly high. Fixing this exactly needs either a retroactive
+// sum over a series-length window (an unverified compile risk in this
+// codebase - see the math.sum research in the v3.0 planning session) or a
+// fixed-size ring buffer of recent bar deltas; deliberately not implemented
+// here given that cost, same category as the v1/v2 confirmation-lag caveats.
+// ============================================================================
+
+var float legPathSum = 0.0
+var float legOverlapSum = 0.0
+var int legOverlapCount = 0
+
+var float referenceLegEfficiency = na
+var float referenceLegOverlap = na
+var int referenceLegBars = na
+
+float curSmallerRange = math.min(high - low, high[1] - low[1])
+float barOverlap = 0.0
+if curSmallerRange > EPS
+    barOverlap := math.max(0.0, math.min(high, high[1]) - math.max(low, low[1])) / curSmallerRange
+
+if newReferenceLeg
+    int legBarsSoFar = na(swingOriginBar) ? na : swingEndBar - swingOriginBar
+    if not na(legBarsSoFar) and legBarsSoFar > 0 and legPathSum > EPS
+        referenceLegEfficiency := f_clamp(f_safeDiv(math.abs(swingEndPrice - swingOriginPrice), legPathSum, 0.0), 0.0, 1.0)
+        referenceLegOverlap := legOverlapCount > 0 ? f_clamp(legOverlapSum / legOverlapCount, 0.0, 1.0) : 0.5
+        referenceLegBars := legBarsSoFar
+    legPathSum := 0.0
+    legOverlapSum := 0.0
+    legOverlapCount := 0
+
+legPathSum += math.abs(close - close[1])
+legOverlapSum += barOverlap
+legOverlapCount += 1
+
+float referenceLegQuality = 50.0
+if not na(referenceLegEfficiency)
+    referenceLegQuality := f_clamp(100.0 * (referenceLegEfficiency * 0.55 + (1.0 - referenceLegOverlap) * 0.45), 0.0, 100.0)
+
+// ============================================================================
+// Live Trend Quality: referenceLegQuality answers "how good WAS the leg when
+// it formed" (frozen at that instant). This answers "is the TREND still
+// healthy" - a recency-weighted read across the last maxLegHistoryInput
+// completed legs, so a trend that's quietly degrading (each new leg choppier
+// or smaller than the last) loses quality continuously as new legs confirm,
+// not just once at the moment a reversal is finally detected.
+// ============================================================================
+
+var array<float> legQualityHistory = array.new_float()
+var array<float> legRangeAtrHistory = array.new_float()
+
+if newReferenceLeg and not na(referenceLegEfficiency)
+    array.push(legQualityHistory, referenceLegQuality)
+    array.push(legRangeAtrHistory, math.abs(swingEndPrice - swingOriginPrice) / math.max(nz(atrAtLegEnd, atrSafe), syminfo.mintick))
+    if array.size(legQualityHistory) > maxLegHistoryInput
+        array.shift(legQualityHistory)
+        array.shift(legRangeAtrHistory)
+
+f_recencyWeightedAvg(array<float> arr) =>
+    float weightedSum = 0.0
+    float totalWeight = 0.0
+    int n = array.size(arr)
+    if n > 0
+        for i = 0 to n - 1
+            float weight = float(i + 1)
+            weightedSum += array.get(arr, i) * weight
+            totalWeight += weight
+    totalWeight > EPS ? weightedSum / totalWeight : na
+
+f_recentHalfVsOlderHalf(array<float> arr) =>
+    int n = array.size(arr)
+    float result = 0.0
+    if n >= 4
+        int half = n / 2
+        float olderSum = 0.0
+        float recentSum = 0.0
+        for i = 0 to half - 1
+            olderSum += array.get(arr, i)
+        for i = half to n - 1
+            recentSum += array.get(arr, i)
+        result := recentSum / (n - half) - olderSum / half
+    result
+
+// Same recent-half-vs-older-half split as above, but as a RELATIVE ratio
+// (recentAvg/olderAvg - 1) instead of an absolute difference - used only for
+// Position Health's Trend Fatigue below. legRangeAtrHistory values (ATR
+// multiples of leg range) can easily span from <1 to >5 between legs, so an
+// absolute difference saturates a tight clamp almost immediately (empirically
+// >=99.9 on 70% of bars in backtested Pine Logs) - a ratio stays scale-
+// invariant regardless of how large the legs themselves are.
+f_recentVsOlderRatio(array<float> arr) =>
+    int n = array.size(arr)
+    float result = 0.0
+    if n >= 4
+        int half = n / 2
+        float olderSum = 0.0
+        float recentSum = 0.0
+        for i = 0 to half - 1
+            olderSum += array.get(arr, i)
+        for i = half to n - 1
+            recentSum += array.get(arr, i)
+        float olderAvg = olderSum / half
+        float recentAvg = recentSum / (n - half)
+        result := f_safeDiv(recentAvg - olderAvg, math.max(olderAvg, EPS), 0.0)
+    result
+
+float legQualityLevel = f_recencyWeightedAvg(legQualityHistory)
+float legQualityTrend = f_recentHalfVsOlderHalf(legQualityHistory)
+float legRangeTrend = f_recentHalfVsOlderHalf(legRangeAtrHistory)
+float legRangeRatio = f_recentVsOlderRatio(legRangeAtrHistory)
+
+float liveTrendQuality = 50.0
+if not na(legQualityLevel)
+    // A shrinking recent leg range (legRangeTrend < 0) counts as fatigue even
+    // if efficiency alone hasn't dropped yet - the same trend making smaller
+    // moves each time, a lighter version of the classic diminishing-HH idea.
+    liveTrendQuality := f_clamp(legQualityLevel + 0.3 * legQualityTrend + 8.0 * f_clamp(legRangeTrend, -2.0, 2.0), 0.0, 100.0)
+
+int liveLegBars = na(swingEndBar) ? na : bar_index - swingEndBar
+float liveLegEfficiency = 0.0
+if not na(swingEndPrice) and legPathSum > EPS
+    liveLegEfficiency := f_clamp(f_safeDiv(math.abs(close - swingEndPrice), legPathSum, 0.0), 0.0, 1.0)
+
+// Live Leg Quality: same formula as referenceLegQuality (fix #2's efficiency x
+// (1-overlap) blend), but reads the NOT-YET-RESET legPathSum/legOverlapSum
+// accumulators every bar instead of only at leg completion - a genuinely
+// continuous quality read for Position Health below, where liveTrendQuality's
+// leg-boundary gating (only updates on newReferenceLeg) is too slow to react
+// within an in-progress pullback.
+float liveLegOverlap = legOverlapCount > 0 ? f_clamp(legOverlapSum / legOverlapCount, 0.0, 1.0) : 0.5
+float liveLegQuality = f_clamp(100.0 * (liveLegEfficiency * 0.55 + (1.0 - liveLegOverlap) * 0.45), 0.0, 100.0)
+
+// ============================================================================
+// Confirmed higher-timeframe context (fix #9: HTF's own ATR, not the chart's)
+// ============================================================================
+
+string selectedHtf = htfModeInput == "Auto" ? f_autoHtf() : manualHtfInput
+bool validHigherTimeframe = timeframe.in_seconds(selectedHtf) > chartSeconds
+
+[htfFastConfirmed, htfSlowConfirmed, htfCloseConfirmed, htfAtrConfirmed] = request.security(
+     syminfo.tickerid,
+     selectedHtf,
+     [ta.ema(close, htfFastEmaInput)[1], ta.ema(close, htfSlowEmaInput)[1], close[1], ta.atr(htfAtrLenInput)[1]],
+     lookahead = barmerge.lookahead_on
+)
+
+float htfAtrSafe = math.max(nz(htfAtrConfirmed, syminfo.mintick), syminfo.mintick)
+float htfSpread = htfFastConfirmed - htfSlowConfirmed
+float htfScale = math.max(math.abs(htfFastConfirmed - htfSlowConfirmed) + htfAtrSafe, htfAtrSafe)
+float htfTrendSigned = 0.0
+if validHigherTimeframe
+    htfTrendSigned := f_clamp(
+         0.70 * f_safeDiv(htfSpread, htfScale, 0.0) +
+         0.30 * f_safeDiv(htfCloseConfirmed - htfSlowConfirmed, htfScale, 0.0),
+         -1.0,
+         1.0
+       )
+
+// ============================================================================
+// Retracement ratio r against the reference leg (shared by Continuation and
+// Reversal Maturity).
+// ============================================================================
+
+float bullishLegRange = latestLegBullish ? lastHigh - lastLow : na
+float bearishLegRange = latestLegBearish ? lastHigh - lastLow : na
+
+float bullishRetracement = na
+if latestLegBullish and bullishLegRange > EPS
+    bullishRetracement := (lastHigh - close) / bullishLegRange
+
+float bearishRetracement = na
+if latestLegBearish and bearishLegRange > EPS
+    bearishRetracement := (close - lastLow) / bearishLegRange
+
+// ============================================================================
+// Maturity: Continuation (bell curve near typical pullback depth) and
+// Reversal (bell curve near a full round-trip) on the SAME retracement ratio.
+// ============================================================================
+
+float preferredFibCenter = f_lerp(weakCenterInput, normalCenterInput, referenceLegQuality / 100.0 / 0.67)
+if referenceLegQuality / 100.0 >= 0.67
+    preferredFibCenter := f_lerp(normalCenterInput, shallowCenterInput, (referenceLegQuality / 100.0 - 0.67) / 0.33)
+
+float activeLegRange = latestLegBullish ? bullishLegRange : latestLegBearish ? bearishLegRange : na
+float fibSoftness = 0.12
+if not na(activeLegRange) and activeLegRange > EPS
+    fibSoftness := 0.075 + fibToleranceAtrInput * atrSafe / activeLegRange
+fibSoftness := f_clamp(fibSoftness, 0.05, 0.30)
+
+float bullZoneFit = not na(bullishRetracement) ? f_gaussianLike(bullishRetracement, preferredFibCenter, fibSoftness) : 0.0
+float bearZoneFit = not na(bearishRetracement) ? f_gaussianLike(bearishRetracement, preferredFibCenter, fibSoftness) : 0.0
+float reversalZoneFitBull = not na(bullishRetracement) ? f_gaussianLike(bullishRetracement, reversalCenterInput, reversalWidthInput) : 0.0
+float reversalZoneFitBear = not na(bearishRetracement) ? f_gaussianLike(bearishRetracement, reversalCenterInput, reversalWidthInput) : 0.0
+
+float correctionPresenceBull = 0.0
+if not na(bullishRetracement)
+    correctionPresenceBull := f_clamp(bullishRetracement / correctionPresenceMinInput, 0.0, 1.0)
+
+float correctionPresenceBear = 0.0
+if not na(bearishRetracement)
+    correctionPresenceBear := f_clamp(bearishRetracement / correctionPresenceMinInput, 0.0, 1.0)
+
+float timeMaturityRatio = na
+if (latestLegBullish or latestLegBearish) and not na(referenceLegBars) and referenceLegBars > 0 and not na(liveLegBars)
+    timeMaturityRatio := float(liveLegBars) / referenceLegBars
+
+float timeMaturityFactor = 1.0
+if not na(timeMaturityRatio)
+    timeMaturityFactor := f_gaussianLike(timeMaturityRatio, timeMaturityCenterInput, timeMaturityWidthInput)
+
+float reversalTimeMaturityFactor = 1.0
+if not na(timeMaturityRatio)
+    reversalTimeMaturityFactor := f_gaussianLike(timeMaturityRatio, reversalTimeMaturityCenterInput, reversalTimeMaturityWidthInput)
+
+float continuationMaturityLong = f_clamp(100.0 * bullZoneFit * correctionPresenceBull * timeMaturityFactor, 0.0, 100.0)
+float continuationMaturityShort = f_clamp(100.0 * bearZoneFit * correctionPresenceBear * timeMaturityFactor, 0.0, 100.0)
+
+// Structural-failure Reversal (existing): the counter-move has round-tripped
+// most/all of the reference leg - a late signal, most of the reversal move
+// has typically already happened by the time this fires.
+float structuralReversalMaturityShort = f_clamp(100.0 * reversalZoneFitBull * correctionPresenceBull * reversalTimeMaturityFactor, 0.0, 100.0)
+float structuralReversalMaturityLong = f_clamp(100.0 * reversalZoneFitBear * correctionPresenceBear * reversalTimeMaturityFactor, 0.0, 100.0)
+
+// Endpoint Reversal (new): the reference leg itself is overextended (large
+// relative to ATR), scored independent of how much it has retraced YET -
+// captures a reversal starting right at the impulse's own top, before a deep
+// round-trip has happened. Fades out once retracement grows past
+// endpointPresenceMaxInput (by then the structural-failure curve above is
+// the more appropriate read).
+float legExtensionAtr = not na(activeLegRange) ? activeLegRange / math.max(nz(atrAtLegEnd, atrSafe), syminfo.mintick) : na
+float endpointOverextension = 0.0
+if not na(legExtensionAtr)
+    endpointOverextension := f_clamp((legExtensionAtr - overextensionAtrInput) / overextensionAtrInput, 0.0, 1.0)
+
+float endpointPresenceBull = not na(bullishRetracement) ? f_clamp(1.0 - bullishRetracement / endpointPresenceMaxInput, 0.0, 1.0) : 0.0
+float endpointPresenceBear = not na(bearishRetracement) ? f_clamp(1.0 - bearishRetracement / endpointPresenceMaxInput, 0.0, 1.0) : 0.0
+
+float endpointReversalMaturityShort = f_clamp(100.0 * endpointOverextension * endpointPresenceBull, 0.0, 100.0)
+float endpointReversalMaturityLong = f_clamp(100.0 * endpointOverextension * endpointPresenceBear, 0.0, 100.0)
+
+// A reversal can become mature either way - whichever fires first/strongest.
+float reversalMaturityShort = math.max(structuralReversalMaturityShort, endpointReversalMaturityShort)
+float reversalMaturityLong = math.max(structuralReversalMaturityLong, endpointReversalMaturityLong)
+
+// ============================================================================
+// Oscillator core (shared by Exhaustion)
+// ============================================================================
+
+float rsi = ta.rsi(close, oscLen)
+float rsiLowest = ta.lowest(rsi, oscLen)
+float rsiHighest = ta.highest(rsi, oscLen)
+float stochRsiRaw = 100.0 * f_safeDiv(rsi - rsiLowest, rsiHighest - rsiLowest, 0.5)
+float stochRsi = ta.ema(stochRsiRaw, oscSmooth)
+
+int wtChannelLen = math.max(5, oscLen)
+int wtAverageLen = math.max(3, oscLen * 2)
+float wtEsa = ta.ema(hlc3, wtChannelLen)
+float wtDeviation = ta.ema(math.abs(hlc3 - wtEsa), wtChannelLen)
+float wtCi = f_safeDiv(hlc3 - wtEsa, 0.015 * wtDeviation, 0.0)
+float wtRaw = ta.ema(wtCi, wtAverageLen)
+float wtNorm = f_clamp(50.0 + wtRaw * 0.65, 0.0, 100.0)
+
+float cmoRaw = ta.cmo(close, oscLen)
+float cmoNorm = f_clamp(50.0 + cmoRaw * 0.5, 0.0, 100.0)
+
+float oscillator = stochRsi
+if oscillatorInput == "RSI"
+    oscillator := rsi
+else if oscillatorInput == "WaveTrend"
+    oscillator := wtNorm
+else if oscillatorInput == "CMO"
+    oscillator := cmoNorm
+
+float oscillatorSmoothed = ta.ema(oscillator, oscSmooth)
+float oscillatorVelocity = oscillatorSmoothed - oscillatorSmoothed[1]
+float oscillatorAcceleration = oscillatorVelocity - oscillatorVelocity[1]
+float oscillatorVolatility = ta.stdev(oscillatorVelocity, math.max(5, oscLen))
+float accelerationNorm = f_clamp(f_safeDiv(oscillatorAcceleration, math.max(oscillatorVolatility, 0.5), 0.0), -2.0, 2.0)
+
+var float lastLowPivotOsc = na
+var float previousLowPivotOsc = na
+var float lastLowPivotPrice = na
+var float previousLowPivotPrice = na
+var int lastLowPivotDivBar = na
+var int previousLowPivotDivBar = na
+
+var float lastHighPivotOsc = na
+var float previousHighPivotOsc = na
+var float lastHighPivotPrice = na
+var float previousHighPivotPrice = na
+var int lastHighPivotDivBar = na
+var int previousHighPivotDivBar = na
+
+if newPivotLow
+    previousLowPivotOsc := lastLowPivotOsc
+    previousLowPivotPrice := lastLowPivotPrice
+    previousLowPivotDivBar := lastLowPivotDivBar
+    lastLowPivotOsc := oscillatorSmoothed[pivotLen]
+    lastLowPivotPrice := pivotLow
+    lastLowPivotDivBar := bar_index - pivotLen
+
+if newPivotHigh
+    previousHighPivotOsc := lastHighPivotOsc
+    previousHighPivotPrice := lastHighPivotPrice
+    previousHighPivotDivBar := lastHighPivotDivBar
+    lastHighPivotOsc := oscillatorSmoothed[pivotLen]
+    lastHighPivotPrice := pivotHigh
+    lastHighPivotDivBar := bar_index - pivotLen
+
+bool validLowDivSpan = not na(lastLowPivotDivBar) and not na(previousLowPivotDivBar) and lastLowPivotDivBar - previousLowPivotDivBar <= divergenceMaxBarsInput
+bool validHighDivSpan = not na(lastHighPivotDivBar) and not na(previousHighPivotDivBar) and lastHighPivotDivBar - previousHighPivotDivBar <= divergenceMaxBarsInput
+
+bool regularBullDiv = divergenceEnabledInput and validLowDivSpan and lastLowPivotPrice < previousLowPivotPrice - pivotTolerance and lastLowPivotOsc > previousLowPivotOsc
+bool hiddenBullDiv = divergenceEnabledInput and validLowDivSpan and lastLowPivotPrice > previousLowPivotPrice + pivotTolerance and lastLowPivotOsc < previousLowPivotOsc
+bool regularBearDiv = divergenceEnabledInput and validHighDivSpan and lastHighPivotPrice > previousHighPivotPrice + pivotTolerance and lastHighPivotOsc < previousHighPivotOsc
+bool hiddenBearDiv = divergenceEnabledInput and validHighDivSpan and lastHighPivotPrice < previousHighPivotPrice - pivotTolerance and lastHighPivotOsc > previousHighPivotOsc
+
+var int lastBullDivConfirmationBar = na
+var int lastBearDivConfirmationBar = na
+var float lastBullDivTypeStrength = 0.0
+var float lastBearDivTypeStrength = 0.0
+
+if regularBullDiv or hiddenBullDiv
+    lastBullDivConfirmationBar := bar_index
+    lastBullDivTypeStrength := regularBullDiv ? 1.0 : 0.75
+
+if regularBearDiv or hiddenBearDiv
+    lastBearDivConfirmationBar := bar_index
+    lastBearDivTypeStrength := regularBearDiv ? 1.0 : 0.75
+
+int divergenceDecayBars = pivotLen * 3
+
+float bullDivDecay = 0.0
+if not na(lastBullDivConfirmationBar)
+    bullDivDecay := f_clamp(1.0 - float(bar_index - lastBullDivConfirmationBar) / divergenceDecayBars, 0.0, 1.0)
+
+float bearDivDecay = 0.0
+if not na(lastBearDivConfirmationBar)
+    bearDivDecay := f_clamp(1.0 - float(bar_index - lastBearDivConfirmationBar) / divergenceDecayBars, 0.0, 1.0)
+
+float bullDivergenceBonus = divergenceStrengthInput * bullDivDecay * lastBullDivTypeStrength
+float bearDivergenceBonus = divergenceStrengthInput * bearDivDecay * lastBearDivTypeStrength
+
+// ============================================================================
+// Exhaustion: DETERIORATION of the counter-move (recent efficiency vs. the
+// counter-move's own running average), shared by Continuation and Reversal,
+// gated only by direction (which counter-move is currently in progress).
+// ============================================================================
+
+float recentPath = math.sum(math.abs(close - close[1]), exhaustionRecentBarsInput)
+float recentNetChange = close - close[exhaustionRecentBarsInput]
+float recentEfficiency = f_clamp(f_safeDiv(math.abs(recentNetChange), recentPath, 0.0), 0.0, 1.0)
+
+float exhaustionRaw = 0.0
+if not na(liveLegBars) and liveLegBars >= exhaustionRecentBarsInput
+    exhaustionRaw := 100.0 * f_clamp(liveLegEfficiency - recentEfficiency, 0.0, 1.0)
+
+float bearExhaustion = 0.0
+if latestLegBullish
+    bearExhaustion := f_clamp(exhaustionRaw + 15.0 * math.max(accelerationNorm, 0.0) + bullDivergenceBonus, 0.0, 100.0)
+
+float bullExhaustion = 0.0
+if latestLegBearish
+    bullExhaustion := f_clamp(exhaustionRaw + 15.0 * math.max(-accelerationNorm, 0.0) + bearDivergenceBonus, 0.0, 100.0)
+
+// Reference-IMPULSE exhaustion (distinct from counter-move exhaustion above):
+// Reversal permission needs "is the ORIGINAL impulse itself exhausted", not
+// "is the counter-move exhausted" (the counter-move exhausting is evidence
+// FOR continuation, not for reversal - using the same measure for both was
+// backwards). Proxied via divergence at the impulse's own endpoint pivot -
+// imprecise once deep into the counter-move (the divergence tracker may have
+// since moved to a more recent, smaller pivot), but this measure matters
+// most right after the leg completes (Endpoint Reversal), when the endpoint
+// pivot IS still the most recent one of its type.
+float bullImpulseExhaustion = 0.0
+if latestLegBullish
+    bullImpulseExhaustion := f_clamp(100.0 * bearDivDecay * lastBearDivTypeStrength, 0.0, 100.0)
+
+float bearImpulseExhaustion = 0.0
+if latestLegBearish
+    bearImpulseExhaustion := f_clamp(100.0 * bullDivDecay * lastBullDivTypeStrength, 0.0, 100.0)
+
+// ============================================================================
+// Position Health: answers "assuming I'm already Long/Short, is that position
+// still structurally healthy" - a DIFFERENT question than Permission above
+// ("is a NEW entry attractive here"), decoupled on purpose. This block sits
+// BEFORE Trigger/Permission/CRV/Decay below (file-position enforced, not just
+// convention) so it can never read that machinery: no CRV, no Trigger state,
+// no t1LongFrozen trade lifecycle. Combined via weighted average, not the
+// multiplicative floored-gate style used for Permission - a single weak
+// dimension (e.g. a choppy regime) must not crash a hold decision the way a
+// weak factor is intentionally allowed to crash a new-entry score.
+// ============================================================================
+
+// Live Quality: blends the leg-boundary-gated liveTrendQuality with the
+// genuinely continuous liveLegQuality above, then reads it per-direction.
+// swingDirection only flips once a counter-move retraces
+// legInvalidationRetracementInput (0.90) of the prior leg - an ordinary
+// Wave-4-style pullback (23-62%) does NOT flip it, so this stays reading the
+// held direction's own leg through a normal correction. The inversion branch
+// only matters in the rarer case structure has already flipped against the
+// held direction - there a clean opposite leg is bad news, a choppy one less
+// so (symmetric, situation-driven, not hardcoded by side).
+float blendedTrendQuality = f_weightedAvg2(liveTrendQuality, 60.0, liveLegQuality, 40.0)
+float liveQualityLong = swingDirection == 1 ? blendedTrendQuality : 100.0 - blendedTrendQuality
+float liveQualityShort = swingDirection == -1 ? blendedTrendQuality : 100.0 - blendedTrendQuality
+
+// Pullback Health: continuationMaturityLong/Short can't be reused directly -
+// it scores a fresh impulse still making new highs (no correction yet,
+// correctionPresenceBull/Bear close to 0) near zero, but "still making highs,
+// no pullback yet" is the HEALTHIEST state for an existing position, not the
+// worst. Treat the maturity/exhaustion blend as a deviation from a healthy
+// 100 baseline, scaled by how much correction is actually present - but only
+// while the HELD direction's own leg is the active reference (swingDirection
+// matches). While the OPPOSITE leg is the active reference, don't hard-zero
+// this (that reintroduces the exact pivot-confirmation lag TPE's own README
+// already flags for Permission - swingDirection only flips at a conservative
+// 90% retracement, so a strong favorable move for the held side would read as
+// "unhealthy" for many bars even while clearly recovering) - reuse the
+// already-computed Reversal Maturity read instead, which continuously scores
+// exactly this "is the opposite leg being invalidated" question.
+float maturityExhaustionBlendLong = f_weightedAvg2(continuationMaturityLong, 65.0, bearExhaustion, 35.0)
+float maturityExhaustionBlendShort = f_weightedAvg2(continuationMaturityShort, 65.0, bullExhaustion, 35.0)
+float pullbackHealthLong = swingDirection == 1 ? f_lerp(100.0, maturityExhaustionBlendLong, correctionPresenceBull) : reversalMaturityLong
+float pullbackHealthShort = swingDirection == -1 ? f_lerp(100.0, maturityExhaustionBlendShort, correctionPresenceBear) : reversalMaturityShort
+
+// Trend Progress: net directional movement over structuralProgressLookbackInput
+// bars, scaled by ATR - continuous, not a "beat the last confirmed high, then
+// decay" pulse model. That pulse model measured 0.0 on 90-98% of bars in
+// backtested Pine Logs (a rare threshold event with a 20-bar decay tail spends
+// most of its time at the floor) - useless for a 20%-weight component that
+// needs to vary smoothly with the actual price move. close[lookback] is na
+// during warm-up (insufficient history) - nz() falls back to close itself,
+// giving a neutral 0 net move instead of propagating na into the whole score.
+float closeLookbackAgo = nz(close[structuralProgressLookbackInput], close)
+float longNetMoveAtr = (close - closeLookbackAgo) / atrSafe
+float shortNetMoveAtr = (closeLookbackAgo - close) / atrSafe
+float trendProgressLong = f_clamp(100.0 * longNetMoveAtr / trendProgressFullCreditAtrInput, 0.0, 100.0)
+float trendProgressShort = f_clamp(100.0 * shortNetMoveAtr / trendProgressFullCreditAtrInput, 0.0, 100.0)
+
+// Trend Fatigue: shrinking recent leg range, exposed as its own 0-100 score.
+// Uses legRangeRatio (relative change), NOT the absolute-difference
+// legRangeTrend that feeds liveTrendQuality above (that one stays untouched -
+// existing Permission behavior) - an absolute ATR-multiple difference
+// saturates its clamp almost immediately given how much leg sizes vary. A
+// SYMMETRIC ratio clamp (+/-100%) still wasn't enough (61.5% of bars pinned
+// at the ceiling in backtested Pine Logs): legRangeRatio is naturally
+// ASYMMETRIC - the shrinking side is bounded at -100% (average range can't go
+// below 0), but the growing side is unbounded (legs commonly more-than-double
+// between an older and a newer regime) - so a symmetric clamp saturates the
+// growth side constantly while the shrink side (which actually IS bounded at
+// -1) was already fine. Compress only the growth side by
+// trendFatigueGrowthScaleInput before the final clamp, so it takes a
+// genuinely large, sustained expansion to reach 100, not just one bigger leg.
+// Direction-symmetric (shrinking legs are bad news regardless of which way
+// you're positioned), computed once, shared by both directions.
+float legRangeRatioScaled = legRangeRatio >= 0.0 ? legRangeRatio / trendFatigueGrowthScaleInput : legRangeRatio
+float trendFatigueScore = f_clamp(50.0 + 50.0 * f_clamp(legRangeRatioScaled, -1.0, 1.0), 0.0, 100.0)
+
+// Structure Intact: graded ramp toward the same 0.90
+// legInvalidationRetracementInput threshold that governs whether swingDirection
+// itself flips. While the OPPOSITE leg is the active reference, this is NOT
+// hard-zeroed (see the Pullback Health comment above for why - same
+// pivot-confirmation-lag problem) - instead it reads a continuous recovery
+// ratio (how much of the opposite leg's range price has already recovered),
+// scaled against the same 0.90 threshold. This makes the two branches meet at
+// 100 exactly at the moment swingDirection would flip: right before the flip
+// (recovery approaching the threshold) and right after (a fresh leg with ~0
+// retracement yet) both read ~100 - continuous, no cliff at the transition.
+bool haveLegRange = not na(lastHigh) and not na(lastLow) and (lastHigh - lastLow) > EPS
+float longRecoveryRatio = haveLegRange ? f_clamp((close - lastLow) / (lastHigh - lastLow), 0.0, 1.0) : 0.0
+float shortRecoveryRatio = haveLegRange ? f_clamp((lastHigh - close) / (lastHigh - lastLow), 0.0, 1.0) : 0.0
+float structureIntactLong = swingDirection == 1 ? 100.0 * (1.0 - f_clamp(nz(bullishRetracement) / legInvalidationRetracementInput, 0.0, 1.0)) : 100.0 * f_clamp(longRecoveryRatio / legInvalidationRetracementInput, 0.0, 1.0)
+float structureIntactShort = swingDirection == -1 ? 100.0 * (1.0 - f_clamp(nz(bearishRetracement) / legInvalidationRetracementInput, 0.0, 1.0)) : 100.0 * f_clamp(shortRecoveryRatio / legInvalidationRetracementInput, 0.0, 1.0)
+
+// Regime/Sideways Risk: Kaufman-style efficiency ratio over regimeLookbackInput
+// - net movement vs. total path length. Direction-symmetric (a choppy regime is
+// bad news regardless of position direction), computed once, shared by both.
+float regimeNetMove = math.abs(close - close[regimeLookbackInput])
+float regimePathLength = math.sum(math.abs(close - close[1]), regimeLookbackInput)
+float regimeEfficiencyRatio = f_safeDiv(regimeNetMove, regimePathLength, 0.5)
+float regimeScore = f_clamp(100.0 * regimeEfficiencyRatio, 0.0, 100.0)
+
+float totalHealthWeight = math.max(wLiveQualityInput + wPullbackHealthInput + wTrendProgressInput + wFatigueInput + wStructureIntactInput + wRegimeInput, EPS)
+
+float longPositionHealthRaw = (
+     wLiveQualityInput * liveQualityLong +
+     wPullbackHealthInput * pullbackHealthLong +
+     wTrendProgressInput * trendProgressLong +
+     wFatigueInput * trendFatigueScore +
+     wStructureIntactInput * structureIntactLong +
+     wRegimeInput * regimeScore
+   ) / totalHealthWeight
+
+float shortPositionHealthRaw = (
+     wLiveQualityInput * liveQualityShort +
+     wPullbackHealthInput * pullbackHealthShort +
+     wTrendProgressInput * trendProgressShort +
+     wFatigueInput * trendFatigueScore +
+     wStructureIntactInput * structureIntactShort +
+     wRegimeInput * regimeScore
+   ) / totalHealthWeight
+
+float smoothedLongHealth = ta.ema(longPositionHealthRaw, smoothingInput)
+float smoothedShortHealth = ta.ema(shortPositionHealthRaw, smoothingInput)
+
+var float frozenLongHealth = na
+var float frozenShortHealth = na
+if barstate.isconfirmed or not confirmedBarOnlyInput
+    frozenLongHealth := smoothedLongHealth
+    frozenShortHealth := smoothedShortHealth
+
+// nz(..., 50.0) guards a rare bar-0/warm-up edge case seen in backtested Pine
+// Logs (health=NaN on the very first bar of history, before enough bars exist
+// for some upstream series[] lookback) - falls back to a neutral 50 rather
+// than propagating na into the state classification below.
+float longPositionHealth = nz(confirmedBarOnlyInput ? nz(frozenLongHealth, smoothedLongHealth) : smoothedLongHealth, 50.0)
+float shortPositionHealth = nz(confirmedBarOnlyInput ? nz(frozenShortHealth, smoothedShortHealth) : smoothedShortHealth, 50.0)
+
+// State codes: 3 HOLD, 2 PROTECT, 1 REDUCE, 0 EXIT
+int longPositionHealthStateCode = longPositionHealth >= healthHoldThresholdInput ? 3 : longPositionHealth >= healthProtectThresholdInput ? 2 : longPositionHealth >= healthReduceThresholdInput ? 1 : 0
+int shortPositionHealthStateCode = shortPositionHealth >= healthHoldThresholdInput ? 3 : shortPositionHealth >= healthProtectThresholdInput ? 2 : shortPositionHealth >= healthReduceThresholdInput ? 1 : 0
+
+// Debug logging via log.info() - does NOT count against the plot/alertcondition
+// output cap (unlike plot(..., display=display.data_window), which is why the
+// six sub-components aren't plotted individually above. Off by default; the
+// Pine Logs panel shows one line per bar per direction when enabled.
+if debugLogPositionHealthInput
+    log.info("TPE1 POSITION_HEALTH | dir=long | bar={0} | swingDir={1} | liveQ={2} | pullback={3} | progress={4} | fatigue={5} | structure={6} | regime={7} | health={8} | state={9}",
+         bar_index, swingDirection,
+         str.tostring(liveQualityLong, "#.0"), str.tostring(pullbackHealthLong, "#.0"),
+         str.tostring(trendProgressLong, "#.0"), str.tostring(trendFatigueScore, "#.0"),
+         str.tostring(structureIntactLong, "#.0"), str.tostring(regimeScore, "#.0"),
+         str.tostring(longPositionHealth, "#.0"), longPositionHealthStateCode)
+    log.info("TPE1 POSITION_HEALTH | dir=short | bar={0} | swingDir={1} | liveQ={2} | pullback={3} | progress={4} | fatigue={5} | structure={6} | regime={7} | health={8} | state={9}",
+         bar_index, swingDirection,
+         str.tostring(liveQualityShort, "#.0"), str.tostring(pullbackHealthShort, "#.0"),
+         str.tostring(trendProgressShort, "#.0"), str.tostring(trendFatigueScore, "#.0"),
+         str.tostring(structureIntactShort, "#.0"), str.tostring(regimeScore, "#.0"),
+         str.tostring(shortPositionHealth, "#.0"), shortPositionHealthStateCode)
+
+// ============================================================================
+// Candle geometry (shared by rejection-at-extreme and Trigger)
+// ============================================================================
+
+float candleRange = math.max(high - low, syminfo.mintick)
+
+// ============================================================================
+// Trigger: explicit state machine (UNTRIGGERED -> BROKEN -> CONFIRMED ->
+// ACCEPTED). A rejection-at-extreme confirms against the REJECTION CANDLE'S
+// OPPOSITE extreme (fix #3: a bullish rejection's follow-through level is
+// its own HIGH, not its low - confirming against the low was already true
+// on the very next bar almost by construction). Micro-swing break is an
+// event (fix #8: crossover/crossunder), not a persisting level condition.
+// ============================================================================
+
+float microPivotHigh = ta.pivothigh(high, microPivotLen, microPivotLen)
+float microPivotLow = ta.pivotlow(low, microPivotLen, microPivotLen)
+
+var float microLastHigh = na
+var float microLastLow = na
+if not na(microPivotHigh)
+    microLastHigh := microPivotHigh
+if not na(microPivotLow)
+    microLastLow := microPivotLow
+
+bool longRejectionAtExtreme = low < low[1] and close > low[1] and f_safeDiv(close - low, candleRange, 0.0) >= rejectionCloseLocInput
+bool shortRejectionAtExtreme = high > high[1] and close < high[1] and f_safeDiv(high - close, candleRange, 0.0) >= rejectionCloseLocInput
+bool longMicroBreak = not na(microLastHigh) and ta.crossover(close, microLastHigh)
+bool shortMicroBreak = not na(microLastLow) and ta.crossunder(close, microLastLow)
+
+// States: 0 UNTRIGGERED, 1 BROKEN (rejection, needs follow-through), 2 CONFIRMED (closed beyond level), 3 ACCEPTED (held)
+var int longTriggerState = 0
+var float longBreakLevel = na
+var int longStateBar = na
+var int longTriggerEpoch = na
+
+// Fix #5: a Trigger that started under a different reference leg is stale.
+if not na(longTriggerEpoch) and longTriggerEpoch != referenceEpoch
+    longTriggerState := 0
+    longBreakLevel := na
+    longStateBar := na
+    longTriggerEpoch := na
+
+if longTriggerState == 0
+    if longRejectionAtExtreme
+        longTriggerState := 1
+        longBreakLevel := high
+        longStateBar := bar_index
+        longTriggerEpoch := referenceEpoch
+    else if longMicroBreak
+        longTriggerState := 2
+        longBreakLevel := microLastHigh
+        longStateBar := bar_index
+        longTriggerEpoch := referenceEpoch
+else if longTriggerState == 1
+    if close > longBreakLevel
+        longTriggerState := 2
+        longStateBar := bar_index
+    else if close < longBreakLevel - atrSafe * 0.3
+        longTriggerState := 0
+        longBreakLevel := na
+        longTriggerEpoch := na
+else if longTriggerState == 2
+    if close < longBreakLevel
+        longTriggerState := 0
+        longBreakLevel := na
+        longTriggerEpoch := na
+    else if bar_index - longStateBar >= acceptanceBarsInput
+        longTriggerState := 3
+else
+    if close < longBreakLevel
+        longTriggerState := 0
+        longBreakLevel := na
+        longTriggerEpoch := na
+
+var int shortTriggerState = 0
+var float shortBreakLevel = na
+var int shortStateBar = na
+var int shortTriggerEpoch = na
+
+if not na(shortTriggerEpoch) and shortTriggerEpoch != referenceEpoch
+    shortTriggerState := 0
+    shortBreakLevel := na
+    shortStateBar := na
+    shortTriggerEpoch := na
+
+if shortTriggerState == 0
+    if shortRejectionAtExtreme
+        shortTriggerState := 1
+        shortBreakLevel := low
+        shortStateBar := bar_index
+        shortTriggerEpoch := referenceEpoch
+    else if shortMicroBreak
+        shortTriggerState := 2
+        shortBreakLevel := microLastLow
+        shortStateBar := bar_index
+        shortTriggerEpoch := referenceEpoch
+else if shortTriggerState == 1
+    if close < shortBreakLevel
+        shortTriggerState := 2
+        shortStateBar := bar_index
+    else if close > shortBreakLevel + atrSafe * 0.3
+        shortTriggerState := 0
+        shortBreakLevel := na
+        shortTriggerEpoch := na
+else if shortTriggerState == 2
+    if close > shortBreakLevel
+        shortTriggerState := 0
+        shortBreakLevel := na
+        shortTriggerEpoch := na
+    else if bar_index - shortStateBar >= acceptanceBarsInput
+        shortTriggerState := 3
+else
+    if close > shortBreakLevel
+        shortTriggerState := 0
+        shortBreakLevel := na
+        shortTriggerEpoch := na
+
+float longTriggerScore = 0.0
+if longTriggerState == 1
+    longTriggerScore := 30.0
+else if longTriggerState == 2
+    longTriggerScore := 50.0 + 25.0 * f_clamp(float(bar_index - longStateBar) / acceptanceBarsInput, 0.0, 1.0)
+else if longTriggerState == 3
+    longTriggerScore := 100.0
+
+float shortTriggerScore = 0.0
+if shortTriggerState == 1
+    shortTriggerScore := 30.0
+else if shortTriggerState == 2
+    shortTriggerScore := 50.0 + 25.0 * f_clamp(float(bar_index - shortStateBar) / acceptanceBarsInput, 0.0, 1.0)
+else if shortTriggerState == 3
+    shortTriggerScore := 100.0
+
+float longAcceptance = 0.0
+if longTriggerState == 2
+    longAcceptance := 100.0 * f_clamp(float(bar_index - longStateBar) / acceptanceBarsInput, 0.0, 1.0)
+else if longTriggerState == 3
+    longAcceptance := 100.0
+
+float shortAcceptance = 0.0
+if shortTriggerState == 2
+    shortAcceptance := 100.0 * f_clamp(float(bar_index - shortStateBar) / acceptanceBarsInput, 0.0, 1.0)
+else if shortTriggerState == 3
+    shortAcceptance := 100.0
+
+// ============================================================================
+// Permission: floored-multiplicative gate (reference-leg quality x Maturity x
+// Exhaustion). Continuation and Reversal are COMPETING explanations of the
+// same retracement, not independent evidence - combined via max(), not
+// noisy-OR (fix #10). The dominant scenario is tracked for scenario-aware
+// Target/Invalidation below.
+// ============================================================================
+
+float longContinuationPermission = 100.0 * f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(liveTrendQuality, liveTrendQualityFloorInput) * f_gatedFactor(continuationMaturityLong, maturityFloorInput) * f_gatedFactor(bearExhaustion, exhaustionFloorInput)
+float longReversalPermission = 100.0 * f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(liveTrendQuality, liveTrendQualityFloorInput) * f_gatedFactor(reversalMaturityLong, maturityFloorInput) * f_gatedFactor(bearImpulseExhaustion, exhaustionFloorInput)
+float shortContinuationPermission = 100.0 * f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(liveTrendQuality, liveTrendQualityFloorInput) * f_gatedFactor(continuationMaturityShort, maturityFloorInput) * f_gatedFactor(bullExhaustion, exhaustionFloorInput)
+float shortReversalPermission = 100.0 * f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(liveTrendQuality, liveTrendQualityFloorInput) * f_gatedFactor(reversalMaturityShort, maturityFloorInput) * f_gatedFactor(bullImpulseExhaustion, exhaustionFloorInput)
+
+// HTF influence is applied PER SCENARIO, before the max() combination, and
+// asymmetrically for Reversal: a Reversal fighting the HTF trend is riskier
+// than a Continuation fighting it, and a Reversal agreeing with the HTF
+// trend needs that agreement less than a Continuation does (the HTF trend
+// direction is itself evidence FOR continuation and AGAINST reversal).
+if htfEnabledInput and validHigherTimeframe
+    longContinuationPermission := f_clamp(longContinuationPermission + htfInfluenceInput * htfTrendSigned, 0.0, 100.0)
+    shortContinuationPermission := f_clamp(shortContinuationPermission - htfInfluenceInput * htfTrendSigned, 0.0, 100.0)
+
+    float longReversalHtfFactor = htfTrendSigned >= 0 ? reversalHtfAlignedFactorInput : reversalHtfConflictFactorInput
+    longReversalPermission := f_clamp(longReversalPermission + htfInfluenceInput * longReversalHtfFactor * htfTrendSigned, 0.0, 100.0)
+
+    float shortReversalHtfFactor = htfTrendSigned <= 0 ? reversalHtfAlignedFactorInput : reversalHtfConflictFactorInput
+    shortReversalPermission := f_clamp(shortReversalPermission - htfInfluenceInput * shortReversalHtfFactor * htfTrendSigned, 0.0, 100.0)
+
+// Continuation and Reversal only swap dominance once one leads by a margin
+// (hysteresis) - otherwise the dominant scenario (and so T2/Invalidation
+// geometry) could flicker every bar when the two are close. Fix #10: the
+// sticky state must reset on a new reference leg - otherwise the OLD leg's
+// dominant scenario keeps ruling a brand new leg it has nothing to do with,
+// until the new leg's reversal score happens to out-lead it by the margin.
+var bool longIsContinuationSticky = true
+var int longStickyEpoch = na
+if na(longStickyEpoch) or longStickyEpoch != referenceEpoch
+    longIsContinuationSticky := longContinuationPermission >= longReversalPermission
+    longStickyEpoch := referenceEpoch
+else if longContinuationPermission > longReversalPermission + scenarioHysteresisMarginInput
+    longIsContinuationSticky := true
+else if longReversalPermission > longContinuationPermission + scenarioHysteresisMarginInput
+    longIsContinuationSticky := false
+bool longIsContinuation = longIsContinuationSticky
+
+var bool shortIsContinuationSticky = true
+var int shortStickyEpoch = na
+if na(shortStickyEpoch) or shortStickyEpoch != referenceEpoch
+    shortIsContinuationSticky := shortContinuationPermission >= shortReversalPermission
+    shortStickyEpoch := referenceEpoch
+else if shortContinuationPermission > shortReversalPermission + scenarioHysteresisMarginInput
+    shortIsContinuationSticky := true
+else if shortReversalPermission > shortContinuationPermission + scenarioHysteresisMarginInput
+    shortIsContinuationSticky := false
+bool shortIsContinuation = shortIsContinuationSticky
+
+float longPermission = math.max(longContinuationPermission, longReversalPermission)
+float shortPermission = math.max(shortContinuationPermission, shortReversalPermission)
+
+// ============================================================================
+// Target / Invalidation. T1 (fix #16) searches the recent confirmed-pivot
+// history for the NEAREST qualifying level, instead of only ever checking
+// lastHigh/lastLow and immediately falling back to a synthetic ATR target if
+// that single specific pivot doesn't qualify. T2/Invalidation are
+// SCENARIO-AWARE (fix #10): Continuation uses the counter-move's extreme
+// since the CURRENT endpoint; Reversal uses the counter-move's own bounce
+// range and any retest depth since that same endpoint - these are different
+// legs of the structure and must not share one formula.
+// ============================================================================
+
+float minT1Dist = minTargetDistanceAtrInput * atrSafe
+
+float t1LongRaw = f_nearestPivotAbove(pivotHighHistory, close, minT1Dist)
+string t1LongTypeRaw = "PIVOT"
+if na(t1LongRaw)
+    t1LongRaw := close + minTargetDistanceAtrInput * 2.0 * atrSafe
+    t1LongTypeRaw := "ATR_FALLBACK"
+
+float t1ShortRaw = f_nearestPivotBelow(pivotLowHistory, close, minT1Dist)
+string t1ShortTypeRaw = "PIVOT"
+if na(t1ShortRaw)
+    t1ShortRaw := close - minTargetDistanceAtrInput * 2.0 * atrSafe
+    t1ShortTypeRaw := "ATR_FALLBACK"
+
+float t2LongRaw = na
+float invLongRaw = na
+if longIsContinuation
+    if not na(lowSinceLastHigh) and not na(lastHigh)
+        t2LongRaw := lowSinceLastHigh + extensionMultInput * (lastHigh - lowSinceLastHigh)
+    if not na(lowSinceLastHigh)
+        invLongRaw := lowSinceLastHigh - atrSafe * invalidationAtrBufferInput
+else
+    if not na(highSinceLastLow) and not na(lastHigh) and not na(lastLow)
+        t2LongRaw := lastHigh + extensionMultInput * (highSinceLastLow - lastLow)
+    if not na(lowSinceLastLow)
+        invLongRaw := lowSinceLastLow - atrSafe * invalidationAtrBufferInput
+
+float t2ShortRaw = na
+float invShortRaw = na
+if shortIsContinuation
+    if not na(highSinceLastLow) and not na(lastLow)
+        t2ShortRaw := highSinceLastLow - extensionMultInput * (highSinceLastLow - lastLow)
+    if not na(highSinceLastLow)
+        invShortRaw := highSinceLastLow + atrSafe * invalidationAtrBufferInput
+else
+    if not na(lowSinceLastHigh) and not na(lastLow) and not na(lastHigh)
+        t2ShortRaw := lastLow - extensionMultInput * (lastHigh - lowSinceLastHigh)
+    if not na(highSinceLastHigh)
+        invShortRaw := highSinceLastHigh + atrSafe * invalidationAtrBufferInput
+
+// T2 validity: must actually lie beyond T1 by a minimum distance, or it's
+// not a meaningful second target (T2 formulas above can produce a level
+// behind T1, too close, or already passed depending on scenario/tracker
+// state - discard rather than freeze a nonsensical target).
+if na(t2LongRaw) or (t2LongRaw - t1LongRaw) < minT1Dist
+    t2LongRaw := na
+if na(t2ShortRaw) or (t1ShortRaw - t2ShortRaw) < minT1Dist
+    t2ShortRaw := na
+
+// ============================================================================
+// Confirmation / pre-CRV score. CRV needs to know whether a trade is already
+// frozen (see below), so it can't be computed yet - Trigger arbitration below
+// uses this PRE-CRV score, which doesn't have that dependency.
+// ============================================================================
+
+float longConfirmation = f_weightedAvg2(longTriggerScore, triggerWeightInput, longAcceptance, acceptanceWeightInput)
+float shortConfirmation = f_weightedAvg2(shortTriggerScore, triggerWeightInput, shortAcceptance, acceptanceWeightInput)
+
+float longScorePreCrv = longPermission * (confirmationFloorInput + (1.0 - confirmationFloorInput) * longConfirmation / 100.0)
+float shortScorePreCrv = shortPermission * (confirmationFloorInput + (1.0 - confirmationFloorInput) * shortConfirmation / 100.0)
+
+// ============================================================================
+// Setup / Trigger events, cooldown (fix #4: a Trigger requires Permission to
+// actually clear the threshold AND dominate the other side; fix #7:
+// simultaneous same-bar candidates are arbitrated by score, not both fired).
+// ============================================================================
+
+bool longSetup = longPermission >= permissionThresholdInput and longPermission > shortPermission
+bool shortSetup = shortPermission >= permissionThresholdInput and shortPermission > longPermission
+bool newLongSetup = longSetup and not longSetup[1]
+bool newShortSetup = shortSetup and not shortSetup[1]
+
+var int lastLongTriggerBar = na
+var int lastShortTriggerBar = na
+bool longCooldownOk = na(lastLongTriggerBar) or (bar_index - lastLongTriggerBar) > cooldownBarsInput
+bool shortCooldownOk = na(lastShortTriggerBar) or (bar_index - lastShortTriggerBar) > cooldownBarsInput
+
+bool longTriggerEligible = longPermission >= permissionThresholdInput and longPermission > shortPermission
+bool shortTriggerEligible = shortPermission >= permissionThresholdInput and shortPermission > longPermission
+
+// Fix #11: a Trigger doesn't have to fire on the EXACT bar it reaches
+// CONFIRMED - it stays armed for triggerValidityBarsInput bars, so if
+// Permission only clears its threshold a few bars later (not that same bar),
+// the signal isn't lost. Fires at most once per episode (reset when the
+// state machine returns to UNTRIGGERED).
+var bool longTriggerConsumed = false
+if longTriggerState == 0
+    longTriggerConsumed := false
+var bool shortTriggerConsumed = false
+if shortTriggerState == 0
+    shortTriggerConsumed := false
+
+// Fix #9: a Trigger that never fired within its validity window expires
+// (resets to UNTRIGGERED) instead of indefinitely showing a CONFIRMED/
+// ACCEPTED score with no way left to actually signal. A Trigger that DID
+// fire is left alone - the resulting trade's lifecycle is tracked
+// separately (t1LongFrozen/longTradeOpen etc.), not through this state.
+if longTriggerState >= 2 and not longTriggerConsumed and (bar_index - longStateBar) > triggerValidityBarsInput
+    longTriggerState := 0
+    longBreakLevel := na
+    longTriggerEpoch := na
+if shortTriggerState >= 2 and not shortTriggerConsumed and (bar_index - shortStateBar) > triggerValidityBarsInput
+    shortTriggerState := 0
+    shortBreakLevel := na
+    shortTriggerEpoch := na
+
+bool longArmed = longTriggerState >= 2 and (bar_index - longStateBar) <= triggerValidityBarsInput and not longTriggerConsumed
+bool shortArmed = shortTriggerState >= 2 and (bar_index - shortStateBar) <= triggerValidityBarsInput and not shortTriggerConsumed
+
+// Frozen trade state, declared here (before it's needed for the "don't fire
+// while already open" gate below) - the actual freeze assignment on
+// newLongTrigger/newShortTrigger stays further down, unchanged.
+var float t1LongFrozen = na
+var float t2LongFrozen = na
+var float invLongFrozen = na
+var string t1LongTypeFrozen = na
+var bool longT1Hit = false
+var bool longT2Hit = false
+var bool longInvHit = false
+var bool longCancelled = false
+
+var float t1ShortFrozen = na
+var float t2ShortFrozen = na
+var float invShortFrozen = na
+var string t1ShortTypeFrozen = na
+var bool shortT1Hit = false
+var bool shortT2Hit = false
+var bool shortInvHit = false
+var bool shortCancelled = false
+
+// A new trigger must not silently replace an already-open same-direction
+// trade's frozen targets - evaluated using this bar's PRIOR state (before
+// any of this bar's freeze/hit updates), i.e. "was a trade already open
+// coming into this bar".
+bool hasLongT2Prior = useT2Input and not na(t2LongFrozen)
+bool hasShortT2Prior = useT2Input and not na(t2ShortFrozen)
+bool longTradeOpenPrior = not na(t1LongFrozen) and not longInvHit and not longCancelled and (hasLongT2Prior ? not longT2Hit : not longT1Hit)
+bool shortTradeOpenPrior = not na(t1ShortFrozen) and not shortInvHit and not shortCancelled and (hasShortT2Prior ? not shortT2Hit : not shortT1Hit)
+
+bool newLongTriggerCandidate = longArmed and longCooldownOk and longTriggerEligible and not longTradeOpenPrior
+bool newShortTriggerCandidate = shortArmed and shortCooldownOk and shortTriggerEligible and not shortTradeOpenPrior
+bool simultaneousTrigger = newLongTriggerCandidate and newShortTriggerCandidate
+
+bool newLongTrigger = newLongTriggerCandidate and (not simultaneousTrigger or longScorePreCrv > shortScorePreCrv)
+bool newShortTrigger = newShortTriggerCandidate and (not simultaneousTrigger or shortScorePreCrv > longScorePreCrv)
+
+if newLongTrigger
+    lastLongTriggerBar := bar_index
+    longTriggerConsumed := true
+    // Fix #12: a confirmed opposite trigger structurally invalidates whatever
+    // the other side's trigger state was building - don't let it linger.
+    shortTriggerState := 0
+    shortBreakLevel := na
+    shortTriggerEpoch := na
+if newShortTrigger
+    lastShortTriggerBar := bar_index
+    shortTriggerConsumed := true
+    longTriggerState := 0
+    longBreakLevel := na
+    longTriggerEpoch := na
+
+if newLongTrigger
+    t1LongFrozen := t1LongRaw
+    t2LongFrozen := t2LongRaw
+    invLongFrozen := invLongRaw
+    t1LongTypeFrozen := t1LongTypeRaw
+    longT1Hit := false
+    longT2Hit := false
+    longInvHit := false
+    longCancelled := false
+
+if newShortTrigger
+    t1ShortFrozen := t1ShortRaw
+    t2ShortFrozen := t2ShortRaw
+    invShortFrozen := invShortRaw
+    t1ShortTypeFrozen := t1ShortTypeRaw
+    shortT1Hit := false
+    shortT2Hit := false
+    shortInvHit := false
+    shortCancelled := false
+
+// Fix #6: an explicit trade-open lifecycle gates ALL hit detection, so a
+// cancelled or already-closed setup can never report a later hit. Fix #13:
+// when T2 is enabled, T1 alone must NOT close the trade - otherwise T2 can
+// only ever register on the exact same bar as T1 (longTradeOpen would go
+// false on the very next bar, before T2 has a chance to be reached later).
+// A trade only stays open past T1 for T2 if T2 actually froze as a valid
+// level - otherwise (T2 tracking on but no valid T2 target) it would never
+// close on its own, waiting on an unreachable na target forever.
+bool hasLongT2 = useT2Input and not na(t2LongFrozen)
+bool hasShortT2 = useT2Input and not na(t2ShortFrozen)
+bool longTradeOpen = not na(t1LongFrozen) and not longInvHit and not longCancelled and (hasLongT2 ? not longT2Hit : not longT1Hit)
+bool shortTradeOpen = not na(t1ShortFrozen) and not shortInvHit and not shortCancelled and (hasShortT2 ? not shortT2Hit : not shortT1Hit)
+
+if newShortTrigger and longTradeOpen
+    longCancelled := true
+if newLongTrigger and shortTradeOpen
+    shortCancelled := true
+
+bool longStillOpenAfterCancel = longTradeOpen and not longCancelled
+bool shortStillOpenAfterCancel = shortTradeOpen and not shortCancelled
+
+bool longInvHitNow = longStillOpenAfterCancel and not na(invLongFrozen) and low <= invLongFrozen
+if longInvHitNow
+    longInvHit := true
+
+bool longT1HitNow = longStillOpenAfterCancel and not longT1Hit and not longInvHitNow and not na(t1LongFrozen) and high >= t1LongFrozen
+bool longT2HitNow = longStillOpenAfterCancel and useT2Input and not longT2Hit and not longInvHitNow and not na(t2LongFrozen) and high >= t2LongFrozen
+if longT1HitNow
+    longT1Hit := true
+if longT2HitNow
+    longT2Hit := true
+
+bool shortInvHitNow = shortStillOpenAfterCancel and not na(invShortFrozen) and high >= invShortFrozen
+if shortInvHitNow
+    shortInvHit := true
+
+bool shortT1HitNow = shortStillOpenAfterCancel and not shortT1Hit and not shortInvHitNow and not na(t1ShortFrozen) and low <= t1ShortFrozen
+bool shortT2HitNow = shortStillOpenAfterCancel and useT2Input and not shortT2Hit and not shortInvHitNow and not na(t2ShortFrozen) and low <= t2ShortFrozen
+if shortT1HitNow
+    shortT1Hit := true
+if shortT2HitNow
+    shortT2Hit := true
+
+// ============================================================================
+// CRV feasibility + final Permission (fix #14). Once a trade is open, CRV must be
+// measured against the FROZEN target/invalidation actually being tracked,
+// not the live (still-moving) raw values - otherwise the displayed Permission
+// drifts away from the geometry the Target/Invalidation lines represent.
+// Before any trigger, the live/prospective geometry is the only one available.
+// ============================================================================
+
+// Fix #8/#14: once T1 has already been hit (trade running on to T2), CRV
+// must switch to measuring against T2 - staying pinned to the now-passed T1
+// would make the reward leg of the ratio negative/near-zero and crush the
+// score right when the trade is actually doing well.
+float longCrvFactor = 1.0
+if longStillOpenAfterCancel
+    float longCrvTarget = longT1Hit and hasLongT2 ? t2LongFrozen : t1LongFrozen
+    if not na(invLongFrozen) and not na(longCrvTarget)
+        float longCrv = f_safeDiv(longCrvTarget - close, math.max(close - invLongFrozen, atrSafe * 0.1), 0.0)
+        longCrvFactor := crvFloorInput + (1.0 - crvFloorInput) * f_clamp(longCrv / minCrvInput, 0.0, 1.0)
+else
+    if not na(invLongRaw)
+        float longCrv = f_safeDiv(t1LongRaw - close, math.max(close - invLongRaw, atrSafe * 0.1), 0.0)
+        longCrvFactor := crvFloorInput + (1.0 - crvFloorInput) * f_clamp(longCrv / minCrvInput, 0.0, 1.0)
+
+float shortCrvFactor = 1.0
+if shortStillOpenAfterCancel
+    float shortCrvTarget = shortT1Hit and hasShortT2 ? t2ShortFrozen : t1ShortFrozen
+    if not na(invShortFrozen) and not na(shortCrvTarget)
+        float shortCrv = f_safeDiv(close - shortCrvTarget, math.max(invShortFrozen - close, atrSafe * 0.1), 0.0)
+        shortCrvFactor := crvFloorInput + (1.0 - crvFloorInput) * f_clamp(shortCrv / minCrvInput, 0.0, 1.0)
+else
+    if not na(invShortRaw)
+        float shortCrv = f_safeDiv(close - t1ShortRaw, math.max(invShortRaw - close, atrSafe * 0.1), 0.0)
+        shortCrvFactor := crvFloorInput + (1.0 - crvFloorInput) * f_clamp(shortCrv / minCrvInput, 0.0, 1.0)
+
+// ============================================================================
+// Permission Decay: a bar with no fresh extreme, no accelerating momentum and
+// no ATR expansion in the relevant direction is "stale" - each stale bar
+// fades permission by decayPerBarInput%, so it doesn't sit at a high value
+// once the move that earned it has gone quiet (a fresh, sharp breakout still
+// resets it to zero stale bars immediately, since it's progress by definition).
+// ============================================================================
+
+bool longProgressNow = high > high[1] or accelerationNorm > 0.05 or atrSafe > atrSafe[decayAtrLookbackInput]
+bool shortProgressNow = low < low[1] or accelerationNorm < -0.05 or atrSafe > atrSafe[decayAtrLookbackInput]
+
+var float longStaleBars = 0.0
+if longProgressNow
+    longStaleBars := 0.0
+else
+    longStaleBars += 1.0
+
+var float shortStaleBars = 0.0
+if shortProgressNow
+    shortStaleBars := 0.0
+else
+    shortStaleBars += 1.0
+
+float longDecayFactor = f_clamp(1.0 - longStaleBars * decayPerBarInput / 100.0, 0.0, 1.0)
+float shortDecayFactor = f_clamp(1.0 - shortStaleBars * decayPerBarInput / 100.0, 0.0, 1.0)
+
+float longScoreRaw = longScorePreCrv * longCrvFactor * longDecayFactor
+float shortScoreRaw = shortScorePreCrv * shortCrvFactor * shortDecayFactor
+
+bool newLongSignal = newLongTrigger and longScoreRaw >= confirmationThresholdInput
+bool newShortSignal = newShortTrigger and shortScoreRaw >= confirmationThresholdInput
+
+float smoothedLong = ta.ema(longScoreRaw, smoothingInput)
+float smoothedShort = ta.ema(shortScoreRaw, smoothingInput)
+
+var float frozenLong = na
+var float frozenShort = na
+if barstate.isconfirmed or not confirmedBarOnlyInput
+    frozenLong := smoothedLong
+    frozenShort := smoothedShort
+
+float longScore = confirmedBarOnlyInput ? nz(frozenLong, smoothedLong) : smoothedLong
+float shortScore = confirmedBarOnlyInput ? nz(frozenShort, smoothedShort) : smoothedShort
+float balance = longScore - shortScore
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertcondition(newLongSetup, "TPE1 Long Setup", "TPE1: new Long setup (permission)")
+alertcondition(newShortSetup, "TPE1 Short Setup", "TPE1: new Short setup (permission)")
+alertcondition(newLongTrigger, "TPE1 Long Trigger", "TPE1: Long trigger confirmed")
+alertcondition(newShortTrigger, "TPE1 Short Trigger", "TPE1: Short trigger confirmed")
+alertcondition(newLongSignal, "TPE1 Long Signal", "TPE1: fully qualified Long signal (trigger + score threshold)")
+alertcondition(newShortSignal, "TPE1 Short Signal", "TPE1: fully qualified Short signal (trigger + score threshold)")
+alertcondition(longT1HitNow, "TPE1 Long T1 Hit", "TPE1: Long target 1 reached")
+alertcondition(longT2HitNow, "TPE1 Long T2 Hit", "TPE1: Long target 2 reached")
+alertcondition(longInvHitNow, "TPE1 Long Invalidated", "TPE1: Long setup invalidated")
+alertcondition(shortT1HitNow, "TPE1 Short T1 Hit", "TPE1: Short target 1 reached")
+alertcondition(shortT2HitNow, "TPE1 Short T2 Hit", "TPE1: Short target 2 reached")
+alertcondition(shortInvHitNow, "TPE1 Short Invalidated", "TPE1: Short setup invalidated")
+alertcondition(newShortTrigger and longTradeOpen, "TPE1 Long Cancelled", "TPE1: Long setup cancelled by opposite trigger")
+alertcondition(newLongTrigger and shortTradeOpen, "TPE1 Short Cancelled", "TPE1: Short setup cancelled by opposite trigger")
+
+// Position Health state-transition alerts - independent of the trade-lifecycle/
+// CRV/decay alerts above; these fire on an existing Long/Short position's
+// structural health crossing into a new state, regardless of whether TPE1
+// itself ever triggered that position. Limited to PROTECT only (the state
+// this feature actually closes a gap on): alertcondition() calls count
+// against the same script-wide "plot" output cap as plot() (empirically
+// confirmed - RE10140 fires from total plot+alertcondition+hline+bgcolor
+// count, not just plot() calls), and this script was already using nearly
+// its entire budget before Position Health. HOLD/REDUCE/EXIT transitions
+// stay visible via the state-colored pane line instead of a dedicated alert.
+bool longEnteredProtect = longPositionHealthStateCode == 2 and longPositionHealthStateCode[1] != 2
+bool shortEnteredProtect = shortPositionHealthStateCode == 2 and shortPositionHealthStateCode[1] != 2
+
+alertcondition(longEnteredProtect, "TPE1 Long Position Health: PROTECT", "TPE1: existing Long position health entered PROTECT")
+alertcondition(shortEnteredProtect, "TPE1 Short Position Health: PROTECT", "TPE1: existing Short position health entered PROTECT")
+
+// ============================================================================
+// Price-chart Target/Invalidation lines (force_overlay from a non-overlay
+// pane). Dimmed to gray once the setup closes (hit, invalidated or cancelled).
+// ============================================================================
+
+var line t1LongLine = na
+var line t2LongLine = na
+var line invLongLine = na
+var label longTriggerLabel = na
+
+if newLongTrigger and showTargetsInput
+    line.delete(t1LongLine)
+    line.delete(t2LongLine)
+    line.delete(invLongLine)
+    label.delete(longTriggerLabel)
+    t1LongLine := line.new(bar_index, t1LongFrozen, bar_index + targetLineBarsInput, t1LongFrozen, color = color.new(color.green, 0), style = line.style_dashed, width = 1, force_overlay = true)
+    invLongLine := line.new(bar_index, invLongFrozen, bar_index + targetLineBarsInput, invLongFrozen, color = color.new(color.red, 0), style = line.style_dotted, width = 1, force_overlay = true)
+    longTriggerLabel := label.new(bar_index, low, "Long · T1 " + t1LongTypeFrozen, style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny, force_overlay = true)
+    if useT2Input
+        t2LongLine := line.new(bar_index, t2LongFrozen, bar_index + targetLineBarsInput, t2LongFrozen, color = color.new(color.lime, 25), style = line.style_dashed, width = 1, force_overlay = true)
+
+if longInvHitNow or (longT2HitNow and useT2Input) or (longT1HitNow and not useT2Input) or longCancelled
+    color dimColor = color.new(color.gray, 70)
+    line.set_color(t1LongLine, dimColor)
+    line.set_color(t2LongLine, dimColor)
+    line.set_color(invLongLine, dimColor)
+
+var line t1ShortLine = na
+var line t2ShortLine = na
+var line invShortLine = na
+var label shortTriggerLabel = na
+
+if newShortTrigger and showTargetsInput
+    line.delete(t1ShortLine)
+    line.delete(t2ShortLine)
+    line.delete(invShortLine)
+    label.delete(shortTriggerLabel)
+    t1ShortLine := line.new(bar_index, t1ShortFrozen, bar_index + targetLineBarsInput, t1ShortFrozen, color = color.new(color.red, 0), style = line.style_dashed, width = 1, force_overlay = true)
+    invShortLine := line.new(bar_index, invShortFrozen, bar_index + targetLineBarsInput, invShortFrozen, color = color.new(color.green, 0), style = line.style_dotted, width = 1, force_overlay = true)
+    shortTriggerLabel := label.new(bar_index, high, "Short · T1 " + t1ShortTypeFrozen, style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny, force_overlay = true)
+    if useT2Input
+        t2ShortLine := line.new(bar_index, t2ShortFrozen, bar_index + targetLineBarsInput, t2ShortFrozen, color = color.new(color.maroon, 25), style = line.style_dashed, width = 1, force_overlay = true)
+
+if shortInvHitNow or (shortT2HitNow and useT2Input) or (shortT1HitNow and not useT2Input) or shortCancelled
+    color dimColorShort = color.new(color.gray, 70)
+    line.set_color(t1ShortLine, dimColorShort)
+    line.set_color(t2ShortLine, dimColorShort)
+    line.set_color(invShortLine, dimColorShort)
+
+// ============================================================================
+// Position Health downgrade markers (price-chart overlay). A history of
+// small warning labels every time Long/Short Position Health drops a state
+// (HOLD->PROTECT->REDUCE->EXIT) - so "where did weakness begin" is visible
+// directly on the price chart across the whole visible history, not just as
+// a dot color in the oscillator pane below. Bounded rolling array (like
+// pivotHighHistory/pivotLowHistory above) so history doesn't accumulate
+// without limit.
+// A single short, plain action clause - no state names, no scores, no
+// comparison to the other side. Earlier versions ("was PROTECT (cooling,
+// protect gains), now REDUCE (weakening, cut size), score 47.4 - for
+// comparison Long is EXIT...") were still too dense to read at a glance -
+// this is deliberately the shortest version that still says what to DO.
+f_healthStateAction(int code) => code == 2 ? "getting risky - start protecting profit" : code == 1 ? "weak - consider a smaller position" : "broken - consider exiting"
+
+int maxHealthWarningLabelsCount = 30
+
+// Only mark downgrades FROM PROTECT or HOLD (stateCode[1] >= 2) - a side that
+// spends most of its time in REDUCE/EXIT (e.g. Short during a sustained
+// uptrend) constantly flickers back and forth across that boundary; marking
+// every one of those is noise, not a real "this was fine, now it's not"
+// event. A drop that started from PROTECT/HOLD is the meaningful case.
+bool longHealthDowngraded = longPositionHealthStateCode < longPositionHealthStateCode[1] and longPositionHealthStateCode[1] >= 2
+bool shortHealthDowngraded = shortPositionHealthStateCode < shortPositionHealthStateCode[1] and shortPositionHealthStateCode[1] >= 2
+
+// Mirror filter for upgrades: only mark a rise INTO PROTECT or HOLD
+// (stateCode >= 2), not every REDUCE<->EXIT wobble - the same noise this
+// file's REDUCE/EXIT boundary produces for downgrades applies symmetrically
+// here. This is deliberate even though it means a plain EXIT->REDUCE tick
+// (a natural first example to reach for) does NOT get marked - that
+// boundary is exactly where the chronic flickering happens.
+bool longHealthUpgraded = longPositionHealthStateCode > longPositionHealthStateCode[1] and longPositionHealthStateCode >= 2
+bool shortHealthUpgraded = shortPositionHealthStateCode > shortPositionHealthStateCode[1] and shortPositionHealthStateCode >= 2
+
+var array<label> longHealthWarningLabels = array.new_label()
+var array<label> shortHealthWarningLabels = array.new_label()
+var array<label> longHealthUpgradeLabels = array.new_label()
+var array<label> shortHealthUpgradeLabels = array.new_label()
+
+// Neutral, genuinely small marker - style_none draws floating text with no
+// background bubble, unlike style_circle (used in an earlier pass) which
+// renders a fixed-size filled disc regardless of the size= setting. Colored
+// by the side it concerns (green = long, red = short - this file's existing
+// convention throughout, e.g. the Permission histogram/lines), not a flat
+// warning orange - and brightness/opacity scales with severity: a mild
+// HOLD->PROTECT slip is faint, a drop into EXIT is much more visible.
+// Offset by half an ATR from the wick so the marker doesn't sit on top of
+// the candle - same offset style as vein_structure_zones.pine's labels.
+f_healthWarningTransparency(int code) => code == 2 ? 85 : code == 1 ? 70 : 40
+f_healthUpgradeAction(int code) => code == 3 ? "looking strong - worth holding" : "improving - worth watching"
+
+if showPositionHealthInput and longHealthDowngraded
+    array.push(longHealthWarningLabels, label.new(bar_index, low - atrSafe * 0.5, "●", style = label.style_none, color = color(na), textcolor = color.new(color.green, f_healthWarningTransparency(longPositionHealthStateCode)), size = size.tiny, force_overlay = true, tooltip = "Long position " + f_healthStateAction(longPositionHealthStateCode)))
+    if array.size(longHealthWarningLabels) > maxHealthWarningLabelsCount
+        label.delete(array.shift(longHealthWarningLabels))
+
+if showPositionHealthInput and shortHealthDowngraded
+    array.push(shortHealthWarningLabels, label.new(bar_index, high + atrSafe * 0.5, "●", style = label.style_none, color = color(na), textcolor = color.new(color.red, f_healthWarningTransparency(shortPositionHealthStateCode)), size = size.tiny, force_overlay = true, tooltip = "Short position " + f_healthStateAction(shortPositionHealthStateCode)))
+    if array.size(shortHealthWarningLabels) > maxHealthWarningLabelsCount
+        label.delete(array.shift(shortHealthWarningLabels))
+
+// Upgrade markers - the mirror of the downgrade markers above, same side
+// convention and position, but a hollow "○" instead of a filled "●" (getting
+// better vs. getting worse), full opacity throughout (an improvement is
+// worth noticing regardless of whether it just reached PROTECT or HOLD).
+if showPositionHealthInput and longHealthUpgraded
+    array.push(longHealthUpgradeLabels, label.new(bar_index, low - atrSafe * 0.5, "○", style = label.style_none, color = color(na), textcolor = color.green, size = size.tiny, force_overlay = true, tooltip = "Long position " + f_healthUpgradeAction(longPositionHealthStateCode)))
+    if array.size(longHealthUpgradeLabels) > maxHealthWarningLabelsCount
+        label.delete(array.shift(longHealthUpgradeLabels))
+
+if showPositionHealthInput and shortHealthUpgraded
+    array.push(shortHealthUpgradeLabels, label.new(bar_index, high + atrSafe * 0.5, "○", style = label.style_none, color = color(na), textcolor = color.red, size = size.tiny, force_overlay = true, tooltip = "Short position " + f_healthUpgradeAction(shortPositionHealthStateCode)))
+    if array.size(shortHealthUpgradeLabels) > maxHealthWarningLabelsCount
+        label.delete(array.shift(shortHealthUpgradeLabels))
+
+// ============================================================================
+// Divergence warning markers - reuses this file's existing divergence
+// detection (regularBearDiv/hiddenBearDiv/regularBullDiv/hiddenBullDiv,
+// already computed above for Permission's Exhaustion) rather than
+// recomputing anything new. Bearish divergence (price makes a new high,
+// momentum doesn't confirm it) is a classic leading warning for an existing
+// LONG position - the rally is losing steam even though price itself hasn't
+// turned yet. Bullish divergence (price makes a new low, momentum doesn't
+// confirm it) is the mirror warning for an existing SHORT. Deliberately
+// PURELY VISUAL - does not feed the Position Health score itself, so the
+// thresholds already calibrated against real backtested Pine Logs don't need
+// re-tuning for this. Same bounded-history-array pattern as the downgrade
+// markers above.
+// ============================================================================
+
+int maxDivergenceLabelsCount = 30
+var array<label> longDivergenceLabels = array.new_label()
+var array<label> shortDivergenceLabels = array.new_label()
+
+// regularBearDiv/hiddenBearDiv (and the bull versions) stay TRUE for every
+// bar between one pivot confirmation and the next, not just the bar the
+// divergence was actually confirmed on - marking every one of those bars
+// produced dense clusters of markers for what was really a single event.
+// Gated to newPivotHigh/newPivotLow (the exact bar the underlying pivot,
+// and so the divergence read itself, actually changed) - one marker per
+// real event. "◆" (filled) instead of "◇" (outline only) - the outline
+// glyph was too faint to read at a glance, especially at size.tiny.
+if showDivergenceMarkersInput and newPivotHigh and (regularBearDiv or hiddenBearDiv)
+    array.push(longDivergenceLabels, label.new(bar_index, high + atrSafe * 0.5, "◆", style = label.style_none, color = color(na), textcolor = color.green, size = size.tiny, force_overlay = true, tooltip = "New high, but momentum is fading - early warning for a Long position"))
+    if array.size(longDivergenceLabels) > maxDivergenceLabelsCount
+        label.delete(array.shift(longDivergenceLabels))
+
+if showDivergenceMarkersInput and newPivotLow and (regularBullDiv or hiddenBullDiv)
+    array.push(shortDivergenceLabels, label.new(bar_index, low - atrSafe * 0.5, "◆", style = label.style_none, color = color(na), textcolor = color.red, size = size.tiny, force_overlay = true, tooltip = "New low, but momentum is fading - early warning for a Short position"))
+    if array.size(shortDivergenceLabels) > maxDivergenceLabelsCount
+        label.delete(array.shift(shortDivergenceLabels))
+
+// ============================================================================
+// Visuals - oscillator pane (color-coded histogram only, no table)
+// ============================================================================
+
+color longPermissionColor = color.new(color.green, 70)
+color longActiveColor = color.new(color.lime, 0)
+color shortPermissionColor = color.new(color.red, 70)
+color shortActiveColor = color.new(color.red, 0)
+
+plot(longPermission, "Long Permission", color = longPermissionColor, style = plot.style_columns, histbase = 0)
+plot(longScore, "Long Active Permission", color = longActiveColor, style = plot.style_columns, histbase = 0)
+plot(-shortPermission, "Short Permission", color = shortPermissionColor, style = plot.style_columns, histbase = 0)
+plot(-shortScore, "Short Active Permission", color = shortActiveColor, style = plot.style_columns, histbase = 0)
+
+// Permission line: a thicker line drawn directly over the histogram bars, so
+// rising vs. falling permission reads at a glance instead of only from bar
+// height (display variant 1). Uses longPermission/shortPermission (the same
+// pre-confirmation read the light histogram bars and permissionThresholdInput
+// use), NOT longScore/shortScore - the latter is Permission further chained
+// through confirmation x CRV x decay, which compresses it near zero almost
+// everywhere except a brief spike at an actual confirmed trigger, making it
+// unusable for a continuously-read line/velocity/background.
+plot(longPermission, "Long Permission Line", color = color.new(color.green, 0), linewidth = 3)
+plot(-shortPermission, "Short Permission Line", color = color.new(color.red, 0), linewidth = 3)
+
+// Velocity: a thin line of bar-over-bar change (x5 for visibility on the
+// same 0-100 scale), so a high-but-fading permission is visually
+// distinguishable from a high-and-still-rising one (display variant 2).
+// Clamped to +/-60 - unclamped, a single sharp Permission jump (up to +/-100
+// x5 = +/-500 in the extreme) forces the whole pane's autoscale to stretch
+// to accommodate that one spike, compressing the histogram/lines/Position
+// Health/threshold reference lines into an unreadable thin band near zero.
+// The clamp caps the outlier without changing the underlying rate-of-change
+// read for any normal (non-extreme) bar.
+float longVelocity = f_clamp((longPermission - longPermission[1]) * 5.0, -60.0, 60.0)
+float shortVelocity = f_clamp((shortPermission - shortPermission[1]) * 5.0, -60.0, 60.0)
+plot(longVelocity, "Long Permission Velocity (x5)", color = color.new(color.teal, 40), linewidth = 1)
+plot(-shortVelocity, "Short Permission Velocity (x5)", color = color.new(color.maroon, 40), linewidth = 1)
+
+// Position Health lines - colored by state (HOLD/PROTECT/REDUCE/EXIT) instead
+// of adding more static threshold hlines to an already-dense pane. Plots the
+// raw combined score directly: unlike Permission vs. longScore, this value was
+// designed to never touch CRV/Trigger/Decay, so there's no "least-chained
+// variant" distinction to make here - it already is one.
+//
+// Hue = side (green = long, red = short - this file's existing convention,
+// same as the Permission histogram/lines and the downgrade markers above),
+// NOT state - an earlier version colored by state alone (blue/purple/orange/
+// fuchsia on both lines), which made it impossible to tell Long from Short by
+// color, only by position (upper/lower half). Brightness = state instead:
+// vivid/opaque when healthy, fading toward gray-transparent as it weakens
+// toward EXIT - the same "fading = weakening" language the background above
+// already uses. `style_circles` (not a smooth line) keeps it visually
+// distinct in shape from the solid Permission line, which also uses green/red.
+f_healthLineTransparency(int code) => code == 3 ? 10 : code == 2 ? 35 : code == 1 ? 60 : 85
+color longHealthColor = color.new(color.green, f_healthLineTransparency(longPositionHealthStateCode))
+color shortHealthColor = color.new(color.red, f_healthLineTransparency(shortPositionHealthStateCode))
+plot(showPositionHealthInput ? longPositionHealth : na, "Long Position Health", color = longHealthColor, linewidth = 2, style = plot.style_circles)
+plot(showPositionHealthInput ? -shortPositionHealth : na, "Short Position Health", color = shortHealthColor, linewidth = 2, style = plot.style_circles)
+
+// Threshold reference lines for the state bands (HOLD/PROTECT/REDUCE
+// boundaries, mirrored for Short) - color/brightness alone answered "which
+// side, how healthy" but not "where exactly does PROTECT start" the way
+// Permission's own threshold lines (below) already do for Permission. Drawn
+// once via line.new(..., extend=extend.right) rather than plot()/hline() -
+// neither counts against the plot/alertcondition output cap the way those
+// do, so this is free regardless of how tight that budget already is.
+if showPositionHealthInput and barstate.isfirst
+    color refLineColor = color.new(color.gray, 75)
+    line.new(bar_index, healthHoldThresholdInput, bar_index + 1, healthHoldThresholdInput, extend = extend.right, color = refLineColor, style = line.style_dotted)
+    line.new(bar_index, healthProtectThresholdInput, bar_index + 1, healthProtectThresholdInput, extend = extend.right, color = refLineColor, style = line.style_dotted)
+    line.new(bar_index, healthReduceThresholdInput, bar_index + 1, healthReduceThresholdInput, extend = extend.right, color = refLineColor, style = line.style_dotted)
+    line.new(bar_index, -healthHoldThresholdInput, bar_index + 1, -healthHoldThresholdInput, extend = extend.right, color = refLineColor, style = line.style_dotted)
+    line.new(bar_index, -healthProtectThresholdInput, bar_index + 1, -healthProtectThresholdInput, extend = extend.right, color = refLineColor, style = line.style_dotted)
+    line.new(bar_index, -healthReduceThresholdInput, bar_index + 1, -healthReduceThresholdInput, extend = extend.right, color = refLineColor, style = line.style_dotted)
+
+plot(balance, "Directional Balance", color = color.new(color.gray, 20), linewidth = 2)
+hline(0, "Zero", color = color.new(color.gray, 65))
+plot(permissionThresholdInput, "Permission threshold", color = color.new(color.gray, 80), linewidth = 1)
+plot(-permissionThresholdInput, "Permission threshold (short)", color = color.new(color.gray, 80), linewidth = 1)
+plot(confirmationThresholdInput, "Confirmed threshold", color = color.new(color.gray, 65), linewidth = 1)
+plot(-confirmationThresholdInput, "Confirmed threshold (short)", color = color.new(color.gray, 65), linewidth = 1)
+
+// Confidence-band background (display variant 3): rising/stagnant/declining
+// permission on the currently-dominant side, instead of only marking the
+// confirmed-trigger moment (which stays visible via the price-chart
+// force_overlay label/lines drawn at trigger time, unchanged). Dominance is
+// read from longPermission/shortPermission, same reasoning as the line above -
+// comparing the heavily-chained longScore/shortScore instead left the
+// dominant side deciding on near-zero noise, disconnected from the actual
+// trend/structure reading.
+float longVelocitySmoothed = ta.ema(longPermission - longPermission[1], 3)
+float shortVelocitySmoothed = ta.ema(shortPermission - shortPermission[1], 3)
+
+color confidenceBackground = na
+if highlightRegimesInput
+    if longPermission > shortPermission
+        if longVelocitySmoothed > 0.5
+            confidenceBackground := color.new(color.green, 82)
+        else if longVelocitySmoothed < -0.5
+            confidenceBackground := color.new(color.gray, 90)
+        else
+            confidenceBackground := color.new(color.green, 92)
+    else if shortPermission > longPermission
+        if shortVelocitySmoothed > 0.5
+            confidenceBackground := color.new(color.red, 82)
+        else if shortVelocitySmoothed < -0.5
+            confidenceBackground := color.new(color.gray, 90)
+        else
+            confidenceBackground := color.new(color.red, 92)
+
+bgcolor(confidenceBackground, title = "Permission confidence band (rising/stagnant/declining)")
+
+// Position Health background - a SEPARATE background from the Permission
+// confidence band above (independent toggle, both can be on and will blend).
+// Answers a different question: not "is Permission rising/falling" but "is
+// whichever side currently has the healthier position deteriorating right
+// now" - a gray override regardless of state color, so a sign of weakness is
+// visible even while still nominally in a good state (e.g. HOLD fading
+// toward PROTECT), not only once a threshold is actually crossed.
+float longHealthVelocitySmoothed = ta.ema(longPositionHealth - longPositionHealth[1], 3)
+float shortHealthVelocitySmoothed = ta.ema(shortPositionHealth - shortPositionHealth[1], 3)
+bool longHealthDominant = longPositionHealth >= shortPositionHealth
+int dominantHealthStateCode = longHealthDominant ? longPositionHealthStateCode : shortPositionHealthStateCode
+float dominantHealthVelocity = longHealthDominant ? longHealthVelocitySmoothed : shortHealthVelocitySmoothed
+
+// Side-based hue (green = long dominant, red = short dominant), matching the
+// Position Health lines' own convention below - an earlier version used a
+// state-based hue here (blue/purple/orange/fuchsia) which no longer matches
+// once the lines switched to side-hue/state-brightness.
+color healthStateBaseColor = longHealthDominant ? color.green : color.red
+
+color positionHealthBackground = na
+if showPositionHealthBackgroundInput
+    if dominantHealthVelocity < -0.3
+        positionHealthBackground := color.new(color.gray, 88)
+    else
+        positionHealthBackground := color.new(healthStateBaseColor, 90)
+
+bgcolor(positionHealthBackground, title = "Position Health background (state color, gray = weakening)")
+
+// ============================================================================
+// Data-window diagnostics
+// ============================================================================
+
+plot(referenceLegQuality, "Diagnostic: Reference Leg Quality (frozen at leg formation)", display = display.data_window)
+plot(liveTrendQuality, "Diagnostic: Live Trend Quality (continuous)", display = display.data_window)
+plot(array.size(legQualityHistory), "Diagnostic: Legs in Live Trend Quality history", display = display.data_window)
+plot(longStaleBars, "Diagnostic: Long stale bars (decay)", display = display.data_window)
+plot(shortStaleBars, "Diagnostic: Short stale bars (decay)", display = display.data_window)
+plot(longDecayFactor, "Diagnostic: Long Decay Factor", display = display.data_window)
+plot(shortDecayFactor, "Diagnostic: Short Decay Factor", display = display.data_window)
+plot(referenceEpoch, "Diagnostic: Reference Epoch", display = display.data_window)
+plot(bullishRetracement * 100.0, "Diagnostic: Bullish-leg retracement %", display = display.data_window)
+plot(bearishRetracement * 100.0, "Diagnostic: Bearish-leg retracement %", display = display.data_window)
+plot(continuationMaturityLong, "Diagnostic: Continuation Maturity Long", display = display.data_window)
+plot(continuationMaturityShort, "Diagnostic: Continuation Maturity Short", display = display.data_window)
+plot(reversalMaturityLong, "Diagnostic: Reversal Maturity Long", display = display.data_window)
+plot(reversalMaturityShort, "Diagnostic: Reversal Maturity Short", display = display.data_window)
+plot(bearExhaustion, "Diagnostic: Exhaustion (feeds Long)", display = display.data_window)
+plot(bullExhaustion, "Diagnostic: Exhaustion (feeds Short)", display = display.data_window)
+plot(longTriggerState, "Diagnostic: Long Trigger State", display = display.data_window)
+plot(shortTriggerState, "Diagnostic: Short Trigger State", display = display.data_window)
+plot(longIsContinuation ? 1 : 0, "Diagnostic: Long dominant scenario (1=Continuation, 0=Reversal)", display = display.data_window)
+plot(shortIsContinuation ? 1 : 0, "Diagnostic: Short dominant scenario (1=Continuation, 0=Reversal)", display = display.data_window)
+plot(longCrvFactor, "Diagnostic: Long CRV Factor", display = display.data_window)
+plot(shortCrvFactor, "Diagnostic: Short CRV Factor", display = display.data_window)
+plot(t1LongFrozen, "Diagnostic: T1 Long", display = display.data_window)
+plot(t2LongFrozen, "Diagnostic: T2 Long", display = display.data_window)
+plot(invLongFrozen, "Diagnostic: Invalidation Long", display = display.data_window)
+plot(t1ShortFrozen, "Diagnostic: T1 Short", display = display.data_window)
+plot(t2ShortFrozen, "Diagnostic: T2 Short", display = display.data_window)
+plot(invShortFrozen, "Diagnostic: Invalidation Short", display = display.data_window)
+
+// Position Health sub-components AND the state codes are deliberately NOT
+// individually plotted here - this script was already using nearly its
+// entire budget against Pine's 64-output cap (RE10140 counts plot()
+// AND alertcondition() together, empirically confirmed - see the alert
+// comment above), before Position Health added anything. longPositionHealth/
+// shortPositionHealth themselves are visible via the two pane lines above
+// (which also surface in the data window automatically); the state boundary
+// is visible directly as that line's color.

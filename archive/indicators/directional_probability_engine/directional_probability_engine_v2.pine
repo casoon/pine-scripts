@@ -1,0 +1,859 @@
+//@version=6
+// ============================================================================
+// Directional Probability Engine v2 [WavesUnchained]
+// Version: 2.0.0
+// Author: WavesUnchained
+// Build: 2026-07-30
+// ============================================================================
+// Transition-focused rebuild of v1. v1 scored the CURRENT state (structure +
+// momentum + price direction), which made it track price ~1:1 with no leading
+// value. v2 instead scores the TRANSITION: is a counter-move against the
+// dominant context maturing and losing steam, and has price actually begun to
+// turn back in the context direction.
+//
+// Four roles, each 0..100:
+//   1. CONTEXT     - dominant structural direction (classification only)
+//   2. MATURITY    - retracement depth of the counter-move vs. a bell-curve
+//                    preferred zone (adapts to impulse quality)
+//   3. EXHAUSTION  - is the counter-move itself losing efficiency, developing
+//                    divergence, decelerating
+//   4. TRIGGER     - fast micro-swing structure shift + candle strength,
+//                    independent of the (slower) main confirmed pivot length
+//
+// Readiness  = weighted(Context, Maturity, Exhaustion)      -> is a reversal plausible
+// Confirmation = weighted(Trigger, Acceptance)               -> has it started
+// Score      = Readiness * (floor + (1-floor) * Confirmation/100)
+//
+// Target / Invalidation (frozen at each new Trigger, drawn on the price chart
+// via force_overlay):
+//   T1  = next relevant confirmed swing (structural)
+//   T2  = optional extension of the correction's own range
+//   Inv = correction extreme +/- ATR buffer
+//
+// IMPORTANT:
+//   Same as v1 - these are rule-based 0..100 evidence scores, not statistically
+//   calibrated hit-rate probabilities. A separate outcome/backtest model would
+//   be required to turn a score into an empirical hit rate.
+//
+// Repainting policy:
+//   - Main structure pivots confirm after pivotLen bars (same lag as v1).
+//   - Micro-swing pivots (Trigger) confirm after the much shorter microPivotLen,
+//     which is what lets Trigger react well before the main structure updates.
+//   - Optional HTF context uses the previous confirmed HTF bar.
+// ============================================================================
+
+indicator(
+     "Directional Probability Engine v2 [WavesUnchained]",
+     shorttitle = "DPE2 [WU]",
+     overlay = false,
+     precision = 1,
+     max_bars_back = 5000
+)
+
+// ============================================================================
+// Constants and helper functions
+// ============================================================================
+
+float EPS = 1e-10
+
+f_clamp(float value, float minimum, float maximum) =>
+    math.max(minimum, math.min(maximum, value))
+
+f_safeDiv(float numerator, float denominator, float fallback) =>
+    math.abs(denominator) > EPS ? numerator / denominator : fallback
+
+f_lerp(float a, float b, float t) =>
+    a + (b - a) * f_clamp(t, 0.0, 1.0)
+
+f_gaussianLike(float x, float center, float width) =>
+    float z = width > EPS ? (x - center) / width : 0.0
+    math.exp(-0.5 * z * z)
+
+f_overlapRatio(int length) =>
+    float total = 0.0
+    int count = 0
+    for i = 0 to length - 1
+        float currentHigh = high[i]
+        float currentLow = low[i]
+        float previousHigh = high[i + 1]
+        float previousLow = low[i + 1]
+        float overlap = math.max(0.0, math.min(currentHigh, previousHigh) - math.max(currentLow, previousLow))
+        float smallerRange = math.min(currentHigh - currentLow, previousHigh - previousLow)
+        if not na(overlap) and not na(smallerRange) and smallerRange > EPS
+            total += overlap / smallerRange
+            count += 1
+    count > 0 ? total / count : 0.5
+
+f_directionalPersistence(int length) =>
+    float bullish = 0.0
+    float bearish = 0.0
+    float total = 0.0
+    for i = 0 to length - 1
+        float body = close[i] - open[i]
+        float barRange = high[i] - low[i]
+        float commitment = barRange > EPS ? math.abs(body) / barRange : 0.0
+        if body > 0
+            bullish += commitment
+        else if body < 0
+            bearish += commitment
+        total += commitment
+    float signed = total > EPS ? (bullish - bearish) / total : 0.0
+    signed
+
+f_autoHtf() =>
+    float chartSeconds = timeframe.in_seconds()
+    string result = "1M"
+    if chartSeconds <= 5 * 60
+        result := "15"
+    else if chartSeconds <= 15 * 60
+        result := "60"
+    else if chartSeconds <= 60 * 60
+        result := "240"
+    else if chartSeconds <= 4 * 60 * 60
+        result := "1D"
+    else if chartSeconds <= 24 * 60 * 60
+        result := "1W"
+    result
+
+f_weightedAvg3(float v1, float w1, float v2, float w2, float v3, float w3) =>
+    float totalWeight = math.max(w1 + w2 + w3, EPS)
+    (v1 * w1 + v2 * w2 + v3 * w3) / totalWeight
+
+f_weightedAvg2(float v1, float w1, float v2, float w2) =>
+    float totalWeight = math.max(w1 + w2, EPS)
+    (v1 * w1 + v2 * w2) / totalWeight
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+string GROUP_GENERAL = "01 · General"
+string GROUP_CONTEXT = "02 · Context (Trend)"
+string GROUP_MATURITY = "03 · Correction Maturity (Location)"
+string GROUP_EXHAUSTION = "04 · Exhaustion (Momentum)"
+string GROUP_TRIGGER = "05 · Trigger & Acceptance"
+string GROUP_TARGET = "06 · Target & Invalidation"
+string GROUP_HTF = "07 · Higher-Timeframe Context"
+string GROUP_DISPLAY = "08 · Display"
+
+string presetInput = input.string(
+     "Auto",
+     "Timeframe preset",
+     options = ["Auto", "Scalping", "Intraday", "Swing", "Position", "Custom"],
+     group = GROUP_GENERAL
+)
+int smoothingInput = input.int(3, "Final score smoothing", minval = 1, maxval = 20, group = GROUP_GENERAL)
+bool confirmedBarOnlyInput = input.bool(
+     false,
+     "Freeze scores until chart bar closes",
+     tooltip = "When enabled, the displayed score updates only after the chart bar is confirmed.",
+     group = GROUP_GENERAL
+)
+
+int customPivotLen = input.int(8, "Custom pivot leg length", minval = 2, maxval = 50, group = GROUP_CONTEXT)
+int customStructureLen = input.int(21, "Custom structure lookback", minval = 5, maxval = 100, group = GROUP_CONTEXT)
+int customAtrLen = input.int(14, "Custom ATR length", minval = 5, maxval = 100, group = GROUP_CONTEXT)
+float pivotAtrToleranceInput = input.float(0.12, "Pivot equality tolerance (ATR)", minval = 0.0, maxval = 1.0, step = 0.01, group = GROUP_CONTEXT)
+float minSwingAtrInput = input.float(1.0, "Minimum relevant swing size (ATR)", minval = 0.25, maxval = 10.0, step = 0.25, group = GROUP_CONTEXT)
+float contextWeightInput = input.float(35.0, "Context weight (Readiness)", minval = 0.0, maxval = 100.0, group = GROUP_CONTEXT)
+
+float shallowCenterInput = input.float(0.382, "Strong-impulse preferred retracement", minval = 0.20, maxval = 0.65, step = 0.001, group = GROUP_MATURITY)
+float normalCenterInput = input.float(0.500, "Normal-impulse preferred retracement", minval = 0.25, maxval = 0.75, step = 0.001, group = GROUP_MATURITY)
+float weakCenterInput = input.float(0.618, "Weak-impulse preferred retracement", minval = 0.35, maxval = 0.90, step = 0.001, group = GROUP_MATURITY)
+float invalidationFibInput = input.float(0.886, "Structure-invalidating retracement", minval = 0.618, maxval = 1.50, step = 0.001, group = GROUP_MATURITY)
+float fibToleranceAtrInput = input.float(0.20, "Zone softness (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = GROUP_MATURITY)
+float maturityWeightInput = input.float(35.0, "Correction Maturity weight (Readiness)", minval = 0.0, maxval = 100.0, group = GROUP_MATURITY)
+
+string oscillatorInput = input.string("Stochastic RSI", "Oscillator", options = ["Stochastic RSI", "RSI", "WaveTrend", "CMO"], group = GROUP_EXHAUSTION)
+int customOscLen = input.int(14, "Custom oscillator length", minval = 5, maxval = 100, group = GROUP_EXHAUSTION)
+int customOscSmooth = input.int(3, "Custom oscillator smoothing", minval = 1, maxval = 20, group = GROUP_EXHAUSTION)
+bool divergenceEnabledInput = input.bool(true, "Use regular and hidden divergence", group = GROUP_EXHAUSTION)
+float divergenceStrengthInput = input.float(18.0, "Divergence maximum contribution", minval = 0.0, maxval = 40.0, step = 1.0, group = GROUP_EXHAUSTION)
+int divergenceMaxBarsInput = input.int(120, "Maximum bars between divergence pivots", minval = 10, maxval = 500, group = GROUP_EXHAUSTION)
+float exhaustionWeightInput = input.float(30.0, "Exhaustion weight (Readiness)", minval = 0.0, maxval = 100.0, group = GROUP_EXHAUSTION)
+
+bool microPivotLenAutoInput = input.bool(true, "Auto micro-swing length (pivotLen / 3)", group = GROUP_TRIGGER)
+int customMicroPivotLenInput = input.int(3, "Custom micro-swing length", minval = 1, maxval = 20, group = GROUP_TRIGGER)
+int acceptanceBarsInput = input.int(3, "Acceptance lookback (bars held beyond trigger level)", minval = 1, maxval = 20, group = GROUP_TRIGGER)
+float triggerWeightInput = input.float(70.0, "Trigger weight (Confirmation)", minval = 0.0, maxval = 100.0, group = GROUP_TRIGGER)
+float acceptanceWeightInput = input.float(30.0, "Acceptance weight (Confirmation)", minval = 0.0, maxval = 100.0, group = GROUP_TRIGGER)
+float confirmationFloorInput = input.float(0.35, "Confirmation floor (unconfirmed setups still show this share of Readiness)", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_TRIGGER)
+int cooldownBarsInput = input.int(5, "Cooldown bars after a trigger", minval = 0, maxval = 100, group = GROUP_TRIGGER)
+
+bool useT2Input = input.bool(true, "Show T2 (extension) target", group = GROUP_TARGET)
+float extensionMultInput = input.float(1.272, "T2 extension multiple", minval = 1.0, maxval = 3.0, step = 0.001, group = GROUP_TARGET)
+float invalidationAtrBufferInput = input.float(0.5, "Invalidation ATR buffer", minval = 0.0, maxval = 3.0, step = 0.1, group = GROUP_TARGET)
+bool showTargetsInput = input.bool(true, "Draw Target/Invalidation lines on price chart", group = GROUP_TARGET)
+int targetLineBarsInput = input.int(30, "Target line length (bars)", minval = 5, maxval = 200, group = GROUP_TARGET)
+
+bool htfEnabledInput = input.bool(true, "Enable confirmed HTF context", group = GROUP_HTF)
+string htfModeInput = input.string("Auto", "HTF selection", options = ["Auto", "Manual"], group = GROUP_HTF)
+string manualHtfInput = input.timeframe("240", "Manual higher timeframe", group = GROUP_HTF)
+float htfInfluenceInput = input.float(15.0, "HTF influence", minval = 0.0, maxval = 40.0, step = 1.0, group = GROUP_HTF)
+int htfFastEmaInput = input.int(21, "HTF fast EMA", minval = 2, maxval = 200, group = GROUP_HTF)
+int htfSlowEmaInput = input.int(55, "HTF slow EMA", minval = 3, maxval = 400, group = GROUP_HTF)
+
+float readinessThresholdInput = input.float(55.0, "Readiness threshold (Setup/Watch)", minval = 0, maxval = 100, group = GROUP_DISPLAY)
+float confirmationThresholdInput = input.float(50.0, "Score threshold (confirmed Trigger)", minval = 0, maxval = 100, group = GROUP_DISPLAY)
+bool highlightRegimesInput = input.bool(true, "Highlight confirmed triggers", group = GROUP_DISPLAY)
+
+// ============================================================================
+// Timeframe-adaptive parameter resolution
+// ============================================================================
+
+float chartSeconds = timeframe.in_seconds()
+
+string resolvedPreset = presetInput
+if presetInput == "Auto"
+    if chartSeconds <= 5 * 60
+        resolvedPreset := "Scalping"
+    else if chartSeconds <= 30 * 60
+        resolvedPreset := "Intraday"
+    else if chartSeconds <= 4 * 60 * 60
+        resolvedPreset := "Swing"
+    else
+        resolvedPreset := "Position"
+
+int pivotLen = customPivotLen
+if resolvedPreset == "Scalping"
+    pivotLen := 4
+else if resolvedPreset == "Intraday"
+    pivotLen := 6
+else if resolvedPreset == "Swing"
+    pivotLen := 9
+else if resolvedPreset == "Position"
+    pivotLen := 13
+
+int structureLen = customStructureLen
+if resolvedPreset == "Scalping"
+    structureLen := 13
+else if resolvedPreset == "Intraday"
+    structureLen := 21
+else if resolvedPreset == "Swing"
+    structureLen := 34
+else if resolvedPreset == "Position"
+    structureLen := 55
+
+int atrLen = customAtrLen
+if resolvedPreset == "Scalping"
+    atrLen := 10
+else if resolvedPreset == "Intraday"
+    atrLen := 14
+else if resolvedPreset == "Swing"
+    atrLen := 21
+else if resolvedPreset == "Position"
+    atrLen := 34
+
+int oscLen = customOscLen
+if resolvedPreset == "Scalping"
+    oscLen := 9
+else if resolvedPreset == "Intraday"
+    oscLen := 14
+else if resolvedPreset == "Swing"
+    oscLen := 21
+else if resolvedPreset == "Position"
+    oscLen := 34
+
+int oscSmooth = customOscSmooth
+if resolvedPreset == "Scalping"
+    oscSmooth := 2
+else if resolvedPreset == "Intraday"
+    oscSmooth := 3
+else if resolvedPreset == "Swing"
+    oscSmooth := 4
+else if resolvedPreset == "Position"
+    oscSmooth := 5
+
+int microPivotLen = customMicroPivotLenInput
+if microPivotLenAutoInput
+    microPivotLen := math.max(2, pivotLen / 3)
+
+// ============================================================================
+// Base series, ATR and confirmed main-structure pivots
+// ============================================================================
+
+float atr = ta.atr(atrLen)
+float atrSafe = math.max(nz(atr, syminfo.mintick), syminfo.mintick)
+
+float pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+float pivotLow = ta.pivotlow(low, pivotLen, pivotLen)
+bool newPivotHigh = not na(pivotHigh)
+bool newPivotLow = not na(pivotLow)
+
+var float lastHigh = na
+var float previousHigh = na
+var int lastHighBar = na
+
+var float lastLow = na
+var float previousLow = na
+var int lastLowBar = na
+
+if newPivotHigh
+    previousHigh := lastHigh
+    lastHigh := pivotHigh
+    lastHighBar := bar_index - pivotLen
+
+if newPivotLow
+    previousLow := lastLow
+    lastLow := pivotLow
+    lastLowBar := bar_index - pivotLen
+
+float pivotTolerance = atrSafe * pivotAtrToleranceInput
+
+bool higherHigh = not na(lastHigh) and not na(previousHigh) and lastHigh > previousHigh + pivotTolerance
+bool lowerHigh = not na(lastHigh) and not na(previousHigh) and lastHigh < previousHigh - pivotTolerance
+bool higherLow = not na(lastLow) and not na(previousLow) and lastLow > previousLow + pivotTolerance
+bool lowerLow = not na(lastLow) and not na(previousLow) and lastLow < previousLow - pivotTolerance
+
+float bullishPivotEvidence =
+     (higherHigh ? 0.5 : lowerHigh ? -0.5 : 0.0) +
+     (higherLow ? 0.5 : lowerLow ? -0.5 : 0.0)
+float pivotTrendSigned = f_clamp(bullishPivotEvidence, -1.0, 1.0)
+
+bool latestLegBullish =
+     not na(lastHighBar) and not na(lastLowBar) and
+     lastHighBar > lastLowBar and
+     lastHigh > lastLow and
+     (lastHigh - lastLow) / atrSafe >= minSwingAtrInput
+
+bool latestLegBearish =
+     not na(lastHighBar) and not na(lastLowBar) and
+     lastLowBar > lastHighBar and
+     lastHigh > lastLow and
+     (lastHigh - lastLow) / atrSafe >= minSwingAtrInput
+
+// Running extreme of the correction currently in progress - used for
+// Target/Invalidation. Resets whenever a fresh confirmed pivot begins a new
+// leg to correct against.
+var float lowSinceLastHigh = na
+if newPivotHigh
+    lowSinceLastHigh := low
+else if not na(lastHigh)
+    lowSinceLastHigh := na(lowSinceLastHigh) ? low : math.min(lowSinceLastHigh, low)
+
+var float highSinceLastLow = na
+if newPivotLow
+    highSinceLastLow := high
+else if not na(lastLow)
+    highSinceLastLow := na(highSinceLastLow) ? high : math.max(highSinceLastLow, high)
+
+// ============================================================================
+// Shared price-path quality (efficiency / overlap / persistence)
+// ============================================================================
+
+float pathLength = math.sum(math.abs(close - close[1]), structureLen)
+float netChange = close - close[structureLen]
+float efficiency = f_clamp(f_safeDiv(math.abs(netChange), pathLength, 0.0), 0.0, 1.0)
+float overlapRatio = f_clamp(f_overlapRatio(structureLen), 0.0, 1.0)
+float lowOverlapQuality = 1.0 - overlapRatio
+float persistenceSigned = f_directionalPersistence(structureLen)
+float directionSigned = netChange == 0.0 ? 0.0 : math.sign(netChange)
+
+float impulseQuality = f_clamp(efficiency * 0.40 + lowOverlapQuality * 0.35 + math.abs(persistenceSigned) * 0.25, 0.0, 1.0)
+
+float structuralDirection = f_clamp(0.55 * pivotTrendSigned + 0.25 * directionSigned * efficiency + 0.20 * persistenceSigned, -1.0, 1.0)
+
+bool bearishCorrectionActive = structuralDirection > 0.15 and netChange < 0
+bool bullishCorrectionActive = structuralDirection < -0.15 and netChange > 0
+
+// ============================================================================
+// Role 1: Context (Trend) - classification only, not a Long/Short signal
+// ============================================================================
+
+float bullContext = f_clamp(50.0 + 50.0 * structuralDirection, 0.0, 100.0)
+float bearContext = 100.0 - bullContext
+
+// ============================================================================
+// Confirmed higher-timeframe context
+// ============================================================================
+
+string selectedHtf = htfModeInput == "Auto" ? f_autoHtf() : manualHtfInput
+bool validHigherTimeframe = timeframe.in_seconds(selectedHtf) > chartSeconds
+
+[htfFastConfirmed, htfSlowConfirmed, htfCloseConfirmed] = request.security(
+     syminfo.tickerid,
+     selectedHtf,
+     [ta.ema(close, htfFastEmaInput)[1], ta.ema(close, htfSlowEmaInput)[1], close[1]],
+     lookahead = barmerge.lookahead_on
+)
+
+float htfSpread = htfFastConfirmed - htfSlowConfirmed
+float htfScale = math.max(math.abs(htfFastConfirmed - htfSlowConfirmed) + atrSafe, atrSafe)
+float htfTrendSigned = 0.0
+if validHigherTimeframe
+    htfTrendSigned := f_clamp(
+         0.70 * f_safeDiv(htfSpread, htfScale, 0.0) +
+         0.30 * f_safeDiv(htfCloseConfirmed - htfSlowConfirmed, htfScale, 0.0),
+         -1.0,
+         1.0
+       )
+
+if htfEnabledInput and validHigherTimeframe
+    bullContext := f_clamp(bullContext + htfInfluenceInput * htfTrendSigned, 0.0, 100.0)
+    bearContext := f_clamp(bearContext - htfInfluenceInput * htfTrendSigned, 0.0, 100.0)
+
+// ============================================================================
+// Role 2: Correction Maturity (Location)
+// bearCorrectionMaturity = maturity of a BEARISH pullback inside a bull leg
+//                          (feeds LONG readiness)
+// bullCorrectionMaturity = maturity of a BULLISH pullback inside a bear leg
+//                          (feeds SHORT readiness)
+// ============================================================================
+
+float bullishLegRange = latestLegBullish ? lastHigh - lastLow : na
+float bearishLegRange = latestLegBearish ? lastHigh - lastLow : na
+
+float bullishRetracement = na
+if latestLegBullish and bullishLegRange > EPS
+    bullishRetracement := (lastHigh - close) / bullishLegRange
+
+float bearishRetracement = na
+if latestLegBearish and bearishLegRange > EPS
+    bearishRetracement := (close - lastLow) / bearishLegRange
+
+float preferredFibCenter = f_lerp(weakCenterInput, normalCenterInput, impulseQuality / 0.67)
+if impulseQuality >= 0.67
+    preferredFibCenter := f_lerp(normalCenterInput, shallowCenterInput, (impulseQuality - 0.67) / 0.33)
+
+float activeLegRange = latestLegBullish ? bullishLegRange : latestLegBearish ? bearishLegRange : na
+float fibSoftness = 0.12
+if not na(activeLegRange) and activeLegRange > EPS
+    fibSoftness := 0.075 + fibToleranceAtrInput * atrSafe / activeLegRange
+fibSoftness := f_clamp(fibSoftness, 0.05, 0.30)
+
+float bullZoneFit = not na(bullishRetracement) ? f_gaussianLike(bullishRetracement, preferredFibCenter, fibSoftness) : 0.0
+float bearZoneFit = not na(bearishRetracement) ? f_gaussianLike(bearishRetracement, preferredFibCenter, fibSoftness) : 0.0
+
+float bullIntegrity = 0.0
+if not na(bullishRetracement)
+    if bullishRetracement <= invalidationFibInput
+        bullIntegrity := 1.0
+    else
+        bullIntegrity := f_clamp(1.0 - (bullishRetracement - invalidationFibInput) / math.max(1.20 - invalidationFibInput, 0.05), 0.0, 1.0)
+
+float bearIntegrity = 0.0
+if not na(bearishRetracement)
+    if bearishRetracement <= invalidationFibInput
+        bearIntegrity := 1.0
+    else
+        bearIntegrity := f_clamp(1.0 - (bearishRetracement - invalidationFibInput) / math.max(1.20 - invalidationFibInput, 0.05), 0.0, 1.0)
+
+float bullCorrectionPresence = 0.0
+if not na(bullishRetracement)
+    bullCorrectionPresence := f_clamp(bullishRetracement / 0.236, 0.0, 1.0)
+
+float bearCorrectionPresence = 0.0
+if not na(bearishRetracement)
+    bearCorrectionPresence := f_clamp(bearishRetracement / 0.236, 0.0, 1.0)
+
+float bearCorrectionMaturity = f_clamp(100.0 * bullZoneFit * bullIntegrity * bullCorrectionPresence, 0.0, 100.0)
+float bullCorrectionMaturity = f_clamp(100.0 * bearZoneFit * bearIntegrity * bearCorrectionPresence, 0.0, 100.0)
+
+// ============================================================================
+// Oscillator core (shared by Exhaustion)
+// ============================================================================
+
+float rsi = ta.rsi(close, oscLen)
+float rsiLowest = ta.lowest(rsi, oscLen)
+float rsiHighest = ta.highest(rsi, oscLen)
+float stochRsiRaw = 100.0 * f_safeDiv(rsi - rsiLowest, rsiHighest - rsiLowest, 0.5)
+float stochRsi = ta.ema(stochRsiRaw, oscSmooth)
+
+int wtChannelLen = math.max(5, oscLen)
+int wtAverageLen = math.max(3, oscLen * 2)
+float wtEsa = ta.ema(hlc3, wtChannelLen)
+float wtDeviation = ta.ema(math.abs(hlc3 - wtEsa), wtChannelLen)
+float wtCi = f_safeDiv(hlc3 - wtEsa, 0.015 * wtDeviation, 0.0)
+float wtRaw = ta.ema(wtCi, wtAverageLen)
+float wtNorm = f_clamp(50.0 + wtRaw * 0.65, 0.0, 100.0)
+
+float cmoRaw = ta.cmo(close, oscLen)
+float cmoNorm = f_clamp(50.0 + cmoRaw * 0.5, 0.0, 100.0)
+
+float oscillator = stochRsi
+if oscillatorInput == "RSI"
+    oscillator := rsi
+else if oscillatorInput == "WaveTrend"
+    oscillator := wtNorm
+else if oscillatorInput == "CMO"
+    oscillator := cmoNorm
+
+float oscillatorSmoothed = ta.ema(oscillator, oscSmooth)
+float oscillatorVelocity = oscillatorSmoothed - oscillatorSmoothed[1]
+float oscillatorAcceleration = oscillatorVelocity - oscillatorVelocity[1]
+float oscillatorVolatility = ta.stdev(oscillatorVelocity, math.max(5, oscLen))
+float accelerationNorm = f_clamp(f_safeDiv(oscillatorAcceleration, math.max(oscillatorVolatility, 0.5), 0.0), -2.0, 2.0)
+
+// Divergence anchored to confirmed PRICE pivots; oscillator values read from
+// the same pivot bars.
+var float lastLowPivotOsc = na
+var float previousLowPivotOsc = na
+var float lastLowPivotPrice = na
+var float previousLowPivotPrice = na
+var int lastLowPivotDivBar = na
+var int previousLowPivotDivBar = na
+
+var float lastHighPivotOsc = na
+var float previousHighPivotOsc = na
+var float lastHighPivotPrice = na
+var float previousHighPivotPrice = na
+var int lastHighPivotDivBar = na
+var int previousHighPivotDivBar = na
+
+if newPivotLow
+    previousLowPivotOsc := lastLowPivotOsc
+    previousLowPivotPrice := lastLowPivotPrice
+    previousLowPivotDivBar := lastLowPivotDivBar
+    lastLowPivotOsc := oscillatorSmoothed[pivotLen]
+    lastLowPivotPrice := pivotLow
+    lastLowPivotDivBar := bar_index - pivotLen
+
+if newPivotHigh
+    previousHighPivotOsc := lastHighPivotOsc
+    previousHighPivotPrice := lastHighPivotPrice
+    previousHighPivotDivBar := lastHighPivotDivBar
+    lastHighPivotOsc := oscillatorSmoothed[pivotLen]
+    lastHighPivotPrice := pivotHigh
+    lastHighPivotDivBar := bar_index - pivotLen
+
+bool validLowDivSpan = not na(lastLowPivotDivBar) and not na(previousLowPivotDivBar) and lastLowPivotDivBar - previousLowPivotDivBar <= divergenceMaxBarsInput
+bool validHighDivSpan = not na(lastHighPivotDivBar) and not na(previousHighPivotDivBar) and lastHighPivotDivBar - previousHighPivotDivBar <= divergenceMaxBarsInput
+
+bool regularBullDiv = divergenceEnabledInput and validLowDivSpan and lastLowPivotPrice < previousLowPivotPrice - pivotTolerance and lastLowPivotOsc > previousLowPivotOsc
+bool hiddenBullDiv = divergenceEnabledInput and validLowDivSpan and lastLowPivotPrice > previousLowPivotPrice + pivotTolerance and lastLowPivotOsc < previousLowPivotOsc
+bool regularBearDiv = divergenceEnabledInput and validHighDivSpan and lastHighPivotPrice > previousHighPivotPrice + pivotTolerance and lastHighPivotOsc < previousHighPivotOsc
+bool hiddenBearDiv = divergenceEnabledInput and validHighDivSpan and lastHighPivotPrice < previousHighPivotPrice - pivotTolerance and lastHighPivotOsc > previousHighPivotOsc
+
+var int lastBullDivConfirmationBar = na
+var int lastBearDivConfirmationBar = na
+var float lastBullDivTypeStrength = 0.0
+var float lastBearDivTypeStrength = 0.0
+
+if regularBullDiv or hiddenBullDiv
+    lastBullDivConfirmationBar := bar_index
+    lastBullDivTypeStrength := regularBullDiv ? 1.0 : 0.75
+
+if regularBearDiv or hiddenBearDiv
+    lastBearDivConfirmationBar := bar_index
+    lastBearDivTypeStrength := regularBearDiv ? 1.0 : 0.75
+
+int divergenceDecayBars = math.max(structureLen, pivotLen * 3)
+
+float bullDivDecay = 0.0
+if not na(lastBullDivConfirmationBar)
+    bullDivDecay := f_clamp(1.0 - float(bar_index - lastBullDivConfirmationBar) / divergenceDecayBars, 0.0, 1.0)
+
+float bearDivDecay = 0.0
+if not na(lastBearDivConfirmationBar)
+    bearDivDecay := f_clamp(1.0 - float(bar_index - lastBearDivConfirmationBar) / divergenceDecayBars, 0.0, 1.0)
+
+float bullDivergenceBonus = divergenceStrengthInput * bullDivDecay * lastBullDivTypeStrength
+float bearDivergenceBonus = divergenceStrengthInput * bearDivDecay * lastBearDivTypeStrength
+
+// ============================================================================
+// Role 3: Exhaustion (Momentum) - is the COUNTER-MOVE losing steam
+// bearExhaustion = exhaustion of a bearish correction (feeds LONG readiness)
+// bullExhaustion = exhaustion of a bullish correction (feeds SHORT readiness)
+// ============================================================================
+
+float bearExhaustion = 0.0
+if bearishCorrectionActive
+    bearExhaustion := f_clamp(100.0 * (0.55 * overlapRatio + 0.45 * (1.0 - efficiency)), 0.0, 100.0)
+    bearExhaustion := f_clamp(bearExhaustion + 15.0 * math.max(accelerationNorm, 0.0) + bullDivergenceBonus, 0.0, 100.0)
+
+float bullExhaustion = 0.0
+if bullishCorrectionActive
+    bullExhaustion := f_clamp(100.0 * (0.55 * overlapRatio + 0.45 * (1.0 - efficiency)), 0.0, 100.0)
+    bullExhaustion := f_clamp(bullExhaustion + 15.0 * math.max(-accelerationNorm, 0.0) + bearDivergenceBonus, 0.0, 100.0)
+
+// ============================================================================
+// Candle strength (acceptance / rejection) - shared ingredient for Trigger
+// ============================================================================
+
+float candleRange = math.max(high - low, syminfo.mintick)
+float bodySigned = (close - open) / candleRange
+float closeLocation = (close - low) / candleRange
+float lowerWick = (math.min(open, close) - low) / candleRange
+float upperWick = (high - math.max(open, close)) / candleRange
+
+float bullishAcceptanceRaw = 0.40 * closeLocation + 0.30 * f_clamp(bodySigned, 0.0, 1.0) + 0.30 * lowerWick
+float bearishAcceptanceRaw = 0.40 * (1.0 - closeLocation) + 0.30 * f_clamp(-bodySigned, 0.0, 1.0) + 0.30 * upperWick
+
+float candleStrengthLong = 100.0 * f_clamp(bullishAcceptanceRaw, 0.0, 1.0)
+float candleStrengthShort = 100.0 * f_clamp(bearishAcceptanceRaw, 0.0, 1.0)
+
+// ============================================================================
+// Role 4: Trigger - fast micro-swing structure shift, independent of the
+// slower main confirmed pivot length. This is the only genuinely leading
+// sensor: it reacts within microPivotLen bars instead of pivotLen bars.
+// ============================================================================
+
+float microPivotHigh = ta.pivothigh(high, microPivotLen, microPivotLen)
+float microPivotLow = ta.pivotlow(low, microPivotLen, microPivotLen)
+bool newMicroPivotHigh = not na(microPivotHigh)
+bool newMicroPivotLow = not na(microPivotLow)
+
+var float microLastHigh = na
+var float microLastLow = na
+
+if newMicroPivotHigh
+    microLastHigh := microPivotHigh
+
+if newMicroPivotLow
+    microLastLow := microPivotLow
+
+float longStructureShiftScore = 0.0
+if not na(microLastHigh)
+    longStructureShiftScore := f_clamp(50.0 + 100.0 * (close - microLastHigh) / atrSafe, 0.0, 100.0)
+
+float shortStructureShiftScore = 0.0
+if not na(microLastLow)
+    shortStructureShiftScore := f_clamp(50.0 + 100.0 * (microLastLow - close) / atrSafe, 0.0, 100.0)
+
+float longTrigger = f_clamp(0.60 * longStructureShiftScore + 0.40 * candleStrengthLong, 0.0, 100.0)
+float shortTrigger = f_clamp(0.60 * shortStructureShiftScore + 0.40 * candleStrengthShort, 0.0, 100.0)
+
+// Trigger level locks in once the micro structure shift crosses its midpoint,
+// used to measure sustained Acceptance afterward.
+var float longTriggerLevel = na
+if longStructureShiftScore > 50.0
+    longTriggerLevel := microLastHigh
+
+var float shortTriggerLevel = na
+if shortStructureShiftScore > 50.0
+    shortTriggerLevel := microLastLow
+
+float longHoldCount = math.sum(close > longTriggerLevel ? 1.0 : 0.0, acceptanceBarsInput)
+float longAcceptance = f_clamp(100.0 * longHoldCount / acceptanceBarsInput, 0.0, 100.0)
+
+float shortHoldCount = math.sum(close < shortTriggerLevel ? 1.0 : 0.0, acceptanceBarsInput)
+float shortAcceptance = f_clamp(100.0 * shortHoldCount / acceptanceBarsInput, 0.0, 100.0)
+
+// ============================================================================
+// Readiness / Confirmation / Score
+// ============================================================================
+
+float longReadiness = f_weightedAvg3(bullContext, contextWeightInput, bearCorrectionMaturity, maturityWeightInput, bearExhaustion, exhaustionWeightInput)
+float shortReadiness = f_weightedAvg3(bearContext, contextWeightInput, bullCorrectionMaturity, maturityWeightInput, bullExhaustion, exhaustionWeightInput)
+
+float longConfirmation = f_weightedAvg2(longTrigger, triggerWeightInput, longAcceptance, acceptanceWeightInput)
+float shortConfirmation = f_weightedAvg2(shortTrigger, triggerWeightInput, shortAcceptance, acceptanceWeightInput)
+
+float longScoreRaw = longReadiness * (confirmationFloorInput + (1.0 - confirmationFloorInput) * longConfirmation / 100.0)
+float shortScoreRaw = shortReadiness * (confirmationFloorInput + (1.0 - confirmationFloorInput) * shortConfirmation / 100.0)
+
+float smoothedLong = ta.ema(longScoreRaw, smoothingInput)
+float smoothedShort = ta.ema(shortScoreRaw, smoothingInput)
+
+var float frozenLong = na
+var float frozenShort = na
+if barstate.isconfirmed or not confirmedBarOnlyInput
+    frozenLong := smoothedLong
+    frozenShort := smoothedShort
+
+float longScore = confirmedBarOnlyInput ? nz(frozenLong, smoothedLong) : smoothedLong
+float shortScore = confirmedBarOnlyInput ? nz(frozenShort, smoothedShort) : smoothedShort
+float balance = longScore - shortScore
+
+// ============================================================================
+// Setup / Trigger state and cooldown
+// ============================================================================
+
+bool longSetup = longReadiness >= readinessThresholdInput and longReadiness > shortReadiness
+bool shortSetup = shortReadiness >= readinessThresholdInput and shortReadiness > longReadiness
+bool newLongSetup = longSetup and not longSetup[1]
+bool newShortSetup = shortSetup and not shortSetup[1]
+
+var int lastLongTriggerBar = na
+var int lastShortTriggerBar = na
+bool longCooldownOk = na(lastLongTriggerBar) or (bar_index - lastLongTriggerBar) > cooldownBarsInput
+bool shortCooldownOk = na(lastShortTriggerBar) or (bar_index - lastShortTriggerBar) > cooldownBarsInput
+
+bool longTriggeredRaw = longScore >= confirmationThresholdInput and longScore > shortScore
+bool shortTriggeredRaw = shortScore >= confirmationThresholdInput and shortScore > longScore
+
+bool newLongTrigger = longTriggeredRaw and not longTriggeredRaw[1] and longCooldownOk
+bool newShortTrigger = shortTriggeredRaw and not shortTriggeredRaw[1] and shortCooldownOk
+
+if newLongTrigger
+    lastLongTriggerBar := bar_index
+
+if newShortTrigger
+    lastShortTriggerBar := bar_index
+
+// ============================================================================
+// Target / Invalidation
+// ============================================================================
+
+float t1LongRaw = lastHigh
+float t2LongRaw = na
+if not na(lowSinceLastHigh) and not na(lastHigh)
+    t2LongRaw := lowSinceLastHigh + extensionMultInput * (lastHigh - lowSinceLastHigh)
+float invLongRaw = na
+if not na(lowSinceLastHigh)
+    invLongRaw := lowSinceLastHigh - atrSafe * invalidationAtrBufferInput
+
+float t1ShortRaw = lastLow
+float t2ShortRaw = na
+if not na(highSinceLastLow) and not na(lastLow)
+    t2ShortRaw := highSinceLastLow - extensionMultInput * (highSinceLastLow - lastLow)
+float invShortRaw = na
+if not na(highSinceLastLow)
+    invShortRaw := highSinceLastLow + atrSafe * invalidationAtrBufferInput
+
+var float t1LongFrozen = na
+var float t2LongFrozen = na
+var float invLongFrozen = na
+var bool longT1Hit = false
+var bool longT2Hit = false
+var bool longInvHit = false
+
+if newLongTrigger
+    t1LongFrozen := t1LongRaw
+    t2LongFrozen := t2LongRaw
+    invLongFrozen := invLongRaw
+    longT1Hit := false
+    longT2Hit := false
+    longInvHit := false
+
+var float t1ShortFrozen = na
+var float t2ShortFrozen = na
+var float invShortFrozen = na
+var bool shortT1Hit = false
+var bool shortT2Hit = false
+var bool shortInvHit = false
+
+if newShortTrigger
+    t1ShortFrozen := t1ShortRaw
+    t2ShortFrozen := t2ShortRaw
+    invShortFrozen := invShortRaw
+    shortT1Hit := false
+    shortT2Hit := false
+    shortInvHit := false
+
+bool longT1HitNow = not longT1Hit and not na(t1LongFrozen) and high >= t1LongFrozen
+bool longT2HitNow = useT2Input and not longT2Hit and not na(t2LongFrozen) and high >= t2LongFrozen
+bool longInvHitNow = not longInvHit and not na(invLongFrozen) and low <= invLongFrozen
+
+if longT1HitNow
+    longT1Hit := true
+if longT2HitNow
+    longT2Hit := true
+if longInvHitNow
+    longInvHit := true
+
+bool shortT1HitNow = not shortT1Hit and not na(t1ShortFrozen) and low <= t1ShortFrozen
+bool shortT2HitNow = useT2Input and not shortT2Hit and not na(t2ShortFrozen) and low <= t2ShortFrozen
+bool shortInvHitNow = not shortInvHit and not na(invShortFrozen) and high >= invShortFrozen
+
+if shortT1HitNow
+    shortT1Hit := true
+if shortT2HitNow
+    shortT2Hit := true
+if shortInvHitNow
+    shortInvHit := true
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertcondition(newLongSetup, "DPE2 Long Setup", "DPE2: new Long setup (readiness)")
+alertcondition(newShortSetup, "DPE2 Short Setup", "DPE2: new Short setup (readiness)")
+alertcondition(newLongTrigger, "DPE2 Long Trigger", "DPE2: Long trigger confirmed")
+alertcondition(newShortTrigger, "DPE2 Short Trigger", "DPE2: Short trigger confirmed")
+alertcondition(longT1HitNow, "DPE2 Long T1 Hit", "DPE2: Long target 1 reached")
+alertcondition(longT2HitNow, "DPE2 Long T2 Hit", "DPE2: Long target 2 reached")
+alertcondition(longInvHitNow, "DPE2 Long Invalidated", "DPE2: Long setup invalidated")
+alertcondition(shortT1HitNow, "DPE2 Short T1 Hit", "DPE2: Short target 1 reached")
+alertcondition(shortT2HitNow, "DPE2 Short T2 Hit", "DPE2: Short target 2 reached")
+alertcondition(shortInvHitNow, "DPE2 Short Invalidated", "DPE2: Short setup invalidated")
+
+// ============================================================================
+// Price-chart Target/Invalidation lines (force_overlay from a non-overlay pane)
+// ============================================================================
+
+var line t1LongLine = na
+var line t2LongLine = na
+var line invLongLine = na
+var label longTriggerLabel = na
+
+if newLongTrigger and showTargetsInput
+    line.delete(t1LongLine)
+    line.delete(t2LongLine)
+    line.delete(invLongLine)
+    label.delete(longTriggerLabel)
+    t1LongLine := line.new(bar_index, t1LongFrozen, bar_index + targetLineBarsInput, t1LongFrozen, color = color.new(color.green, 0), style = line.style_dashed, width = 1, force_overlay = true)
+    invLongLine := line.new(bar_index, invLongFrozen, bar_index + targetLineBarsInput, invLongFrozen, color = color.new(color.red, 0), style = line.style_dotted, width = 1, force_overlay = true)
+    longTriggerLabel := label.new(bar_index, low, "Long", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny, force_overlay = true)
+    if useT2Input
+        t2LongLine := line.new(bar_index, t2LongFrozen, bar_index + targetLineBarsInput, t2LongFrozen, color = color.new(color.lime, 25), style = line.style_dashed, width = 1, force_overlay = true)
+
+var line t1ShortLine = na
+var line t2ShortLine = na
+var line invShortLine = na
+var label shortTriggerLabel = na
+
+if newShortTrigger and showTargetsInput
+    line.delete(t1ShortLine)
+    line.delete(t2ShortLine)
+    line.delete(invShortLine)
+    label.delete(shortTriggerLabel)
+    t1ShortLine := line.new(bar_index, t1ShortFrozen, bar_index + targetLineBarsInput, t1ShortFrozen, color = color.new(color.red, 0), style = line.style_dashed, width = 1, force_overlay = true)
+    invShortLine := line.new(bar_index, invShortFrozen, bar_index + targetLineBarsInput, invShortFrozen, color = color.new(color.green, 0), style = line.style_dotted, width = 1, force_overlay = true)
+    shortTriggerLabel := label.new(bar_index, high, "Short", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny, force_overlay = true)
+    if useT2Input
+        t2ShortLine := line.new(bar_index, t2ShortFrozen, bar_index + targetLineBarsInput, t2ShortFrozen, color = color.new(color.maroon, 25), style = line.style_dashed, width = 1, force_overlay = true)
+
+// ============================================================================
+// Visuals - oscillator pane
+// ============================================================================
+
+color longReadinessColor = color.new(color.green, 70)
+color longScoreColor = color.new(color.lime, 0)
+color shortReadinessColor = color.new(color.red, 70)
+color shortScoreColor = color.new(color.red, 0)
+
+plot(longReadiness, "Long Readiness", color = longReadinessColor, style = plot.style_columns, histbase = 0)
+plot(longScore, "Long Score (confirmed)", color = longScoreColor, style = plot.style_columns, histbase = 0)
+plot(-shortReadiness, "Short Readiness", color = shortReadinessColor, style = plot.style_columns, histbase = 0)
+plot(-shortScore, "Short Score (confirmed)", color = shortScoreColor, style = plot.style_columns, histbase = 0)
+
+plot(balance, "Directional Balance", color = color.new(color.gray, 20), linewidth = 2)
+hline(0, "Zero", color = color.new(color.gray, 65))
+plot(readinessThresholdInput, "Readiness threshold", color = color.new(color.gray, 80), linewidth = 1)
+plot(-readinessThresholdInput, "Readiness threshold (short)", color = color.new(color.gray, 80), linewidth = 1)
+plot(confirmationThresholdInput, "Confirmed threshold", color = color.new(color.gray, 65), linewidth = 1)
+plot(-confirmationThresholdInput, "Confirmed threshold (short)", color = color.new(color.gray, 65), linewidth = 1)
+
+color regimeBackground = na
+if highlightRegimesInput
+    if longTriggeredRaw
+        regimeBackground := color.new(color.green, 88)
+    else if shortTriggeredRaw
+        regimeBackground := color.new(color.red, 88)
+
+bgcolor(regimeBackground, title = "Confirmed trigger background")
+
+// ============================================================================
+// Data-window diagnostics (no visible table - color-coded histogram only)
+// ============================================================================
+
+plot(structuralDirection, "Diagnostic: Structural direction", display = display.data_window)
+plot(bullishRetracement * 100.0, "Diagnostic: Bullish (correction) retracement %", display = display.data_window)
+plot(bearishRetracement * 100.0, "Diagnostic: Bearish (correction) retracement %", display = display.data_window)
+plot(bullContext, "Diagnostic: Context Long", display = display.data_window)
+plot(bearContext, "Diagnostic: Context Short", display = display.data_window)
+plot(bearCorrectionMaturity, "Diagnostic: Correction Maturity Long", display = display.data_window)
+plot(bullCorrectionMaturity, "Diagnostic: Correction Maturity Short", display = display.data_window)
+plot(bearExhaustion, "Diagnostic: Exhaustion Long", display = display.data_window)
+plot(bullExhaustion, "Diagnostic: Exhaustion Short", display = display.data_window)
+plot(longTrigger, "Diagnostic: Trigger Long", display = display.data_window)
+plot(shortTrigger, "Diagnostic: Trigger Short", display = display.data_window)
+plot(longAcceptance, "Diagnostic: Acceptance Long", display = display.data_window)
+plot(shortAcceptance, "Diagnostic: Acceptance Short", display = display.data_window)
+plot(t1LongFrozen, "Diagnostic: T1 Long", display = display.data_window)
+plot(t2LongFrozen, "Diagnostic: T2 Long", display = display.data_window)
+plot(invLongFrozen, "Diagnostic: Invalidation Long", display = display.data_window)
+plot(t1ShortFrozen, "Diagnostic: T1 Short", display = display.data_window)
+plot(t2ShortFrozen, "Diagnostic: T2 Short", display = display.data_window)
+plot(invShortFrozen, "Diagnostic: Invalidation Short", display = display.data_window)
