@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.1.2 — 2026-08-01
+- Added move-extension shading to the Permission histogram bars (`extensionShadingInput`, default
+  on): Permission's floored-multiplicative gates saturate once a trend is established, so the bars
+  can look flat even while price keeps extending in the same direction. The fill now fades toward
+  full color as the dominant side's live move since its last opposite pivot grows, normalized
+  against the existing "Impulse overextension threshold (ATR)" input. Reuses the
+  `highSinceLastLow`/`lowSinceLastHigh` trackers fixed in v1.1.1. Display only — bar height, the
+  underlying Permission value, Trigger eligibility, CRV and alerts are all untouched.
+- Fixed `RE10140` ("script creates too many plots (65), limit is 64") on compile — the script was
+  already at/near Pine's 64-cap on combined plot+alertcondition+hline+bgcolor calls before this
+  release (see in-file comments near Position Health); dropped 3 of the least load-bearing
+  data-window diagnostics (legQualityHistory array-size sanity check, T2 Long/Short — the latter
+  still visible as the dashed price-chart target lines) to get back under the limit with margin.
+- Fixed the confidence-band background reading as a constant colored wash (user report: "Hintergrund
+  ist durchgezogen rot") — its "stagnant" state was a faint tint of the dominant side's color, and
+  since Permission rarely moves fast enough bar-to-bar to clear the rising/declining velocity
+  threshold, most bars landed in "stagnant" and painted the same tint continuously. Dropped that
+  state: the background now stays fully transparent unless there's a real rising (color) or
+  declining (gray) move, so shading only appears when it means something.
+- Relabeled `highlightRegimesInput` from "Highlight confirmed triggers" (stale, from before the
+  confidence-band-background rework) to "Confidence-band background (Permission rising/declining)",
+  and removed the same stale "gates ... the background highlight" claim from
+  `confirmationThresholdInput`'s tooltip (it never did — the background reads
+  longPermission/shortPermission, not confirmationThresholdInput).
+- Same fix applied to the separate Position Health background, which had the identical issue: an
+  unconditional `else` branch tinted the pane by dominant side whenever health was NOT
+  deteriorating, so it painted almost every bar. Now grays only on real deterioration
+  (`dominantHealthVelocity < -0.3`), transparent otherwise — the side info stays visible via the
+  Position Health lines' own color. Also removed `dominantHealthStateCode` and
+  `healthStateBaseColor`, both dead code left over once the state-tint branch was dropped (the
+  former was never read anywhere, the latter only fed that branch).
+- Refined the move-extension shading curve: was a linear 25-70 transparency ramp, which bunched
+  most of the visible color change up near the overextension threshold (bars rarely get that far).
+  Now `norm^0.6` over a wider 15-70 range, so the first ATR or so of movement already reads as a
+  clear step instead of needing to approach the full threshold before the bars visibly change.
+
+## v1.1.1 — 2026-08-01
+- Fixed `lowSinceLastHigh`/`highSinceLastLow`/`lowSinceLastLow`/`highSinceLastHigh` starting at
+  the pivot confirmation bar instead of the true pivot bar, silently dropping up to `pivotLen`
+  bars of already-known price movement from the plotted T2/Invalidation levels and from
+  `longCrvFactor`/`shortCrvFactor`, which can feed into whether a Trigger signal fires at all. Now
+  seeded via `ta.lowest`/`ta.highest` over the true pivot-to-confirmation window.
+- Fixed the "Directional Balance" plot still reading `longScore`/`shortScore` (compressed near
+  zero except around a confirmed trigger) instead of `longPermission`/`shortPermission` — the same
+  fix v1.0.1 already applied to the Permission line/velocity/background, missed here.
+- Raised `maxLegHistoryInput`'s minimum from 2 to 4 — below 4, the recent-half-vs-older-half trend
+  split silently stayed neutral instead of reflecting a real trend read.
+- README now documents that reference-impulse exhaustion gets imprecise deep into a counter-move
+  (the code already knew this; the caveat wasn't surfaced to users).
+- Removed a `math.max` floor on `htfScale` that could never trigger (the other branch is always
+  larger by construction) — simplification only, no behavior change.
+
 ## v1.1.0 — 2026-08-01
 - Added Position Health (Long/Short) — a second, fully decoupled score answering "is an
   already-open position still structurally healthy", not "is a new entry attractive here". Never
@@ -124,6 +176,15 @@
   that one spike, compressing the histogram, Permission line, Position Health lines, and the new
   threshold reference lines into an unreadable thin band near zero. Purely visual - Velocity feeds
   nothing else (the confidence background uses its own independently-computed smoothed velocity).
+- The Velocity clamp alone wasn't enough - real chart feedback confirmed the deeper issue: Permission's
+  floored-multiplicative gate design keeps it naturally compressed into a small sub-range (rarely
+  much above ~40), while sharing one pane axis with Position Health (full 0-100 range) squashes it
+  regardless of any one outlier. Added `permissionDisplayStretchInput` (default 1.6x, new "08 ·
+  Display" group input) - stretches the Permission histogram, Permission line, Directional Balance
+  line, and Permission's own threshold lines by this factor before plotting (clamped back to
+  ±100 so the stretched threshold lines don't exceed the shared axis). Display only - every
+  non-plot use of Permission (Trigger eligibility, CRV, alerts, data-window diagnostics) still
+  reads the real, unstretched 0-100 value.
 
 ## v1.0.1 — 2026-07-31
 - Fixed the Permission line, velocity line and confidence-band background driving off

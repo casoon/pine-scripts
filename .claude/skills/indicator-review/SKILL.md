@@ -34,8 +34,7 @@ Pro verpasstem/getroffenem Pivot klassifizieren:
 | **kein** Signal im Fenster | Bereich verfehlt → Rollenfrage (siehe §2) |
 
 Die eigentliche Frage ist „Bereich erkannt vs. Punkt verfehlt", nicht „Kerze exakt getroffen".
-Pivots bleiben dabei reines Control-Overlay — sie dürfen den Signalpfad nie speisen
-(Memory `feedback_pivot_is_control_not_signal`).
+Warum Pivots dabei reines Control-Overlay bleiben (nie Signalpfad): `indicator-design` §8.
 
 ## 2. Fehleranalyse-Regel — war die Rolle überhaupt zuständig?
 
@@ -52,7 +51,8 @@ falsche Aussage vom falschen Modul erwartet.
 Jeden Befund einer Klasse zuordnen — das verhindert, dass „Indikator schlecht" als
 Sammelbegriff für unterschiedliche Ursachen herhält:
 
-1. **Codefehler** — Logik/Pine-Bug (siehe Memory `reference_pine_v6_pitfalls`)
+1. **Codefehler** — Logik/Pine-Bug (Detail-Checkliste: `indicator-code-audit`; Syntaxfallen:
+   Memory `reference_pine_v6_pitfalls`)
 2. **Berechnungsfehler** — Formel/Serie falsch
 3. **Visualisierungsfehler** — Logik richtig, Anzeige falsch
 4. **Schwellenwertfehler** — Rolle richtig, Schwelle daneben
@@ -87,10 +87,10 @@ Coverage, Gate Cost, Entry/Blocked/Gate Quality).
 ## 5. Gate-/Filter-Prüfung — verhindert die wiederholten Repo-Fehler
 
 Bevor ein Gate als „sinnvoll" gilt, gegen die hart erkauften Lektionen aus `.claude/CLAUDE.md`
-prüfen:
+prüfen. Die Block-Volumen-Schwelle (< ~5 % ist selbst bei perfekter Treffsicherheit irrelevant,
+siehe verworfenes Gate C: nur 1 % geblockt) ist bereits Baukriterium in `indicator-design` §2 —
+hier zusätzlich, spezifisch für die *Diagnose bestehender* Gates:
 
-- **Block-Volumen schätzen** *vor* Implementierung. Gates die < ~5 % blocken sind selbst bei
-  perfekter Treffsicherheit irrelevant (verworfenes Gate C: nur 1 % geblockt).
 - **Capture-Rate** *neben* avgR betrachten. Fällt Capture stärker als avgR steigt, ist das Gate
   selektionsneutral (verkappt wertlos) — es entfernt gute *und* schlechte Setups gleich oft.
 - **Niemals aus Aggregat-Daten schließen.** Aggregierte Befunde über alle TF/Dir maskieren
@@ -119,8 +119,8 @@ Checkliste gegen das Rollen-Modell (`indicator-design`):
 
 ## 7. Arbeitsprinzip — Fundament vor Feintuning
 
-Vor jeder Mikro-Optimierung prüfen, ob das *strukturelle* Fundament steht. Per-TF/Dir-Bänder
-gewinnen ~0.05 R; ein besserer Exit oder eine reparierte Rollen-Zuständigkeit gewinnt ~0.30 R.
-Feintuning auf schlechtem Fundament optimiert auf das falsche Ziel — erst Fundament (Exit-Logik,
-Signal-Quality, Rollen-Zuständigkeit, HTF-Confluence), dann polieren (Memory-Prinzip aus
-`.claude/CLAUDE.md`, „Fundament vor Feintuning").
+Vor jeder Mikro-Optimierung prüfen, ob das *strukturelle* Fundament steht — Regel und
+Zahlenbeispiel (Per-TF/Dir-Bänder ~0.05 R vs. besserer Exit ~0.30 R) stehen in
+`.claude/CLAUDE.md` unter „Arbeitsprinzip: Fundament vor Feintuning". Für die Review-Praxis
+heißt das: einen Befund zuerst als Fundament- oder Feintuning-Ebene einordnen (siehe
+Fehlerklassen §3), bevor an Schwellenwerten gedreht wird.

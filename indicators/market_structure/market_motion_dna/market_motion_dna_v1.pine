@@ -1,0 +1,1031 @@
+//@version=6
+// ============================================================================
+// Market Motion DNA [WavesUnchained]
+// Version: 1.5.1
+// Author: WavesUnchained
+// Build: 2026-08-01
+// ============================================================================
+// Objective movement-character engine. It does NOT count Elliott waves.
+// It classifies each confirmed and developing pivot-to-pivot leg as primarily
+// impulsive, corrective, or neutral using measurable price-action properties.
+//
+// v1.0 scope:
+//   ✓ Alternating confirmed pivot engine with same-type extreme replacement
+//   ✓ Historical and live pivot-to-pivot legs
+//   ✓ Directional efficiency
+//   ✓ Candle-range overlap density
+//   ✓ Internal retracement pressure
+//   ✓ Directional close commitment
+//   ✓ Wick cleanliness
+//   ✓ Momentum expansion
+//   ✓ True-range expansion
+//   ✓ Moving-average support
+//   ✓ Internal direction-change cleanliness
+//   ✓ Directional acceptance
+//   ✓ Impulse / Correction scores and classification confidence
+//   ✓ Translucent leg envelopes, live candle tint, labels, alerts and data plots
+//
+// v1.1 additions:
+//   ✓ Segment-level leg coloring — a completed leg's envelope is split into
+//     colored segments wherever its live character changed, instead of one
+//     solid color for the whole move
+//
+// v1.2 additions:
+//   ✓ Internal sub-swing count and average sub-swing size (ATR multiples) per
+//     leg — diagnostic only, exposed in the tooltip and Data Window, does not
+//     feed the Impulse/Correction score (Roadmap Phase 1.3, partial)
+//
+// v1.3 additions:
+//   ✓ Progression-to-rotation ratio and sub-swing growth ratio per leg — same
+//     diagnostic-only internal sub-swing data, still does not feed the score
+//     (Roadmap Phase 1.3, continued)
+//
+// v1.4 additions:
+//   ✓ Merge consecutive NEUTRAL legs into one range box+label instead of drawing
+//     one box per leg — a long choppy/flat stretch decomposes into many small,
+//     individually-weak legs by design; this merges a run of at least "Minimum
+//     consecutive legs to merge into a range" of them into a single "RANGE (Nx)"
+//     box instead of showing each one separately
+//
+// v1.5 additions:
+//   ✓ Generalized the v1.4 NEUTRAL-only merge into coherent-wave merging: any run
+//     of legs (any mix of IMPULSE/CORRECTION/NEUTRAL) is folded into one running
+//     wave as long as re-scoring the whole span (first pivot to the newest leg)
+//     keeps agreeing with the wave's established character — a grinding trend made
+//     of small alternating impulsive pushes and corrective pullbacks now draws as
+//     one clean pivot-to-pivot box instead of many small, individually-weak ones
+//
+// Important:
+//   - Confirmed pivots appear only after `Pivot right bars`; this is deliberate.
+//   - The live leg uses the latest confirmed pivot and the current bar.
+//   - A green leg means "impulsive", not "bullish".
+//   - A red leg means "corrective", not "bearish".
+// ============================================================================
+
+indicator(
+     "Market Motion DNA [WavesUnchained]",
+     shorttitle = "Motion DNA",
+     overlay = true,
+     max_bars_back = 5000,
+     max_boxes_count = 400,
+     max_labels_count = 300,
+     max_lines_count = 100)
+
+// ============================================================================
+// Groups
+// ============================================================================
+string GROUP_PIVOTS   = "01 · Pivot Engine"
+string GROUP_DNA      = "02 · Leg DNA"
+string GROUP_WEIGHTS  = "03 · DNA Weights"
+string GROUP_CLASSIFY = "04 · Classification"
+string GROUP_VISUALS  = "05 · Visuals"
+string GROUP_LABELS   = "06 · Labels & Diagnostics"
+string GROUP_ALERTS   = "07 · Alerts"
+
+// ============================================================================
+// Inputs · Pivot engine
+// ============================================================================
+int pivotLeftInput = input.int(5, "Pivot left bars", minval = 1, maxval = 50, group = GROUP_PIVOTS)
+int pivotRightInput = input.int(5, "Pivot right bars", minval = 1, maxval = 50, group = GROUP_PIVOTS)
+int maxLegBarsInput = input.int(350, "Maximum bars evaluated per leg", minval = 20, maxval = 1500,
+     tooltip = "Older bars beyond this limit are ignored when a very long leg is scored.", group = GROUP_PIVOTS)
+int retainedLegsInput = input.int(40, "Retained completed legs", minval = 3, maxval = 120, group = GROUP_PIVOTS)
+float minLegAtrInput = input.float(0.50, "Minimum leg size (ATR)", minval = 0.0, maxval = 10.0, step = 0.05,
+     tooltip = "Opposite pivots producing a smaller leg are ignored. Set to 0 to disable.", group = GROUP_PIVOTS)
+int atrLengthInput = input.int(14, "ATR length", minval = 2, maxval = 200, group = GROUP_PIVOTS)
+
+// ============================================================================
+// Inputs · DNA calculation
+// ============================================================================
+int minimumMatureBarsInput = input.int(8, "Bars until full score maturity", minval = 2, maxval = 100,
+     tooltip = "Young live legs are pulled toward neutral until enough bars exist.", group = GROUP_DNA)
+float retracementCeilingInput = input.float(0.80, "Retracement mapped to fully corrective", minval = 0.20, maxval = 2.0, step = 0.05,
+     tooltip = "An internal retracement at or above this fraction of total leg displacement receives the maximum corrective contribution.", group = GROUP_DNA)
+float momentumLowRatioInput = input.float(0.60, "Momentum expansion low ratio", minval = 0.10, maxval = 1.0, step = 0.05, group = GROUP_DNA)
+float momentumHighRatioInput = input.float(1.40, "Momentum expansion high ratio", minval = 1.0, maxval = 4.0, step = 0.05, group = GROUP_DNA)
+float trLowRatioInput = input.float(0.70, "True-range expansion low ratio", minval = 0.10, maxval = 1.0, step = 0.05, group = GROUP_DNA)
+float trHighRatioInput = input.float(1.30, "True-range expansion high ratio", minval = 1.0, maxval = 4.0, step = 0.05, group = GROUP_DNA)
+string maTypeInput = input.string("EMA", "Support MA type", options = ["EMA", "SMA", "RMA", "WMA", "HMA"], group = GROUP_DNA)
+int maLengthInput = input.int(34, "Support MA length", minval = 2, maxval = 500, group = GROUP_DNA)
+int subPivotWidthInput = input.int(2, "Internal sub-pivot width (bars)", minval = 1, maxval = 20,
+     tooltip = "Left/right bars used to confirm a smaller pivot inside a leg, for internal swing count/size — diagnostic only, does not feed the Impulse/Correction score.", group = GROUP_DNA)
+
+// ============================================================================
+// Inputs · Weights
+// ============================================================================
+float weightEfficiencyInput = input.float(20.0, "Directional efficiency", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightOverlapInput = input.float(15.0, "Low overlap", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightRetracementInput = input.float(12.5, "Shallow internal retracement", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightCommitmentInput = input.float(10.0, "Directional close commitment", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightWicksInput = input.float(7.5, "Wick cleanliness", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightMomentumInput = input.float(10.0, "Momentum expansion", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightTrueRangeInput = input.float(5.0, "True-range expansion", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightMaSupportInput = input.float(7.5, "MA support", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightCleanlinessInput = input.float(7.5, "Internal direction cleanliness", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+float weightAcceptanceInput = input.float(5.0, "Directional acceptance", minval = 0.0, maxval = 100.0, step = 0.5, group = GROUP_WEIGHTS)
+
+// ============================================================================
+// Inputs · Classification
+// ============================================================================
+float impulseThresholdInput = input.float(62.0, "Impulse threshold", minval = 50.0, maxval = 95.0, step = 0.5, group = GROUP_CLASSIFY)
+float correctionThresholdInput = input.float(62.0, "Correction threshold", minval = 50.0, maxval = 95.0, step = 0.5, group = GROUP_CLASSIFY)
+float minimumConfidenceInput = input.float(18.0, "Minimum score separation", minval = 0.0, maxval = 80.0, step = 1.0,
+     tooltip = "The absolute difference between Impulse and Correction must reach this value before a directional character is shown.", group = GROUP_CLASSIFY)
+float characterChangeBufferInput = input.float(5.0, "Live character-change buffer", minval = 0.0, maxval = 25.0, step = 0.5,
+     tooltip = "Reduces rapid live switching around classification thresholds.", group = GROUP_CLASSIFY)
+bool mergeCoherentLegsInput = input.bool(true, "Merge consecutive legs into one coherent wave", group = GROUP_CLASSIFY,
+     tooltip = "A run of small legs can still net one bigger, decisive move even if each small piece looks weak on its own (e.g. a grinding trend made of alternating small impulse pushes and corrective pullbacks). Each new leg is folded into the running wave as long as re-scoring the whole span (first pivot to the newest one) keeps the same character; the moment it wouldn't, the wave is drawn as one box and a new one starts.")
+int minWaveLegsInput = input.int(2, "Minimum consecutive legs to merge into one wave", minval = 2, maxval = 10,
+     tooltip = "A merged run shorter than this still draws as a single normal leg (same as if merging were off). Only matters for the case where the whole span's character is NEUTRAL — a NEUTRAL run at or above this count draws as a merged \"RANGE (Nx)\" box instead of one NEUTRAL leg box.", group = GROUP_CLASSIFY)
+
+// ============================================================================
+// Inputs · Visuals
+// ============================================================================
+bool showCompletedLegsInput = input.bool(true, "Show completed leg envelopes", group = GROUP_VISUALS)
+bool showLiveLegInput = input.bool(true, "Show live leg envelope", group = GROUP_VISUALS)
+int maxSegmentsPerLegInput = input.int(6, "Maximum color segments per leg", minval = 1, maxval = 20,
+     tooltip = "A completed leg's envelope is split into this many color segments where its live character changed. Further changes beyond this cap keep the last segment's color.", group = GROUP_VISUALS)
+bool tintLiveCandlesInput = input.bool(true, "Tint candles of current live leg", group = GROUP_VISUALS)
+bool showPivotMarkersInput = input.bool(true, "Show confirmed pivot markers", group = GROUP_VISUALS)
+bool showSupportMaInput = input.bool(false, "Show support MA", group = GROUP_VISUALS)
+int completedTransparencyInput = input.int(86, "Completed envelope transparency", minval = 55, maxval = 98, group = GROUP_VISUALS)
+int liveTransparencyInput = input.int(80, "Live envelope transparency", minval = 45, maxval = 98, group = GROUP_VISUALS)
+int candleTransparencyInput = input.int(65, "Candle tint transparency", minval = 0, maxval = 95, group = GROUP_VISUALS)
+color impulseColorInput = input.color(color.rgb(25, 170, 95), "Impulse color", group = GROUP_VISUALS)
+color correctionColorInput = input.color(color.rgb(220, 65, 70), "Correction color", group = GROUP_VISUALS)
+color neutralColorInput = input.color(color.rgb(210, 165, 45), "Neutral / transition color", group = GROUP_VISUALS)
+
+// ============================================================================
+// Inputs · Labels
+// ============================================================================
+bool showCompletedLabelsInput = input.bool(true, "Show completed leg labels", group = GROUP_LABELS)
+int minLabelSpacingInput = input.int(3, "Minimum label spacing (bars)", minval = 0, maxval = 50,
+     tooltip = "Skip a completed leg's label if it would land closer than this many bars to the previous completed leg's label — short, closely-spaced legs otherwise stack their labels on top of each other. The leg's colored envelope is always drawn regardless.", group = GROUP_LABELS)
+bool showLiveLabelInput = input.bool(true, "Show live leg label", group = GROUP_LABELS)
+bool showDetailedLabelInput = input.bool(false, "Include DNA details in tooltip", group = GROUP_LABELS)
+bool exposeDataWindowInput = input.bool(true, "Expose live scores in Data Window", group = GROUP_LABELS)
+
+// ============================================================================
+// Inputs · Alerts
+// ============================================================================
+bool alertOnLiveImpulseInput = input.bool(true, "Alert when live leg becomes impulsive", group = GROUP_ALERTS)
+bool alertOnLiveCorrectionInput = input.bool(true, "Alert when live leg becomes corrective", group = GROUP_ALERTS)
+bool alertOnCharacterLossInput = input.bool(true, "Alert when live leg loses prior character", group = GROUP_ALERTS)
+bool alertsOnCloseOnlyInput = input.bool(true, "Alerts only on bar close (confirmed)", group = GROUP_ALERTS)
+
+// ============================================================================
+// Constants / helpers
+// ============================================================================
+int CLASS_CORRECTION = -1
+int CLASS_NEUTRAL = 0
+int CLASS_IMPULSE = 1
+
+f_clamp(float value, float low, float high) =>
+    math.max(low, math.min(high, value))
+
+f_safeDiv(float numerator, float denominator, float fallback) =>
+    denominator != 0.0 ? numerator / denominator : fallback
+
+f_map01(float value, float low, float high) =>
+    high > low ? f_clamp((value - low) / (high - low), 0.0, 1.0) : 0.5
+
+f_ma(float source, int length, string maType) =>
+    switch maType
+        "SMA" => ta.sma(source, length)
+        "RMA" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "HMA" => ta.hma(source, length)
+        => ta.ema(source, length)
+
+f_className(int legClass) =>
+    legClass == CLASS_IMPULSE ? "IMPULSE" : legClass == CLASS_CORRECTION ? "CORRECTION" : "NEUTRAL"
+
+f_classColor(int legClass, float impulseScore, float correctionScore, int transparency) =>
+    float strength = f_clamp(math.abs(impulseScore - correctionScore) / 100.0, 0.0, 1.0)
+    int adjustedTransparency = int(math.round(f_clamp(transparency + (1.0 - strength) * 8.0, 0.0, 100.0)))
+    color base = legClass == CLASS_IMPULSE ? impulseColorInput : legClass == CLASS_CORRECTION ? correctionColorInput : neutralColorInput
+    color.new(base, adjustedTransparency)
+
+f_classify(float impulseScore, float correctionScore, float maturity) =>
+    float separation = math.abs(impulseScore - correctionScore)
+    int result = CLASS_NEUTRAL
+    if maturity >= 0.999 and separation >= minimumConfidenceInput
+        if impulseScore >= impulseThresholdInput and impulseScore > correctionScore
+            result := CLASS_IMPULSE
+        else if correctionScore >= correctionThresholdInput and correctionScore > impulseScore
+            result := CLASS_CORRECTION
+    result
+
+f_labelTooltip(int legClass, float impulseScore, float correctionScore, float confidence, int bars,
+     float efficiency, float overlap, float retracement, float commitment, float wickClean,
+     float momentumExpansion, float trExpansion, float maSupport, float cleanliness, float acceptance,
+     int internalSwings, float avgInternalSwingAtr, float progressionRatio, float subLegGrowthRatio) =>
+    string base = f_className(legClass) + "\nI " + str.tostring(impulseScore, "#.0") + "  ·  C " + str.tostring(correctionScore, "#.0") +
+         "\nConfidence " + str.tostring(confidence, "#.0") + "  ·  " + str.tostring(bars) + " bars"
+    string details = "\nEff " + str.tostring(efficiency * 100.0, "#.0") +
+         "  Ov " + str.tostring(overlap * 100.0, "#.0") +
+         "  Ret " + str.tostring(retracement * 100.0, "#.0") +
+         "\nCom " + str.tostring(commitment * 100.0, "#.0") +
+         "  Wick " + str.tostring(wickClean * 100.0, "#.0") +
+         "  Mom " + str.tostring(momentumExpansion * 100.0, "#.0") +
+         "\nTR " + str.tostring(trExpansion * 100.0, "#.0") +
+         "  MA " + str.tostring(maSupport * 100.0, "#.0") +
+         "  Clean " + str.tostring(cleanliness * 100.0, "#.0") +
+         "  Acc " + str.tostring(acceptance * 100.0, "#.0") +
+         "\nSub-swings " + str.tostring(internalSwings) + "  ·  Avg size " + str.tostring(avgInternalSwingAtr, "#.00") + " ATR" +
+         "\nProgression " + str.tostring(progressionRatio * 100.0, "#.0") + "  ·  Trend " + str.tostring(subLegGrowthRatio, "#.00") + "x"
+    showDetailedLabelInput ? base + details : base
+
+float atrSeries = ta.atr(atrLengthInput)
+float supportMaSeries = f_ma(close, maLengthInput, maTypeInput)
+float subPivotHighSeries = ta.pivothigh(high, subPivotWidthInput, subPivotWidthInput)
+float subPivotLowSeries = ta.pivotlow(low, subPivotWidthInput, subPivotWidthInput)
+
+// ============================================================================
+// Leg DNA calculation
+// Returns:
+// impulse, correction, confidence, maturity, bars,
+// efficiency, overlap, retracement, commitment, wick cleanliness,
+// momentum expansion, TR expansion, MA support, cleanliness, acceptance,
+// highest high, lowest low, internal swing count, average internal swing size,
+// progression-to-rotation ratio, sub-swing growth ratio
+//
+// The last four (internal sub-swing metrics) are diagnostic only — they describe
+// the leg's own internal pivot structure but do not feed the Impulse/Correction
+// score. Roadmap Phase 2 (ABC engine) is the intended first consumer.
+// ============================================================================
+f_calculateLeg(int startBar, float startPrice, int endBar, float endPrice, int direction, bool isComplete) =>
+    int rawBars = math.max(endBar - startBar, 1)
+    int evaluatedBars = math.min(rawBars, maxLegBarsInput)
+    int effectiveStartBar = endBar - evaluatedBars
+    float effectiveStartPrice = effectiveStartBar == startBar ? startPrice : close[bar_index - effectiveStartBar]
+    float netDistance = math.max(math.abs(endPrice - effectiveStartPrice), syminfo.mintick)
+
+    float pathDistance = 0.0
+    float overlapSum = 0.0
+    int overlapCount = 0
+    float commitmentSum = 0.0
+    float wickCleanSum = 0.0
+    float acceptanceSum = 0.0
+    float maSupportSum = 0.0
+    int featureCount = 0
+    int directionChanges = 0
+    int previousDeltaSign = 0
+
+    float favorableExtreme = effectiveStartPrice
+    float maxAdverse = 0.0
+    float highestHigh = math.max(effectiveStartPrice, endPrice)
+    float lowestLow = math.min(effectiveStartPrice, endPrice)
+
+    float firstHalfBody = 0.0
+    float secondHalfBody = 0.0
+    float firstHalfTr = 0.0
+    float secondHalfTr = 0.0
+    int firstHalfCount = 0
+    int secondHalfCount = 0
+
+    int lastSubType = 0 // internal sub-pivot alternation state: +1 high, -1 low
+    float lastSubPrice = na
+    int internalSwingCount = 0
+    float internalSwingSum = 0.0
+    array<float> swingSizes = array.new_float() // one entry per completed internal swing, in order
+
+    for step = 1 to evaluatedBars
+        int absoluteBar = effectiveStartBar + step
+        int offset = bar_index - absoluteBar
+        int previousOffset = offset + 1
+
+        float currentClose = close[offset]
+        float previousClose = close[previousOffset]
+        float currentOpen = open[offset]
+        float currentHigh = high[offset]
+        float currentLow = low[offset]
+        float previousHigh = high[previousOffset]
+        float previousLow = low[previousOffset]
+        float currentMa = supportMaSeries[offset]
+        float previousMa = supportMaSeries[previousOffset]
+
+        float currentRange = math.max(currentHigh - currentLow, syminfo.mintick)
+        float previousRange = math.max(previousHigh - previousLow, syminfo.mintick)
+        float delta = currentClose - previousClose
+        int deltaSign = delta > 0.0 ? 1 : delta < 0.0 ? -1 : 0
+        float directionalDelta = direction * delta
+        float directionalBody = math.max(direction * (currentClose - currentOpen), 0.0)
+        float currentTr = math.max(currentHigh - currentLow, math.max(math.abs(currentHigh - previousClose), math.abs(currentLow - previousClose)))
+
+        pathDistance += currentTr
+
+        float overlapAmount = math.max(0.0, math.min(currentHigh, previousHigh) - math.max(currentLow, previousLow))
+        overlapSum += f_safeDiv(overlapAmount, math.min(currentRange, previousRange), 0.0)
+        overlapCount += 1
+
+        float closeLocation = direction == 1 ? (currentClose - currentLow) / currentRange : (currentHigh - currentClose) / currentRange
+        commitmentSum += f_clamp(closeLocation, 0.0, 1.0)
+
+        float totalWick = currentRange - math.abs(currentClose - currentOpen)
+        wickCleanSum += 1.0 - f_clamp(totalWick / currentRange, 0.0, 1.0)
+
+        acceptanceSum += directionalDelta > 0.0 ? 1.0 : directionalDelta < 0.0 ? 0.0 : 0.5
+
+        bool priceSupported = direction == 1 ? currentClose >= currentMa : currentClose <= currentMa
+        bool slopeSupported = direction == 1 ? currentMa >= previousMa : currentMa <= previousMa
+        maSupportSum += (priceSupported ? 0.6 : 0.0) + (slopeSupported ? 0.4 : 0.0)
+
+        if deltaSign != 0
+            if previousDeltaSign != 0 and deltaSign != previousDeltaSign
+                directionChanges += 1
+            previousDeltaSign := deltaSign
+
+        if direction == 1
+            favorableExtreme := math.max(favorableExtreme, currentHigh)
+            maxAdverse := math.max(maxAdverse, favorableExtreme - currentLow)
+        else
+            favorableExtreme := math.min(favorableExtreme, currentLow)
+            maxAdverse := math.max(maxAdverse, currentHigh - favorableExtreme)
+
+        highestHigh := math.max(highestHigh, currentHigh)
+        lowestLow := math.min(lowestLow, currentLow)
+
+        if step <= int(math.ceil(evaluatedBars * 0.5))
+            firstHalfBody += directionalBody
+            firstHalfTr += currentTr
+            firstHalfCount += 1
+        else
+            secondHalfBody += directionalBody
+            secondHalfTr += currentTr
+            secondHalfCount += 1
+
+        // Internal sub-pivots: was `absoluteBar` itself a confirmed smaller pivot?
+        // A sub-pivot high/low at absoluteBar only shows up in the series once
+        // subPivotWidthInput bars later, i.e. at confirmOffset = offset - subPivotWidthInput.
+        int confirmOffset = offset - subPivotWidthInput
+        int safeConfirmOffset = math.max(confirmOffset, 0)
+        float subHighVal = confirmOffset >= 0 ? subPivotHighSeries[safeConfirmOffset] : na
+        float subLowVal = confirmOffset >= 0 ? subPivotLowSeries[safeConfirmOffset] : na
+        bool isSubHigh = not na(subHighVal)
+        bool isSubLow = not na(subLowVal)
+
+        int subChosenType = 0
+        float subChosenPrice = na
+        if isSubHigh and isSubLow
+            subChosenType := lastSubType <= 0 ? 1 : -1
+            subChosenPrice := subChosenType == 1 ? subHighVal : subLowVal
+        else if isSubHigh
+            subChosenType := 1
+            subChosenPrice := subHighVal
+        else if isSubLow
+            subChosenType := -1
+            subChosenPrice := subLowVal
+
+        if subChosenType != 0
+            if lastSubType == 0
+                lastSubType := subChosenType
+                lastSubPrice := subChosenPrice
+                internalSwingCount += 1
+            else if subChosenType == lastSubType
+                bool subMoreExtreme = subChosenType == 1 ? subChosenPrice > lastSubPrice : subChosenPrice < lastSubPrice
+                if subMoreExtreme
+                    lastSubPrice := subChosenPrice
+            else
+                float completedSwingSize = math.abs(subChosenPrice - lastSubPrice)
+                internalSwingSum += completedSwingSize
+                array.push(swingSizes, completedSwingSize)
+                internalSwingCount += 1
+                lastSubType := subChosenType
+                lastSubPrice := subChosenPrice
+
+        featureCount += 1
+
+    float efficiency = f_clamp(f_safeDiv(netDistance, math.max(pathDistance, netDistance), 0.0), 0.0, 1.0)
+    float overlap = overlapCount > 0 ? f_clamp(overlapSum / overlapCount, 0.0, 1.0) : 0.5
+    float retracementRaw = f_safeDiv(maxAdverse, netDistance, 0.0)
+    float retracement = f_clamp(retracementRaw / retracementCeilingInput, 0.0, 1.0)
+    float commitment = featureCount > 0 ? f_clamp(commitmentSum / featureCount, 0.0, 1.0) : 0.5
+    float wickClean = featureCount > 0 ? f_clamp(wickCleanSum / featureCount, 0.0, 1.0) : 0.5
+    float acceptance = featureCount > 0 ? f_clamp(acceptanceSum / featureCount, 0.0, 1.0) : 0.5
+    float maSupport = featureCount > 0 ? f_clamp(maSupportSum / featureCount, 0.0, 1.0) : 0.5
+    float cleanliness = evaluatedBars > 1 ? 1.0 - f_clamp(directionChanges / math.max(evaluatedBars - 1.0, 1.0), 0.0, 1.0) : 0.5
+
+    float atrAtEnd = nz(atrSeries[bar_index - endBar])
+
+    float avgFirstBody = firstHalfCount > 0 ? firstHalfBody / firstHalfCount : 0.0
+    float avgSecondBody = secondHalfCount > 0 ? secondHalfBody / secondHalfCount : avgFirstBody
+    // A near-zero first-half body would make avgSecondBody/avgFirstBody blow up (or
+    // used to hard-jump to momentumHighRatioInput) regardless of how small the second
+    // half's push actually was. Flooring the denominator with a fraction of ATR keeps
+    // the ratio proportional to the real move size instead of an all-or-nothing jump.
+    float momentumFirstBase = math.max(avgFirstBody, atrAtEnd * 0.25)
+    float momentumRatio = momentumFirstBase > syminfo.mintick ? avgSecondBody / momentumFirstBase : 1.0
+    float momentumExpansion = f_map01(momentumRatio, momentumLowRatioInput, momentumHighRatioInput)
+
+    float avgFirstTr = firstHalfCount > 0 ? firstHalfTr / firstHalfCount : 0.0
+    float avgSecondTr = secondHalfCount > 0 ? secondHalfTr / secondHalfCount : avgFirstTr
+    float trRatio = avgFirstTr > syminfo.mintick ? avgSecondTr / avgFirstTr : 1.0
+    float trExpansion = f_map01(trRatio, trLowRatioInput, trHighRatioInput)
+
+    float weightSum = weightEfficiencyInput + weightOverlapInput + weightRetracementInput + weightCommitmentInput +
+         weightWicksInput + weightMomentumInput + weightTrueRangeInput + weightMaSupportInput +
+         weightCleanlinessInput + weightAcceptanceInput
+    float safeWeightSum = math.max(weightSum, 0.0001)
+
+    float rawImpulse = (
+         efficiency * weightEfficiencyInput +
+         (1.0 - overlap) * weightOverlapInput +
+         (1.0 - retracement) * weightRetracementInput +
+         commitment * weightCommitmentInput +
+         wickClean * weightWicksInput +
+         momentumExpansion * weightMomentumInput +
+         trExpansion * weightTrueRangeInput +
+         maSupport * weightMaSupportInput +
+         cleanliness * weightCleanlinessInput +
+         acceptance * weightAcceptanceInput) / safeWeightSum * 100.0
+
+    float rawCorrection = (
+         (1.0 - efficiency) * weightEfficiencyInput +
+         overlap * weightOverlapInput +
+         retracement * weightRetracementInput +
+         (1.0 - commitment) * weightCommitmentInput +
+         (1.0 - wickClean) * weightWicksInput +
+         (1.0 - momentumExpansion) * weightMomentumInput +
+         (1.0 - trExpansion) * weightTrueRangeInput +
+         (1.0 - maSupport) * weightMaSupportInput +
+         (1.0 - cleanliness) * weightCleanlinessInput +
+         (1.0 - acceptance) * weightAcceptanceInput) / safeWeightSum * 100.0
+
+    float maturity = isComplete ? 1.0 : f_clamp(evaluatedBars / float(minimumMatureBarsInput), 0.0, 1.0)
+    float impulseScore = 50.0 + (rawImpulse - 50.0) * maturity
+    float correctionScore = 50.0 + (rawCorrection - 50.0) * maturity
+    float confidence = math.abs(impulseScore - correctionScore) * maturity
+
+    // internalSwingCount counts registered sub-pivots; the number of completed
+    // swing-legs between them (what avgInternalSwingAtr averages over) is one less.
+    // Expressed in ATR multiples so it reads consistently across instruments.
+    int completedSwings = array.size(swingSizes)
+    float avgInternalSwingAtr = completedSwings > 0 ? f_safeDiv(internalSwingSum / completedSwings, atrAtEnd, 0.0) : 0.0
+
+    // Progression-to-rotation: how much of the total back-and-forth swing distance
+    // ended up as net leg progress. 1.0 = swings walked almost straight to netDistance
+    // (little rotation); low = a lot of internal back-and-forth for little net gain.
+    float progressionRatio = f_clamp(f_safeDiv(netDistance, internalSwingSum, 1.0), 0.0, 1.0)
+
+    // Growing vs. shrinking sub-swings: average size of the first half of completed
+    // swings vs the second half, same first/second-half split used for momentum/TR
+    // above. >1 = swings are expanding as the leg progresses, <1 = contracting.
+    float firstSwingSum = 0.0
+    float secondSwingSum = 0.0
+    int firstSwingCount = 0
+    int secondSwingCount = 0
+    int swingHalfBoundary = int(math.ceil(completedSwings * 0.5))
+    if completedSwings > 0
+        for swingIdx = 0 to completedSwings - 1
+            float swingSize = array.get(swingSizes, swingIdx)
+            if swingIdx < swingHalfBoundary
+                firstSwingSum += swingSize
+                firstSwingCount += 1
+            else
+                secondSwingSum += swingSize
+                secondSwingCount += 1
+    float avgFirstSwing = firstSwingCount > 0 ? firstSwingSum / firstSwingCount : 0.0
+    float avgSecondSwing = secondSwingCount > 0 ? secondSwingSum / secondSwingCount : avgFirstSwing
+    float subLegGrowthRatio = avgFirstSwing > syminfo.mintick ? avgSecondSwing / avgFirstSwing : 1.0
+
+    [impulseScore, correctionScore, confidence, maturity, evaluatedBars,
+     efficiency, overlap, retracement, commitment, wickClean,
+     momentumExpansion, trExpansion, maSupport, cleanliness, acceptance,
+     highestHigh, lowestLow, internalSwingCount, avgInternalSwingAtr,
+     progressionRatio, subLegGrowthRatio]
+
+// ============================================================================
+// Persistent state
+// ============================================================================
+var pivotBars = array.new_int()
+var pivotPrices = array.new_float()
+var pivotTypes = array.new_int() // +1 high, -1 low
+
+var completedBoxes = array.new_box()
+var completedBoxCounts = array.new_int() // segment-box count per retained leg, oldest first
+var completedLabels = array.new_label()
+// Single-element mutable box for the last completed-leg label's endBar: a function
+// cannot reassign a plain global variable (CE10088), only mutate a collection's
+// contents, so this tracks state the same way the arrays above do.
+var lastCompletedLabelBarBox = array.new_int(1, na)
+
+// Pending coherent-wave streak — classic Zigzag-style: a wave tracks new extremes in
+// one direction (pendingWaveDirection); a leg of the SAME pivot type absorbs into the
+// wave only if it makes a NEW extreme (pendingWaveExtremeBar/Price, which is exactly
+// what gets drawn as the box's end), a leg of the OPPOSITE type (a counter-swing
+// inside the move) always absorbs unconditionally without moving the tracked extreme.
+// The wave flushes — ending exactly at its last real extreme, never past it — the
+// moment a same-direction leg fails to extend further; the next wave then starts
+// seeded from that same extreme bar, so there is never a gap between two drawn boxes.
+// Plain vars, not arrays, because this state is only ever reassigned from the main
+// script scope (the pivot registration block below), never from inside a `=>`
+// function — CE10088 only applies to reassignment from within a function.
+var int pendingWaveStartBar = na
+var float pendingWaveStartPrice = na
+var int pendingWaveDirection = 0 // +1 = tracking new highs, -1 = tracking new lows
+var int pendingWaveExtremeBar = na
+var float pendingWaveExtremePrice = na
+var float pendingWaveHigh = na
+var float pendingWaveLow = na
+var int pendingWaveLegCount = 0
+
+// The bar the most recently DRAWN box actually starts at. Since v1.4.0/v1.4.3 one
+// drawn box can span multiple original pivots (a merged range, or a whole streak
+// reclassified as one leg), `pivotBars[lastIndex - 1]` is no longer a reliable stand-
+// in for "where does the last drawn box begin" — the same-type-pivot-extreme replace
+// path below needs this exact value to redraw the correct span.
+var int lastDrawnLegStartBar = na
+var float lastDrawnLegStartPrice = na
+
+var box liveBox = na
+var label liveLabel = na
+var int liveClassState = CLASS_NEUTRAL
+var int previousLiveClassState = CLASS_NEUTRAL
+
+var liveSegmentBars = array.new_int() // character-change breakpoints within the current live leg
+var liveSegmentClasses = array.new_int()
+
+// ============================================================================
+// Drawing cleanup helpers
+// ============================================================================
+f_trimDrawings() =>
+    while array.size(completedBoxCounts) > retainedLegsInput
+        int oldCount = array.shift(completedBoxCounts)
+        if oldCount > 0
+            for i = 1 to oldCount
+                box oldBox = array.shift(completedBoxes)
+                box.delete(oldBox)
+    while array.size(completedLabels) > retainedLegsInput
+        label oldLabel = array.shift(completedLabels)
+        label.delete(oldLabel)
+
+f_deleteLastCompletedDrawing() =>
+    if array.size(completedBoxCounts) > 0
+        int lastCount = array.pop(completedBoxCounts)
+        if lastCount > 0
+            for i = 1 to lastCount
+                box lastBox = array.pop(completedBoxes)
+                box.delete(lastBox)
+    if array.size(completedLabels) > 0
+        label lastLabel = array.pop(completedLabels)
+        label.delete(lastLabel)
+
+f_drawCompletedLeg(int startBar, float startPrice, int endBar, float endPrice, array<int> segBars) =>
+    int direction = endPrice >= startPrice ? 1 : -1
+    [impulseScore, correctionScore, confidence, maturity, legBars,
+     efficiency, overlap, retracement, commitment, wickClean,
+     momentumExpansion, trExpansion, maSupport, cleanliness, acceptance,
+     highestHigh, lowestLow, internalSwings, avgInternalSwingAtr,
+     progressionRatio, subLegGrowthRatio] = f_calculateLeg(startBar, startPrice, endBar, endPrice, direction, true)
+
+    int legClass = f_classify(impulseScore, correctionScore, maturity)
+    color borderColor = color.new(legClass == CLASS_IMPULSE ? impulseColorInput : legClass == CLASS_CORRECTION ? correctionColorInput : neutralColorInput, 35)
+
+    int segmentCount = array.size(segBars)
+    int boxesCreated = 0
+    if showCompletedLegsInput
+        if segmentCount > 0
+            for i = 0 to segmentCount - 1
+                int segStart = array.get(segBars, i)
+                int segEnd = i < segmentCount - 1 ? array.get(segBars, i + 1) - 1 : endBar
+                if segEnd >= segStart
+                    // Live segment tracking (segBars) only records *where* the character
+                    // changed — the live class at each point was maturity-damped/hysteresis-
+                    // buffered, so a leg shorter than the maturity window would have spent
+                    // its entire live history damped toward neutral. Now that the leg is
+                    // complete, re-derive every segment's class the same undamped way
+                    // (isComplete=true) instead of trusting a tracked live value, so the
+                    // whole box — not just its last segment — matches hindsight.
+                    int segClass = na
+                    if i == segmentCount - 1
+                        segClass := legClass
+                    else
+                        float segEndPrice = direction == 1 ? high[bar_index - segEnd] : low[bar_index - segEnd]
+                        [segImpulse, segCorrection, segConfidence, segMaturity, segBarsCount,
+                         segEfficiency, segOverlap, segRetracement, segCommitment, segWickClean,
+                         segMomentum, segTr, segMaSupport, segCleanliness, segAcceptance,
+                         segHigh, segLow, segSwings, segAvgSwingAtr,
+                         segProgression, segGrowth] = f_calculateLeg(startBar, startPrice, segEnd, segEndPrice, direction, true)
+                        segClass := f_classify(segImpulse, segCorrection, segMaturity)
+                    color segColor = color.new(segClass == CLASS_IMPULSE ? impulseColorInput : segClass == CLASS_CORRECTION ? correctionColorInput : neutralColorInput, completedTransparencyInput)
+                    box segBox = box.new(left = segStart, top = highestHigh, right = segEnd, bottom = lowestLow,
+                         xloc = xloc.bar_index, bgcolor = segColor, border_color = borderColor, border_width = 1)
+                    array.push(completedBoxes, segBox)
+                    boxesCreated += 1
+        else
+            color envelopeColor = f_classColor(legClass, impulseScore, correctionScore, completedTransparencyInput)
+            box wholeBox = box.new(left = startBar, top = highestHigh, right = endBar, bottom = lowestLow,
+                 xloc = xloc.bar_index, bgcolor = envelopeColor, border_color = borderColor, border_width = 1)
+            array.push(completedBoxes, wholeBox)
+            boxesCreated += 1
+    array.push(completedBoxCounts, boxesCreated)
+
+    label createdLabel = na
+    int lastCompletedLabelBar = array.get(lastCompletedLabelBarBox, 0)
+    bool tooCloseToLastLabel = not na(lastCompletedLabelBar) and (endBar - lastCompletedLabelBar) < minLabelSpacingInput
+    if showCompletedLabelsInput and not tooCloseToLastLabel
+        float labelPrice = direction == 1 ? highestHigh : lowestLow
+        createdLabel := label.new(x = endBar, y = labelPrice,
+             text = f_className(legClass),
+             tooltip = f_labelTooltip(legClass, impulseScore, correctionScore, confidence, legBars,
+                 efficiency, overlap, retracement, commitment, wickClean,
+                 momentumExpansion, trExpansion, maSupport, cleanliness, acceptance,
+                 internalSwings, avgInternalSwingAtr, progressionRatio, subLegGrowthRatio),
+             xloc = xloc.bar_index,
+             style = direction == 1 ? label.style_label_down : label.style_label_up,
+             color = color.new(legClass == CLASS_IMPULSE ? impulseColorInput : legClass == CLASS_CORRECTION ? correctionColorInput : neutralColorInput, 12),
+             textcolor = color.white,
+             size = size.tiny)
+        array.set(lastCompletedLabelBarBox, 0, endBar)
+
+    if not na(createdLabel)
+        array.push(completedLabels, createdLabel)
+    f_trimDrawings()
+
+// Draws one merged box+label for a run of consecutive legs whose whole-span verdict
+// is NEUTRAL (see the pendingWave* state above). Mirrors f_drawCompletedLeg's bookkeeping (push to
+// completedBoxes/completedBoxCounts/completedLabels, respect label spacing, trim)
+// but takes already-aggregated bounds instead of recomputing DNA for one leg.
+f_drawRangeBox(int startBar, int endBar, float rangeHigh, float rangeLow, int legCount) =>
+    color rangeColor = color.new(neutralColorInput, completedTransparencyInput)
+    color rangeBorder = color.new(neutralColorInput, 35)
+    int boxesCreated = 0
+    if showCompletedLegsInput
+        box rangeBox = box.new(left = startBar, top = rangeHigh, right = endBar, bottom = rangeLow,
+             xloc = xloc.bar_index, bgcolor = rangeColor, border_color = rangeBorder, border_width = 1)
+        array.push(completedBoxes, rangeBox)
+        boxesCreated += 1
+    array.push(completedBoxCounts, boxesCreated)
+
+    label createdLabel = na
+    int lastCompletedLabelBar = array.get(lastCompletedLabelBarBox, 0)
+    bool tooCloseToLastLabel = not na(lastCompletedLabelBar) and (endBar - lastCompletedLabelBar) < minLabelSpacingInput
+    if showCompletedLabelsInput and not tooCloseToLastLabel
+        createdLabel := label.new(x = endBar, y = rangeHigh,
+             text = "RANGE (" + str.tostring(legCount) + ")",
+             tooltip = "Merged " + str.tostring(legCount) + " consecutive NEUTRAL legs into one range — none of them individually cleared the classification threshold.",
+             xloc = xloc.bar_index,
+             style = label.style_label_down,
+             color = color.new(neutralColorInput, 12),
+             textcolor = color.white,
+             size = size.tiny)
+        array.set(lastCompletedLabelBarBox, 0, endBar)
+
+    if not na(createdLabel)
+        array.push(completedLabels, createdLabel)
+    f_trimDrawings()
+
+// ============================================================================
+// Pivot detection and alternating pivot registration
+// ============================================================================
+float candidateHigh = ta.pivothigh(high, pivotLeftInput, pivotRightInput)
+float candidateLow = ta.pivotlow(low, pivotLeftInput, pivotRightInput)
+int candidateBar = bar_index - pivotRightInput
+
+bool hasHigh = not na(candidateHigh)
+bool hasLow = not na(candidateLow)
+
+int chosenType = 0
+float chosenPrice = na
+
+if hasHigh and hasLow
+    if array.size(pivotTypes) == 0
+        chosenType := math.abs(candidateHigh - close[pivotRightInput]) >= math.abs(close[pivotRightInput] - candidateLow) ? 1 : -1
+    else
+        int lastTypeForTie = array.get(pivotTypes, array.size(pivotTypes) - 1)
+        chosenType := -lastTypeForTie
+    chosenPrice := chosenType == 1 ? candidateHigh : candidateLow
+else if hasHigh
+    chosenType := 1
+    chosenPrice := candidateHigh
+else if hasLow
+    chosenType := -1
+    chosenPrice := candidateLow
+
+bool registeredNewPivot = false
+bool replacedLastPivot = false
+
+if chosenType != 0 and not na(chosenPrice)
+    int pivotCount = array.size(pivotBars)
+    if pivotCount == 0
+        array.push(pivotBars, candidateBar)
+        array.push(pivotPrices, chosenPrice)
+        array.push(pivotTypes, chosenType)
+        registeredNewPivot := true
+    else
+        int lastIndex = pivotCount - 1
+        int lastType = array.get(pivotTypes, lastIndex)
+        float lastPrice = array.get(pivotPrices, lastIndex)
+
+        if chosenType == lastType
+            bool isMoreExtreme = chosenType == 1 ? chosenPrice > lastPrice : chosenPrice < lastPrice
+            if isMoreExtreme
+                array.set(pivotBars, lastIndex, candidateBar)
+                array.set(pivotPrices, lastIndex, chosenPrice)
+                replacedLastPivot := true
+
+                if pendingWaveLegCount > 0
+                    // The extended pivot is the tail of an undrawn pending wave — nothing
+                    // was drawn for it yet, so there's nothing to delete. If it's extending
+                    // the wave's own tracked direction further, that's the new extreme (the
+                    // box's future end point); either way, stretch the vertical bounds.
+                    if chosenType == pendingWaveDirection
+                        pendingWaveExtremeBar := candidateBar
+                        pendingWaveExtremePrice := chosenPrice
+                    if chosenType == 1
+                        pendingWaveHigh := math.max(pendingWaveHigh, chosenPrice)
+                    else
+                        pendingWaveLow := math.min(pendingWaveLow, chosenPrice)
+                else
+                    // The last completed leg ended at this same-type pivot. Redraw it.
+                    // Use lastDrawnLegStartBar/Price (what was actually drawn), not
+                    // pivotBars[lastIndex-1] — a drawn box can span several original
+                    // pivots (a merged range or a whole-streak reclassified leg), so the
+                    // immediately-preceding individual pivot is not necessarily where the
+                    // last drawn box actually starts.
+                    if pivotCount >= 2 and not na(lastDrawnLegStartBar)
+                        f_deleteLastCompletedDrawing()
+                        f_drawCompletedLeg(lastDrawnLegStartBar, lastDrawnLegStartPrice, candidateBar, chosenPrice, array.new_int())
+        else
+            float atrAtPivot = atrSeries[pivotRightInput]
+            bool largeEnough = minLegAtrInput <= 0.0 or math.abs(chosenPrice - lastPrice) >= atrAtPivot * minLegAtrInput
+            if largeEnough and candidateBar > array.get(pivotBars, lastIndex)
+                array.push(pivotBars, candidateBar)
+                array.push(pivotPrices, chosenPrice)
+                array.push(pivotTypes, chosenType)
+                registeredNewPivot := true
+
+                int newCount = array.size(pivotBars)
+                int startBar = array.get(pivotBars, newCount - 2)
+                float startPrice = array.get(pivotPrices, newCount - 2)
+
+                int newLegDirection = chosenPrice >= startPrice ? 1 : -1
+                [newLegImpulse, newLegCorrection, newLegConfidence, newLegMaturity, newLegBars,
+                 newLegEfficiency, newLegOverlap, newLegRetracement, newLegCommitment, newLegWickClean,
+                 newLegMomentum, newLegTr, newLegMaSupport, newLegCleanliness, newLegAcceptance,
+                 newLegHigh, newLegLow, newLegSwings, newLegAvgSwingAtr,
+                 newLegProgression, newLegGrowth] = f_calculateLeg(startBar, startPrice, candidateBar, chosenPrice, newLegDirection, true)
+                int newLegClass = f_classify(newLegImpulse, newLegCorrection, newLegMaturity)
+
+                if not mergeCoherentLegsInput
+                    // Merging disabled: draw every leg individually, exactly as before v1.4.0.
+                    f_drawCompletedLeg(startBar, startPrice, candidateBar, chosenPrice, liveSegmentBars)
+                    lastDrawnLegStartBar := startBar
+                    lastDrawnLegStartPrice := startPrice
+                else if pendingWaveLegCount == 0
+                    // Seed a new pending wave — this leg's own direction is what the wave
+                    // will track new extremes in.
+                    pendingWaveStartBar := startBar
+                    pendingWaveStartPrice := startPrice
+                    pendingWaveDirection := newLegDirection
+                    pendingWaveExtremeBar := candidateBar
+                    pendingWaveExtremePrice := chosenPrice
+                    pendingWaveHigh := newLegHigh
+                    pendingWaveLow := newLegLow
+                    pendingWaveLegCount := 1
+                else if chosenType == pendingWaveDirection
+                    // This leg's pivot type matches the wave's tracked direction — only
+                    // absorb if it actually pushes the extreme further; a wave must always
+                    // end exactly at its true extreme, never past it.
+                    bool isNewExtreme = chosenType == 1 ? chosenPrice > pendingWaveExtremePrice : chosenPrice < pendingWaveExtremePrice
+                    if isNewExtreme
+                        pendingWaveExtremeBar := candidateBar
+                        pendingWaveExtremePrice := chosenPrice
+                        pendingWaveHigh := math.max(pendingWaveHigh, newLegHigh)
+                        pendingWaveLow := math.min(pendingWaveLow, newLegLow)
+                        pendingWaveLegCount := pendingWaveLegCount + 1
+                    else
+                        // The trend failed to extend further — flush the wave exactly at its
+                        // last real extreme (never past it), then start a fresh wave from
+                        // that same extreme point so the counter-swing leg(s) already
+                        // absorbed since then, plus this one, carry over with no time gap.
+                        int flushDirection = pendingWaveExtremePrice >= pendingWaveStartPrice ? 1 : -1
+                        [flushImpulse, flushCorrection, flushConfidence, flushMaturity, flushBars,
+                         flushEfficiency, flushOverlap, flushRetracement, flushCommitment, flushWickClean,
+                         flushMomentum, flushTr, flushMaSupport, flushCleanliness, flushAcceptance,
+                         flushHigh, flushLow, flushSwings, flushAvgSwingAtr,
+                         flushProgression, flushGrowth] = f_calculateLeg(pendingWaveStartBar, pendingWaveStartPrice, pendingWaveExtremeBar, pendingWaveExtremePrice, flushDirection, true)
+                        int flushClass = f_classify(flushImpulse, flushCorrection, flushMaturity)
+
+                        if flushClass == CLASS_NEUTRAL and pendingWaveLegCount >= minWaveLegsInput
+                            f_drawRangeBox(pendingWaveStartBar, pendingWaveExtremeBar, pendingWaveHigh, pendingWaveLow, pendingWaveLegCount)
+                        else
+                            f_drawCompletedLeg(pendingWaveStartBar, pendingWaveStartPrice, pendingWaveExtremeBar, pendingWaveExtremePrice, array.new_int())
+                        lastDrawnLegStartBar := pendingWaveStartBar
+                        lastDrawnLegStartPrice := pendingWaveStartPrice
+
+                        int newWaveDirection = chosenPrice >= pendingWaveExtremePrice ? 1 : -1
+                        [seedImpulse, seedCorrection, seedConfidence, seedMaturity, seedBars,
+                         seedEfficiency, seedOverlap, seedRetracement, seedCommitment, seedWickClean,
+                         seedMomentum, seedTr, seedMaSupport, seedCleanliness, seedAcceptance,
+                         seedHigh, seedLow, seedSwings, seedAvgSwingAtr,
+                         seedProgression, seedGrowth] = f_calculateLeg(pendingWaveExtremeBar, pendingWaveExtremePrice, candidateBar, chosenPrice, newWaveDirection, true)
+
+                        pendingWaveStartBar := pendingWaveExtremeBar
+                        pendingWaveStartPrice := pendingWaveExtremePrice
+                        pendingWaveDirection := newWaveDirection
+                        pendingWaveExtremeBar := candidateBar
+                        pendingWaveExtremePrice := chosenPrice
+                        pendingWaveHigh := seedHigh
+                        pendingWaveLow := seedLow
+                        pendingWaveLegCount := 1
+                else
+                    // Counter-swing leg (opposite type to the wave's tracked direction) —
+                    // just an internal wiggle inside the move. Absorb unconditionally
+                    // without moving the tracked extreme (that stays wherever the wave's
+                    // own direction last reached, per the rule above).
+                    pendingWaveHigh := math.max(pendingWaveHigh, newLegHigh)
+                    pendingWaveLow := math.min(pendingWaveLow, newLegLow)
+                    pendingWaveLegCount := pendingWaveLegCount + 1
+                array.clear(liveSegmentBars)
+                array.clear(liveSegmentClasses)
+
+                while array.size(pivotBars) > retainedLegsInput + 2
+                    array.shift(pivotBars)
+                    array.shift(pivotPrices)
+                    array.shift(pivotTypes)
+
+// Pivot markers are plotted at their actual pivot bars.
+plotshape(showPivotMarkersInput and hasHigh and chosenType == 1, title = "Confirmed pivot high",
+     style = shape.triangledown, location = location.abovebar, offset = -pivotRightInput,
+     color = color.new(color.gray, 20), size = size.tiny)
+plotshape(showPivotMarkersInput and hasLow and chosenType == -1, title = "Confirmed pivot low",
+     style = shape.triangleup, location = location.belowbar, offset = -pivotRightInput,
+     color = color.new(color.gray, 20), size = size.tiny)
+
+// ============================================================================
+// Live leg calculation and rendering
+// ============================================================================
+float liveImpulse = 50.0
+float liveCorrection = 50.0
+float liveConfidence = 0.0
+float liveMaturity = 0.0
+int liveBars = 0
+float liveEfficiency = 0.5
+float liveOverlap = 0.5
+float liveRetracement = 0.5
+float liveCommitment = 0.5
+float liveWickClean = 0.5
+float liveMomentumExpansion = 0.5
+float liveTrExpansion = 0.5
+float liveMaSupport = 0.5
+float liveCleanliness = 0.5
+float liveAcceptance = 0.5
+float liveHighestHigh = high
+float liveLowestLow = low
+int liveInternalSwings = 0
+float liveAvgInternalSwingAtr = 0.0
+float liveProgressionRatio = 1.0
+float liveSubLegGrowthRatio = 1.0
+int rawLiveClass = CLASS_NEUTRAL
+
+if array.size(pivotBars) > 0
+    int lastPivotIndex = array.size(pivotBars) - 1
+    int liveStartBar = array.get(pivotBars, lastPivotIndex)
+    float liveStartPrice = array.get(pivotPrices, lastPivotIndex)
+    int lastPivotType = array.get(pivotTypes, lastPivotIndex)
+    int liveDirection = lastPivotType == -1 ? 1 : -1
+    float liveEndPrice = liveDirection == 1 ? high : low
+
+    [calcImpulse, calcCorrection, calcConfidence, calcMaturity, calcBars,
+     calcEfficiency, calcOverlap, calcRetracement, calcCommitment, calcWickClean,
+     calcMomentumExpansion, calcTrExpansion, calcMaSupport, calcCleanliness, calcAcceptance,
+     calcHighestHigh, calcLowestLow, calcInternalSwings, calcAvgInternalSwingAtr,
+     calcProgressionRatio, calcSubLegGrowthRatio] = f_calculateLeg(liveStartBar, liveStartPrice, bar_index, liveEndPrice, liveDirection, false)
+
+    liveImpulse := calcImpulse
+    liveCorrection := calcCorrection
+    liveConfidence := calcConfidence
+    liveMaturity := calcMaturity
+    liveBars := calcBars
+    liveEfficiency := calcEfficiency
+    liveOverlap := calcOverlap
+    liveRetracement := calcRetracement
+    liveCommitment := calcCommitment
+    liveWickClean := calcWickClean
+    liveMomentumExpansion := calcMomentumExpansion
+    liveTrExpansion := calcTrExpansion
+    liveMaSupport := calcMaSupport
+    liveCleanliness := calcCleanliness
+    liveAcceptance := calcAcceptance
+    liveHighestHigh := calcHighestHigh
+    liveLowestLow := calcLowestLow
+    liveInternalSwings := calcInternalSwings
+    liveAvgInternalSwingAtr := calcAvgInternalSwingAtr
+    liveProgressionRatio := calcProgressionRatio
+    liveSubLegGrowthRatio := calcSubLegGrowthRatio
+    rawLiveClass := f_classify(liveImpulse, liveCorrection, liveMaturity)
+
+    // Hysteresis for the live class only.
+    previousLiveClassState := liveClassState
+    if liveClassState == CLASS_IMPULSE
+        bool keepImpulse = liveImpulse >= impulseThresholdInput - characterChangeBufferInput and liveImpulse >= liveCorrection
+        liveClassState := keepImpulse ? CLASS_IMPULSE : rawLiveClass
+    else if liveClassState == CLASS_CORRECTION
+        bool keepCorrection = liveCorrection >= correctionThresholdInput - characterChangeBufferInput and liveCorrection >= liveImpulse
+        liveClassState := keepCorrection ? CLASS_CORRECTION : rawLiveClass
+    else
+        liveClassState := rawLiveClass
+
+    // Track where the live leg's character changed, so the completed leg can be
+    // drawn as colored segments instead of one solid box (segment boundaries
+    // double as the character-change marker).
+    if array.size(liveSegmentClasses) == 0
+        array.push(liveSegmentBars, liveStartBar)
+        array.push(liveSegmentClasses, liveClassState)
+    else if array.get(liveSegmentClasses, array.size(liveSegmentClasses) - 1) != liveClassState and array.size(liveSegmentBars) < maxSegmentsPerLegInput
+        array.push(liveSegmentBars, bar_index)
+        array.push(liveSegmentClasses, liveClassState)
+
+    color liveEnvelopeColor = f_classColor(liveClassState, liveImpulse, liveCorrection, liveTransparencyInput)
+    color liveBorderColor = color.new(liveClassState == CLASS_IMPULSE ? impulseColorInput : liveClassState == CLASS_CORRECTION ? correctionColorInput : neutralColorInput, 20)
+
+    if showLiveLegInput
+        if na(liveBox)
+            liveBox := box.new(left = liveStartBar, top = liveHighestHigh, right = bar_index, bottom = liveLowestLow,
+                 xloc = xloc.bar_index, bgcolor = liveEnvelopeColor, border_color = liveBorderColor, border_width = 2)
+        else
+            box.set_left(liveBox, liveStartBar)
+            box.set_right(liveBox, bar_index)
+            box.set_top(liveBox, liveHighestHigh)
+            box.set_bottom(liveBox, liveLowestLow)
+            box.set_bgcolor(liveBox, liveEnvelopeColor)
+            box.set_border_color(liveBox, liveBorderColor)
+    else if not na(liveBox)
+        box.delete(liveBox)
+        liveBox := na
+
+    if showLiveLabelInput
+        float liveLabelPrice = liveDirection == 1 ? liveHighestHigh : liveLowestLow
+        string currentText = "LIVE · " + f_className(liveClassState)
+        string currentTooltip = f_labelTooltip(liveClassState, liveImpulse, liveCorrection, liveConfidence, liveBars,
+             liveEfficiency, liveOverlap, liveRetracement, liveCommitment, liveWickClean,
+             liveMomentumExpansion, liveTrExpansion, liveMaSupport, liveCleanliness, liveAcceptance,
+             liveInternalSwings, liveAvgInternalSwingAtr, liveProgressionRatio, liveSubLegGrowthRatio)
+        color currentLabelColor = color.new(liveClassState == CLASS_IMPULSE ? impulseColorInput : liveClassState == CLASS_CORRECTION ? correctionColorInput : neutralColorInput, 5)
+        if na(liveLabel)
+            liveLabel := label.new(x = bar_index, y = liveLabelPrice, text = currentText, tooltip = currentTooltip,
+                 xloc = xloc.bar_index,
+                 style = liveDirection == 1 ? label.style_label_down : label.style_label_up,
+                 color = currentLabelColor, textcolor = color.white, size = size.small)
+        else
+            label.set_x(liveLabel, bar_index)
+            label.set_y(liveLabel, liveLabelPrice)
+            label.set_text(liveLabel, currentText)
+            label.set_tooltip(liveLabel, currentTooltip)
+            label.set_style(liveLabel, liveDirection == 1 ? label.style_label_down : label.style_label_up)
+            label.set_color(liveLabel, currentLabelColor)
+    else if not na(liveLabel)
+        label.delete(liveLabel)
+        liveLabel := na
+else
+    if not na(liveBox)
+        box.delete(liveBox)
+        liveBox := na
+    if not na(liveLabel)
+        label.delete(liveLabel)
+        liveLabel := na
+
+color liveCandleColor = liveClassState == CLASS_IMPULSE ? color.new(impulseColorInput, candleTransparencyInput) :
+     liveClassState == CLASS_CORRECTION ? color.new(correctionColorInput, candleTransparencyInput) :
+     color.new(neutralColorInput, candleTransparencyInput)
+barcolor(tintLiveCandlesInput and array.size(pivotBars) > 0 ? liveCandleColor : na, title = "Live leg character tint")
+plot(showSupportMaInput ? supportMaSeries : na, "Support MA", color = color.new(color.silver, 25), linewidth = 1)
+
+// ============================================================================
+// Data Window outputs
+// ============================================================================
+plot(exposeDataWindowInput ? liveImpulse : na, "Live Impulse Score", display = display.data_window)
+plot(exposeDataWindowInput ? liveCorrection : na, "Live Correction Score", display = display.data_window)
+plot(exposeDataWindowInput ? liveConfidence : na, "Live Classification Confidence", display = display.data_window)
+plot(exposeDataWindowInput ? liveEfficiency * 100.0 : na, "DNA · Efficiency", display = display.data_window)
+plot(exposeDataWindowInput ? liveOverlap * 100.0 : na, "DNA · Overlap", display = display.data_window)
+plot(exposeDataWindowInput ? liveRetracement * 100.0 : na, "DNA · Retracement pressure", display = display.data_window)
+plot(exposeDataWindowInput ? liveCommitment * 100.0 : na, "DNA · Commitment", display = display.data_window)
+plot(exposeDataWindowInput ? liveWickClean * 100.0 : na, "DNA · Wick cleanliness", display = display.data_window)
+plot(exposeDataWindowInput ? liveMomentumExpansion * 100.0 : na, "DNA · Momentum expansion", display = display.data_window)
+plot(exposeDataWindowInput ? liveTrExpansion * 100.0 : na, "DNA · True-range expansion", display = display.data_window)
+plot(exposeDataWindowInput ? liveMaSupport * 100.0 : na, "DNA · MA support", display = display.data_window)
+plot(exposeDataWindowInput ? liveCleanliness * 100.0 : na, "DNA · Direction cleanliness", display = display.data_window)
+plot(exposeDataWindowInput ? liveAcceptance * 100.0 : na, "DNA · Acceptance", display = display.data_window)
+plot(exposeDataWindowInput ? liveClassState : na, "Live Class (-1 correction / 0 neutral / 1 impulse)", display = display.data_window)
+plot(exposeDataWindowInput ? liveInternalSwings : na, "DNA · Internal sub-swing count", display = display.data_window)
+plot(exposeDataWindowInput ? liveAvgInternalSwingAtr : na, "DNA · Average internal sub-swing size (ATR)", display = display.data_window)
+plot(exposeDataWindowInput ? liveProgressionRatio * 100.0 : na, "DNA · Progression-to-rotation ratio", display = display.data_window)
+plot(exposeDataWindowInput ? liveSubLegGrowthRatio : na, "DNA · Sub-swing growth ratio (2nd half / 1st half)", display = display.data_window)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+bool becameImpulse = liveClassState == CLASS_IMPULSE and previousLiveClassState != CLASS_IMPULSE
+bool becameCorrection = liveClassState == CLASS_CORRECTION and previousLiveClassState != CLASS_CORRECTION
+bool lostCharacter = liveClassState == CLASS_NEUTRAL and previousLiveClassState != CLASS_NEUTRAL
+bool alertGateOk = not alertsOnCloseOnlyInput or barstate.isconfirmed
+
+alertcondition(alertOnLiveImpulseInput and becameImpulse and alertGateOk, "Motion DNA · Live leg became impulsive",
+     "The current live pivot-to-price leg became impulsive on {{ticker}} {{interval}}.")
+alertcondition(alertOnLiveCorrectionInput and becameCorrection and alertGateOk, "Motion DNA · Live leg became corrective",
+     "The current live pivot-to-price leg became corrective on {{ticker}} {{interval}}.")
+alertcondition(alertOnCharacterLossInput and lostCharacter and alertGateOk, "Motion DNA · Live leg lost character",
+     "The current live pivot-to-price leg returned to neutral on {{ticker}} {{interval}}.")

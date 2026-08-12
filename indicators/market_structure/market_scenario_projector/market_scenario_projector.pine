@@ -1,0 +1,1327 @@
+//@version=6
+// ============================================================================
+// Market Scenario Projector [WavesUnchained]
+// Version: 0.6.7
+// Author: WavesUnchained
+// Build: 2026-08-12 00:00:00
+// ============================================================================
+// Scores the current impulse, swing structure, nearest decision zone and
+// rejection evidence into three forward scenarios (direct continuation,
+// pullback-then-continuation, structural failure) and draws their projected
+// paths as a dominance-ranked scenario tree from a single origin. Optionally
+// records each case's entry features + eventual outcome for offline
+// calibration of the currently heuristic scenario weights.
+//
+// Features:
+//   ✓ Impulse strength, path efficiency and acceleration/deceleration scoring
+//   ✓ Swing structure bias (HH/HL vs LH/LL) from stored pivots
+//   ✓ Lookback-bounded support/resistance zone clustering with recency-weighted quality
+//   ✓ Candle-based rejection/exhaustion evidence at the barrier (wick, failed close, body compression)
+//   ✓ Pullback zone from three converging references (structural / ATR / impulse Fib retracement)
+//   ✓ Three weighted scenario scores (Direct / Pullback / Failure), normalized to 100%
+//   ✓ Scenario tree from one origin point — the single highest-weight scenario draws thick and
+//     opaque, the other two thin and faded, below-threshold scenarios hidden entirely
+//   ✓ Barrier and pullback zones drawn as shaded boxes, not just single price lines
+//   ✓ Optional outcome recorder — tracks each fresh setup bar-by-bar to Direct/Pullback/
+//     Failure/Unresolved resolution and logs entry features + outcome via log.info()
+//   ✓ Dark, fully opaque scenario labels with bright accent text and direction/scenario symbols
+//     (▲▼ ↩ ✕) for at-a-glance reading, Context shown as a block-character progress bar
+//   ✓ Summary label background blends from neutral to saturated green/red with setup strength
+//   ✓ Context gate — no projection is drawn below a minimum score
+//   ✓ Optional internal metrics readout for debugging scenario weights
+//
+// ============================================================================
+
+indicator(
+    "Market Scenario Projector [WavesUnchained]",
+    shorttitle = "Scenario Projector",
+    overlay = true,
+    max_lines_count = 100,
+    max_labels_count = 100,
+    max_boxes_count = 50,
+    max_bars_back = 5000
+)
+// ============================================================================
+// 01 · ANALYSIS
+// ============================================================================
+groupAnalysis = "01 · Analysis"
+impulseLength = input.int(
+    12,
+    "Impulse Length",
+    minval = 4,
+    maxval = 100,
+    group = groupAnalysis,
+    tooltip =
+        "Number of bars used to evaluate the currently active movement.\n\n" +
+        "Smaller values react faster.\n" +
+        "Larger values evaluate broader movements."
+)
+atrLength = input.int(
+    14,
+    "ATR Length",
+    minval = 5,
+    maxval = 100,
+    group = groupAnalysis
+)
+analysisLookback = input.int(
+    250,
+    "Structure Lookback",
+    minval = 50,
+    maxval = 1000,
+    group = groupAnalysis,
+    tooltip =
+        "Only pivots inside this historical window are considered relevant.\n\n" +
+        "This prevents old support/resistance levels from dominating the analysis."
+)
+minimumSetupScore = input.float(
+    45.0,
+    "Minimum Context Quality",
+    minval = 0,
+    maxval = 100,
+    step = 1,
+    group = groupAnalysis,
+    tooltip =
+        "Scenario projections are only shown if the current market context reaches " +
+        "this minimum score. This is not a trade-quality or probability measure."
+)
+// ============================================================================
+// 02 · SWING STRUCTURE
+// ============================================================================
+groupStructure = "02 · Swing Structure"
+pivotLeft = input.int(
+    4,
+    "Pivot Left",
+    minval = 1,
+    maxval = 50,
+    group = groupStructure
+)
+pivotRight = input.int(
+    4,
+    "Pivot Right",
+    minval = 1,
+    maxval = 50,
+    group = groupStructure
+)
+maxStoredPivots = input.int(
+    60,
+    "Maximum Stored Pivots",
+    minval = 10,
+    maxval = 200,
+    group = groupStructure
+)
+// ============================================================================
+// 03 · LEVEL ENGINE
+// ============================================================================
+groupLevels = "03 · Support / Resistance"
+maxLevelDistanceATR = input.float(
+    6.0,
+    "Maximum Level Distance ATR",
+    minval = 0.5,
+    maxval = 20,
+    step = 0.25,
+    group = groupLevels,
+    tooltip =
+        "Levels farther away than this ATR distance are ignored."
+)
+levelZoneATR = input.float(
+    0.20,
+    "Level Cluster Width ATR",
+    minval = 0.05,
+    maxval = 1.0,
+    step = 0.05,
+    group = groupLevels,
+    tooltip =
+        "Nearby pivot levels are treated as belonging to the same structural zone."
+)
+levelRecencyInfluence = input.float(
+    0.3,
+    "Level Recency Influence",
+    minval = 0.0,
+    maxval = 1.0,
+    step = 0.05,
+    group = groupLevels,
+    tooltip =
+        "0 = every touch inside a zone counts equally regardless of age.\n" +
+        "1 = only recent touches (within roughly half the Structure Lookback) count meaningfully."
+)
+requireBarrier = input.bool(
+    true,
+    "Require Nearby Decision Level",
+    group = groupLevels,
+    tooltip =
+        "When enabled, scenarios are only projected if a relevant resistance " +
+        "or support exists in the current movement direction."
+)
+// ============================================================================
+// 04 · REJECTION EVIDENCE
+// ============================================================================
+groupRejection = "04 · Rejection Evidence"
+rejectionLookback = input.int(
+    3,
+    "Rejection Lookback Bars",
+    minval = 1,
+    maxval = 10,
+    group = groupRejection,
+    tooltip =
+        "Number of recent bars checked for wick rejection, failed closes and " +
+        "body compression at the current barrier."
+)
+rejectionZoneATR = input.float(
+    0.35,
+    "Rejection Touch Distance ATR",
+    minval = 0.05,
+    maxval = 2.0,
+    step = 0.05,
+    group = groupRejection,
+    tooltip =
+        "How close a bar's high/low must come to the barrier to count as a touch " +
+        "for rejection evidence."
+)
+// ============================================================================
+// 05 · SCENARIO PROJECTION
+// ============================================================================
+groupProjection = "05 · Projection"
+projectionBars = input.int(
+    30,
+    "Projection Bars",
+    minval = 5,
+    maxval = 100,
+    group = groupProjection
+)
+decisionBars = input.int(
+    8,
+    "Decision Point Bars",
+    minval = 2,
+    maxval = 50,
+    group = groupProjection,
+    tooltip =
+        "Approximate horizontal distance where the projected breakout or pullback " +
+        "decision occurs."
+)
+fallbackTargetATR = input.float(
+    2.0,
+    "Fallback Target ATR",
+    minval = 0.25,
+    maxval = 10,
+    step = 0.25,
+    group = groupProjection
+)
+fallbackPullbackATR = input.float(
+    1.0,
+    "Fallback Pullback ATR",
+    minval = 0.25,
+    maxval = 5,
+    step = 0.25,
+    group = groupProjection
+)
+impulseRetracementRatio = input.float(
+    0.382,
+    "Impulse Retracement Ratio",
+    minval = 0.1,
+    maxval = 0.9,
+    step = 0.01,
+    group = groupProjection,
+    tooltip =
+        "Fib-style retracement of the current impulse move, used as one of three " +
+        "candidates (with structural support/resistance and Fallback Pullback ATR) " +
+        "that define the pullback zone."
+)
+minimumScenarioWeight = input.float(
+    8,
+    "Minimum Scenario Weight %",
+    minval = 0,
+    maxval = 50,
+    step = 1,
+    group = groupProjection
+)
+minimumDominanceGap = input.float(
+    8.0,
+    "Minimum Dominance Gap %",
+    minval = 0,
+    maxval = 50,
+    step = 1,
+    group = groupProjection,
+    tooltip =
+        "The leading scenario must exceed the second-highest scenario by this " +
+        "many percentage points before it is drawn as visually dominant.\n\n" +
+        "Smaller gaps are shown as a mixed scenario state."
+)
+// ============================================================================
+// 06 · DISPLAY
+// ============================================================================
+groupDisplay = "06 · Display"
+showDirect = input.bool(
+    true,
+    "Direct Continuation",
+    group = groupDisplay
+)
+showPullback = input.bool(
+    true,
+    "Pullback Continuation",
+    group = groupDisplay
+)
+showFailure = input.bool(
+    true,
+    "Failure Scenario",
+    group = groupDisplay
+)
+showLevels = input.bool(
+    true,
+    "Show Decision Levels",
+    group = groupDisplay
+)
+showSummary = input.bool(
+    true,
+    "Show Scenario Summary",
+    group = groupDisplay
+)
+showDebugMetrics = input.bool(
+    false,
+    "Show Internal Metrics",
+    group = groupDisplay
+)
+// ============================================================================
+// 07 · DATA RECORDER
+// ============================================================================
+groupRecorder = "07 · Data Recorder"
+enableRecorder = input.bool(
+    false,
+    "Enable Outcome Recorder (Pine Logs)",
+    group = groupRecorder,
+    tooltip =
+        "Tracks every fresh setup forward bar-by-bar until it resolves as Direct / " +
+        "Pullback / Failure / Unresolved (resolution window = Projection Bars), then " +
+        "logs the entry feature scores + outcome via log.info() for offline " +
+        "calibration analysis (see todo.md). Off by default to avoid log noise — " +
+        "only enable while deliberately collecting data on a chart."
+)
+// ============================================================================
+// OUTCOME RECORDER TYPE
+// ============================================================================
+type ScenarioCase
+    int   startBar
+    int   direction
+    float targetLevel
+    float failureLevel
+    float pullbackLow
+    float pullbackHigh
+    bool  enteredPullback
+    float impulseAtEntry
+    float efficiencyAtEntry
+    float accelerationAtEntry
+    float structureAtEntry
+    float levelQualityAtEntry
+    float rejectionAtEntry
+    float setupQualityAtEntry
+    float directWeightAtEntry
+    float pullbackWeightAtEntry
+    float failureWeightAtEntry
+    float dominanceGapAtEntry
+    float targetDistanceATRAtEntry
+    float failureDistanceATRAtEntry
+    float pullbackDepthATRAtEntry
+    float pullbackZoneWidthATRAtEntry
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_clamp(float value, float minimum, float maximum) =>
+    math.max(minimum, math.min(maximum, value))
+f_bar(float value, float maxValue, int segments) =>
+    int filled = int(math.round(f_clamp(value / maxValue, 0.0, 1.0) * segments))
+    string bar = ""
+    for i = 0 to segments - 1
+        bar += i < filled ? "▰" : "▱"
+    bar
+f_efficiency(int length) =>
+    float path = 0.0
+    for i = 0 to length - 1
+        path += math.abs(close[i] - close[i + 1])
+    float displacement = math.abs(close - close[length])
+    path > 0 ? displacement / path : 0.0
+// ============================================================================
+// PIVOT STORAGE
+// ============================================================================
+var array<float> pivotHighPrices = array.new_float()
+var array<int>   pivotHighBars   = array.new_int()
+var array<float> pivotLowPrices = array.new_float()
+var array<int>   pivotLowBars   = array.new_int()
+pivotHigh = ta.pivothigh(
+    high,
+    pivotLeft,
+    pivotRight
+)
+pivotLow = ta.pivotlow(
+    low,
+    pivotLeft,
+    pivotRight
+)
+if not na(pivotHigh)
+    array.push(
+        pivotHighPrices,
+        pivotHigh
+    )
+    array.push(
+        pivotHighBars,
+        bar_index - pivotRight
+    )
+if not na(pivotLow)
+    array.push(
+        pivotLowPrices,
+        pivotLow
+    )
+    array.push(
+        pivotLowBars,
+        bar_index - pivotRight
+    )
+// Limit total number of pivots.
+while array.size(pivotHighPrices) > maxStoredPivots
+    array.shift(pivotHighPrices)
+    array.shift(pivotHighBars)
+while array.size(pivotLowPrices) > maxStoredPivots
+    array.shift(pivotLowPrices)
+    array.shift(pivotLowBars)
+// Remove historically irrelevant pivots.
+while array.size(pivotHighBars) > 0 and array.get(pivotHighBars, 0) < bar_index - analysisLookback
+    array.shift(pivotHighPrices)
+    array.shift(pivotHighBars)
+while array.size(pivotLowBars) > 0 and array.get(pivotLowBars, 0) < bar_index - analysisLookback
+    array.shift(pivotLowPrices)
+    array.shift(pivotLowBars)
+// ============================================================================
+// LEVEL SEARCH FUNCTIONS
+// ============================================================================
+f_nearest_above(
+    float currentPrice,
+    float maximumDistance
+) =>
+    float result = na
+    int size = array.size(pivotHighPrices)
+    if size > 0
+        for i = 0 to size - 1
+            float level = array.get(
+                pivotHighPrices,
+                i
+            )
+            float distance = level - currentPrice
+            if distance > 0 and distance <= maximumDistance
+                if na(result) or level < result
+                    result := level
+    result
+f_nearest_below(
+    float currentPrice,
+    float maximumDistance
+) =>
+    float result = na
+    int size = array.size(pivotLowPrices)
+    if size > 0
+        for i = 0 to size - 1
+            float level = array.get(
+                pivotLowPrices,
+                i
+            )
+            float distance = currentPrice - level
+            if distance > 0 and distance <= maximumDistance
+                if na(result) or level > result
+                    result := level
+    result
+f_next_high(
+    float currentLevel,
+    float minimumSeparation,
+    float maximumDistance
+) =>
+    float result = na
+    int size = array.size(pivotHighPrices)
+    if size > 0
+        for i = 0 to size - 1
+            float candidate = array.get(
+                pivotHighPrices,
+                i
+            )
+            float distance = candidate - currentLevel
+            if distance > minimumSeparation and distance <= maximumDistance
+                if na(result) or candidate < result
+                    result := candidate
+    result
+f_next_low(
+    float currentLevel,
+    float minimumSeparation,
+    float maximumDistance
+) =>
+    float result = na
+    int size = array.size(pivotLowPrices)
+    if size > 0
+        for i = 0 to size - 1
+            float candidate = array.get(
+                pivotLowPrices,
+                i
+            )
+            float distance = currentLevel - candidate
+            if distance > minimumSeparation and distance <= maximumDistance
+                if na(result) or candidate > result
+                    result := candidate
+    result
+// ============================================================================
+// LEVEL QUALITY / ZONE CLUSTERING
+//
+// Clusters every stored pivot within zoneWidth of the anchor level into one
+// zone (zoneLow/zoneHigh) and scores it by recency-weighted touch count
+// instead of a flat count, so a level tested 7 times long ago doesn't score
+// the same as one tested 7 times recently (levelRecencyInfluence input).
+// ============================================================================
+f_level_quality(
+    array<float> prices,
+    array<int> bars,
+    float level,
+    float zoneWidth,
+    float recencyInfluence,
+    float recencyHalfLife
+) =>
+    float quality = 0.0
+    float zoneLow = na
+    float zoneHigh = na
+    if not na(level)
+        float weightedTouches = 0.0
+        int size = array.size(prices)
+        if size > 0
+            for i = 0 to size - 1
+                float candidate = array.get(prices, i)
+                if math.abs(candidate - level) <= zoneWidth
+                    int touchBar = array.get(bars, i)
+                    int age = bar_index - touchBar
+                    float recencyWeight = 1.0 - recencyInfluence + recencyInfluence * math.pow(0.5, age / recencyHalfLife)
+                    weightedTouches += recencyWeight
+                    zoneLow := na(zoneLow) ? candidate : math.min(zoneLow, candidate)
+                    zoneHigh := na(zoneHigh) ? candidate : math.max(zoneHigh, candidate)
+        quality := f_clamp(weightedTouches / 3.0, 0.0, 1.0)
+    [quality, zoneLow, zoneHigh]
+// ============================================================================
+// REJECTION / EXHAUSTION EVIDENCE
+//
+// Scores the last `lookback` bars for evidence that price is being turned
+// away from `level` right now: wick rejection, closes that fail to hold
+// beyond the level, and shrinking bodies (exhaustion). Direction-agnostic —
+// dir > 0 checks rejection from above (resistance), dir < 0 from below
+// (support), so the same function serves both barrier sides.
+// ============================================================================
+f_rejection_score(
+    int dir,
+    float level,
+    float tolerance,
+    int lookback
+) =>
+    float score = 0.0
+    if not na(level) and lookback > 0
+        float wickSum = 0.0
+        float bodySum = 0.0
+        int touchCount = 0
+        int failCount = 0
+        for i = 0 to lookback - 1
+            float barHigh = high[i]
+            float barLow = low[i]
+            float barOpen = open[i]
+            float barClose = close[i]
+            float barRange = barHigh - barLow
+            if barRange > 0
+                bool touched = dir > 0 ? barHigh >= level - tolerance : barLow <= level + tolerance
+                if touched
+                    touchCount += 1
+                    bodySum += math.abs(barClose - barOpen) / barRange
+                    float wick = dir > 0 ? barHigh - math.max(barOpen, barClose) : math.min(barOpen, barClose) - barLow
+                    wickSum += wick / barRange
+                    bool failedClose = dir > 0 ? barClose < level : barClose > level
+                    if failedClose
+                        failCount += 1
+        if touchCount > 0
+            float avgWick = wickSum / touchCount
+            float failRatio = failCount / touchCount
+            float avgBody = bodySum / touchCount
+            float compression = f_clamp(1.0 - avgBody / 0.6, 0.0, 1.0)
+            score := f_clamp(avgWick * 0.4 + failRatio * 0.4 + compression * 0.2, 0.0, 1.0)
+    score
+// ============================================================================
+// STRUCTURE ENGINE
+// ============================================================================
+float structureBias = 0.0
+int highCount = array.size(pivotHighPrices)
+int lowCount  = array.size(pivotLowPrices)
+if highCount >= 2 and lowCount >= 2
+    float latestHigh = array.get(
+        pivotHighPrices,
+        highCount - 1
+    )
+    float previousHigh = array.get(
+        pivotHighPrices,
+        highCount - 2
+    )
+    float latestLow = array.get(
+        pivotLowPrices,
+        lowCount - 1
+    )
+    float previousLow = array.get(
+        pivotLowPrices,
+        lowCount - 2
+    )
+    bool higherHigh = latestHigh > previousHigh
+    bool higherLow  = latestLow > previousLow
+    bool lowerHigh = latestHigh < previousHigh
+    bool lowerLow  = latestLow < previousLow
+    if higherHigh and higherLow
+        structureBias := 1.0
+    else if lowerHigh and lowerLow
+        structureBias := -1.0
+    else if higherLow
+        structureBias := 0.5
+    else if lowerHigh
+        structureBias := -0.5
+    else
+        structureBias := 0.0
+// ============================================================================
+// IMPULSE ENGINE
+// ============================================================================
+atr = ta.atr(
+    atrLength
+)
+enoughHistory = bar_index > impulseLength * 2 + atrLength
+float rawMove = enoughHistory ? close - close[impulseLength] : 0.0
+int direction = rawMove >= 0 ? 1 : -1
+float moveATR = atr > 0 ? math.abs(rawMove) / atr : 0.0
+float impulseStrength = f_clamp(
+    (moveATR - 0.35) / 2.65,
+    0.0,
+    1.0
+)
+// ============================================================================
+// EFFICIENCY
+// ============================================================================
+float efficiency = enoughHistory ? f_efficiency(impulseLength) : 0.0
+// ============================================================================
+// ACCELERATION / DECELERATION
+// ============================================================================
+int halfLength = math.max(
+    2,
+    int(math.floor(impulseLength / 2))
+)
+float recentVelocity = 0.0
+float previousVelocity = 0.0
+if enoughHistory and atr > 0
+    recentVelocity := direction * (close - close[halfLength]) / (halfLength * atr)
+    previousVelocity := direction * (close[halfLength] - close[halfLength * 2]) / (halfLength * atr)
+float accelerationDelta = recentVelocity - previousVelocity
+float accelerationScore = f_clamp(
+    0.5 + accelerationDelta * 1.5,
+    0.0,
+    1.0
+)
+// ============================================================================
+// STRUCTURE ALIGNMENT WITH CURRENT DIRECTION
+// ============================================================================
+float alignment = structureBias * direction
+float structureScore = 0.5
+if alignment >= 1.0
+    structureScore := 1.0
+else if alignment >= 0.5
+    structureScore := 0.75
+else if alignment <= -1.0
+    structureScore := 0.0
+else if alignment <= -0.5
+    structureScore := 0.25
+else
+    structureScore := 0.5
+// ============================================================================
+// LEVEL ENGINE
+// ============================================================================
+float maxDistance = atr * maxLevelDistanceATR
+float clusterWidth = atr * levelZoneATR
+float resistance = f_nearest_above(
+    close,
+    maxDistance
+)
+float support = f_nearest_below(
+    close,
+    maxDistance
+)
+float barrier = direction > 0 ? resistance : support
+float pullbackLevel = direction > 0 ? support : resistance
+float recencyHalfLife = analysisLookback * 0.5
+float barrierQuality = 0.0
+float barrierZoneLow = na
+float barrierZoneHigh = na
+if direction > 0
+    [q, zLow, zHigh] = f_level_quality(pivotHighPrices, pivotHighBars, barrier, clusterWidth, levelRecencyInfluence, recencyHalfLife)
+    barrierQuality := q
+    barrierZoneLow := zLow
+    barrierZoneHigh := zHigh
+else
+    [q, zLow, zHigh] = f_level_quality(pivotLowPrices, pivotLowBars, barrier, clusterWidth, levelRecencyInfluence, recencyHalfLife)
+    barrierQuality := q
+    barrierZoneLow := zLow
+    barrierZoneHigh := zHigh
+float barrierDistanceATR = not na(barrier) and atr > 0 ? math.abs(barrier - close) / atr : maxLevelDistanceATR
+float proximityScore = not na(barrier) ? 1.0 - f_clamp(barrierDistanceATR / maxLevelDistanceATR, 0.0, 1.0) : 0.0
+float rejectionScore = f_rejection_score(direction, barrier, atr * rejectionZoneATR, rejectionLookback)
+// ============================================================================
+// TARGET ENGINE
+// ============================================================================
+float nextTarget = na
+if direction > 0
+    if not na(barrier)
+        nextTarget := f_next_high(
+            barrier,
+            clusterWidth,
+            maxDistance
+        )
+        if na(nextTarget)
+            nextTarget := barrier + fallbackTargetATR * atr
+    else
+        nextTarget := close + fallbackTargetATR * atr
+else
+    if not na(barrier)
+        nextTarget := f_next_low(
+            barrier,
+            clusterWidth,
+            maxDistance
+        )
+        if na(nextTarget)
+            nextTarget := barrier - fallbackTargetATR * atr
+    else
+        nextTarget := close - fallbackTargetATR * atr
+// ============================================================================
+// PULLBACK ZONE
+//
+// Three candidate pullback references (structural support/resistance, ATR-
+// expected retracement, impulse Fib retracement) converge on one zone instead
+// of a single point. `projectedPullback` stays the anchor price used by the
+// existing target/failure search — prefers the structural candidate when one
+// exists, otherwise the midpoint of the two fallback estimates.
+// ============================================================================
+float structuralPullback = pullbackLevel
+float atrPullback = close - direction * fallbackPullbackATR * atr
+float impulsePullback = close - direction * impulseRetracementRatio * math.abs(rawMove)
+float pullbackZoneLow = math.min(atrPullback, impulsePullback)
+float pullbackZoneHigh = math.max(atrPullback, impulsePullback)
+if not na(structuralPullback)
+    pullbackZoneLow := math.min(pullbackZoneLow, structuralPullback)
+    pullbackZoneHigh := math.max(pullbackZoneHigh, structuralPullback)
+float projectedPullback = not na(structuralPullback) ? structuralPullback : (atrPullback + impulsePullback) / 2.0
+// ============================================================================
+// FAILURE TARGET
+// ============================================================================
+float failureTarget = na
+if direction > 0
+    float reference = projectedPullback
+    failureTarget := f_next_low(
+        reference,
+        clusterWidth,
+        maxDistance
+    )
+    if na(failureTarget)
+        failureTarget := reference - fallbackTargetATR * atr
+else
+    float reference = projectedPullback
+    failureTarget := f_next_high(
+        reference,
+        clusterWidth,
+        maxDistance
+    )
+    if na(failureTarget)
+        failureTarget := reference + fallbackTargetATR * atr
+// ============================================================================
+// SCENARIO ENGINE
+//
+// IMPORTANT:
+// These are heuristic scores, not historically calibrated probabilities.
+// The calibration work (objective outcome definition, historical scenario
+// recorder, conditional probability buckets) is tracked in todo.md.
+// ============================================================================
+// Direct continuation likes:
+// - strong impulse
+// - high efficiency
+// - acceleration
+// - aligned structure
+// - weak barrier
+// - nearby decision point
+// - no fresh rejection evidence at the barrier
+float directScore = (
+      impulseStrength * 0.24
+    + efficiency      * 0.19
+    + accelerationScore * 0.17
+    + structureScore * 0.15
+    + (1.0 - barrierQuality) * 0.06
+    + proximityScore * 0.04
+    + (1.0 - rejectionScore) * 0.15
+)
+// Pullback continuation likes:
+// - bullish/bearish structural alignment
+// - healthy underlying impulse
+// - some directional efficiency
+// - deceleration near a level
+// - strong barrier
+// - nearby decision point
+// - some rejection evidence at the barrier
+float pullbackScore = (
+      structureScore * 0.19
+    + impulseStrength * 0.15
+    + efficiency * 0.10
+    + (1.0 - accelerationScore) * 0.15
+    + barrierQuality * 0.15
+    + proximityScore * 0.11
+    + rejectionScore * 0.15
+)
+// Failure likes:
+// - poor structure
+// - weak impulse
+// - inefficient movement
+// - deceleration
+// - strong opposing barrier
+// - strong rejection evidence at the barrier
+float failureScore = (
+      (1.0 - structureScore) * 0.26
+    + (1.0 - impulseStrength) * 0.17
+    + (1.0 - efficiency) * 0.13
+    + (1.0 - accelerationScore) * 0.17
+    + barrierQuality * 0.12
+    + rejectionScore * 0.15
+)
+float totalScenarioScore = directScore + pullbackScore + failureScore
+float directWeight = totalScenarioScore > 0 ? directScore / totalScenarioScore * 100 : 0
+float pullbackWeight = totalScenarioScore > 0 ? pullbackScore / totalScenarioScore * 100 : 0
+float failureWeight = totalScenarioScore > 0 ? failureScore / totalScenarioScore * 100 : 0
+float dominantScenarioWeight = math.max(directWeight, math.max(pullbackWeight, failureWeight))
+float secondHighestScenarioWeight = math.max(
+    math.min(directWeight, pullbackWeight),
+    math.max(
+        math.min(directWeight, failureWeight),
+        math.min(pullbackWeight, failureWeight)
+    )
+)
+float dominanceGap = dominantScenarioWeight - secondHighestScenarioWeight
+float targetDistanceATR = atr > 0 ? direction * (nextTarget - close) / atr : na
+float failureDistanceATR = atr > 0 ? direction * (close - failureTarget) / atr : na
+float pullbackDepthATR = atr > 0 ? direction * (close - projectedPullback) / atr : na
+float pullbackZoneWidthATR = atr > 0 ? (pullbackZoneHigh - pullbackZoneLow) / atr : na
+// ============================================================================
+// GLOBAL SETUP QUALITY
+// ============================================================================
+float setupQuality = 100 * (
+      impulseStrength * 0.30
+    + efficiency * 0.20
+    + structureScore * 0.20
+    + proximityScore * 0.15
+    + barrierQuality * 0.15
+)
+bool validLevel = not requireBarrier or not na(barrier)
+bool validSetup = enoughHistory and validLevel and setupQuality >= minimumSetupScore
+// ============================================================================
+// OUTCOME RECORDER (v0.5 objective outcome definition + v0.6 recorder)
+//
+// Runs on every confirmed bar, not just barstate.islast — no lookahead. A
+// fresh case is opened when validSetup turns true (or direction flips) and
+// tracked forward bar-by-bar using only that bar's own OHLC plus state
+// carried over from earlier bars, exactly like a discretionary trader would
+// watch a setup play out. Resolution priority within a single bar (documented
+// approximation — Pine has no intrabar sequencing): Failure > Pullback-touch
+// > Target, i.e. the pessimistic reading wins when a single bar's range could
+// support more than one reading at once.
+// ============================================================================
+var array<ScenarioCase> pendingCases = array.new<ScenarioCase>()
+// Resolve existing cases first, using ONLY this bar's OHLC — a case created
+// this same bar is appended afterward and only starts being checked from the
+// next bar onward (standard "signal closes, tracking starts next bar"
+// convention, not an artifact of evaluation order).
+if enableRecorder and barstate.isconfirmed and array.size(pendingCases) > 0
+    array<ScenarioCase> stillPending = array.new<ScenarioCase>()
+    for i = 0 to array.size(pendingCases) - 1
+        ScenarioCase c = array.get(pendingCases, i)
+        int age = bar_index - c.startBar
+        bool touchedFailure = c.direction > 0 ? low <= c.failureLevel : high >= c.failureLevel
+        bool touchedPullback = high >= c.pullbackLow and low <= c.pullbackHigh
+        bool touchedTarget = c.direction > 0 ? high >= c.targetLevel : low <= c.targetLevel
+        if touchedPullback and not touchedFailure
+            c.enteredPullback := true
+        string outcome = na
+        if touchedFailure
+            outcome := "Failure"
+        else if touchedTarget
+            outcome := c.enteredPullback ? "Pullback" : "Direct"
+        else if age >= projectionBars
+            outcome := "Unresolved"
+        if not na(outcome)
+            log.info(
+                 "MSP CASE outcome=" + outcome +
+                 " startBar=" + str.tostring(c.startBar) +
+                 " dir=" + str.tostring(c.direction) +
+                 " barsToResolve=" + str.tostring(age) +
+                 " impulse=" + str.tostring(c.impulseAtEntry, "#.###") +
+                 " efficiency=" + str.tostring(c.efficiencyAtEntry, "#.###") +
+                 " accel=" + str.tostring(c.accelerationAtEntry, "#.###") +
+                 " structure=" + str.tostring(c.structureAtEntry, "#.###") +
+                 " levelQ=" + str.tostring(c.levelQualityAtEntry, "#.###") +
+                 " rejection=" + str.tostring(c.rejectionAtEntry, "#.###") +
+                 " contextQ=" + str.tostring(c.setupQualityAtEntry, "#.#") +
+                 " directW=" + str.tostring(c.directWeightAtEntry, "#.#") +
+                 " pullbackW=" + str.tostring(c.pullbackWeightAtEntry, "#.#") +
+                 " failureW=" + str.tostring(c.failureWeightAtEntry, "#.#") +
+                 " dominanceGap=" + str.tostring(c.dominanceGapAtEntry, "#.##") +
+                 " targetATR=" + str.tostring(c.targetDistanceATRAtEntry, "#.##") +
+                 " failureATR=" + str.tostring(c.failureDistanceATRAtEntry, "#.##") +
+                 " pullbackATR=" + str.tostring(c.pullbackDepthATRAtEntry, "#.##") +
+                 " pullbackWidthATR=" + str.tostring(c.pullbackZoneWidthATRAtEntry, "#.##") +
+                 " sym=" + syminfo.ticker +
+                 " tf=" + timeframe.period
+            )
+        else
+            array.push(stillPending, c)
+    pendingCases := stillPending
+bool isNewCase = enableRecorder and barstate.isconfirmed and validSetup and (not validSetup[1] or direction != direction[1])
+if isNewCase
+    ScenarioCase newCase = ScenarioCase.new(
+         startBar = bar_index,
+         direction = direction,
+         targetLevel = nextTarget,
+         failureLevel = failureTarget,
+         pullbackLow = pullbackZoneLow,
+         pullbackHigh = pullbackZoneHigh,
+         enteredPullback = false,
+         impulseAtEntry = impulseStrength,
+         efficiencyAtEntry = efficiency,
+         accelerationAtEntry = accelerationScore,
+         structureAtEntry = structureScore,
+         levelQualityAtEntry = barrierQuality,
+         rejectionAtEntry = rejectionScore,
+         setupQualityAtEntry = setupQuality,
+         directWeightAtEntry = directWeight,
+         pullbackWeightAtEntry = pullbackWeight,
+         failureWeightAtEntry = failureWeight,
+         dominanceGapAtEntry = dominanceGap,
+         targetDistanceATRAtEntry = targetDistanceATR,
+         failureDistanceATRAtEntry = failureDistanceATR,
+         pullbackDepthATRAtEntry = pullbackDepthATR,
+         pullbackZoneWidthATRAtEntry = pullbackZoneWidthATR
+    )
+    array.push(pendingCases, newCase)
+// ============================================================================
+// DRAWING STORAGE
+// ============================================================================
+var array<line> scenarioLines = array.new_line()
+var array<label> scenarioLabels = array.new_label()
+var array<box> scenarioBoxes = array.new_box()
+f_clear_drawings() =>
+    while array.size(scenarioLines) > 0
+        line.delete(
+            array.pop(scenarioLines)
+        )
+    while array.size(scenarioLabels) > 0
+        label.delete(
+            array.pop(scenarioLabels)
+        )
+    while array.size(scenarioBoxes) > 0
+        box.delete(
+            array.pop(scenarioBoxes)
+        )
+// ============================================================================
+// DRAWING
+// ============================================================================
+if barstate.islast
+    f_clear_drawings()
+    if validSetup
+        int xNow = bar_index
+        int xDecision = bar_index + decisionBars
+        int xTarget = bar_index + projectionBars
+        // Pine's built-in color.green (HTML "green", #008000) and color.blue
+        // (#0000FF) are both low-luminance — fine for a thick opaque line, but
+        // poor contrast as small text on a near-black label background.
+        // Brighter, project-standard accents (CLAUDE.md bullish/bearish/warning)
+        // fix this for both the lines/boxes and the label text that reuse them.
+        // Failure previously used plain color.gray, which read as "quiet
+        // background scenario" and clashed with the warning-toned label
+        // background added for contrast — now consistently warning-orange.
+        color directColor = direction > 0 ? #00c853 : #ff5252
+        color pullbackColor = #2979ff
+        color failureColor = #ff6f00
+        // Label styling: colored text at small sizes reads worse than its raw
+        // WCAG contrast ratio suggests (anti-aliased colored glyphs look
+        // "fuzzy", and green/red text is a known problem for red-green color
+        // blindness) — every WCAG number in v0.6.4 was individually fine, but
+        // the combination still measured as hard to read in practice. Flipped
+        // to the pattern that already worked for the summary box: white text
+        // (max legibility, colorblind-safe) on a solid, scenario-tinted dark
+        // background — all four combinations measure 12.9-16.3:1, comfortably
+        // past even AAA.
+        color directLabelBg = direction > 0 ? color.rgb(8, 58, 28) : color.rgb(64, 14, 14)
+        color pullbackLabelBg = color.rgb(10, 35, 74)
+        color failureLabelBg = color.rgb(58, 40, 10)
+        color labelText = color.new(color.white, 0)
+        string directSymbol = direction > 0 ? "▲" : "▼"
+        // Scenario tree: the leading scenario is drawn as a dominant thick
+        // branch only when it clears the configured gap over the runner-up;
+        // otherwise all branches remain thin secondary paths. All three
+        // scenarios use identical width/transparency tiers — Failure
+        // previously topped out lower (3/15 vs. 4/8) as a leftover from the
+        // pre-v1.0 design where it was always the flat, de-emphasized
+        // "background" scenario; a dominant Failure read is exactly as
+        // actionable as a dominant Direct/Pullback read, so it gets equal
+        // visual weight now.
+        bool hasClearDominance = dominanceGap >= minimumDominanceGap
+        bool directIsDominant = directWeight == dominantScenarioWeight
+        bool pullbackIsDominant = not directIsDominant and pullbackWeight == dominantScenarioWeight
+        bool failureIsDominant = not directIsDominant and not pullbackIsDominant
+        int directLineWidth = directIsDominant and hasClearDominance ? 4 : 2
+        int pullbackLineWidth = pullbackIsDominant and hasClearDominance ? 4 : 2
+        int failureLineWidth = failureIsDominant and hasClearDominance ? 4 : 2
+        int directTransparency = directIsDominant and hasClearDominance ? 8 : 45
+        int pullbackTransparency = pullbackIsDominant and hasClearDominance ? 8 : 45
+        int failureTransparency = failureIsDominant and hasClearDominance ? 8 : 45
+        // --------------------------------------------------------------------
+        // Decision levels
+        // --------------------------------------------------------------------
+        if showLevels
+            if not na(barrier)
+                line barrierLine = line.new(
+                        xNow,
+                        barrier,
+                        xTarget,
+                        barrier,
+                        xloc = xloc.bar_index,
+                        extend = extend.none,
+                        color = color.new(
+                            directColor,
+                            35
+                        ),
+                        style = line.style_dashed,
+                        width = 1
+                    )
+                array.push(
+                    scenarioLines,
+                    barrierLine
+                )
+            if not na(barrierZoneLow) and not na(barrierZoneHigh) and barrierZoneHigh > barrierZoneLow
+                box barrierZone = box.new(
+                        xNow,
+                        barrierZoneHigh,
+                        xTarget,
+                        barrierZoneLow,
+                        xloc = xloc.bar_index,
+                        border_color = color.new(directColor, 60),
+                        border_width = 1,
+                        bgcolor = color.new(directColor, 88)
+                    )
+                array.push(
+                    scenarioBoxes,
+                    barrierZone
+                )
+            if not na(projectedPullback)
+                line pullbackSupportLine = line.new(
+                        xNow,
+                        projectedPullback,
+                        xTarget,
+                        projectedPullback,
+                        xloc = xloc.bar_index,
+                        extend = extend.none,
+                        color = color.new(
+                            pullbackColor,
+                            60
+                        ),
+                        style = line.style_dotted,
+                        width = 1
+                    )
+                array.push(
+                    scenarioLines,
+                    pullbackSupportLine
+                )
+            if pullbackZoneHigh > pullbackZoneLow
+                box pullbackZone = box.new(
+                        xNow,
+                        pullbackZoneHigh,
+                        xTarget,
+                        pullbackZoneLow,
+                        xloc = xloc.bar_index,
+                        border_color = color.new(pullbackColor, 60),
+                        border_width = 1,
+                        bgcolor = color.new(pullbackColor, 88)
+                    )
+                array.push(
+                    scenarioBoxes,
+                    pullbackZone
+                )
+        // --------------------------------------------------------------------
+        // Direct continuation
+        // --------------------------------------------------------------------
+        if showDirect and directWeight >= minimumScenarioWeight
+            float directDecisionPrice = not na(barrier) ? barrier : close + direction * atr * 0.5
+            line directLeg1 = line.new(
+                    xNow,
+                    close,
+                    xDecision,
+                    directDecisionPrice,
+                    xloc = xloc.bar_index,
+                    color = color.new(
+                        directColor,
+                        directTransparency
+                    ),
+                    width = directLineWidth
+                )
+            array.push(
+                scenarioLines,
+                directLeg1
+            )
+            line directLeg2 = line.new(
+                    xDecision,
+                    directDecisionPrice,
+                    xTarget,
+                    nextTarget,
+                    xloc = xloc.bar_index,
+                    color = color.new(directColor, directTransparency),
+                    style = line.style_arrow_right,
+                    width = directLineWidth
+                )
+            array.push(
+                scenarioLines,
+                directLeg2
+            )
+            label directLabel = label.new(
+                    xTarget,
+                    nextTarget,
+                    directSymbol + " Direct " +
+                    str.tostring(
+                        directWeight,
+                        "#.0"
+                    ) +
+                    "%",
+                    xloc = xloc.bar_index,
+                    style = direction > 0 ? label.style_label_down : label.style_label_up,
+                    color = directLabelBg,
+                    textcolor = labelText,
+                    size = size.small
+                )
+            array.push(
+                scenarioLabels,
+                directLabel
+            )
+        // --------------------------------------------------------------------
+        // Pullback -> continuation
+        // --------------------------------------------------------------------
+        if showPullback and pullbackWeight >= minimumScenarioWeight
+            line pullbackLeg1 = line.new(
+                    xNow,
+                    close,
+                    xDecision,
+                    projectedPullback,
+                    xloc = xloc.bar_index,
+                    color = color.new(
+                        pullbackColor,
+                        pullbackTransparency
+                    ),
+                    width = pullbackLineWidth
+                )
+            array.push(
+                scenarioLines,
+                pullbackLeg1
+            )
+            line pullbackLeg2 = line.new(
+                    xDecision,
+                    projectedPullback,
+                    xTarget,
+                    nextTarget,
+                    xloc = xloc.bar_index,
+                    color = color.new(pullbackColor, pullbackTransparency),
+                    style = line.style_arrow_right,
+                    width = pullbackLineWidth
+                )
+            array.push(
+                scenarioLines,
+                pullbackLeg2
+            )
+            label pullbackLabel = label.new(
+                    xDecision,
+                    projectedPullback,
+                    "↩ Pullback " +
+                    str.tostring(
+                        pullbackWeight,
+                        "#.0"
+                    ) +
+                    "%",
+                    xloc = xloc.bar_index,
+                    style = direction > 0 ? label.style_label_up : label.style_label_down,
+                    color = pullbackLabelBg,
+                    textcolor = labelText,
+                    size = size.small
+                )
+            array.push(
+                scenarioLabels,
+                pullbackLabel
+            )
+        // --------------------------------------------------------------------
+        // Failure
+        // --------------------------------------------------------------------
+        if showFailure and failureWeight >= minimumScenarioWeight
+            line failureLeg1 = line.new(
+                    xNow,
+                    close,
+                    xDecision,
+                    projectedPullback,
+                    xloc = xloc.bar_index,
+                    color = color.new(
+                        failureColor,
+                        failureTransparency
+                    ),
+                    style = line.style_dashed,
+                    width = failureLineWidth
+                )
+            array.push(
+                scenarioLines,
+                failureLeg1
+            )
+            line failureLeg2 = line.new(
+                    xDecision,
+                    projectedPullback,
+                    xTarget,
+                    failureTarget,
+                    xloc = xloc.bar_index,
+                    color = color.new(
+                        failureColor,
+                        failureTransparency
+                    ),
+                    style = line.style_arrow_right,
+                    width = failureLineWidth
+                )
+            array.push(
+                scenarioLines,
+                failureLeg2
+            )
+            label failureLabel = label.new(
+                    xTarget,
+                    failureTarget,
+                    "✕ Failure " +
+                    str.tostring(
+                        failureWeight,
+                        "#.0"
+                    ) +
+                    "%",
+                    xloc = xloc.bar_index,
+                    style = direction > 0 ? label.style_label_up : label.style_label_down,
+                    color = failureLabelBg,
+                    textcolor = labelText,
+                    size = size.small
+                )
+            array.push(
+                scenarioLabels,
+                failureLabel
+            )
+        // --------------------------------------------------------------------
+        // Summary
+        // --------------------------------------------------------------------
+        if showSummary
+            string directionText = directSymbol + " " + (direction > 0 ? "UPWARD IMPULSE" : "DOWNWARD IMPULSE")
+            string dominanceText = hasClearDominance ? "Clear edge: " : "Mixed: "
+            string summaryText = (
+                "Scenario Engine\n" +
+                directionText +
+                "\n\n" +
+                "Context " +
+                f_bar(setupQuality, 100, 10) +
+                " " +
+                str.tostring(
+                    setupQuality,
+                    "#"
+                ) +
+                "%\n" +
+                dominanceText +
+                str.tostring(
+                    dominanceGap,
+                    "#.0"
+                ) +
+                " pp\n" +
+                directSymbol + " Direct: " +
+                str.tostring(
+                    directWeight,
+                    "#.0"
+                ) +
+                "%\n" +
+                "↩ Pullback: " +
+                str.tostring(
+                    pullbackWeight,
+                    "#.0"
+                ) +
+                "%\n" +
+                "✕ Failure: " +
+                str.tostring(
+                    failureWeight,
+                    "#.0"
+                ) +
+                "%"
+            )
+            if showDebugMetrics
+                summaryText += (
+                    "\n\nImpulse: " +
+                    str.tostring(
+                        impulseStrength * 100,
+                        "#"
+                    ) +
+                    "\nEfficiency: " +
+                    str.tostring(
+                        efficiency * 100,
+                        "#"
+                    ) +
+                    "\nAcceleration: " +
+                    str.tostring(
+                        accelerationScore * 100,
+                        "#"
+                    ) +
+                    "\nStructure: " +
+                    str.tostring(
+                        structureScore * 100,
+                        "#"
+                    ) +
+                    "\nLevel Quality: " +
+                    str.tostring(
+                        barrierQuality * 100,
+                        "#"
+                    ) +
+                    "\nRejection: " +
+                    str.tostring(
+                        rejectionScore * 100,
+                        "#"
+                    ) +
+                    "\nTarget: " +
+                    str.tostring(
+                        targetDistanceATR,
+                        "#.##"
+                    ) +
+                    " ATR\nFailure: " +
+                    str.tostring(
+                        failureDistanceATR,
+                        "#.##"
+                    ) +
+                    " ATR\nPullback: " +
+                    str.tostring(
+                        pullbackDepthATR,
+                        "#.##"
+                    ) +
+                    " ATR\nPB zone width: " +
+                    str.tostring(
+                        pullbackZoneWidthATR,
+                        "#.##"
+                    )
+                )
+            float labelY = direction > 0 ? nextTarget + atr : nextTarget - atr
+            // Background shifts from neutral dark gray (weak/uncertain setup)
+            // toward a saturated dark green/red with Context — stays dark
+            // throughout so white text keeps full
+            // contrast regardless of how strong the reading is.
+            color neutralSummaryBg = color.rgb(38, 42, 54)
+            color strongSummaryBg = direction > 0 ? color.rgb(8, 58, 28) : color.rgb(64, 14, 14)
+            color summaryBg = color.from_gradient(setupQuality, 0, 100, neutralSummaryBg, strongSummaryBg)
+            label summaryLabel = label.new(
+                    xTarget,
+                    labelY,
+                    summaryText,
+                    xloc = xloc.bar_index,
+                    style = direction > 0 ? label.style_label_down : label.style_label_up,
+                    color = summaryBg,
+                    textcolor = color.new(color.white, 0),
+                    size = size.normal
+                )
+            array.push(
+                scenarioLabels,
+                summaryLabel
+            )

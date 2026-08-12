@@ -88,10 +88,16 @@ indicator(...)
 Rules:
 - `//@version=6` is always the first line
 - The comment block always comes **before** the `indicator()` call
+- Separator lines are exactly `// ` followed by 76 `=` characters (79 characters total) — used once above and once below the Version/Author/Build block, and once more after Features, right before the blank line and `indicator(...)`
 - Script name in the comment block always ends with `[WavesUnchained]`
 - The `indicator()` title string also always ends with `[WavesUnchained]`
-- Features use `✓` prefix (not `-` or `*`)
-- `Build:` date is kept from the original; only update it when the script is actually modified
+- Never prefix the script/indicator name with "Waves" — the `[WavesUnchained]` suffix already attributes it; the name itself starts directly with the indicator's own name (e.g. `ZigZag Core`, not `Waves ZigZag Core`)
+- `Version:`, `Author: WavesUnchained`, `Build:` — always present, in that exact order, directly below the title line
+- `Build:` date is `YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS`; kept from the original, only update it when the script is actually modified
+- The description is prose (one sentence to a short paragraph), directly below the header separator, no blank line before it
+- The `// Features:` heading is always the literal word "Features:" — don't replace it with a custom lead-in sentence
+- One blank `//` line before `Features:` and one blank `//` line after the last bullet, before the closing separator
+- Features use `✓` prefix (not `-`, `*`, or `•`)
 - No `@description`, `@author`, `@version` JSDoc-style tags — use the structured fields above
 
 ## Dashboard table style

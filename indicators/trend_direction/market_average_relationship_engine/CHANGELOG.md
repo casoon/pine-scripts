@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.0 — 2026-08-01
+- Removed the `text`/`textcolor` labels ("PB", "M", "!", "BR", "D", "T") from every event marker — the hover tooltip already carries the full detail, so markers are now plain colored shapes
+- Changed the Divergence marker from `shape.flag` to `shape.circle` (green bullish / red bearish); stays distinguishable from the always-orange Do Not Chase circle
+- Added `@strategy-config` (Strategy Hooks section) so `scripts/build_strategies.py` can generate `strategies/market_average_relationship_engine_strategy.pine`: entries are Pullback + Momentum Release only (continuation setups already gated on an established trend); Divergence and Turn From Extreme are deliberately excluded from entries to avoid mixing trend-following and reversal logic in one signal; trailing stop is the reference MA ∓ a new `stopAtrMultInput` (ATR×, default 2.5)
+
 ## v1.1.0 — 2026-08-01
 - Added regular price/relationship divergence (bullish: price lower low vs. relationship higher low; bearish: price higher high vs. relationship lower high) as its own event with pane + price-chart markers, hover tooltip, and alerts — price pivots are used only to detect the divergence itself and never gate the existing Pullback/Momentum/Do Not Chase/Exhaustion events
 - Added Turn From Extreme: fires when the relationship line has recently touched a deep low/high and is now confirmed rising/falling off it — a pivot-free read on a trend starting or an already-extended trend recognizably losing steam

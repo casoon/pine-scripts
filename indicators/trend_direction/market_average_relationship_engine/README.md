@@ -14,6 +14,11 @@ Evaluates the relationship between price and one consistently selected moving-av
 - Optional MA line and event markers on the price chart (`force_overlay`) alongside the oscillator pane, all at `size.tiny`
 - Hover tooltips on every event marker with the full six-score readout, ATR distance, MA slope, and Respect sample count/hit rate; the tooltip carrier itself is fully transparent so it never draws a second, larger shape on top of the visible marker; all diagnostics additionally routed to the Data Window
 - Alerts for each event direction plus a combined "any MARE event" alert
+- `@strategy-config` block for `scripts/build_strategies.py`, generating [`strategies/market_average_relationship_engine/market_average_relationship_engine_strategy.pine`](../../../strategies/market_average_relationship_engine/market_average_relationship_engine_strategy.pine) — see Strategy below
+
+## Strategy
+
+The generated strategy enters long/short on Pullback or Momentum Release only — both are continuation setups already gated on an established, quality-checked trend. Divergence and Turn From Extreme are deliberately excluded from entries: mixing those reversal-style, early signals into the same OR'd trigger as the continuation setups would blend two different market models into one signal, which this repo's indicator-design rules treat as an anti-pattern. The stop is a plain per-bar trailing envelope anchored to the reference MA itself (`ma ∓ stopAtrMultInput × ATR`), matching the indicator's own "MA as market reference" framing rather than a generic chandelier/highest-lowest stop. Not yet backtested — see `strategies/market_average_relationship_engine_strategy_assessment.md`.
 
 ## Design rules
 
@@ -24,4 +29,4 @@ Evaluates the relationship between price and one consistently selected moving-av
 
 ## Status
 
-v1.1.0 is a complete build with plausible starting thresholds, not an empirically calibrated model. Defaults should be validated across instruments, timeframes, and market phases before relying on the event signals.
+v1.2.0 is a complete build with plausible starting thresholds, not an empirically calibrated model. Defaults should be validated across instruments, timeframes, and market phases before relying on the event signals. The generated strategy has not been backtested yet.

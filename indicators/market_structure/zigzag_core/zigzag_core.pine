@@ -1,0 +1,1603 @@
+//@version=6
+// ============================================================================
+// ZigZag Core [WavesUnchained]
+// Version: 2.2.1
+// Author: WavesUnchained
+// Build: 2026-08-12 00:00:00
+// ============================================================================
+// Configurable ZigZag engine — depth/deviation/backstep filtering, Percent/
+// ATR/Hybrid reversal modes, true higher- AND lower-timeframe pivot
+// projection, an optional recursive Level-2 ZigZag, and an optional
+// independent Secondary ZigZag (Structural + Internal dual view).
+//
+// Features:
+//   ✓ Separated Pivot Depth, Reversal Threshold, Backstep, and Alternation filters
+//   ✓ Percent, ATR, and Hybrid (max of both) reversal significance modes
+//   ✓ True higher-timeframe calculation with pivot-time projection onto the chart
+//   ✓ True lower-timeframe calculation via a manual request.security_lower_tf() pivot scan
+//   ✓ Confirmed ZigZag structure stays stable; last leg shown separately as developing
+//   ✓ HH/HL/LH/LL structure labels, pivot price, and swing-change % labels
+//   ✓ Live retracement % of the forming reversal vs. the leg that preceded it
+//   ✓ Optional diagnostics marking rejected pivot candidates and why
+//   ✓ Optional recursive Level-2 ZigZag built from confirmed Level-1 pivots
+//   ✓ Optional independent Secondary ZigZag with its own Depth/Backstep/Deviation
+//
+// ============================================================================
+
+indicator(
+    "ZigZag Core [WavesUnchained]",
+    shorttitle = "ZigZag Core",
+    overlay = true,
+    max_lines_count = 500,
+    max_labels_count = 500,
+    max_bars_back = 5000
+)
+// ============================================================================
+// 01 · CALCULATION TIMEFRAME
+// ============================================================================
+groupTf = "01 · Timeframe"
+calculationTfInput = input.timeframe(
+    "",
+    "Calculation Timeframe",
+    group = groupTf,
+    tooltip =
+        "Empty = chart timeframe.\n\n" +
+        "Choose a HIGHER timeframe to calculate a genuine HTF ZigZag " +
+        "(via request.security) and project its pivots onto the current chart.\n\n" +
+        "Choose a LOWER timeframe to calculate a genuine LTF ZigZag (via " +
+        "request.security_lower_tf, manually scanned for pivots — a single " +
+        "request.security call can't see individual lower-timeframe bars).\n\n" +
+        "Example:\n" +
+        "5m chart + 1H calculation = actual 1H ZigZag.\n" +
+        "1H chart + 5m calculation = actual 5m ZigZag."
+)
+// ============================================================================
+// 02 · PIVOT ENGINE
+// ============================================================================
+groupPivot = "02 · Pivot Engine"
+pivotDepth = input.int(
+    5,
+    "Pivot Depth",
+    minval = 1,
+    maxval = 100,
+    group = groupPivot,
+    tooltip =
+        "Bars on each side required to confirm a local high/low.\n\n" +
+        "Small value = more responsive / more noise.\n" +
+        "Large value = fewer and structurally larger pivots."
+)
+backstepBars = input.int(
+    3,
+    "Minimum Pivot Spacing",
+    minval = 0,
+    maxval = 100,
+    group = groupPivot,
+    tooltip =
+        "Minimum number of calculation-timeframe bars between two accepted " +
+        "opposite ZigZag pivots.\n\n" +
+        "This is separate from Pivot Depth."
+)
+useHighLow = input.bool(
+    true,
+    "Use High / Low",
+    group = groupPivot,
+    tooltip =
+        "ON: pivots use candle highs and lows.\n" +
+        "OFF: pivots are calculated from closing prices."
+)
+// ============================================================================
+// 03 · REVERSAL FILTER
+// ============================================================================
+groupFilter = "03 · Reversal Filter"
+filterMode = input.string(
+    "Hybrid",
+    "Reversal Mode",
+    options = [
+        "Percent",
+        "ATR",
+        "Hybrid"
+    ],
+    group = groupFilter,
+    tooltip =
+        "Percent:\n" +
+        "Requires a fixed percentage reversal.\n\n" +
+        "ATR:\n" +
+        "Adapts automatically to volatility.\n\n" +
+        "Hybrid:\n" +
+        "Requires whichever threshold is larger: Percent or ATR."
+)
+deviationPercent = input.float(
+    0.50,
+    "Minimum Reversal · %",
+    minval = 0.0,
+    maxval = 100.0,
+    step = 0.05,
+    group = groupFilter
+)
+atrLength = input.int(
+    14,
+    "ATR Length",
+    minval = 1,
+    maxval = 500,
+    group = groupFilter
+)
+atrMultiplier = input.float(
+    1.50,
+    "Minimum Reversal · ATR",
+    minval = 0.0,
+    maxval = 20.0,
+    step = 0.10,
+    group = groupFilter
+)
+// ============================================================================
+// 04 · VISUAL STYLE
+// ============================================================================
+groupStyle = "04 · ZigZag Style"
+upColor = input.color(
+    color.new(color.lime, 0),
+    "Up Leg",
+    group = groupStyle
+)
+downColor = input.color(
+    color.new(color.red, 0),
+    "Down Leg",
+    group = groupStyle
+)
+singleColorMode = input.bool(
+    false,
+    "Single Line Color",
+    group = groupStyle
+)
+singleColor = input.color(
+    color.new(color.silver, 0),
+    "Single Color",
+    group = groupStyle
+)
+lineWidth = input.int(
+    2,
+    "Line Width",
+    minval = 1,
+    maxval = 5,
+    group = groupStyle
+)
+lineStyleInput = input.string(
+    "Solid",
+    "Line Style",
+    options = [
+        "Solid",
+        "Dashed",
+        "Dotted"
+    ],
+    group = groupStyle
+)
+maxSegments = input.int(
+    150,
+    "Maximum Visible Segments",
+    minval = 10,
+    maxval = 450,
+    group = groupStyle,
+    tooltip =
+        "Older drawing objects are automatically removed to stay within " +
+        "TradingView's object limits."
+)
+// ============================================================================
+// 05 · DEVELOPING LEG
+// ============================================================================
+groupDeveloping = "05 · Developing Leg"
+showDevelopingLeg = input.bool(
+    true,
+    "Show Developing Leg",
+    group = groupDeveloping,
+    tooltip =
+        "Draws the still-unconfirmed final ZigZag leg.\n\n" +
+        "This line is intentionally dynamic and can move as new extremes form."
+)
+developingColor = input.color(
+    color.new(color.gray, 35),
+    "Developing Color",
+    group = groupDeveloping
+)
+developingWidth = input.int(
+    1,
+    "Developing Width",
+    minval = 1,
+    maxval = 5,
+    group = groupDeveloping
+)
+showRetracement = input.bool(
+    true,
+    "Show Retracement %",
+    group = groupDeveloping,
+    tooltip =
+        "Shows how deep the forming reversal has pulled back relative to " +
+        "the leg that preceded it, e.g. \"38.2%\".\n\n" +
+        "Only shown while a reversal candidate is active (not during a " +
+        "same-direction extension)."
+)
+// ============================================================================
+// 06 · PIVOT LABELS
+// ============================================================================
+groupLabels = "06 · Pivot Labels"
+showPivotLabels = input.bool(
+    false,
+    "Show Pivot Labels",
+    group = groupLabels
+)
+showStructure = input.bool(
+    true,
+    "HH / HL / LH / LL",
+    group = groupLabels
+)
+showPrice = input.bool(
+    false,
+    "Pivot Price",
+    group = groupLabels
+)
+showChange = input.bool(
+    false,
+    "Swing Change %",
+    group = groupLabels
+)
+labelSizeInput = input.string(
+    "Tiny",
+    "Label Size",
+    options = [
+        "Tiny",
+        "Small",
+        "Normal"
+    ],
+    group = groupLabels
+)
+// ============================================================================
+// 07 · OPTIONAL PIVOT MARKERS
+// ============================================================================
+groupMarkers = "07 · Markers"
+showPivotDots = input.bool(
+    true,
+    "Show Pivot Dots",
+    group = groupMarkers
+)
+pivotDotSizeInput = input.string(
+    "Tiny",
+    "Pivot Dot Size",
+    options = [
+        "Tiny",
+        "Small",
+        "Normal"
+    ],
+    group = groupMarkers
+)
+// ============================================================================
+// 08 · DIAGNOSTICS
+// ============================================================================
+groupDiag = "08 · Diagnostics"
+showDiagnostics = input.bool(
+    false,
+    "Show Rejected Pivot Diagnostics",
+    group = groupDiag,
+    tooltip =
+        "Marks confirmed pivot candidates that were rejected by Minimum " +
+        "Pivot Spacing or the Reversal Filter, and which one blocked them.\n\n" +
+        "Off by default — this is a debugging aid for tracing a missed " +
+        "swing to its exact blocking filter, not part of the normal chart."
+)
+// ============================================================================
+// 09 · RECURSIVE ZIGZAG
+// ============================================================================
+groupL2 = "09 · Recursive ZigZag"
+showL2 = input.bool(
+    false,
+    "Show Recursive (Level 2) ZigZag",
+    group = groupL2,
+    tooltip =
+        "A second, coarser ZigZag built from the CONFIRMED Level-1 pivots " +
+        "instead of raw price — macro/subwave structure without a second " +
+        "indicator instance.\n\n" +
+        "Confirmed-only: unlike Level 1, it has no live/developing leg — a " +
+        "Level 2 pivot only exists once enough Level-1 pivots have confirmed " +
+        "around it."
+)
+l2MinSpacing = input.int(
+    2,
+    "L2 Minimum Pivot Spacing · L1 pivots",
+    minval = 1,
+    group = groupL2,
+    tooltip = "Minimum number of confirmed Level-1 pivots between two accepted Level-2 pivots."
+)
+l2DeviationMultiplier = input.float(
+    2.0,
+    "L2 Deviation Multiplier · × L1 threshold",
+    minval = 1.0,
+    step = 0.1,
+    group = groupL2,
+    tooltip =
+        "Level 2 reuses Level 1's Reversal Mode/Deviation/ATR settings, " +
+        "scaled up by this multiplier — e.g. 2.0 means a Level-2 swing must " +
+        "be at least twice as large as what Level 1 already requires."
+)
+l2Color = input.color(
+    color.new(color.blue, 0),
+    "L2 Line Color",
+    group = groupL2
+)
+l2Width = input.int(
+    3,
+    "L2 Line Width",
+    minval = 1,
+    maxval = 8,
+    group = groupL2
+)
+// ============================================================================
+// 10 · DUAL ZIGZAG (SECONDARY)
+// ============================================================================
+groupSecondary = "10 · Dual ZigZag (Secondary)"
+showSecondary = input.bool(
+    false,
+    "Show Secondary ZigZag",
+    group = groupSecondary,
+    tooltip =
+        "A second, independent pivot configuration (e.g. finer \"Internal\" " +
+        "structure alongside the primary \"Structural\" one) on the same " +
+        "Calculation Timeframe as the primary ZigZag.\n\n" +
+        "Confirmed-only, like Level 2: no live/developing leg, retracement " +
+        "label, or diagnostics — those stay primary-only features."
+)
+secondaryPivotDepth = input.int(
+    3,
+    "Secondary Pivot Depth",
+    minval = 1,
+    maxval = 100,
+    group = groupSecondary
+)
+secondaryBackstepBars = input.int(
+    2,
+    "Secondary Minimum Pivot Spacing",
+    minval = 0,
+    maxval = 100,
+    group = groupSecondary
+)
+secondaryDeviationMultiplier = input.float(
+    0.5,
+    "Secondary Deviation Multiplier · × Primary threshold",
+    minval = 0.0,
+    step = 0.1,
+    group = groupSecondary,
+    tooltip =
+        "Secondary reuses the primary Reversal Mode/Deviation/ATR settings, " +
+        "scaled by this multiplier — e.g. 0.5 means a Secondary swing only " +
+        "needs to be half as large as what the primary ZigZag requires, for " +
+        "a finer \"Internal\" read alongside the coarser primary structure."
+)
+secondaryColor = input.color(
+    color.new(color.purple, 0),
+    "Secondary Line Color",
+    group = groupSecondary
+)
+secondaryWidth = input.int(
+    1,
+    "Secondary Line Width",
+    minval = 1,
+    maxval = 5,
+    group = groupSecondary
+)
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_lineStyle(string styleText) =>
+    switch styleText
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+f_labelSize(string sizeText) =>
+    switch sizeText
+        "Small" => size.small
+        "Normal" => size.normal
+        => size.tiny
+f_markerSize(string sizeText) =>
+    switch sizeText
+        "Small" => size.small
+        "Normal" => size.normal
+        => size.tiny
+f_legColor(bool rising) =>
+    color result = na
+    if singleColorMode
+        result := singleColor
+    else if rising
+        result := upColor
+    else
+        result := downColor
+    result
+// Several labels below used to pair a highly transparent tinted background
+// (e.g. color.new(upColor, 75)) with fully-opaque colored text — contrast
+// then depended on whatever happened to be behind the label (chart
+// background, candles), which is exactly the "hard to read in practice"
+// pattern already found and fixed in market_scenario_projector.pine. This
+// picks black or white text based on the actual background's luminance, so
+// it stays readable regardless of which color the user configures.
+f_contrastText(color bg) =>
+    float luminance = 0.2126 * color.r(bg) + 0.7152 * color.g(bg) + 0.0722 * color.b(bg)
+    luminance > 140 ? color.new(color.black, 0) : color.new(color.white, 0)
+f_percentDistance(float referencePrice) =>
+    math.abs(referencePrice) * deviationPercent / 100.0
+f_requiredMove(float referencePrice, float atrValue) =>
+    float percentRequirement = f_percentDistance(referencePrice)
+    float atrRequirement = nz(atrValue) * atrMultiplier
+    float result = switch filterMode
+        "Percent" => percentRequirement
+        "ATR" => atrRequirement
+        => math.max(percentRequirement, atrRequirement)
+    result
+f_structureText(bool isHigh, float price, float previousSameTypePrice) =>
+    string result = ""
+    if not na(previousSameTypePrice)
+        if isHigh
+            result := price > previousSameTypePrice ? "HH" : "LH"
+        else
+            result := price > previousSameTypePrice ? "HL" : "LL"
+    else
+        result := isHigh ? "H" : "L"
+    result
+f_buildLabelText(bool isHigh, float pivotPrice, float previousSameTypePrice, float previousPivotPrice) =>
+    string result = ""
+    if showStructure
+        result := f_structureText(isHigh, pivotPrice, previousSameTypePrice)
+    if showPrice
+        string priceText = str.tostring(pivotPrice, format.mintick)
+        result := str.length(result) > 0 ? result + "\n" + priceText : priceText
+    if showChange and not na(previousPivotPrice) and previousPivotPrice != 0
+        float change = (pivotPrice - previousPivotPrice) / math.abs(previousPivotPrice) * 100.0
+        string changeText = ""
+        if change >= 0
+            changeText := "+" + str.tostring(change, "#.##") + "%"
+        else
+            changeText := str.tostring(change, "#.##") + "%"
+        result := str.length(result) > 0 ? result + "\n" + changeText : changeText
+    result
+// ============================================================================
+// TIMEFRAME VALIDATION
+// ============================================================================
+// effectiveTf is always the user's chosen Calculation Timeframe now — both a
+// higher and a lower timeframe than the chart are genuinely supported, just
+// through two different pivot-detection paths below (ta.pivothigh/low via
+// request.security for higher/equal, a manual scan over request.security_
+// lower_tf() buffers for lower). lowerTfRequested / higherTfRequested select
+// between them.
+string calculationTf = calculationTfInput == "" ? timeframe.period : calculationTfInput
+float chartTfSeconds = timeframe.in_seconds(timeframe.period)
+float requestedTfSeconds = timeframe.in_seconds(calculationTf)
+bool lowerTfRequested = not na(chartTfSeconds) and not na(requestedTfSeconds) and requestedTfSeconds < chartTfSeconds
+bool higherTfRequested = not na(chartTfSeconds) and not na(requestedTfSeconds) and requestedTfSeconds > chartTfSeconds
+string effectiveTf = calculationTf
+// ============================================================================
+// SOURCES ON CALCULATION TIMEFRAME
+// ============================================================================
+f_pivotHighSource() =>
+    useHighLow ? high : close
+f_pivotLowSource() =>
+    useHighLow ? low : close
+// We retrieve:
+//   confirmed pivot price
+//   timestamp of actual pivot bar
+//   bar index ON THE CALCULATION TIMEFRAME
+//   ATR AT THE PIVOT BAR ([pivotDepth] offset) — not the later confirmation
+//   bar, so "how big must the reversal be" is always measured against
+//   volatility at the swing point itself, not at whatever volatility happens
+//   to exist pivotDepth bars later when the pivot gets confirmed.
+//
+// Used for "same as chart" and a genuine HIGHER calculation timeframe.
+// lookahead_off is intentional.
+[htfPivotHigh, htfPivotHighTime, htfPivotHighTfIndex, htfPivotAtrHigh] = request.security(
+    syminfo.tickerid,
+    effectiveTf,
+    [
+        ta.pivothigh(f_pivotHighSource(), pivotDepth, pivotDepth),
+        not na(ta.pivothigh(f_pivotHighSource(), pivotDepth, pivotDepth)) ? time[pivotDepth] : na,
+        not na(ta.pivothigh(f_pivotHighSource(), pivotDepth, pivotDepth)) ? bar_index[pivotDepth] : na,
+        ta.atr(atrLength)[pivotDepth]
+    ],
+    gaps = barmerge.gaps_off,
+    lookahead = barmerge.lookahead_off
+)
+[htfPivotLow, htfPivotLowTime, htfPivotLowTfIndex, htfPivotAtrLow] = request.security(
+    syminfo.tickerid,
+    effectiveTf,
+    [
+        ta.pivotlow(f_pivotLowSource(), pivotDepth, pivotDepth),
+        not na(ta.pivotlow(f_pivotLowSource(), pivotDepth, pivotDepth)) ? time[pivotDepth] : na,
+        not na(ta.pivotlow(f_pivotLowSource(), pivotDepth, pivotDepth)) ? bar_index[pivotDepth] : na,
+        ta.atr(atrLength)[pivotDepth]
+    ],
+    gaps = barmerge.gaps_off,
+    lookahead = barmerge.lookahead_off
+)
+// ============================================================================
+// LOWER-TIMEFRAME PIVOT ENGINE
+// ============================================================================
+// ta.pivothigh/ta.pivotlow can't run through request.security() for a LOWER
+// timeframe — that returns exactly one value per CHART bar, silently
+// skipping every lower-timeframe bar in between. request.security_lower_tf()
+// instead returns every lower-timeframe bar inside the current chart bar; we
+// buffer those into persistent arrays and scan them manually for local
+// extrema — the same Depth/Backstep/Deviation model, just over a manually
+// assembled bar sequence instead of the engine's own ta.pivothigh/low.
+//
+// Simplification: at most one new high pivot and one new low pivot surface
+// per CHART bar (matching the higher-timeframe path's own grain). If an
+// extreme LTF ratio confirms more than one same-type pivot within a single
+// chart bar, only the most recent is surfaced.
+//
+// The buffers never shrink — bounded by Pine's 100,000-element array cap,
+// which an extreme LTF ratio over a very long chart history could reach.
+// calculationTf is only genuinely lower than the chart when lowerTfRequested
+// is true; the call must still run unconditionally every bar (Pine forbids
+// conditional request.* calls), so ignore_invalid_timeframe=true is required
+// — otherwise the "same as chart" and higher-timeframe cases (the common
+// ones) would throw a runtime error here instead of just going unused below.
+[ltfHighRaw, ltfLowRaw, ltfTimeRaw, ltfAtrRaw] = request.security_lower_tf(
+    syminfo.tickerid,
+    calculationTf,
+    [
+        f_pivotHighSource(),
+        f_pivotLowSource(),
+        time,
+        ta.atr(atrLength)
+    ],
+    ignore_invalid_timeframe = true
+)
+var array<float> ltfHighBuf = array.new<float>()
+var array<float> ltfLowBuf = array.new<float>()
+var array<int> ltfTimeBuf = array.new<int>()
+var array<float> ltfAtrBuf = array.new<float>()
+var int ltfScannedThrough = -1
+var float ltfPivotHigh = na
+var int ltfPivotHighTime = na
+var int ltfPivotHighTfIndex = na
+var float ltfPivotAtrHigh = na
+var float ltfPivotLow = na
+var int ltfPivotLowTime = na
+var int ltfPivotLowTfIndex = na
+var float ltfPivotAtrLow = na
+f_isLtfPivotHigh(int idx) =>
+    float centerVal = array.get(ltfHighBuf, idx)
+    bool result = true
+    for i = idx - pivotDepth to idx + pivotDepth
+        if i != idx and array.get(ltfHighBuf, i) >= centerVal
+            result := false
+    result
+f_isLtfPivotLow(int idx) =>
+    float centerVal = array.get(ltfLowBuf, idx)
+    bool result = true
+    for i = idx - pivotDepth to idx + pivotDepth
+        if i != idx and array.get(ltfLowBuf, i) <= centerVal
+            result := false
+    result
+if lowerTfRequested
+    for i = 0 to array.size(ltfHighRaw) - 1
+        array.push(ltfHighBuf, array.get(ltfHighRaw, i))
+        array.push(ltfLowBuf, array.get(ltfLowRaw, i))
+        array.push(ltfTimeBuf, array.get(ltfTimeRaw, i))
+        array.push(ltfAtrBuf, array.get(ltfAtrRaw, i))
+    int checkableThrough = array.size(ltfHighBuf) - 1 - pivotDepth
+    if checkableThrough > ltfScannedThrough
+        for idx = math.max(ltfScannedThrough + 1, pivotDepth) to checkableThrough
+            if f_isLtfPivotHigh(idx)
+                ltfPivotHigh := array.get(ltfHighBuf, idx)
+                ltfPivotHighTime := array.get(ltfTimeBuf, idx)
+                ltfPivotHighTfIndex := idx
+                ltfPivotAtrHigh := array.get(ltfAtrBuf, idx)
+            if f_isLtfPivotLow(idx)
+                ltfPivotLow := array.get(ltfLowBuf, idx)
+                ltfPivotLowTime := array.get(ltfTimeBuf, idx)
+                ltfPivotLowTfIndex := idx
+                ltfPivotAtrLow := array.get(ltfAtrBuf, idx)
+        ltfScannedThrough := checkableThrough
+// ============================================================================
+// PIVOT SOURCE SELECTION
+// ============================================================================
+// Everything below this point (event dedup, alternation, drawing) is
+// path-agnostic — it just reads rawPivotHigh/rawPivotLow and friends,
+// whichever engine produced them.
+float rawPivotHigh = lowerTfRequested ? ltfPivotHigh : htfPivotHigh
+int rawPivotHighTime = lowerTfRequested ? ltfPivotHighTime : htfPivotHighTime
+int rawPivotHighTfIndex = lowerTfRequested ? ltfPivotHighTfIndex : htfPivotHighTfIndex
+float pivotAtrHigh = lowerTfRequested ? ltfPivotAtrHigh : htfPivotAtrHigh
+float rawPivotLow = lowerTfRequested ? ltfPivotLow : htfPivotLow
+int rawPivotLowTime = lowerTfRequested ? ltfPivotLowTime : htfPivotLowTime
+int rawPivotLowTfIndex = lowerTfRequested ? ltfPivotLowTfIndex : htfPivotLowTfIndex
+float pivotAtrLow = lowerTfRequested ? ltfPivotAtrLow : htfPivotAtrLow
+// ============================================================================
+// EVENT DEDUPLICATION
+// ============================================================================
+// Both paths hold their result constant across bars until a genuinely new
+// pivot confirms (request.security()'s own HTF-propagation behavior for the
+// higher/same-TF path; explicit var state for the LTF path above) — so a
+// pivot is a NEW EVENT only when its timestamp changes, uniformly for both.
+bool newHighEvent = not na(rawPivotHigh) and not na(rawPivotHighTime) and (na(rawPivotHighTime[1]) or rawPivotHighTime != rawPivotHighTime[1])
+bool newLowEvent = not na(rawPivotLow) and not na(rawPivotLowTime) and (na(rawPivotLowTime[1]) or rawPivotLowTime != rawPivotLowTime[1])
+// ============================================================================
+// SECONDARY (DUAL ZIGZAG) PIVOT SOURCE
+// ============================================================================
+// Same two-path idea as the primary engine above, at secondaryPivotDepth
+// instead of pivotDepth, on the SAME effectiveTf. The LTF path reuses the
+// primary engine's already-buffered ltfHighBuf/ltfLowBuf/ltfTimeBuf/ltfAtrBuf
+// (raw LTF bar data, not depth-specific) with its own scan window and its
+// own "how far scanned" counter — no second request.security_lower_tf() call
+// needed. The HTF/chart-TF path still needs its own request.security() calls
+// since ta.pivothigh/low are depth-specific.
+[secHtfPivotHigh, secHtfPivotHighTime, secHtfPivotHighTfIndex, secHtfPivotAtrHigh] = request.security(
+    syminfo.tickerid,
+    effectiveTf,
+    [
+        ta.pivothigh(f_pivotHighSource(), secondaryPivotDepth, secondaryPivotDepth),
+        not na(ta.pivothigh(f_pivotHighSource(), secondaryPivotDepth, secondaryPivotDepth)) ? time[secondaryPivotDepth] : na,
+        not na(ta.pivothigh(f_pivotHighSource(), secondaryPivotDepth, secondaryPivotDepth)) ? bar_index[secondaryPivotDepth] : na,
+        ta.atr(atrLength)[secondaryPivotDepth]
+    ],
+    gaps = barmerge.gaps_off,
+    lookahead = barmerge.lookahead_off
+)
+[secHtfPivotLow, secHtfPivotLowTime, secHtfPivotLowTfIndex, secHtfPivotAtrLow] = request.security(
+    syminfo.tickerid,
+    effectiveTf,
+    [
+        ta.pivotlow(f_pivotLowSource(), secondaryPivotDepth, secondaryPivotDepth),
+        not na(ta.pivotlow(f_pivotLowSource(), secondaryPivotDepth, secondaryPivotDepth)) ? time[secondaryPivotDepth] : na,
+        not na(ta.pivotlow(f_pivotLowSource(), secondaryPivotDepth, secondaryPivotDepth)) ? bar_index[secondaryPivotDepth] : na,
+        ta.atr(atrLength)[secondaryPivotDepth]
+    ],
+    gaps = barmerge.gaps_off,
+    lookahead = barmerge.lookahead_off
+)
+var int secLtfScannedThrough = -1
+var float secLtfPivotHigh = na
+var int secLtfPivotHighTime = na
+var int secLtfPivotHighTfIndex = na
+var float secLtfPivotAtrHigh = na
+var float secLtfPivotLow = na
+var int secLtfPivotLowTime = na
+var int secLtfPivotLowTfIndex = na
+var float secLtfPivotAtrLow = na
+f_isSecLtfPivotHigh(int idx) =>
+    float centerVal = array.get(ltfHighBuf, idx)
+    bool result = true
+    for i = idx - secondaryPivotDepth to idx + secondaryPivotDepth
+        if i != idx and array.get(ltfHighBuf, i) >= centerVal
+            result := false
+    result
+f_isSecLtfPivotLow(int idx) =>
+    float centerVal = array.get(ltfLowBuf, idx)
+    bool result = true
+    for i = idx - secondaryPivotDepth to idx + secondaryPivotDepth
+        if i != idx and array.get(ltfLowBuf, i) <= centerVal
+            result := false
+    result
+if lowerTfRequested and showSecondary
+    int secCheckableThrough = array.size(ltfHighBuf) - 1 - secondaryPivotDepth
+    if secCheckableThrough > secLtfScannedThrough
+        for idx = math.max(secLtfScannedThrough + 1, secondaryPivotDepth) to secCheckableThrough
+            if f_isSecLtfPivotHigh(idx)
+                secLtfPivotHigh := array.get(ltfHighBuf, idx)
+                secLtfPivotHighTime := array.get(ltfTimeBuf, idx)
+                secLtfPivotHighTfIndex := idx
+                secLtfPivotAtrHigh := array.get(ltfAtrBuf, idx)
+            if f_isSecLtfPivotLow(idx)
+                secLtfPivotLow := array.get(ltfLowBuf, idx)
+                secLtfPivotLowTime := array.get(ltfTimeBuf, idx)
+                secLtfPivotLowTfIndex := idx
+                secLtfPivotAtrLow := array.get(ltfAtrBuf, idx)
+        secLtfScannedThrough := secCheckableThrough
+float rawSecPivotHigh = lowerTfRequested ? secLtfPivotHigh : secHtfPivotHigh
+int rawSecPivotHighTime = lowerTfRequested ? secLtfPivotHighTime : secHtfPivotHighTime
+int rawSecPivotHighTfIndex = lowerTfRequested ? secLtfPivotHighTfIndex : secHtfPivotHighTfIndex
+float secPivotAtrHigh = lowerTfRequested ? secLtfPivotAtrHigh : secHtfPivotAtrHigh
+float rawSecPivotLow = lowerTfRequested ? secLtfPivotLow : secHtfPivotLow
+int rawSecPivotLowTime = lowerTfRequested ? secLtfPivotLowTime : secHtfPivotLowTime
+int rawSecPivotLowTfIndex = lowerTfRequested ? secLtfPivotLowTfIndex : secHtfPivotLowTfIndex
+float secPivotAtrLow = lowerTfRequested ? secLtfPivotAtrLow : secHtfPivotAtrLow
+bool secNewHighEvent = showSecondary and not na(rawSecPivotHigh) and not na(rawSecPivotHighTime) and (na(rawSecPivotHighTime[1]) or rawSecPivotHighTime != rawSecPivotHighTime[1])
+bool secNewLowEvent = showSecondary and not na(rawSecPivotLow) and not na(rawSecPivotLowTime) and (na(rawSecPivotLowTime[1]) or rawSecPivotLowTime != rawSecPivotLowTime[1])
+// secSimultaneousPivot/secProcessHighEvent/secProcessLowEvent need
+// secLastPivotType, declared below in ZIGZAG STATE — computed right before
+// SECONDARY HIGH EVENT instead, mirroring where the primary engine's own
+// simultaneousPivot/processHighEvent/processLowEvent live relative to
+// lastPivotType.
+// ============================================================================
+// ZIGZAG STATE
+// ============================================================================
+// pivotType:
+//      1 = HIGH
+//     -1 = LOW
+var int lastPivotType = 0
+var float lastPivotPrice = na
+var int lastPivotTime = na
+var int lastPivotTfIndex = na
+// ATR at the pivot bar itself (not the later confirmation bar) — see
+// pivotAtrHigh/pivotAtrLow below. Kept alongside lastPivotPrice so deviation
+// checks always measure against volatility at the swing point they reference.
+var float lastPivotAtr = na
+var float previousHighPrice = na
+var float previousLowPrice = na
+var float previousPivotPriceForLabel = na
+// activePivot is the true current endpoint of the last ZigZag leg — it can be
+// AHEAD of lastPivotPrice/lastPivotTime because it also tracks live extension
+// and same-side confirmed replacement, whichever is more extreme. All drawing
+// (new segments, same-side replacement, live extension) uses activePivot, so
+// a new leg always starts exactly where the previous one visually ended.
+// lastPivotPrice/lastPivotTime stay behind on purpose — they are the backend
+// reference used only for the alternation/backstep/deviation gating math.
+var float activePivotPrice = na
+var int activePivotTime = na
+// Initial candidate before the ZigZag has enough information to establish
+// its first alternating pair.
+var int seedType = 0
+var float seedPrice = na
+var int seedTime = na
+var int seedTfIndex = na
+var float seedAtr = na
+// Every CONFIRMED (never-to-be-replaced) Level-1 pivot, pushed the moment it
+// locks in — either when the opposite pivot of the initial pair establishes,
+// or when a later alternation reversal confirms. This stream feeds the
+// Recursive (Level 2) ZigZag below; it never needs in-place updates the way
+// activePivot does, because by construction nothing here can still change.
+var array<float> l1PivotPriceBuf = array.new<float>()
+var array<int> l1PivotTimeBuf = array.new<int>()
+var array<int> l1PivotTypeBuf = array.new<int>()
+var array<float> l1PivotAtrBuf = array.new<float>()
+// Level 2 state — mirrors Level 1's seed/last-pivot pattern, but driven by
+// L1PivotBuf events (already alternating extrema) instead of raw price, so
+// it needs no Depth scan and no live activePivot extension.
+var int l2ScannedThrough = -1
+var int l2SeedType = 0
+var float l2SeedPrice = na
+var int l2SeedTime = na
+var float l2SeedAtr = na
+var int l2SeedL1Count = na
+var int l2LastPivotType = 0
+var float l2LastPivotPrice = na
+var int l2LastPivotTime = na
+var float l2LastPivotAtr = na
+var int l2LastPivotL1Count = na
+// Secondary (Dual ZigZag) state — an independent seed/last-pivot pattern,
+// confirmed-only like Level 2 (no activePivot/developing leg), running its
+// own Pivot Depth/Backstep/Deviation over the SAME calculation-timeframe
+// pivot sources as the primary ZigZag (see PIVOT SOURCE SELECTION below).
+var int secLastPivotType = 0
+var float secLastPivotPrice = na
+var int secLastPivotTime = na
+var int secLastPivotTfIndex = na
+var float secLastPivotAtr = na
+var int secSeedType = 0
+var float secSeedPrice = na
+var int secSeedTime = na
+var int secSeedTfIndex = na
+var float secSeedAtr = na
+// ============================================================================
+// DRAWING STORAGE
+// ============================================================================
+var array<line> confirmedLines = array.new<line>()
+var array<label> pivotLabels = array.new<label>()
+var array<label> pivotDots = array.new<label>()
+var array<label> diagnosticLabels = array.new<label>()
+var array<line> l2Lines = array.new<line>()
+var array<line> secondaryLines = array.new<line>()
+var line developingLine = na
+var label retracementLabel = na
+// ============================================================================
+// DRAWING HELPERS
+// ============================================================================
+f_trimLines() =>
+    while array.size(confirmedLines) > maxSegments
+        line oldLine = array.shift(confirmedLines)
+        line.delete(oldLine)
+f_trimLabels() =>
+    // Pine caps a script at 500 labels total (indicator() sets
+    // max_labels_count = 500 above). pivotLabels and pivotDots are two
+    // independent label pools drawn from that SAME shared budget, so trimming
+    // each to maxSegments + 1 independently can let their combined count run
+    // past what Pine actually allows — TradingView then silently deletes the
+    // oldest objects itself, leaving our arrays holding stale references.
+    // Reserve headroom for diagnosticLabels/retracementLabel and split the
+    // rest across whichever pivot label types are enabled.
+    int enabledPivotLabelTypes = (showPivotLabels ? 1 : 0) + (showPivotDots ? 1 : 0)
+    int maxPivotObjects = enabledPivotLabelTypes > 0 ? math.min(maxSegments + 1, math.floor(400 / enabledPivotLabelTypes)) : 0
+    while array.size(pivotLabels) > maxPivotObjects
+        label oldLabel = array.shift(pivotLabels)
+        label.delete(oldLabel)
+    while array.size(pivotDots) > maxPivotObjects
+        label oldDot = array.shift(pivotDots)
+        label.delete(oldDot)
+f_trimDiagnostics() =>
+    // Small, fixed budget — this is an opt-in debugging aid, not meant to
+    // accumulate over the whole chart history, and shares the same 500-label
+    // cap as pivotLabels/pivotDots (see f_trimLabels above).
+    while array.size(diagnosticLabels) > 80
+        label oldDiag = array.shift(diagnosticLabels)
+        label.delete(oldDiag)
+f_drawDiagnostic(bool isHigh, int eventTime, float eventPrice, bool spacingOk, bool deviationOk) =>
+    if showDiagnostics and not (spacingOk and deviationOk)
+        string reason = not spacingOk ? "Spacing" : "Deviation"
+        string prefix = isHigh ? "High blocked: " : "Low blocked: "
+        label diag = label.new(
+            eventTime,
+            eventPrice,
+            "✕ " + prefix + reason,
+            xloc = xloc.bar_time,
+            yloc = yloc.price,
+            style = isHigh ? label.style_label_down : label.style_label_up,
+            color = color.new(color.orange, 0),
+            textcolor = f_contrastText(color.new(color.orange, 0)),
+            size = size.tiny
+        )
+        array.push(diagnosticLabels, diag)
+        f_trimDiagnostics()
+f_drawPivot(
+    bool isHigh,
+    int pivotTime,
+    float pivotPrice,
+    float previousSameType,
+    float previousPivotPrice
+) =>
+    if showPivotLabels
+        string labelText = f_buildLabelText(isHigh, pivotPrice, previousSameType, previousPivotPrice)
+        if str.length(labelText) > 0
+            color pivotLabelBg = color.new(isHigh ? downColor : upColor, 0)
+            label newLabel = label.new(
+                pivotTime,
+                pivotPrice,
+                labelText,
+                xloc = xloc.bar_time,
+                yloc = yloc.price,
+                style = isHigh ? label.style_label_down : label.style_label_up,
+                color = pivotLabelBg,
+                textcolor = f_contrastText(pivotLabelBg),
+                size = f_labelSize(labelSizeInput)
+            )
+            array.push(pivotLabels, newLabel)
+    if showPivotDots
+        label newDot = label.new(
+            pivotTime,
+            pivotPrice,
+            "•",
+            xloc = xloc.bar_time,
+            yloc = yloc.price,
+            style = label.style_none,
+            textcolor = isHigh ? downColor : upColor,
+            size = f_markerSize(pivotDotSizeInput)
+        )
+        array.push(pivotDots, newDot)
+    f_trimLabels()
+f_drawSegment(int startTime, float startPrice, int endTime, float endPrice) =>
+    bool rising = endPrice > startPrice
+    line segment = line.new(
+        startTime,
+        startPrice,
+        endTime,
+        endPrice,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = f_legColor(rising),
+        style = f_lineStyle(lineStyleInput),
+        width = lineWidth
+    )
+    array.push(confirmedLines, segment)
+    f_trimLines()
+f_trimL2Lines() =>
+    while array.size(l2Lines) > maxSegments
+        line oldLine = array.shift(l2Lines)
+        line.delete(oldLine)
+f_drawL2Segment(int startTime, float startPrice, int endTime, float endPrice) =>
+    line segment = line.new(
+        startTime,
+        startPrice,
+        endTime,
+        endPrice,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = l2Color,
+        style = line.style_solid,
+        width = l2Width
+    )
+    array.push(l2Lines, segment)
+    f_trimL2Lines()
+f_trimSecondaryLines() =>
+    while array.size(secondaryLines) > maxSegments
+        line oldLine = array.shift(secondaryLines)
+        line.delete(oldLine)
+f_drawSecondarySegment(int startTime, float startPrice, int endTime, float endPrice) =>
+    line segment = line.new(
+        startTime,
+        startPrice,
+        endTime,
+        endPrice,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = secondaryColor,
+        style = line.style_solid,
+        width = secondaryWidth
+    )
+    array.push(secondaryLines, segment)
+    f_trimSecondaryLines()
+// ============================================================================
+// ACCEPT OPPOSITE PIVOT
+// ============================================================================
+// Pine does not allow arbitrary global reassignment inside a helper function,
+// so event processing remains explicit below.
+//
+// Conditions for accepting the opposite pivot:
+// 1. Correct alternation.
+// 2. Backstep is satisfied.
+// 3. Price reversal exceeds selected threshold.
+//
+// A large outside bar can be both a confirmed pivot high and low on the same
+// bar. Pine gives no way to know which happened first intrabar, so when both
+// fire simultaneously the one that continues the current alternation (i.e.
+// the one actually expected next) is processed; the other is deferred to
+// whenever it next fires as its own event.
+// ============================================================================
+bool simultaneousPivot = newHighEvent and newLowEvent and rawPivotHighTime == rawPivotLowTime
+bool processHighEvent = newHighEvent and not (simultaneousPivot and lastPivotType == 1)
+bool processLowEvent = newLowEvent and not (simultaneousPivot and lastPivotType == -1)
+// ============================================================================
+// HIGH EVENT
+// ============================================================================
+if processHighEvent
+    float eventPrice = rawPivotHigh
+    int eventTime = rawPivotHighTime
+    int eventTfIndex = rawPivotHighTfIndex
+    // -------------------------------------------------------------------
+    // No established ZigZag yet
+    // -------------------------------------------------------------------
+    if lastPivotType == 0
+        if seedType == 0
+            seedType := 1
+            seedPrice := eventPrice
+            seedTime := eventTime
+            seedTfIndex := eventTfIndex
+            seedAtr := pivotAtrHigh
+        else if seedType == 1
+            // Same-side seed: keep only the more extreme high.
+            if eventPrice > seedPrice
+                seedPrice := eventPrice
+                seedTime := eventTime
+                seedTfIndex := eventTfIndex
+                seedAtr := pivotAtrHigh
+        else
+            // Existing seed is LOW. Test LOW -> HIGH, measured against the
+            // seed's own ATR (its pivot bar), not this event's.
+            int barsBetween = eventTfIndex - seedTfIndex
+            float requiredMove = f_requiredMove(seedPrice, seedAtr)
+            bool spacingOk = barsBetween >= backstepBars
+            bool deviationOk = eventPrice - seedPrice >= requiredMove
+            if spacingOk and deviationOk
+                // Establish LOW as first pivot.
+                lastPivotType := -1
+                lastPivotPrice := seedPrice
+                lastPivotTime := seedTime
+                lastPivotTfIndex := seedTfIndex
+                if showL2
+                    // The seed LOW is already final: this same bar overwrites
+                    // lastPivotType with the HIGH below, so it can never be
+                    // same-side-replaced afterward.
+                    array.push(l1PivotPriceBuf, seedPrice)
+                    array.push(l1PivotTimeBuf, seedTime)
+                    array.push(l1PivotTypeBuf, -1)
+                    array.push(l1PivotAtrBuf, seedAtr)
+                previousLowPrice := seedPrice
+                f_drawPivot(false, seedTime, seedPrice, na, na)
+                // Accept HIGH as second pivot.
+                f_drawSegment(seedTime, seedPrice, eventTime, eventPrice)
+                f_drawPivot(true, eventTime, eventPrice, previousHighPrice, seedPrice)
+                previousHighPrice := eventPrice
+                previousPivotPriceForLabel := seedPrice
+                lastPivotType := 1
+                lastPivotPrice := eventPrice
+                lastPivotTime := eventTime
+                lastPivotTfIndex := eventTfIndex
+                lastPivotAtr := pivotAtrHigh
+                activePivotPrice := eventPrice
+                activePivotTime := eventTime
+                seedType := 0
+                seedPrice := na
+                seedTime := na
+                seedTfIndex := na
+                seedAtr := na
+    // -------------------------------------------------------------------
+    // Existing last pivot is HIGH.
+    // A more extreme HIGH replaces the current endpoint. This is a ZigZag
+    // correction, not a new leg. Only redraw if it's also more extreme than
+    // the active pivot — live extension may have already gone further.
+    // -------------------------------------------------------------------
+    else if lastPivotType == 1
+        if eventPrice > lastPivotPrice
+            lastPivotPrice := eventPrice
+            lastPivotTime := eventTime
+            lastPivotTfIndex := eventTfIndex
+            lastPivotAtr := pivotAtrHigh
+            previousHighPrice := eventPrice
+            if eventPrice > activePivotPrice
+                // Update latest confirmed segment endpoint.
+                if array.size(confirmedLines) > 0
+                    line currentSegment = array.get(confirmedLines, array.size(confirmedLines) - 1)
+                    line.set_x2(currentSegment, eventTime)
+                    line.set_y2(currentSegment, eventPrice)
+                // Update latest visual pivot objects instead of adding duplicates.
+                if showPivotLabels and array.size(pivotLabels) > 0
+                    label currentLabel = array.get(pivotLabels, array.size(pivotLabels) - 1)
+                    label.set_x(currentLabel, eventTime)
+                    label.set_y(currentLabel, eventPrice)
+                    string updatedText = f_buildLabelText(true, eventPrice, previousHighPrice, previousPivotPriceForLabel)
+                    label.set_text(currentLabel, updatedText)
+                if showPivotDots and array.size(pivotDots) > 0
+                    label currentDot = array.get(pivotDots, array.size(pivotDots) - 1)
+                    label.set_x(currentDot, eventTime)
+                    label.set_y(currentDot, eventPrice)
+                activePivotPrice := eventPrice
+                activePivotTime := eventTime
+    // -------------------------------------------------------------------
+    // Existing last pivot is LOW -> HIGH candidate.
+    // The new leg starts at activePivot (the true current endpoint, which
+    // may sit ahead of the stale lastPivotPrice/lastPivotTime used only for
+    // the gating math below), so it always connects where the chart last
+    // visually left off.
+    // -------------------------------------------------------------------
+    else
+        // Reference is the LOW being reversed away from — measure against
+        // its own pivot-bar ATR (lastPivotAtr), not this HIGH candidate's.
+        int barsBetween = eventTfIndex - lastPivotTfIndex
+        float requiredMove = f_requiredMove(lastPivotPrice, lastPivotAtr)
+        bool spacingOk = barsBetween >= backstepBars
+        bool deviationOk = eventPrice - lastPivotPrice >= requiredMove
+        f_drawDiagnostic(true, eventTime, eventPrice, spacingOk, deviationOk)
+        if spacingOk and deviationOk
+            float priorHigh = previousHighPrice
+            if showL2
+                // The LOW just now confirmed as reversed away from — final,
+                // since lastPivotType flips below and can't replace it anymore.
+                array.push(l1PivotPriceBuf, lastPivotPrice)
+                array.push(l1PivotTimeBuf, lastPivotTime)
+                array.push(l1PivotTypeBuf, -1)
+                array.push(l1PivotAtrBuf, lastPivotAtr)
+            f_drawSegment(activePivotTime, activePivotPrice, eventTime, eventPrice)
+            f_drawPivot(true, eventTime, eventPrice, priorHigh, lastPivotPrice)
+            previousPivotPriceForLabel := lastPivotPrice
+            previousHighPrice := eventPrice
+            lastPivotType := 1
+            lastPivotPrice := eventPrice
+            lastPivotTime := eventTime
+            lastPivotTfIndex := eventTfIndex
+            lastPivotAtr := pivotAtrHigh
+            activePivotPrice := eventPrice
+            activePivotTime := eventTime
+// ============================================================================
+// LOW EVENT
+// ============================================================================
+if processLowEvent
+    float eventPrice = rawPivotLow
+    int eventTime = rawPivotLowTime
+    int eventTfIndex = rawPivotLowTfIndex
+    // -------------------------------------------------------------------
+    // No established ZigZag yet
+    // -------------------------------------------------------------------
+    if lastPivotType == 0
+        if seedType == 0
+            seedType := -1
+            seedPrice := eventPrice
+            seedTime := eventTime
+            seedTfIndex := eventTfIndex
+            seedAtr := pivotAtrLow
+        else if seedType == -1
+            if eventPrice < seedPrice
+                seedPrice := eventPrice
+                seedTime := eventTime
+                seedTfIndex := eventTfIndex
+                seedAtr := pivotAtrLow
+        else
+            // Existing seed is HIGH. Test HIGH -> LOW, measured against the
+            // seed's own ATR (its pivot bar), not this event's.
+            int barsBetween = eventTfIndex - seedTfIndex
+            float requiredMove = f_requiredMove(seedPrice, seedAtr)
+            bool spacingOk = barsBetween >= backstepBars
+            bool deviationOk = seedPrice - eventPrice >= requiredMove
+            if spacingOk and deviationOk
+                // Establish HIGH as first pivot.
+                lastPivotType := 1
+                lastPivotPrice := seedPrice
+                lastPivotTime := seedTime
+                lastPivotTfIndex := seedTfIndex
+                if showL2
+                    array.push(l1PivotPriceBuf, seedPrice)
+                    array.push(l1PivotTimeBuf, seedTime)
+                    array.push(l1PivotTypeBuf, 1)
+                    array.push(l1PivotAtrBuf, seedAtr)
+                previousHighPrice := seedPrice
+                f_drawPivot(true, seedTime, seedPrice, na, na)
+                // Accept LOW as second pivot.
+                f_drawSegment(seedTime, seedPrice, eventTime, eventPrice)
+                f_drawPivot(false, eventTime, eventPrice, previousLowPrice, seedPrice)
+                previousLowPrice := eventPrice
+                previousPivotPriceForLabel := seedPrice
+                lastPivotType := -1
+                lastPivotPrice := eventPrice
+                lastPivotTime := eventTime
+                lastPivotTfIndex := eventTfIndex
+                lastPivotAtr := pivotAtrLow
+                activePivotPrice := eventPrice
+                activePivotTime := eventTime
+                seedType := 0
+                seedPrice := na
+                seedTime := na
+                seedTfIndex := na
+                seedAtr := na
+    // -------------------------------------------------------------------
+    // Existing last pivot is LOW.
+    // Replace it only with a more extreme LOW. Only redraw if it's also
+    // more extreme than the active pivot — live extension may have already
+    // gone further.
+    // -------------------------------------------------------------------
+    else if lastPivotType == -1
+        if eventPrice < lastPivotPrice
+            lastPivotPrice := eventPrice
+            lastPivotTime := eventTime
+            lastPivotTfIndex := eventTfIndex
+            lastPivotAtr := pivotAtrLow
+            previousLowPrice := eventPrice
+            if eventPrice < activePivotPrice
+                if array.size(confirmedLines) > 0
+                    line currentSegment = array.get(confirmedLines, array.size(confirmedLines) - 1)
+                    line.set_x2(currentSegment, eventTime)
+                    line.set_y2(currentSegment, eventPrice)
+                if showPivotLabels and array.size(pivotLabels) > 0
+                    label currentLabel = array.get(pivotLabels, array.size(pivotLabels) - 1)
+                    label.set_x(currentLabel, eventTime)
+                    label.set_y(currentLabel, eventPrice)
+                    string updatedText = f_buildLabelText(false, eventPrice, previousLowPrice, previousPivotPriceForLabel)
+                    label.set_text(currentLabel, updatedText)
+                if showPivotDots and array.size(pivotDots) > 0
+                    label currentDot = array.get(pivotDots, array.size(pivotDots) - 1)
+                    label.set_x(currentDot, eventTime)
+                    label.set_y(currentDot, eventPrice)
+                activePivotPrice := eventPrice
+                activePivotTime := eventTime
+    // -------------------------------------------------------------------
+    // Existing last pivot is HIGH -> LOW candidate.
+    // The new leg starts at activePivot — see the mirrored comment in the
+    // HIGH EVENT block above.
+    // -------------------------------------------------------------------
+    else
+        // Reference is the HIGH being reversed away from — measure against
+        // its own pivot-bar ATR (lastPivotAtr), not this LOW candidate's.
+        int barsBetween = eventTfIndex - lastPivotTfIndex
+        float requiredMove = f_requiredMove(lastPivotPrice, lastPivotAtr)
+        bool spacingOk = barsBetween >= backstepBars
+        bool deviationOk = lastPivotPrice - eventPrice >= requiredMove
+        f_drawDiagnostic(false, eventTime, eventPrice, spacingOk, deviationOk)
+        if spacingOk and deviationOk
+            float priorLow = previousLowPrice
+            if showL2
+                // The HIGH just now confirmed as reversed away from — final,
+                // since lastPivotType flips below and can't replace it anymore.
+                array.push(l1PivotPriceBuf, lastPivotPrice)
+                array.push(l1PivotTimeBuf, lastPivotTime)
+                array.push(l1PivotTypeBuf, 1)
+                array.push(l1PivotAtrBuf, lastPivotAtr)
+            f_drawSegment(activePivotTime, activePivotPrice, eventTime, eventPrice)
+            f_drawPivot(false, eventTime, eventPrice, priorLow, lastPivotPrice)
+            previousPivotPriceForLabel := lastPivotPrice
+            previousLowPrice := eventPrice
+            lastPivotType := -1
+            lastPivotPrice := eventPrice
+            lastPivotTime := eventTime
+            lastPivotTfIndex := eventTfIndex
+            lastPivotAtr := pivotAtrLow
+            activePivotPrice := eventPrice
+            activePivotTime := eventTime
+// ============================================================================
+// ACCEPT SECONDARY OPPOSITE PIVOT
+// ============================================================================
+bool secSimultaneousPivot = secNewHighEvent and secNewLowEvent and rawSecPivotHighTime == rawSecPivotLowTime
+bool secProcessHighEvent = secNewHighEvent and not (secSimultaneousPivot and secLastPivotType == 1)
+bool secProcessLowEvent = secNewLowEvent and not (secSimultaneousPivot and secLastPivotType == -1)
+// ============================================================================
+// SECONDARY HIGH EVENT
+// ============================================================================
+// Confirmed-only mirror of the primary HIGH EVENT block above, minus the
+// activePivot/live-extension machinery that section needs — Secondary has
+// no developing leg, so a confirmed pivot's own price/time is always the
+// final drawn endpoint, nothing else can move it later.
+if secProcessHighEvent
+    float secEventPrice = rawSecPivotHigh
+    int secEventTime = rawSecPivotHighTime
+    int secEventTfIndex = rawSecPivotHighTfIndex
+    if secLastPivotType == 0
+        if secSeedType == 0
+            secSeedType := 1
+            secSeedPrice := secEventPrice
+            secSeedTime := secEventTime
+            secSeedTfIndex := secEventTfIndex
+            secSeedAtr := secPivotAtrHigh
+        else if secSeedType == 1
+            if secEventPrice > secSeedPrice
+                secSeedPrice := secEventPrice
+                secSeedTime := secEventTime
+                secSeedTfIndex := secEventTfIndex
+                secSeedAtr := secPivotAtrHigh
+        else
+            int secBarsBetween = secEventTfIndex - secSeedTfIndex
+            float secRequiredMove = f_requiredMove(secSeedPrice, secSeedAtr) * secondaryDeviationMultiplier
+            bool secSpacingOk = secBarsBetween >= secondaryBackstepBars
+            bool secDeviationOk = secEventPrice - secSeedPrice >= secRequiredMove
+            if secSpacingOk and secDeviationOk
+                f_drawSecondarySegment(secSeedTime, secSeedPrice, secEventTime, secEventPrice)
+                secLastPivotType := 1
+                secLastPivotPrice := secEventPrice
+                secLastPivotTime := secEventTime
+                secLastPivotTfIndex := secEventTfIndex
+                secLastPivotAtr := secPivotAtrHigh
+                secSeedType := 0
+                secSeedPrice := na
+                secSeedTime := na
+                secSeedTfIndex := na
+                secSeedAtr := na
+    else if secLastPivotType == 1
+        if secEventPrice > secLastPivotPrice
+            if array.size(secondaryLines) > 0
+                line secCurrentSegment = array.get(secondaryLines, array.size(secondaryLines) - 1)
+                line.set_x2(secCurrentSegment, secEventTime)
+                line.set_y2(secCurrentSegment, secEventPrice)
+            secLastPivotPrice := secEventPrice
+            secLastPivotTime := secEventTime
+            secLastPivotTfIndex := secEventTfIndex
+            secLastPivotAtr := secPivotAtrHigh
+    else
+        int secBarsBetween = secEventTfIndex - secLastPivotTfIndex
+        float secRequiredMove = f_requiredMove(secLastPivotPrice, secLastPivotAtr) * secondaryDeviationMultiplier
+        bool secSpacingOk = secBarsBetween >= secondaryBackstepBars
+        bool secDeviationOk = secEventPrice - secLastPivotPrice >= secRequiredMove
+        if secSpacingOk and secDeviationOk
+            f_drawSecondarySegment(secLastPivotTime, secLastPivotPrice, secEventTime, secEventPrice)
+            secLastPivotType := 1
+            secLastPivotPrice := secEventPrice
+            secLastPivotTime := secEventTime
+            secLastPivotTfIndex := secEventTfIndex
+            secLastPivotAtr := secPivotAtrHigh
+// ============================================================================
+// SECONDARY LOW EVENT
+// ============================================================================
+if secProcessLowEvent
+    float secEventPrice = rawSecPivotLow
+    int secEventTime = rawSecPivotLowTime
+    int secEventTfIndex = rawSecPivotLowTfIndex
+    if secLastPivotType == 0
+        if secSeedType == 0
+            secSeedType := -1
+            secSeedPrice := secEventPrice
+            secSeedTime := secEventTime
+            secSeedTfIndex := secEventTfIndex
+            secSeedAtr := secPivotAtrLow
+        else if secSeedType == -1
+            if secEventPrice < secSeedPrice
+                secSeedPrice := secEventPrice
+                secSeedTime := secEventTime
+                secSeedTfIndex := secEventTfIndex
+                secSeedAtr := secPivotAtrLow
+        else
+            int secBarsBetween = secEventTfIndex - secSeedTfIndex
+            float secRequiredMove = f_requiredMove(secSeedPrice, secSeedAtr) * secondaryDeviationMultiplier
+            bool secSpacingOk = secBarsBetween >= secondaryBackstepBars
+            bool secDeviationOk = secSeedPrice - secEventPrice >= secRequiredMove
+            if secSpacingOk and secDeviationOk
+                f_drawSecondarySegment(secSeedTime, secSeedPrice, secEventTime, secEventPrice)
+                secLastPivotType := -1
+                secLastPivotPrice := secEventPrice
+                secLastPivotTime := secEventTime
+                secLastPivotTfIndex := secEventTfIndex
+                secLastPivotAtr := secPivotAtrLow
+                secSeedType := 0
+                secSeedPrice := na
+                secSeedTime := na
+                secSeedTfIndex := na
+                secSeedAtr := na
+    else if secLastPivotType == -1
+        if secEventPrice < secLastPivotPrice
+            if array.size(secondaryLines) > 0
+                line secCurrentSegment = array.get(secondaryLines, array.size(secondaryLines) - 1)
+                line.set_x2(secCurrentSegment, secEventTime)
+                line.set_y2(secCurrentSegment, secEventPrice)
+            secLastPivotPrice := secEventPrice
+            secLastPivotTime := secEventTime
+            secLastPivotTfIndex := secEventTfIndex
+            secLastPivotAtr := secPivotAtrLow
+    else
+        int secBarsBetween = secEventTfIndex - secLastPivotTfIndex
+        float secRequiredMove = f_requiredMove(secLastPivotPrice, secLastPivotAtr) * secondaryDeviationMultiplier
+        bool secSpacingOk = secBarsBetween >= secondaryBackstepBars
+        bool secDeviationOk = secLastPivotPrice - secEventPrice >= secRequiredMove
+        if secSpacingOk and secDeviationOk
+            f_drawSecondarySegment(secLastPivotTime, secLastPivotPrice, secEventTime, secEventPrice)
+            secLastPivotType := -1
+            secLastPivotPrice := secEventPrice
+            secLastPivotTime := secEventTime
+            secLastPivotTfIndex := secEventTfIndex
+            secLastPivotAtr := secPivotAtrLow
+// ============================================================================
+// RECURSIVE ZIGZAG (LEVEL 2)
+// ============================================================================
+// Same seed → establish → same-side-replace → confirm pattern as Level 1,
+// but driven by the l1PivotPriceBuf event stream above instead of raw
+// ta.pivothigh/low events. No Depth scan is needed — L1 already guarantees
+// each buffer entry is a genuine local extremum and the stream already
+// strictly alternates HIGH/LOW. "L1 count" (buffer index) stands in for
+// backstep spacing; f_requiredMove() reuses L1's Reversal Mode, scaled by
+// l2DeviationMultiplier.
+//
+// Runs at top level (not inside a function) because Pine doesn't allow a
+// function to reassign script-level vars — same constraint noted for Level 1
+// above. At most a couple of new buffer entries typically arrive per bar, so
+// this loop is cheap.
+if showL2 and array.size(l1PivotPriceBuf) - 1 > l2ScannedThrough
+    for idx = l2ScannedThrough + 1 to array.size(l1PivotPriceBuf) - 1
+        float l1Price = array.get(l1PivotPriceBuf, idx)
+        int l1Time = array.get(l1PivotTimeBuf, idx)
+        int l1Type = array.get(l1PivotTypeBuf, idx)
+        float l1Atr = array.get(l1PivotAtrBuf, idx)
+        if l2LastPivotType == 0
+            if l2SeedType == 0
+                l2SeedType := l1Type
+                l2SeedPrice := l1Price
+                l2SeedTime := l1Time
+                l2SeedAtr := l1Atr
+                l2SeedL1Count := idx
+            else if l2SeedType == l1Type
+                bool moreExtreme = l1Type == 1 ? l1Price > l2SeedPrice : l1Price < l2SeedPrice
+                if moreExtreme
+                    l2SeedPrice := l1Price
+                    l2SeedTime := l1Time
+                    l2SeedAtr := l1Atr
+                    l2SeedL1Count := idx
+            else
+                int l2Spacing = idx - l2SeedL1Count
+                float l2RequiredMove = f_requiredMove(l2SeedPrice, l2SeedAtr) * l2DeviationMultiplier
+                bool l2SpacingOk = l2Spacing >= l2MinSpacing
+                bool l2DeviationOk = math.abs(l1Price - l2SeedPrice) >= l2RequiredMove
+                if l2SpacingOk and l2DeviationOk
+                    f_drawL2Segment(l2SeedTime, l2SeedPrice, l1Time, l1Price)
+                    l2LastPivotType := l1Type
+                    l2LastPivotPrice := l1Price
+                    l2LastPivotTime := l1Time
+                    l2LastPivotAtr := l1Atr
+                    l2LastPivotL1Count := idx
+                    l2SeedType := 0
+        else if l2LastPivotType == l1Type
+            bool moreExtreme = l1Type == 1 ? l1Price > l2LastPivotPrice : l1Price < l2LastPivotPrice
+            if moreExtreme
+                if array.size(l2Lines) > 0
+                    line lastL2Segment = array.get(l2Lines, array.size(l2Lines) - 1)
+                    line.set_x2(lastL2Segment, l1Time)
+                    line.set_y2(lastL2Segment, l1Price)
+                l2LastPivotPrice := l1Price
+                l2LastPivotTime := l1Time
+                l2LastPivotAtr := l1Atr
+                l2LastPivotL1Count := idx
+        else
+            int l2Spacing = idx - l2LastPivotL1Count
+            float l2RequiredMove = f_requiredMove(l2LastPivotPrice, l2LastPivotAtr) * l2DeviationMultiplier
+            bool l2SpacingOk = l2Spacing >= l2MinSpacing
+            bool l2DeviationOk = math.abs(l1Price - l2LastPivotPrice) >= l2RequiredMove
+            if l2SpacingOk and l2DeviationOk
+                f_drawL2Segment(l2LastPivotTime, l2LastPivotPrice, l1Time, l1Price)
+                l2LastPivotType := l1Type
+                l2LastPivotPrice := l1Price
+                l2LastPivotTime := l1Time
+                l2LastPivotAtr := l1Atr
+                l2LastPivotL1Count := idx
+    l2ScannedThrough := array.size(l1PivotPriceBuf) - 1
+// ============================================================================
+// DEVELOPING LEG
+// ============================================================================
+// activePivot (state above) is the single source of truth for the current
+// ZigZag endpoint. Two live (unconfirmed) states extend it further here:
+//
+//   Extension — price is still pushing past activePivot in its own
+//               direction. The last leg (line + label/dot) grows live to
+//               follow it — no separate/paused segment.
+//   Reversal  — price has pulled back from activePivot and is forming a
+//               candidate pivot in the opposite direction, drawn dashed.
+//
+// Only one of the two is active at a time. Both repaint by design until
+// their pivot actually confirms.
+// ============================================================================
+// request.security() must be called unconditionally, but its result is only
+// used for a genuine HIGHER calculation timeframe. For "same as chart" AND
+// for a genuine LOWER timeframe, the chart's own current high/low already
+// covers (or exceeds) the calc-TF granularity, and going through security()
+// for a same-or-lower-TF request still synchronizes like a HTF merge and can
+// lag the live bar-by-bar extremes this live tracking depends on. Plain
+// high/low/time is exact in both of those cases.
+[secCurrentHigh, secCurrentLow, secCurrentTime] = request.security(
+    syminfo.tickerid,
+    effectiveTf,
+    [
+        useHighLow ? high : close,
+        useHighLow ? low : close,
+        time
+    ],
+    gaps = barmerge.gaps_off,
+    lookahead = barmerge.lookahead_off
+)
+float tfCurrentHigh = higherTfRequested ? secCurrentHigh : (useHighLow ? high : close)
+float tfCurrentLow = higherTfRequested ? secCurrentLow : (useHighLow ? low : close)
+int tfCurrentTime = higherTfRequested ? secCurrentTime : time
+var float developingExtremePrice = na
+var int developingExtremeTime = na
+var int rememberedActivePivotTime = na
+bool anchorExtended = false
+if lastPivotType == -1
+    // Last pivot = LOW: the active pivot can still push lower.
+    if na(activePivotPrice) or tfCurrentLow < activePivotPrice
+        activePivotPrice := tfCurrentLow
+        activePivotTime := tfCurrentTime
+        anchorExtended := true
+else if lastPivotType == 1
+    // Last pivot = HIGH: the active pivot can still push higher.
+    if na(activePivotPrice) or tfCurrentHigh > activePivotPrice
+        activePivotPrice := tfCurrentHigh
+        activePivotTime := tfCurrentTime
+        anchorExtended := true
+if anchorExtended and array.size(confirmedLines) > 0
+    // Grow the last leg live instead of pausing it at a stale pivot.
+    line lastSegment = array.get(confirmedLines, array.size(confirmedLines) - 1)
+    line.set_x2(lastSegment, activePivotTime)
+    line.set_y2(lastSegment, activePivotPrice)
+    bool extendingHigh = lastPivotType == 1
+    if showPivotLabels and array.size(pivotLabels) > 0
+        label lastLabel = array.get(pivotLabels, array.size(pivotLabels) - 1)
+        label.set_x(lastLabel, activePivotTime)
+        label.set_y(lastLabel, activePivotPrice)
+        string liveText = f_buildLabelText(extendingHigh, activePivotPrice, extendingHigh ? previousHighPrice : previousLowPrice, previousPivotPriceForLabel)
+        label.set_text(lastLabel, liveText)
+    if showPivotDots and array.size(pivotDots) > 0
+        label lastDot = array.get(pivotDots, array.size(pivotDots) - 1)
+        label.set_x(lastDot, activePivotTime)
+        label.set_y(lastDot, activePivotPrice)
+// activePivotTime changes both from live extension above and from confirmed
+// events (same-side replace or a brand new reversal) in the event handlers
+// earlier this bar. Either way, any reversal candidate measured from the old
+// reference is now stale and must restart from scratch.
+bool activePivotChanged = not na(activePivotTime) and (na(rememberedActivePivotTime) or activePivotTime != rememberedActivePivotTime)
+if activePivotChanged
+    developingExtremePrice := na
+    developingExtremeTime := na
+    rememberedActivePivotTime := activePivotTime
+else if lastPivotType == -1
+    // Active pivot stable — track the opposite-direction (upward) reversal candidate.
+    if na(developingExtremePrice) or tfCurrentHigh > developingExtremePrice
+        developingExtremePrice := tfCurrentHigh
+        developingExtremeTime := tfCurrentTime
+else if lastPivotType == 1
+    // Active pivot stable — track the opposite-direction (downward) reversal candidate.
+    if na(developingExtremePrice) or tfCurrentLow < developingExtremePrice
+        developingExtremePrice := tfCurrentLow
+        developingExtremeTime := tfCurrentTime
+// The line's far endpoint tracks tfCurrentTime (the present bar), not
+// developingExtremeTime (the bar where the extreme actually occurred).
+// developingExtremeTime only advances when a NEW extreme is set — on a bar
+// where price recovers without setting one, that time would otherwise stay
+// frozen at the old extreme bar while price (and bars) keep moving, leaving
+// every bar since undrawn. Anchoring the line's time to "now" every bar
+// (price still comes from developingExtremePrice) keeps it flat at the
+// pending extreme until price either exceeds it (a fresh, lower/higher
+// extreme moves the price down) or the leg confirms.
+bool showReversal = showDevelopingLeg and lastPivotType != 0 and not na(developingExtremePrice)
+if showReversal
+    if na(developingLine)
+        developingLine := line.new(
+            activePivotTime,
+            activePivotPrice,
+            tfCurrentTime,
+            developingExtremePrice,
+            xloc = xloc.bar_time,
+            extend = extend.none,
+            color = developingColor,
+            style = line.style_dashed,
+            width = developingWidth
+        )
+    else
+        line.set_xy1(developingLine, activePivotTime, activePivotPrice)
+        line.set_xy2(developingLine, tfCurrentTime, developingExtremePrice)
+        line.set_color(developingLine, developingColor)
+        line.set_width(developingLine, developingWidth)
+        line.set_style(developingLine, line.style_dashed)
+else
+    if not na(developingLine)
+        line.delete(developingLine)
+        developingLine := na
+// ============================================================================
+// RETRACEMENT %
+// ============================================================================
+// How deep the forming reversal candidate has pulled back relative to the
+// leg that preceded activePivot (the leg still recorded as the last entry
+// in confirmedLines, live-extended endpoint and all).
+float legStartPrice = na
+if array.size(confirmedLines) > 0
+    line priorSegment = array.get(confirmedLines, array.size(confirmedLines) - 1)
+    legStartPrice := line.get_y1(priorSegment)
+float legSize = na(legStartPrice) ? na : math.abs(activePivotPrice - legStartPrice)
+float retracementPercent = na
+if not na(legSize) and legSize > 0 and not na(developingExtremePrice)
+    retracementPercent := math.abs(activePivotPrice - developingExtremePrice) / legSize * 100.0
+bool showRetracementLabel = showReversal and showRetracement and not na(retracementPercent)
+if showRetracementLabel
+    string retracementText = str.tostring(retracementPercent, "#.#") + "%"
+    string retracementStyle = lastPivotType == 1 ? label.style_label_up : label.style_label_down
+    // Follows the same tfCurrentTime endpoint as developingLine above, for
+    // the same reason — otherwise it stays pinned to the old extreme bar
+    // while price runs on and looks like it vanished off the right edge.
+    if na(retracementLabel)
+        color retracementLabelBg = color.new(developingColor, 0)
+        retracementLabel := label.new(
+            tfCurrentTime,
+            developingExtremePrice,
+            retracementText,
+            xloc = xloc.bar_time,
+            yloc = yloc.price,
+            style = retracementStyle,
+            color = retracementLabelBg,
+            textcolor = f_contrastText(retracementLabelBg),
+            size = size.tiny
+        )
+    else
+        label.set_x(retracementLabel, tfCurrentTime)
+        label.set_y(retracementLabel, developingExtremePrice)
+        label.set_text(retracementLabel, retracementText)
+        label.set_style(retracementLabel, retracementStyle)
+else
+    if not na(retracementLabel)
+        label.delete(retracementLabel)
+        retracementLabel := na
+// ============================================================================
+// DATA WINDOW
+// ============================================================================
+plot(
+    lastPivotPrice,
+    "Last Confirmed Pivot",
+    display = display.data_window
+)
+plot(
+    lastPivotType,
+    "Last Pivot Type · +1 High / -1 Low",
+    display = display.data_window
+)
+plot(
+    activePivotPrice,
+    "Active Pivot (live endpoint)",
+    display = display.data_window
+)
+plot(
+    developingExtremePrice,
+    "Reversal Candidate",
+    display = display.data_window
+)
+plot(
+    lowerTfRequested ? array.size(ltfHighBuf) : na,
+    "LTF Buffer Size",
+    display = display.data_window
+)
+plot(
+    showL2 ? l2LastPivotPrice : na,
+    "Level 2 Last Pivot",
+    display = display.data_window
+)
+plot(
+    showSecondary ? secLastPivotPrice : na,
+    "Secondary Last Pivot",
+    display = display.data_window
+)
+// ============================================================================
+// TODO — open items (not yet implemented)
+// ============================================================================
+// Done: Pivot Confirmation Diagnostics (showDiagnostics), the simultaneous
+// high/low tie-break, pivot-bar ATR semantics, the shared label object
+// budget, the Lower-Timeframe Engine, the Recursive (Level 2) ZigZag, and
+// Dual ZigZag (Secondary) — see CHANGELOG. No open TODOs remain; further
+// work here would be new feature requests rather than backlog items.
+// ============================================================================

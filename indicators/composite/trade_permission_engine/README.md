@@ -57,7 +57,9 @@ reference leg, not two separate detectors:
   uses its own, wider/later-centered duration curve.
 - **Continuation/Reversal dominance is sticky** (hysteresis), resetting on a new reference leg.
 - **Two distinct Exhaustion measures**: counter-move exhaustion (deterioration, feeds Continuation)
-  and reference-impulse exhaustion (divergence at the leg's own endpoint, feeds Reversal).
+  and reference-impulse exhaustion (divergence at the leg's own endpoint, feeds Reversal) — most
+  accurate right after the leg completes; it gets imprecise deep into the counter-move, since the
+  divergence tracker may by then have moved on to a more recent, smaller pivot.
 - **Trigger** — an explicit state machine (`UNTRIGGERED → BROKEN → CONFIRMED → ACCEPTED`) driven by
   either a same-bar rejection-at-extreme or a micro-swing structure break, armed for
   `triggerValidityBarsInput` bars, resetting on a stale reference leg or an opposite confirmed
@@ -73,10 +75,27 @@ reference leg, not two separate detectors:
   Permission, solid = Active Permission), a thicker Permission line over the histogram, a thin
   ×5-scaled velocity line (Δ Active Permission, clamped to ±60 - unclamped, a single sharp jump
   could stretch the whole pane's autoscale and compress everything else into an unreadable thin
-  band), and a confidence-band background shading the pane
-  green/red when the dominant side's Permission is rising and gray when it's stagnant or falling —
-  replacing the old "confirmed trigger" background (the trigger moment stays visible via the
-  price-chart labels/lines instead). Every per-role score, including Live Trend Quality and the
+  band), and a confidence-band background (`highlightRegimesInput`, default on) shading the pane
+  green/red when the dominant side's Permission is rising and gray when it's falling — no shading
+  while it's merely stagnant, since Permission's floored-multiplicative gates saturate once a
+  trend is established and stagnant is the common case, not the exception; shading it too would
+  read as a constant colored wash instead of a signal — replacing the old "confirmed trigger"
+  background (the trigger moment stays visible via the price-chart labels/lines instead). The
+  histogram, Permission line, Directional Balance line, and
+  Permission's own threshold lines are all stretched by `permissionDisplayStretchInput` (default
+  1.6x, clamped back to ±100) before plotting - Permission's floored-multiplicative gate design
+  keeps it naturally compressed into a small sub-range (rarely much above ~40), and sharing one
+  pane axis with Position Health (which uses the full 0-100 range) squashed it into an unreadably
+  thin band. Display only - every non-plot use of Permission (Trigger eligibility, CRV, alerts,
+  data-window diagnostics) still reads the real, unstretched 0-100 value. The Permission bars'
+  fill also fades toward full color as the dominant side's live move extends further
+  (`extensionShadingInput`, default on) - distance since the last opposite pivot in ATR terms,
+  normalized against the existing "Impulse overextension threshold (ATR)" input and mapped through
+  a `norm^0.6` curve (not linear) so the first ATR or so of movement already shows a clear color
+  step instead of the change bunching up near the threshold, where bars rarely reach. Permission's
+  own floored-multiplicative gates saturate once a trend is established, so bar *height* alone can
+  look flat while price keeps running; this gives the pane a second, purely visual read of ongoing
+  move intensity without changing Permission's value or anything downstream of it. Every per-role score, including Live Trend Quality and the
   decay factors, is in the data window for debugging.
 - **Alerts**: Setup, Trigger, Signal (Trigger + Permission threshold), T1/T2 hit, Invalidation hit,
   Cancelled — per side.
@@ -165,12 +184,13 @@ Two further additions address transitions and early weakness across a wide chart
 dot color at a single bar:
 
 - **Position Health background** — a second background band, independent of the existing
-  Permission confidence band (both can be on at once; they blend). Colors the pane green or red by
-  whichever side (Long/Short) currently has the healthier reading - matching the lines' own
-  side-hue convention - but overrides to gray whenever that dominant side's health is falling
-  (smoothed 3-bar velocity below -0.3), regardless of which state it's still nominally in. This is
-  the "sign of weakness" signal: a still-HOLD reading that's fading toward PROTECT shows gray
-  before it ever crosses the threshold, not only after.
+  Permission confidence band (both can be on at once; they blend). Grays the pane whenever the
+  currently-healthier side's (Long/Short) Position Health is falling (smoothed 3-bar velocity below
+  -0.3), regardless of which state it's still nominally in - no shading otherwise (dropped the
+  earlier per-side state-color tint for the non-falling case, which painted almost every bar and
+  read as a constant wash rather than a signal). This is the "sign of weakness" signal: a
+  still-HOLD reading that's fading toward PROTECT shows gray before it ever crosses the threshold,
+  not only after; the dominant side itself stays visible via the Position Health lines' own color.
 - **Position Health downgrade markers** — a small `●` text glyph (`label.style_none`, no
   background bubble - `label.style_circle` renders a fixed-size disc regardless of `size=`, too
   large on a busy chart), offset half an ATR from the wick so it doesn't sit on the candle, drawn

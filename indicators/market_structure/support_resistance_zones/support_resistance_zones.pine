@@ -1,0 +1,1095 @@
+//@version=6
+// ============================================================================
+// Support & Resistance Zones [WavesUnchained]
+// Version: 0.1.11
+// Author: WavesUnchained
+// Build: 2026-08-12 17:00:00
+// ============================================================================
+// Detector-driven support/resistance zone engine: independent zone detectors
+// (pivot clusters, multiple tests, base/supply-demand, order blocks, fair
+// value gaps, price gaps, equal-high/low liquidity) feed candidates into a
+// central registry that merges, scores, confluences and tracks each zone
+// through touch/reaction/break/flip lifecycle states. Detectors never draw
+// directly — only the registry decides what becomes a zone and how it is
+// rendered, which keeps detection, scoring and visualization independently
+// testable and reusable for a future library extraction.
+//
+// Features:
+//   ✓ Pivot cluster, multiple-test and base/supply-demand zone detectors
+//   ✓ Order Block, Fair Value Gap, Price Gap and Equal High/Low Liquidity detectors
+//   ✓ Central zone registry with ATR-based merging and stable zone IDs
+//   ✓ Configurable confluence scoring (EMA, VWAP, Fibonacci, psychological levels, relative volume)
+//   ✓ Zone lifecycle — touch detection, reaction validation, break detection, Support/Resistance flips
+//   ✓ Nearest-zone renderer with hover tooltips (top N per side, score-filtered, non-overlapping)
+//   ✓ On-chart zone state label (NEW/TESTED/CONFIRMED/WEAK/BROKEN/FLIPPED) — validity without hovering
+//   ✓ Pine Log event logging and a validation statistics table for debugging
+//
+// Scores are heuristic confluence/quality scores, NOT statistical probabilities.
+//
+// ============================================================================
+
+indicator(
+     "Support & Resistance Zones [WavesUnchained]",
+     shorttitle = "S/R Zones",
+     overlay = true,
+     max_bars_back = 5000,
+     max_boxes_count = 250,
+     max_labels_count = 350,
+     max_lines_count = 100)
+
+// ============================================================================
+// 01 · GENERAL
+// ============================================================================
+groupGeneral = "01 · General"
+lookbackBars = input.int(
+     1200, "Maximum Analysis Lookback", minval = 100, maxval = 5000, group = groupGeneral,
+     tooltip = "Maximum historical distance considered relevant for active zones. This does not mean every historical zone is drawn.")
+maxStoredZones = input.int(
+     180, "Maximum Stored Zones", minval = 20, maxval = 400, group = groupGeneral)
+maxZonesPerSide = input.int(
+     5, "Maximum Visible Zones Per Side", minval = 1, maxval = 20, group = groupGeneral,
+     tooltip = "Maximum number of Support and Resistance zones rendered around price.")
+minZoneScore = input.float(
+     20.0, "Minimum Visible Zone Score", minval = 0, maxval = 100, step = 1, group = groupGeneral)
+atrLength = input.int(
+     14, "ATR Length", minval = 2, maxval = 200, group = groupGeneral)
+maxZoneWidthAtr = input.float(
+     2.0, "Maximum New Zone Width · ATR", minval = 0.1, maxval = 10, step = 0.1, group = groupGeneral)
+maxMergedWidthAtr = input.float(
+     3.0, "Maximum Merged Zone Width · ATR", minval = 0.25, maxval = 15, step = 0.1, group = groupGeneral)
+mergeDistanceAtr = input.float(
+     0.20, "Zone Merge Distance · ATR", minval = 0, maxval = 3, step = 0.05, group = groupGeneral,
+     tooltip = "Zones of the same direction are merged when they overlap or are this close.")
+
+// ============================================================================
+// 02 · PIVOT CLUSTERS
+// ============================================================================
+groupPivot = "02 · Pivot Clusters"
+enablePivotClusters = input.bool(true, "Enable Pivot Clusters", group = groupPivot)
+pivotDepth = input.int(5, "Pivot Depth", minval = 1, maxval = 50, group = groupPivot)
+pivotClusterMinCount = input.int(3, "Minimum Pivots", minval = 2, maxval = 10, group = groupPivot)
+pivotClusterToleranceAtr = input.float(0.35, "Cluster Tolerance · ATR", minval = 0.05, maxval = 3, step = 0.05, group = groupPivot)
+pivotPaddingAtr = input.float(0.08, "Zone Padding · ATR", minval = 0, maxval = 1, step = 0.01, group = groupPivot)
+pivotHistoryBars = input.int(400, "Pivot Cluster History", minval = 30, maxval = 3000, group = groupPivot)
+
+// ============================================================================
+// 03 · MULTIPLE TESTS
+// ============================================================================
+groupTests = "03 · Multiple Tests"
+enableMultipleTests = input.bool(
+     true, "Enable Multiple-Test Zones", group = groupTests,
+     tooltip = "Awards MT after repeated real zone tests. Its pivot-cluster detector is only a fallback when Pivot Cluster did not produce an accepted candidate on the same side.")
+minimumTests = input.int(3, "Minimum Tests", minval = 2, maxval = 10, group = groupTests)
+testToleranceAtr = input.float(0.22, "Test-Level Tolerance · ATR", minval = 0.02, maxval = 2, step = 0.02, group = groupTests)
+touchCooldownBars = input.int(
+     3, "Touch Cooldown", minval = 1, maxval = 50, group = groupTests,
+     tooltip = "Consecutive candles inside the same zone are not counted as separate tests.")
+
+// ============================================================================
+// 04 · BASE / SUPPLY & DEMAND
+// ============================================================================
+groupSD = "04 · Base / Supply & Demand"
+enableBaseZones = input.bool(
+     true, "Enable Base Zones", group = groupSD,
+     tooltip = "Used as the fallback source when Supply / Demand is disabled. Both modes currently use the same compact-base departure model and are never counted as independent evidence.")
+enableSupplyDemand = input.bool(
+     true, "Enable Supply / Demand", group = groupSD,
+     tooltip = "Takes source/score precedence when both Base and Supply / Demand are enabled; the shared raw pattern must not receive two scores.")
+baseBars = input.int(5, "Base Length", minval = 2, maxval = 30, group = groupSD)
+baseMaxWidthAtr = input.float(1.25, "Maximum Base Width · ATR", minval = 0.1, maxval = 5, step = 0.05, group = groupSD)
+baseImpulseAtr = input.float(0.80, "Required Exit Body · ATR", minval = 0.1, maxval = 5, step = 0.05, group = groupSD)
+
+// ============================================================================
+// 05 · ORDER BLOCKS
+// ============================================================================
+groupOB = "05 · Order Blocks"
+enableOrderBlocks = input.bool(true, "Enable Order Blocks", group = groupOB)
+obImpulseAtr = input.float(1.0, "Minimum Displacement Body · ATR", minval = 0.2, maxval = 5, step = 0.1, group = groupOB)
+obStructureLookback = input.int(8, "Structure Break Lookback", minval = 2, maxval = 100, group = groupOB)
+obSearchBars = input.int(6, "Origin Candle Search", minval = 1, maxval = 20, group = groupOB)
+obUseBody = input.bool(
+     false, "Use Candle Body Only", group = groupOB,
+     tooltip = "Off = complete origin candle range. On = open/close body only.")
+
+// ============================================================================
+// 06 · FAIR VALUE GAPS
+// ============================================================================
+groupFVG = "06 · Fair Value Gaps"
+enableFVG = input.bool(true, "Enable Fair Value Gaps", group = groupFVG)
+fvgMinAtr = input.float(0.10, "Minimum FVG Width · ATR", minval = 0, maxval = 3, step = 0.05, group = groupFVG)
+
+// ============================================================================
+// 07 · PRICE GAPS
+// ============================================================================
+groupGap = "07 · Price Gaps"
+enablePriceGaps = input.bool(true, "Enable Price Gaps", group = groupGap)
+gapMinAtr = input.float(0.15, "Minimum Gap Width · ATR", minval = 0, maxval = 5, step = 0.05, group = groupGap)
+
+// ============================================================================
+// 08 · LIQUIDITY
+// ============================================================================
+groupLiq = "08 · Liquidity"
+enableLiquidity = input.bool(true, "Enable Equal High / Low Liquidity", group = groupLiq)
+liquidityToleranceAtr = input.float(0.18, "Equal-Level Tolerance · ATR", minval = 0.01, maxval = 2, step = 0.01, group = groupLiq)
+liquidityPaddingAtr = input.float(0.05, "Liquidity Zone Padding · ATR", minval = 0, maxval = 1, step = 0.01, group = groupLiq)
+
+// ============================================================================
+// 09 · CONFLUENCE
+// ============================================================================
+groupConf = "09 · Confluence"
+enableEMA = input.bool(true, "EMA Confluence", group = groupConf)
+emaLength = input.int(50, "EMA Length", minval = 2, maxval = 500, group = groupConf)
+enableVWAP = input.bool(true, "VWAP Confluence", group = groupConf)
+enableFib = input.bool(true, "Fibonacci Confluence", group = groupConf)
+fibLookback = input.int(120, "Fibonacci Range Lookback", minval = 20, maxval = 1000, group = groupConf)
+enablePsychological = input.bool(true, "Psychological Price Levels", group = groupConf)
+psychologicalStep = input.float(
+     10.0, "Psychological Price Step", minval = 0.0000001, group = groupConf,
+     tooltip = "Example: Stocks around 100 -> 10 or 5. Indices -> 50 / 100. FX -> instrument-dependent.")
+enableVolumeConfluence = input.bool(true, "Relative Volume Confluence", group = groupConf)
+volumeLength = input.int(30, "Volume Average Length", minval = 2, maxval = 300, group = groupConf)
+relativeVolumeThreshold = input.float(1.5, "Relative Volume Threshold", minval = 1, maxval = 10, step = 0.1, group = groupConf)
+
+// ============================================================================
+// 10 · SCORING
+// ============================================================================
+groupScore = "10 · Scoring"
+weightPivot = input.float(18, "Pivot Cluster", minval = 0, maxval = 50, group = groupScore)
+weightTests = input.float(14, "Multiple Tests", minval = 0, maxval = 50, group = groupScore)
+weightBase = input.float(12, "Base", minval = 0, maxval = 50, group = groupScore)
+weightSD = input.float(18, "Supply / Demand", minval = 0, maxval = 50, group = groupScore)
+weightOB = input.float(18, "Order Block", minval = 0, maxval = 50, group = groupScore)
+weightFVG = input.float(10, "Fair Value Gap", minval = 0, maxval = 50, group = groupScore)
+weightGap = input.float(8, "Price Gap", minval = 0, maxval = 50, group = groupScore)
+weightLiquidity = input.float(12, "Liquidity", minval = 0, maxval = 50, group = groupScore)
+weightBreakout = input.float(14, "Breakout / Flip", minval = 0, maxval = 50, group = groupScore)
+weightEMA = input.float(5, "EMA Confluence", minval = 0, maxval = 30, group = groupScore)
+weightVWAP = input.float(6, "VWAP Confluence", minval = 0, maxval = 30, group = groupScore)
+weightFib = input.float(5, "Fibonacci Confluence", minval = 0, maxval = 30, group = groupScore)
+weightPsych = input.float(3, "Psychological Level", minval = 0, maxval = 30, group = groupScore)
+weightVolume = input.float(6, "Volume Confluence", minval = 0, maxval = 30, group = groupScore)
+
+// ============================================================================
+// 11 · LIFECYCLE / VALIDATION
+// ============================================================================
+groupLife = "11 · Lifecycle / Validation"
+breakThresholdAtr = input.float(0.20, "Confirmed Break Distance · ATR", minval = 0, maxval = 3, step = 0.05, group = groupLife)
+enableZoneFlips = input.bool(true, "Convert Broken Zones Into Flip Zones", group = groupLife)
+reactionThresholdAtr = input.float(0.75, "Successful Reaction · ATR", minval = 0.1, maxval = 10, step = 0.05, group = groupLife)
+reactionHorizon = input.int(20, "Reaction Validation Horizon", minval = 1, maxval = 200, group = groupLife)
+brokenKeepBars = input.int(100, "Keep Broken Zones", minval = 0, maxval = 1000, group = groupLife)
+
+// ============================================================================
+// 12 · VISUALIZATION
+// ============================================================================
+groupVisual = "12 · Visualization"
+showSupport = input.bool(true, "Show Support", group = groupVisual)
+showResistance = input.bool(true, "Show Resistance", group = groupVisual)
+showLabels = input.bool(true, "Show Zone Codes", group = groupVisual)
+showScores = input.bool(true, "Show Score", group = groupVisual)
+showZoneState = input.bool(true, "Show Zone State", group = groupVisual)
+showBrokenZones = input.bool(false, "Show Broken Zones", group = groupVisual)
+supportColor = input.color(color.rgb(25, 135, 84), "Support Color", group = groupVisual)
+resistanceColor = input.color(color.rgb(190, 50, 55), "Resistance Color", group = groupVisual)
+flipColor = input.color(color.rgb(210, 145, 35), "Fresh Flip Color", group = groupVisual)
+zoneTransparency = input.int(86, "Base Zone Transparency", minval = 50, maxval = 98, group = groupVisual)
+rightProjection = input.int(
+     15, "Right Projection · Bars", minval = 3, maxval = 100, group = groupVisual,
+     tooltip = "How many bars past the current bar a zone box (and its label) extends. Bounded on purpose — no infinite auto-extend into the future.")
+
+// ============================================================================
+// 13 · DEBUG / VALIDATION
+// ============================================================================
+groupDebug = "13 · Debug / Validation"
+operatingMode = input.string(
+     "Normal", "Operating Mode", options = ["Normal", "Validation", "Debug"], group = groupDebug)
+enableLogs = input.bool(false, "Enable Pine Logs", group = groupDebug)
+logTouches = input.bool(false, "Log Zone Touches", group = groupDebug)
+showValidationTable = input.bool(true, "Show Validation Statistics", group = groupDebug)
+debugCandidateLabels = input.bool(false, "Show Candidate Markers", group = groupDebug)
+debugBars = input.int(250, "Debug Marker Lookback", minval = 20, maxval = 1000, group = groupDebug)
+
+// ============================================================================
+// CORE SERIES
+// ============================================================================
+atr = ta.atr(atrLength)
+ema = ta.ema(close, emaLength)
+vwapValue = ta.vwap(hlc3)
+volumeAverage = ta.sma(volume, volumeLength)
+relativeVolume = volumeAverage > 0 ? volume / volumeAverage : 0.0
+fibHigh = ta.highest(high, fibLookback)
+fibLow = ta.lowest(low, fibLookback)
+fibRange = fibHigh - fibLow
+fib382 = fibHigh - fibRange * 0.382
+fib500 = fibHigh - fibRange * 0.500
+fib618 = fibHigh - fibRange * 0.618
+ph = ta.pivothigh(high, pivotDepth, pivotDepth)
+pl = ta.pivotlow(low, pivotDepth, pivotDepth)
+bool isConfirmedBar = barstate.isconfirmed
+
+// ============================================================================
+// DATA TYPES
+// ============================================================================
+// dir: +1 = Support, -1 = Resistance
+type ZoneCandidate
+    int dir
+    float top
+    float bottom
+    int originBar
+    int confirmedBar
+    string sources
+    float initialScore
+    string reason
+
+type Zone
+    int id
+    int dir
+    float top
+    float bottom
+    int originBar
+    int createdBar
+    int lastEvidenceBar
+    int confirmedBar
+    string sources
+    string state
+    float score
+    int touches
+    int reactions
+    int breaks
+    int lastTouchBar
+    int lastBreakBar
+    bool pendingReaction
+    int reactionStartBar
+    float reactionReference
+    float reactionAtr
+    float maxFavorableExcursion
+    bool multipleTestsAwarded
+
+// ============================================================================
+// STORAGE
+// ============================================================================
+var array<Zone> zones = array.new<Zone>()
+var array<float> pivotHighPrices = array.new<float>()
+var array<int> pivotHighBars = array.new<int>()
+var array<float> pivotLowPrices = array.new<float>()
+var array<int> pivotLowBars = array.new<int>()
+var array<box> renderedBoxes = array.new<box>()
+var array<label> renderedLabels = array.new<label>()
+var array<int> selectedIndices = array.new<int>()
+var int nextZoneId = 1
+
+// ============================================================================
+// VALIDATION COUNTERS
+// ============================================================================
+var int statCandidates = 0
+var int statCreated = 0
+var int statMerged = 0
+var int statRejected = 0
+var int statTouches = 0
+var int statReactionSuccess = 0
+var int statReactionWeak = 0
+var int statBreaks = 0
+var int statFlips = 0
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_clampScore(float value) =>
+    math.max(0.0, math.min(100.0, value))
+
+f_zoneMid(float top, float bottom) =>
+    (top + bottom) * 0.5
+
+f_hasSource(string sources, string code) =>
+    str.contains("|" + sources + "|", "|" + code + "|")
+
+f_addSource(string sources, string code) =>
+    string result = sources
+    if not f_hasSource(sources, code)
+        if sources == ""
+            result := code
+        else
+            result := sources + "|" + code
+    result
+
+f_sourceDisplay(string sources) =>
+    str.replace_all(sources, "|", "+")
+
+f_isLiveState(string state) =>
+    state != "INVALID" and state != "BROKEN"
+
+f_isRenderableState(string state) =>
+    state != "INVALID" and (state != "BROKEN" or showBrokenZones)
+
+f_log(string message) =>
+    if enableLogs
+        log.info(message)
+
+f_debugCandidate(ZoneCandidate c, string status) =>
+    if operatingMode == "Debug" and debugCandidateLabels and bar_index >= last_bar_index - debugBars
+        float y = c.dir == 1 ? c.bottom : c.top
+        string marker = status == "REJECT" ? "×" : "·"
+        color markerColor = c.dir == 1 ? supportColor : resistanceColor
+        label lb = label.new(
+             x = bar_index,
+             y = y,
+             text = marker + f_sourceDisplay(c.sources),
+             xloc = xloc.bar_index,
+             style = c.dir == 1 ? label.style_label_up : label.style_label_down,
+             color = color.new(markerColor, 75),
+             textcolor = color.white,
+             size = size.tiny)
+        label.set_tooltip(
+             lb,
+             "Candidate\n" +
+             "Status: " + status + "\n" +
+             "Source: " + f_sourceDisplay(c.sources) + "\n" +
+             "Top: " + str.tostring(c.top, format.mintick) + "\n" +
+             "Bottom: " + str.tostring(c.bottom, format.mintick) + "\n" +
+             "Score: " + str.tostring(c.initialScore, "#.0") + "\n" +
+             "Reason: " + c.reason)
+
+// ============================================================================
+// CONFLUENCE — evaluated on touch, not continuously
+//
+// Checking EMA/VWAP/Fib/Volume against a zone's own [bottom, top] on every
+// bar means a wide zone accumulates confluence merely by being wide, not
+// because of genuine localized agreement. Evaluating it only when the zone
+// is actually touched ties every confluence point to a real price event.
+// ============================================================================
+f_applyConfluence(Zone z, float currentAtr) =>
+    float tolerance = 0.05 * currentAtr
+    bool emaInside = ema >= z.bottom - tolerance and ema <= z.top + tolerance
+    if enableEMA and emaInside and not f_hasSource(z.sources, "MA")
+        z.sources := f_addSource(z.sources, "MA")
+        z.score := f_clampScore(z.score + weightEMA)
+    bool vwapInside = not na(vwapValue) and vwapValue >= z.bottom - tolerance and vwapValue <= z.top + tolerance
+    if enableVWAP and vwapInside and not f_hasSource(z.sources, "VWAP")
+        z.sources := f_addSource(z.sources, "VWAP")
+        z.score := f_clampScore(z.score + weightVWAP)
+    bool fibInside =
+         (fib382 >= z.bottom and fib382 <= z.top) or
+         (fib500 >= z.bottom and fib500 <= z.top) or
+         (fib618 >= z.bottom and fib618 <= z.top)
+    if enableFib and fibInside and not f_hasSource(z.sources, "FIB")
+        z.sources := f_addSource(z.sources, "FIB")
+        z.score := f_clampScore(z.score + weightFib)
+    float middle = f_zoneMid(z.top, z.bottom)
+    float nearestPsych = math.round(middle / psychologicalStep) * psychologicalStep
+    bool psychInside = nearestPsych >= z.bottom and nearestPsych <= z.top
+    if enablePsychological and psychInside and not f_hasSource(z.sources, "PSY")
+        z.sources := f_addSource(z.sources, "PSY")
+        z.score := f_clampScore(z.score + weightPsych)
+    bool highRelativeVolume = relativeVolume >= relativeVolumeThreshold
+    if enableVolumeConfluence and highRelativeVolume and not f_hasSource(z.sources, "VOL")
+        z.sources := f_addSource(z.sources, "VOL")
+        z.score := f_clampScore(z.score + weightVolume)
+
+// ============================================================================
+// PIVOT CLUSTER SEARCH
+// ============================================================================
+f_findCluster(array<float> prices, array<int> bars, float referencePrice, int referenceBar, float tolerance, int historyBars) =>
+    float clusterLow = referencePrice
+    float clusterHigh = referencePrice
+    int count = 0
+    int earliestBar = referenceBar
+    int sz = array.size(prices)
+    if sz > 0
+        for i = 0 to sz - 1
+            float p = array.get(prices, i)
+            int b = array.get(bars, i)
+            bool recentEnough = referenceBar - b <= historyBars
+            bool closeEnough = math.abs(p - referencePrice) <= tolerance
+            if recentEnough and closeEnough
+                count += 1
+                clusterLow := math.min(clusterLow, p)
+                clusterHigh := math.max(clusterHigh, p)
+                earliestBar := math.min(earliestBar, b)
+    [clusterLow, clusterHigh, count, earliestBar]
+
+// ============================================================================
+// ZONE MERGING
+// ============================================================================
+f_canMerge(Zone z, ZoneCandidate c, float currentAtr) =>
+    bool sameDirection = z.dir == c.dir
+    bool overlap = math.min(z.top, c.top) >= math.max(z.bottom, c.bottom)
+    float distance = 0.0
+    if not overlap
+        if c.bottom > z.top
+            distance := c.bottom - z.top
+        else if z.bottom > c.top
+            distance := z.bottom - c.top
+    bool nearEnough = distance <= mergeDistanceAtr * currentAtr
+    sameDirection and f_isLiveState(z.state) and (overlap or nearEnough)
+
+// ============================================================================
+// INGEST CANDIDATE
+// Return: 0 = rejected, 1 = new zone, 2 = merged
+// ============================================================================
+f_ingestCandidate(ZoneCandidate c, int proposedId, float currentAtr) =>
+    int result = 0
+    float width = c.top - c.bottom
+    bool basicValid = not na(c.top) and not na(c.bottom) and c.top > c.bottom and width <= maxZoneWidthAtr * currentAtr
+    if not basicValid
+        f_debugCandidate(c, "REJECT")
+        f_log(
+             "[REJECT] candidate=" + f_sourceDisplay(c.sources) +
+             " range=" + str.tostring(c.bottom, format.mintick) + "-" + str.tostring(c.top, format.mintick))
+    else
+        int mergeIndex = -1
+        float bestMergeDistance = 1e30
+        int zoneCount = array.size(zones)
+        if zoneCount > 0
+            for i = 0 to zoneCount - 1
+                Zone z = array.get(zones, i)
+                if f_canMerge(z, c, currentAtr)
+                    float mergedTop = math.max(z.top, c.top)
+                    float mergedBottom = math.min(z.bottom, c.bottom)
+                    bool mergedWidthValid = mergedTop - mergedBottom <= maxMergedWidthAtr * currentAtr
+                    if mergedWidthValid
+                        float centerDistance = math.abs(f_zoneMid(z.top, z.bottom) - f_zoneMid(c.top, c.bottom))
+                        if centerDistance < bestMergeDistance
+                            bestMergeDistance := centerDistance
+                            mergeIndex := i
+        if mergeIndex >= 0
+            Zone z = array.get(zones, mergeIndex)
+            bool newEvidence = not str.contains("|" + z.sources + "|", "|" + c.sources + "|")
+            z.top := math.max(z.top, c.top)
+            z.bottom := math.min(z.bottom, c.bottom)
+            z.originBar := math.min(z.originBar, c.originBar)
+            z.lastEvidenceBar := bar_index
+            if newEvidence
+                z.sources := z.sources == "" ? c.sources : z.sources + "|" + c.sources
+                z.score := f_clampScore(z.score + c.initialScore)
+            f_log(
+                 "[MERGE] Z" + str.tostring(z.id) + " source=" + f_sourceDisplay(c.sources) +
+                 " range=" + str.tostring(z.bottom, format.mintick) + "-" + str.tostring(z.top, format.mintick) +
+                 " score=" + str.tostring(z.score, "#.0"))
+            result := 2
+        else
+            Zone newZone = Zone.new(
+                 proposedId, c.dir, c.top, c.bottom, c.originBar, bar_index, bar_index, c.confirmedBar, c.sources,
+                 "NEW", f_clampScore(c.initialScore), 0, 0, 0, na, na, false, na, na, na, 0.0, false)
+            array.push(zones, newZone)
+            f_log(
+                 "[CREATE] Z" + str.tostring(proposedId) + " dir=" + (c.dir == 1 ? "SUPPORT" : "RESISTANCE") +
+                 " source=" + f_sourceDisplay(c.sources) +
+                 " range=" + str.tostring(c.bottom, format.mintick) + "-" + str.tostring(c.top, format.mintick) +
+                 " score=" + str.tostring(c.initialScore, "#.0"))
+            f_debugCandidate(c, "CREATE")
+            result := 1
+    result
+
+// ============================================================================
+// HANDLE CANDIDATE
+// ============================================================================
+f_candidate(int direction, float zoneTop, float zoneBottom, int origin, string sources, float score, string reason) =>
+    ZoneCandidate.new(direction, zoneTop, zoneBottom, origin, bar_index, sources, score, reason)
+
+// ============================================================================
+// RECORD NEW PIVOTS
+// ============================================================================
+if isConfirmedBar and not na(ph)
+    int pBar = bar_index - pivotDepth
+    array.push(pivotHighPrices, ph)
+    array.push(pivotHighBars, pBar)
+    // Keep the full user-requested bar history rather than an arbitrary
+    // pivot-count cap; the latter silently shortened long-history searches.
+    while array.size(pivotHighPrices) > 0 and pBar - array.get(pivotHighBars, 0) > pivotHistoryBars
+        array.shift(pivotHighPrices)
+        array.shift(pivotHighBars)
+if isConfirmedBar and not na(pl)
+    int pBar = bar_index - pivotDepth
+    array.push(pivotLowPrices, pl)
+    array.push(pivotLowBars, pBar)
+    while array.size(pivotLowPrices) > 0 and pBar - array.get(pivotLowBars, 0) > pivotHistoryBars
+        array.shift(pivotLowPrices)
+        array.shift(pivotLowBars)
+
+// ============================================================================
+// DETECTOR · PIVOT CLUSTER
+// ============================================================================
+// MT is allowed to fall back to its own stricter pivot clustering only when
+// the PC candidate on this side was not accepted by the registry. Otherwise
+// the same pivot evidence would receive PC and MT score on one bar.
+bool pivotClusterHandledHigh = false
+bool pivotClusterHandledLow = false
+if isConfirmedBar and enablePivotClusters and not na(ph)
+    int pivotBar = bar_index - pivotDepth
+    [clusterLow, clusterHigh, clusterCount, earliestBar] = f_findCluster(
+         pivotHighPrices, pivotHighBars, ph, pivotBar, pivotClusterToleranceAtr * atr, pivotHistoryBars)
+    if clusterCount >= pivotClusterMinCount
+        ZoneCandidate c = f_candidate(
+             -1, clusterHigh + pivotPaddingAtr * atr, clusterLow - pivotPaddingAtr * atr, earliestBar,
+             "PC", weightPivot, "Pivot-high cluster count=" + str.tostring(clusterCount))
+        statCandidates += 1
+        int action = f_ingestCandidate(c, nextZoneId, atr)
+        pivotClusterHandledHigh := action > 0
+        if action == 1
+            statCreated += 1
+            nextZoneId += 1
+        else if action == 2
+            statMerged += 1
+        else
+            statRejected += 1
+if isConfirmedBar and enablePivotClusters and not na(pl)
+    int pivotBar = bar_index - pivotDepth
+    [clusterLow, clusterHigh, clusterCount, earliestBar] = f_findCluster(
+         pivotLowPrices, pivotLowBars, pl, pivotBar, pivotClusterToleranceAtr * atr, pivotHistoryBars)
+    if clusterCount >= pivotClusterMinCount
+        ZoneCandidate c = f_candidate(
+             1, clusterHigh + pivotPaddingAtr * atr, clusterLow - pivotPaddingAtr * atr, earliestBar,
+             "PC", weightPivot, "Pivot-low cluster count=" + str.tostring(clusterCount))
+        statCandidates += 1
+        int action = f_ingestCandidate(c, nextZoneId, atr)
+        pivotClusterHandledLow := action > 0
+        if action == 1
+            statCreated += 1
+            nextZoneId += 1
+        else if action == 2
+            statMerged += 1
+        else
+            statRejected += 1
+
+// ============================================================================
+// DETECTOR · MULTIPLE TEST LEVELS
+// A pivot-cluster MT candidate is a fallback only. When PC already created or
+// reinforced a zone from this pivot, MT is awarded later by real zone tests in
+// the lifecycle block instead of double-counting the same pivot evidence.
+// ============================================================================
+if isConfirmedBar and enableMultipleTests and not pivotClusterHandledHigh and not na(ph)
+    int pivotBar = bar_index - pivotDepth
+    [testLow, testHigh, testCount, earliestTest] = f_findCluster(
+         pivotHighPrices, pivotHighBars, ph, pivotBar, testToleranceAtr * atr, pivotHistoryBars)
+    if testCount >= minimumTests
+        ZoneCandidate c = f_candidate(
+             -1, testHigh + pivotPaddingAtr * atr, testLow - pivotPaddingAtr * atr, earliestTest,
+             "MT", weightTests, "Repeated resistance tests=" + str.tostring(testCount))
+        statCandidates += 1
+        int action = f_ingestCandidate(c, nextZoneId, atr)
+        if action == 1
+            statCreated += 1
+            nextZoneId += 1
+        else if action == 2
+            statMerged += 1
+        else
+            statRejected += 1
+if isConfirmedBar and enableMultipleTests and not pivotClusterHandledLow and not na(pl)
+    int pivotBar = bar_index - pivotDepth
+    [testLow, testHigh, testCount, earliestTest] = f_findCluster(
+         pivotLowPrices, pivotLowBars, pl, pivotBar, testToleranceAtr * atr, pivotHistoryBars)
+    if testCount >= minimumTests
+        ZoneCandidate c = f_candidate(
+             1, testHigh + pivotPaddingAtr * atr, testLow - pivotPaddingAtr * atr, earliestTest,
+             "MT", weightTests, "Repeated support tests=" + str.tostring(testCount))
+        statCandidates += 1
+        int action = f_ingestCandidate(c, nextZoneId, atr)
+        if action == 1
+            statCreated += 1
+            nextZoneId += 1
+        else if action == 2
+            statMerged += 1
+        else
+            statRejected += 1
+
+// ============================================================================
+// DETECTOR · LIQUIDITY / EQUAL HIGHS
+//
+// Compare the current confirmed pivot against the complete retained pivot
+// history. Comparing only the immediately preceding pivot misses a valid
+// equal-high pair whenever an unrelated high occurs between its two tests.
+// ============================================================================
+if isConfirmedBar and not na(ph)
+    int currentPivotBar = bar_index - pivotDepth
+    if enableLiquidity
+        [clusterLow, clusterHigh, clusterCount, earliestBar] = f_findCluster(
+             pivotHighPrices, pivotHighBars, ph, currentPivotBar, liquidityToleranceAtr * atr, pivotHistoryBars)
+        if clusterCount >= 2
+            ZoneCandidate c = f_candidate(
+                 -1, clusterHigh + liquidityPaddingAtr * atr, clusterLow - liquidityPaddingAtr * atr,
+                 earliestBar, "LIQ", weightLiquidity, "Equal-high liquidity cluster count=" + str.tostring(clusterCount))
+            statCandidates += 1
+            int action = f_ingestCandidate(c, nextZoneId, atr)
+            if action == 1
+                statCreated += 1
+                nextZoneId += 1
+            else if action == 2
+                statMerged += 1
+            else
+                statRejected += 1
+
+// ============================================================================
+// DETECTOR · LIQUIDITY / EQUAL LOWS
+// Same full-history search as equal highs; see the comment above.
+// ============================================================================
+if isConfirmedBar and not na(pl)
+    int currentPivotBar = bar_index - pivotDepth
+    if enableLiquidity
+        [clusterLow, clusterHigh, clusterCount, earliestBar] = f_findCluster(
+             pivotLowPrices, pivotLowBars, pl, currentPivotBar, liquidityToleranceAtr * atr, pivotHistoryBars)
+        if clusterCount >= 2
+            ZoneCandidate c = f_candidate(
+                 1, clusterHigh + liquidityPaddingAtr * atr, clusterLow - liquidityPaddingAtr * atr,
+                 earliestBar, "LIQ", weightLiquidity, "Equal-low liquidity cluster count=" + str.tostring(clusterCount))
+            statCandidates += 1
+            int action = f_ingestCandidate(c, nextZoneId, atr)
+            if action == 1
+                statCreated += 1
+                nextZoneId += 1
+            else if action == 2
+                statMerged += 1
+            else
+                statRejected += 1
+
+// ============================================================================
+// DETECTOR · BASE / SUPPLY & DEMAND
+// ============================================================================
+float previousBaseHigh = ta.highest(high[1], baseBars)
+float previousBaseLow = ta.lowest(low[1], baseBars)
+float previousBaseWidth = previousBaseHigh - previousBaseLow
+bool compactBase = previousBaseWidth <= baseMaxWidthAtr * atr
+float currentBody = math.abs(close - open)
+bool strongExit = currentBody >= baseImpulseAtr * atr
+if isConfirmedBar and (enableBaseZones or enableSupplyDemand) and compactBase and strongExit
+    bool bullishDeparture = close > previousBaseHigh
+    bool bearishDeparture = close < previousBaseLow
+    if bullishDeparture
+        // Compact-base departure is one raw pattern. When both switches are
+        // on, model it as SD rather than awarding BASE and SD independently.
+        string source = enableSupplyDemand ? "SD" : "BASE"
+        float score = enableSupplyDemand ? weightSD : weightBase
+        ZoneCandidate c = f_candidate(
+             1, previousBaseHigh, previousBaseLow, bar_index - baseBars,
+             source, score, "Compact base followed by bullish displacement")
+        statCandidates += 1
+        int action = f_ingestCandidate(c, nextZoneId, atr)
+        if action == 1
+            statCreated += 1
+            nextZoneId += 1
+        else if action == 2
+            statMerged += 1
+        else
+            statRejected += 1
+    if bearishDeparture
+        string source = enableSupplyDemand ? "SD" : "BASE"
+        float score = enableSupplyDemand ? weightSD : weightBase
+        ZoneCandidate c = f_candidate(
+             -1, previousBaseHigh, previousBaseLow, bar_index - baseBars,
+             source, score, "Compact base followed by bearish displacement")
+        statCandidates += 1
+        int action = f_ingestCandidate(c, nextZoneId, atr)
+        if action == 1
+            statCreated += 1
+            nextZoneId += 1
+        else if action == 2
+            statMerged += 1
+        else
+            statRejected += 1
+
+// ============================================================================
+// DETECTOR · ORDER BLOCK
+// ============================================================================
+float priorStructureHigh = ta.highest(high[1], obStructureLookback)
+float priorStructureLow = ta.lowest(low[1], obStructureLookback)
+bool bullishDisplacement = close > open and math.abs(close - open) >= obImpulseAtr * atr and close > priorStructureHigh
+bool bearishDisplacement = close < open and math.abs(close - open) >= obImpulseAtr * atr and close < priorStructureLow
+if isConfirmedBar and enableOrderBlocks and bullishDisplacement
+    int foundOffset = na
+    for i = 1 to obSearchBars
+        if na(foundOffset) and close[i] < open[i]
+            foundOffset := i
+    if not na(foundOffset)
+        float obTop = obUseBody ? math.max(open[foundOffset], close[foundOffset]) : high[foundOffset]
+        float obBottom = obUseBody ? math.min(open[foundOffset], close[foundOffset]) : low[foundOffset]
+        ZoneCandidate c = f_candidate(
+             1, obTop, obBottom, bar_index - foundOffset,
+             "OB", weightOB, "Last bearish candle before bullish displacement and structure break")
+        statCandidates += 1
+        int action = f_ingestCandidate(c, nextZoneId, atr)
+        if action == 1
+            statCreated += 1
+            nextZoneId += 1
+        else if action == 2
+            statMerged += 1
+        else
+            statRejected += 1
+if isConfirmedBar and enableOrderBlocks and bearishDisplacement
+    int foundOffset = na
+    for i = 1 to obSearchBars
+        if na(foundOffset) and close[i] > open[i]
+            foundOffset := i
+    if not na(foundOffset)
+        float obTop = obUseBody ? math.max(open[foundOffset], close[foundOffset]) : high[foundOffset]
+        float obBottom = obUseBody ? math.min(open[foundOffset], close[foundOffset]) : low[foundOffset]
+        ZoneCandidate c = f_candidate(
+             -1, obTop, obBottom, bar_index - foundOffset,
+             "OB", weightOB, "Last bullish candle before bearish displacement and structure break")
+        statCandidates += 1
+        int action = f_ingestCandidate(c, nextZoneId, atr)
+        if action == 1
+            statCreated += 1
+            nextZoneId += 1
+        else if action == 2
+            statMerged += 1
+        else
+            statRejected += 1
+
+// ============================================================================
+// DETECTOR · FAIR VALUE GAP
+// ============================================================================
+bool bullishFvg = low > high[2] and low - high[2] >= fvgMinAtr * atr
+bool bearishFvg = high < low[2] and low[2] - high >= fvgMinAtr * atr
+if isConfirmedBar and enableFVG and bullishFvg
+    ZoneCandidate c = f_candidate(1, low, high[2], bar_index - 2, "FVG", weightFVG, "Bullish three-candle imbalance")
+    statCandidates += 1
+    int action = f_ingestCandidate(c, nextZoneId, atr)
+    if action == 1
+        statCreated += 1
+        nextZoneId += 1
+    else if action == 2
+        statMerged += 1
+    else
+        statRejected += 1
+if isConfirmedBar and enableFVG and bearishFvg
+    ZoneCandidate c = f_candidate(-1, low[2], high, bar_index - 2, "FVG", weightFVG, "Bearish three-candle imbalance")
+    statCandidates += 1
+    int action = f_ingestCandidate(c, nextZoneId, atr)
+    if action == 1
+        statCreated += 1
+        nextZoneId += 1
+    else if action == 2
+        statMerged += 1
+    else
+        statRejected += 1
+
+// ============================================================================
+// DETECTOR · CLASSICAL PRICE GAP
+// ============================================================================
+bool bullishGap = low > high[1] and low - high[1] >= gapMinAtr * atr
+bool bearishGap = high < low[1] and low[1] - high >= gapMinAtr * atr
+if isConfirmedBar and enablePriceGaps and bullishGap
+    ZoneCandidate c = f_candidate(1, low, high[1], bar_index - 1, "GAP", weightGap, "Bullish unfilled price gap")
+    statCandidates += 1
+    int action = f_ingestCandidate(c, nextZoneId, atr)
+    if action == 1
+        statCreated += 1
+        nextZoneId += 1
+    else if action == 2
+        statMerged += 1
+    else
+        statRejected += 1
+if isConfirmedBar and enablePriceGaps and bearishGap
+    ZoneCandidate c = f_candidate(-1, low[1], high, bar_index - 1, "GAP", weightGap, "Bearish unfilled price gap")
+    statCandidates += 1
+    int action = f_ingestCandidate(c, nextZoneId, atr)
+    if action == 1
+        statCreated += 1
+        nextZoneId += 1
+    else if action == 2
+        statMerged += 1
+    else
+        statRejected += 1
+
+// ============================================================================
+// LIFECYCLE ENGINE
+// ============================================================================
+int lifecycleCount = array.size(zones)
+if isConfirmedBar and lifecycleCount > 0
+    for i = 0 to lifecycleCount - 1
+        Zone z = array.get(zones, i)
+        if z.state != "INVALID"
+            if bar_index - z.lastEvidenceBar > lookbackBars
+                z.state := "INVALID"
+            else
+                // -------------------------------------------------------------
+                // WIDTH RE-CHECK
+                // A zone merged during a high-ATR period must not stay frozen
+                // wider than the current ATR allows once volatility drops —
+                // z.top/z.bottom otherwise only ever grow, never shrink.
+                // -------------------------------------------------------------
+                float maxWidthNow = maxMergedWidthAtr * atr
+                if z.top - z.bottom > maxWidthNow
+                    float mid = f_zoneMid(z.top, z.bottom)
+                    z.top := mid + maxWidthNow * 0.5
+                    z.bottom := mid - maxWidthNow * 0.5
+                // -------------------------------------------------------------
+                // BREAK DETECTION
+                // -------------------------------------------------------------
+                bool supportBroken = z.dir == 1 and close < z.bottom - breakThresholdAtr * atr
+                bool resistanceBroken = z.dir == -1 and close > z.top + breakThresholdAtr * atr
+                bool broken = supportBroken or resistanceBroken
+                if broken and z.state != "BROKEN"
+                    z.breaks += 1
+                    z.lastBreakBar := bar_index
+                    statBreaks += 1
+                    z.pendingReaction := false
+                    f_log(
+                         "[BREAK] Z" + str.tostring(z.id) +
+                         " direction=" + (z.dir == 1 ? "SUPPORT" : "RESISTANCE") +
+                         " close=" + str.tostring(close, format.mintick))
+                    if enableZoneFlips
+                        z.dir := -z.dir
+                        z.state := "FLIPPED"
+                        if not f_hasSource(z.sources, "BO")
+                            z.sources := f_addSource(z.sources, "BO")
+                            z.score := f_clampScore(z.score + weightBreakout)
+                        statFlips += 1
+                        f_log("[FLIP] Z" + str.tostring(z.id) + " newDirection=" + (z.dir == 1 ? "SUPPORT" : "RESISTANCE"))
+                    else
+                        z.state := "BROKEN"
+                // -------------------------------------------------------------
+                // REMOVE OLD BROKEN ZONES
+                // -------------------------------------------------------------
+                if z.state == "BROKEN" and not na(z.lastBreakBar) and bar_index - z.lastBreakBar > brokenKeepBars
+                    z.state := "INVALID"
+                // -------------------------------------------------------------
+                // TOUCH DETECTION
+                // -------------------------------------------------------------
+                bool zoneIntersection = high >= z.bottom and low <= z.top
+                bool cooldownPassed = na(z.lastTouchBar) or bar_index - z.lastTouchBar > touchCooldownBars
+                bool afterZoneConfirmation = bar_index > z.confirmedBar
+                bool notBreakBar = na(z.lastBreakBar) or bar_index != z.lastBreakBar
+                if zoneIntersection and cooldownPassed and not z.pendingReaction and z.state != "BROKEN" and afterZoneConfirmation and notBreakBar
+                    z.touches += 1
+                    z.lastTouchBar := bar_index
+                    statTouches += 1
+                    if z.state == "NEW"
+                        z.state := "TESTED"
+                    z.pendingReaction := true
+                    z.reactionStartBar := bar_index
+                    z.reactionReference := f_zoneMid(z.top, z.bottom)
+                    z.reactionAtr := atr
+                    z.maxFavorableExcursion := 0.0
+                    if logTouches
+                        f_log(
+                             "[TOUCH] Z" + str.tostring(z.id) + " touch=" + str.tostring(z.touches) +
+                             " source=" + f_sourceDisplay(z.sources))
+                    if enableMultipleTests and z.touches >= minimumTests and not z.multipleTestsAwarded
+                        z.multipleTestsAwarded := true
+                        if not f_hasSource(z.sources, "MT")
+                            z.sources := f_addSource(z.sources, "MT")
+                            z.score := f_clampScore(z.score + weightTests)
+                    f_applyConfluence(z, atr)
+                // -------------------------------------------------------------
+                // REACTION VALIDATION
+                // -------------------------------------------------------------
+                if z.pendingReaction and bar_index > z.reactionStartBar
+                    float favorable = z.dir == 1 ? high - z.reactionReference : z.reactionReference - low
+                    z.maxFavorableExcursion := math.max(z.maxFavorableExcursion, favorable)
+                    float requiredMove = reactionThresholdAtr * z.reactionAtr
+                    bool reactionSuccess = z.maxFavorableExcursion >= requiredMove
+                    bool reactionExpired = bar_index - z.reactionStartBar > reactionHorizon
+                    if reactionSuccess
+                        z.pendingReaction := false
+                        z.reactions += 1
+                        z.state := "CONFIRMED"
+                        statReactionSuccess += 1
+                        f_log(
+                             "[REACTION] Z" + str.tostring(z.id) +
+                             " excursionATR=" + str.tostring(z.maxFavorableExcursion / z.reactionAtr, "#.00"))
+                    else if reactionExpired
+                        z.pendingReaction := false
+                        if z.state != "FLIPPED"
+                            z.state := "WEAK"
+                        statReactionWeak += 1
+                        f_log("[WEAK] Z" + str.tostring(z.id) + " reaction horizon expired")
+
+// ============================================================================
+// STORAGE PRUNING
+// ============================================================================
+while array.size(zones) > maxStoredZones
+    array.shift(zones)
+
+// ============================================================================
+// RENDERER HELPERS
+// ============================================================================
+f_deleteRenderedObjects() =>
+    int bCount = array.size(renderedBoxes)
+    if bCount > 0
+        for i = 0 to bCount - 1
+            box.delete(array.get(renderedBoxes, i))
+    array.clear(renderedBoxes)
+    int lCount = array.size(renderedLabels)
+    if lCount > 0
+        for i = 0 to lCount - 1
+            label.delete(array.get(renderedLabels, i))
+    array.clear(renderedLabels)
+
+f_alreadySelected(int index) =>
+    bool result = false
+    int count = array.size(selectedIndices)
+    if count > 0
+        for i = 0 to count - 1
+            if array.get(selectedIndices, i) == index
+                result := true
+    result
+
+// A candidate that price-overlaps an already-selected zone of the same
+// direction is skipped — otherwise "N nearest per side" happily stacks
+// several same-side bands on top of each other with colliding labels.
+f_overlapsSelected(Zone candidate) =>
+    bool result = false
+    int count = array.size(selectedIndices)
+    if count > 0
+        for i = 0 to count - 1
+            Zone other = array.get(zones, array.get(selectedIndices, i))
+            bool overlap = math.min(candidate.top, other.top) >= math.max(candidate.bottom, other.bottom)
+            if other.dir == candidate.dir and overlap
+                result := true
+    result
+
+f_selectNearest(int direction, int maximum) =>
+    for selection = 0 to maximum - 1
+        int bestIndex = -1
+        float bestDistance = 1e30
+        int count = array.size(zones)
+        if count > 0
+            for i = 0 to count - 1
+                Zone z = array.get(zones, i)
+                bool correctDirection = z.dir == direction
+                bool scoreValid = z.score >= minZoneScore
+                bool stateValid = f_isRenderableState(z.state)
+                bool enabledSide = direction == 1 ? showSupport : showResistance
+                bool onCorrectPriceSide = direction == 1 ? z.bottom <= close : z.top >= close
+                bool eligible =
+                     correctDirection and scoreValid and stateValid and enabledSide and onCorrectPriceSide and
+                     not f_alreadySelected(i) and not f_overlapsSelected(z)
+                if eligible
+                    float distance = math.abs(f_zoneMid(z.top, z.bottom) - close)
+                    if distance < bestDistance
+                        bestDistance := distance
+                        bestIndex := i
+        if bestIndex >= 0
+            array.push(selectedIndices, bestIndex)
+
+f_zoneTooltip(Zone z) =>
+    string direction = z.dir == 1 ? "SUPPORT" : "RESISTANCE"
+    string result =
+         "ZONE Z" + str.tostring(z.id) + "\n\n" +
+         "Direction: " + direction + "\n" +
+         "State: " + z.state + "\n" +
+         "Sources: " + f_sourceDisplay(z.sources) + "\n\n" +
+         "Top: " + str.tostring(z.top, format.mintick) + "\n" +
+         "Bottom: " + str.tostring(z.bottom, format.mintick) + "\n" +
+         "Width: " + str.tostring(z.top - z.bottom, format.mintick) + "\n\n" +
+         "Score: " + str.tostring(z.score, "#.0") + " / 100\n" +
+         "Touches: " + str.tostring(z.touches) + "\n" +
+         "Successful reactions: " + str.tostring(z.reactions) + "\n" +
+         "Breaks: " + str.tostring(z.breaks) + "\n\n" +
+         "Origin bar: " + str.tostring(z.originBar) + "\n" +
+         "Created bar: " + str.tostring(z.createdBar) + "\n" +
+         "Last evidence bar: " + str.tostring(z.lastEvidenceBar)
+    result
+
+// ============================================================================
+// RENDER CURRENT RELEVANT ZONES
+// ============================================================================
+if barstate.islast
+    f_deleteRenderedObjects()
+    array.clear(selectedIndices)
+    f_selectNearest(1, maxZonesPerSide)
+    f_selectNearest(-1, maxZonesPerSide)
+    int renderCount = array.size(selectedIndices)
+    if renderCount > 0
+        for i = 0 to renderCount - 1
+            int zoneIndex = array.get(selectedIndices, i)
+            Zone z = array.get(zones, zoneIndex)
+            color baseColor = z.dir == 1 ? supportColor : resistanceColor
+            if z.state == "FLIPPED"
+                baseColor := flipColor
+            int dynamicTransparency = int(math.max(55, math.min(96, zoneTransparency - z.score * 0.05)))
+            color background = color.new(baseColor, dynamicTransparency)
+            color border = color.new(baseColor, math.max(10, dynamicTransparency - 30))
+            // createdBar (when this Zone entity was instantiated) reflects the
+            // zone's actual age. originBar keeps regressing to the oldest ever-
+            // merged evidence (math.min on every merge, see f_ingestCandidate)
+            // and is kept only for provenance in the tooltip.
+            int leftBar = math.max(z.createdBar, bar_index - 4990)
+            int rightBar = bar_index + rightProjection
+            box bx = box.new(
+                 left = leftBar,
+                 top = z.top,
+                 right = rightBar,
+                 bottom = z.bottom,
+                 xloc = xloc.bar_index,
+                 extend = extend.none,
+                 border_color = border,
+                 border_width = 1,
+                 bgcolor = background)
+            array.push(renderedBoxes, bx)
+            if showLabels
+                string labelText = f_sourceDisplay(z.sources)
+                if showScores
+                    labelText += " · " + str.tostring(z.score, "#")
+                if showZoneState
+                    labelText += " · " + z.state
+                float labelY = f_zoneMid(z.top, z.bottom)
+                label lb = label.new(
+                     x = rightBar + 3,
+                     y = labelY,
+                     text = labelText,
+                     xloc = xloc.bar_index,
+                     style = label.style_label_left,
+                     color = color.new(baseColor, 35),
+                     textcolor = color.white,
+                     size = size.small)
+                label.set_tooltip(lb, f_zoneTooltip(z))
+                array.push(renderedLabels, lb)
+
+// ============================================================================
+// VALIDATION TABLE
+// ============================================================================
+var table statsTable = table.new(position.top_right, 2, 11, border_width = 1)
+if barstate.islast
+    bool tableEnabled = operatingMode != "Normal" and showValidationTable
+    color headerBackground = color.new(color.gray, 65)
+    color cellBackground = color.new(color.black, 70)
+    if tableEnabled
+        int activeZones = 0
+        int confirmedZones = 0
+        int weakZones = 0
+        int flippedZones = 0
+        int count = array.size(zones)
+        if count > 0
+            for i = 0 to count - 1
+                Zone z = array.get(zones, i)
+                if z.state != "INVALID" and z.state != "BROKEN"
+                    activeZones += 1
+                if z.state == "CONFIRMED"
+                    confirmedZones += 1
+                if z.state == "WEAK"
+                    weakZones += 1
+                if z.state == "FLIPPED"
+                    flippedZones += 1
+        float reactionRate = na
+        if statReactionSuccess + statReactionWeak > 0
+            reactionRate := (float(statReactionSuccess) / float(statReactionSuccess + statReactionWeak)) * 100.0
+        string reactionRateText = "n/a"
+        if not na(reactionRate)
+            reactionRateText := str.tostring(reactionRate, "#.0") + "%"
+        table.cell(statsTable, 0, 0, "ZONE ENGINE", bgcolor = headerBackground, text_color = color.white)
+        table.cell(statsTable, 1, 0, operatingMode, bgcolor = headerBackground, text_color = color.white)
+        table.cell(statsTable, 0, 1, "Active", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 1, str.tostring(activeZones), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 2, "Candidates", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 2, str.tostring(statCandidates), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 3, "Created", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 3, str.tostring(statCreated), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 4, "Merged", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 4, str.tostring(statMerged), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 5, "Touches", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 5, str.tostring(statTouches), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 6, "Confirmed", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 6, str.tostring(confirmedZones), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 7, "Weak", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 7, str.tostring(weakZones), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 8, "Flipped", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 8, str.tostring(flippedZones), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 9, "Breaks", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 9, str.tostring(statBreaks), bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 0, 10, "Reaction %", bgcolor = cellBackground, text_color = color.white)
+        table.cell(statsTable, 1, 10, reactionRateText, bgcolor = cellBackground, text_color = color.white)
+    else
+        for row = 0 to 10
+            table.cell(statsTable, 0, row, "", bgcolor = color.new(color.black, 100))
+            table.cell(statsTable, 1, row, "", bgcolor = color.new(color.black, 100))

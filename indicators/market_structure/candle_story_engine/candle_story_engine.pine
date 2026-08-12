@@ -1,0 +1,946 @@
+//@version=6
+// ============================================================================
+// Candle Story Engine [WavesUnchained]
+// Version: 1.9.1
+// Author: WavesUnchained
+// Build: 2026-08-12 01:15:00
+// ============================================================================
+// Interprets candle behaviour as a weighted multi-candle sequence (pressure,
+// quality, dominance, persistence, deceleration, exhaustion) instead of
+// relying on isolated candlestick patterns.
+//
+// Features:
+//   ✓ Candle Pressure (-100..+100) from close position, body and wick balance
+//   ✓ Candle Quality — how cleanly a candle's structure supports a direction
+//   ✓ Weighted multi-candle Sequence Engine (recency-weighted pressure)
+//   ✓ Buyer / Seller Dominance and Close Persistence across the sequence
+//   ✓ Body Contraction tracking
+//   ✓ Deceleration Engine — progress-per-range fading across the sequence
+//   ✓ Range Compression detection (short vs. long range average, inside bars)
+//   ✓ Compression-zone breakout story with accepted breakouts and trap reversals
+//   ✓ Trend Context (EMA slope + price distance) as contextual evidence
+//   ✓ Bullish / Bearish Exhaustion, deliberately separated from BUY/SELL
+//   ✓ Follow-through and Signal Failure detection on the next candle
+//   ✓ Classic candlestick patterns as supporting (not standalone) evidence
+//   ✓ Optional distinctive candle-role markers (Marubozu, Dragonfly/Gravestone Doji)
+//
+// Scores are evidence/state scores, NOT statistical probabilities.
+//
+// ============================================================================
+
+indicator(
+     "Candle Story Engine [WavesUnchained]",
+     shorttitle = "Candle Story",
+     overlay = true,
+     max_labels_count = 500,
+     max_boxes_count = 200,
+     max_bars_back = 500)
+
+// ============================================================================
+// 01 · GENERAL
+// ============================================================================
+groupGeneral = "01 · General"
+sequenceLength = input.int(
+     5, "Sequence Length", minval = 2, maxval = 20, group = groupGeneral,
+     tooltip = "Number of recent candles used to interpret the current candle story.")
+signalThreshold = input.float(
+     65.0, "Signal Threshold", minval = 40.0, maxval = 95.0, step = 1.0, group = groupGeneral,
+     tooltip = "Minimum directional evidence score required for a BUY/SELL signal.")
+strongThreshold = input.float(
+     78.0, "Strong State Threshold", minval = 50.0, maxval = 100.0, step = 1.0, group = groupGeneral)
+minimumSignalChange = input.float(
+     5.0, "Minimum Score Improvement", minval = 0.0, maxval = 30.0, step = 1.0, group = groupGeneral,
+     tooltip = "Directional evidence must improve by at least this amount before a fresh BUY/SELL signal can fire.")
+signalExitBuffer = input.float(
+     15.0, "Signal Exit Buffer", minval = 0.0, maxval = 40.0, step = 1.0, group = groupGeneral,
+     tooltip = "Once in control, evidence must drop this many points below Signal Threshold (or lose to the opposite side) before a fresh signal can fire again. Prevents a single weak candle from re-triggering the same trend leg.")
+confirmOnClose = input.bool(
+     true, "Confirm Signals on Bar Close", group = groupGeneral,
+     tooltip = "Prevents live-bar signals and alerts from appearing intrabar and disappearing before the candle closes.")
+
+// ============================================================================
+// 02 · VOLATILITY
+// ============================================================================
+groupVolatility = "02 · Volatility"
+atrLength = input.int(14, "ATR Length", minval = 2, maxval = 100, group = groupVolatility)
+expansionThreshold = input.float(1.25, "Range Expansion × ATR", minval = 0.5, maxval = 5.0, step = 0.05, group = groupVolatility)
+compressionShort = input.int(3, "Compression Short Window", minval = 2, maxval = 10, group = groupVolatility)
+compressionLong = input.int(10, "Compression Reference Window", minval = 5, maxval = 50, group = groupVolatility)
+
+groupBreakoutStory = "02a · Breakout Story"
+minimumCompressionBars = input.int(
+     3, "Minimum Compression Bars", minval = 2, maxval = 20, group = groupBreakoutStory,
+     tooltip = "A breakout story starts only after this many consecutive compressed bars form a zone.")
+breakoutResolutionBars = input.int(
+     3, "Breakout Resolution Window (Bars)", minval = 1, maxval = 10, group = groupBreakoutStory,
+     tooltip = "Bars allowed after BRK? for the market to accept the breakout or return through the zone boundary.")
+
+// ============================================================================
+// 03 · TREND CONTEXT
+// ============================================================================
+groupTrend = "03 · Trend Context"
+useTrendContext = input.bool(true, "Use Trend Context", group = groupTrend)
+trendMaLength = input.int(34, "Trend EMA Length", minval = 5, maxval = 300, group = groupTrend)
+trendSlopeLength = input.int(5, "EMA Slope Lookback", minval = 1, maxval = 30, group = groupTrend)
+trendWeight = input.float(20.0, "Trend Context Weight", minval = 0.0, maxval = 40.0, step = 1.0, group = groupTrend)
+
+// ============================================================================
+// 04 · VOLUME
+// ============================================================================
+groupVolume = "04 · Volume"
+useVolume = input.bool(true, "Use Volume When Available", group = groupVolume)
+volumeLength = input.int(20, "Volume Average Length", minval = 2, maxval = 200, group = groupVolume)
+volumeInfluence = input.float(
+     0.15, "Volume Influence", minval = 0.0, maxval = 0.50, step = 0.05, group = groupVolume,
+     tooltip = "Maximum multiplier adjustment applied to candle pressure when volume is unusually high or low.")
+
+// ============================================================================
+// 05 · EXHAUSTION
+// ============================================================================
+groupExhaustion = "05 · Exhaustion"
+exhaustionThreshold = input.float(65.0, "Exhaustion Threshold", minval = 40.0, maxval = 95.0, step = 1.0, group = groupExhaustion)
+exhaustionTrendMin = input.float(25.0, "Minimum Prior Trend Strength", minval = 0.0, maxval = 100.0, step = 5.0, group = groupExhaustion)
+wickExhaustionWeight = input.float(30.0, "Opposing Wick Weight", minval = 0.0, maxval = 50.0, step = 1.0, group = groupExhaustion)
+bodyContractionWeight = input.float(25.0, "Body Contraction Weight", minval = 0.0, maxval = 50.0, step = 1.0, group = groupExhaustion)
+
+// ============================================================================
+// 06 · CLASSIC PATTERNS
+// ============================================================================
+groupPatterns = "06 · Classic Patterns"
+usePatterns = input.bool(
+     true, "Use Classic Patterns as Supporting Evidence", group = groupPatterns,
+     tooltip = "Patterns contribute supporting evidence but do not independently create a directional signal.")
+patternWeight = input.float(10.0, "Pattern Evidence Weight", minval = 0.0, maxval = 30.0, step = 1.0, group = groupPatterns)
+useExtendedPatternEvidence = input.bool(
+     false, "Use Extended Patterns as Evidence", group = groupPatterns,
+     tooltip = "Piercing Line, Dark Cloud Cover and Harami remain visible for research by default, but do not alter the BUY/SELL evidence score until validated.")
+pinBarWickMin = input.float(
+     0.60, "Pin Bar: Minimum Long Wick / Range", minval = 0.40, maxval = 0.90, step = 0.01, group = groupPatterns)
+pinBarCloseMin = input.float(
+     0.66, "Pin Bar: Minimum Close Position", minval = 0.50, maxval = 0.90, step = 0.01, group = groupPatterns)
+pinBarBodyMax = input.float(
+     0.35, "Pin Bar: Maximum Body / Range", minval = 0.10, maxval = 0.50, step = 0.01, group = groupPatterns)
+strongPatternBodyMin = input.float(
+     0.55, "Two-Bar Pattern: Minimum Body / Range", minval = 0.30, maxval = 0.90, step = 0.01, group = groupPatterns)
+haramiBodyMax = input.float(
+     0.60, "Harami: Maximum Current / Prior Body", minval = 0.20, maxval = 0.90, step = 0.05, group = groupPatterns)
+patternValidationBars = input.int(
+     3, "Pattern Validation Window (Bars)", minval = 1, maxval = 10, group = groupPatterns,
+     tooltip = "After a pattern label, this many confirmed bars are allowed to validate it by closing beyond the pattern high/low.")
+
+groupCandleRoles = "06a · Candle Roles"
+dojiBodyMax = input.float(
+     0.10, "Doji: Maximum Body / Range", minval = 0.02, maxval = 0.25, step = 0.01, group = groupCandleRoles)
+marubozuBodyMin = input.float(
+     0.85, "Marubozu: Minimum Body / Range", minval = 0.60, maxval = 0.98, step = 0.01, group = groupCandleRoles)
+marubozuWickMax = input.float(
+     0.075, "Marubozu: Maximum Wick / Range", minval = 0.01, maxval = 0.20, step = 0.005, group = groupCandleRoles)
+spinningTopBodyMax = input.float(
+     0.30, "Spinning Top: Maximum Body / Range", minval = 0.11, maxval = 0.50, step = 0.01, group = groupCandleRoles)
+spinningTopWickMin = input.float(
+     0.25, "Spinning Top: Minimum Wick / Range", minval = 0.05, maxval = 0.45, step = 0.01, group = groupCandleRoles)
+
+// ============================================================================
+// 07 · VISUALIZATION
+// ============================================================================
+groupVisual = "07 · Visualization"
+showBuySell = input.bool(true, "Show BUY / SELL Signals", group = groupVisual)
+showExhaustion = input.bool(true, "Show Exhaustion", group = groupVisual)
+showCompression = input.bool(true, "Show Compression Zones", group = groupVisual)
+showBreakouts = input.bool(true, "Show Breakout Story", group = groupVisual,
+     tooltip = "BRK? is a pending attempt. BRK↑/BRK↓ is an accepted breakout. TRAP↑/TRAP↓ marks a failed breakout that reversed through the zone.")
+showUnresolvedBreakouts = input.bool(false, "Show Unresolved Breakouts", group = groupVisual, active = showBreakouts,
+     tooltip = "Shows BRK· when an attempt neither extends nor returns through the zone boundary within the validation window. Hidden by default because it is context, not a directional signal.")
+showFollowThrough = input.bool(false, "Show Follow-Through", group = groupVisual,
+     tooltip = "Optional one-bar confirmation after a fresh BUY/SELL signal. The signal and its alert remain available when this marker is hidden.")
+showFailures = input.bool(false, "Show Signal Failures", group = groupVisual,
+     tooltip = "Optional one-bar invalidation after a fresh BUY/SELL signal. The signal and its alert remain available when this marker is hidden.")
+showPatterns = input.bool(
+     false, "Show Contextual Pattern Labels", group = groupVisual,
+     tooltip = "Shows at most one prioritized label per candle and only when it opposes the active trend context. Enable all raw labels only for pattern debugging.")
+showAllPatternLabels = input.bool(
+     false, "Show All Raw Pattern Labels", group = groupVisual, active = showPatterns,
+     tooltip = "Disables trend-context filtering, but still limits the chart to one prioritized pattern label per candle.")
+showExtendedPatternLabels = input.bool(
+     true, "Show Extended Pattern Labels", group = groupVisual, active = showPatterns,
+     tooltip = "Includes Piercing Line, Dark Cloud Cover and Harami in the contextual one-label-per-candle display.")
+showCandleRoles = input.bool(
+     false, "Show Distinctive Candle Roles", group = groupVisual,
+     tooltip = "Square = Marubozu (green bullish, red bearish). Diamond = Dragonfly Doji (aqua) or Gravestone Doji (orange).")
+colorBars = input.bool(
+     true, "Color Candles by Directional State", group = groupVisual,
+     tooltip = "Color priority: breakout result or attempt, strong/control state, contextual directional pattern, follow-through/failure, distinctive directional role, exhaustion, then indecision. Ordinary candles retain the chart's native colors.")
+showTrendMa = input.bool(false, "Show Trend EMA", group = groupVisual)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_clamp(float value, float minimum, float maximum) =>
+    math.max(minimum, math.min(maximum, value))
+
+f_safeDiv(float numerator, float denominator) =>
+    denominator != 0.0 ? numerator / denominator : 0.0
+
+confirmedBar = not confirmOnClose or barstate.isconfirmed
+
+// ============================================================================
+// BASE CALCULATIONS
+// ============================================================================
+atr = ta.atr(atrLength)
+candleRange = math.max(high - low, syminfo.mintick)
+body = math.abs(close - open)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+bodyPct = f_safeDiv(body, candleRange)
+upperWickPct = f_safeDiv(upperWick, candleRange)
+lowerWickPct = f_safeDiv(lowerWick, candleRange)
+closePosition = f_safeDiv(close - low, candleRange)
+bullCandle = close > open
+bearCandle = close < open
+direction = bullCandle ? 1.0 : bearCandle ? -1.0 : 0.0
+doji = bodyPct <= dojiBodyMax
+rangeAtrRatio = atr > 0.0 ? candleRange / atr : 1.0
+rangeExpansion = rangeAtrRatio >= expansionThreshold
+
+// ============================================================================
+// VOLUME CONTEXT
+// ============================================================================
+volumeAverage = ta.sma(volume, volumeLength)
+hasVolume = not na(volume) and not na(volumeAverage) and volumeAverage > 0
+volumeRatio = hasVolume ? volume / volumeAverage : 1.0
+volumeAdjustment = useVolume and hasVolume
+     ? f_clamp(1.0 + ((volumeRatio - 1.0) * volumeInfluence), 1.0 - volumeInfluence, 1.0 + volumeInfluence)
+     : 1.0
+
+// ============================================================================
+// CANDLE PRESSURE
+// ============================================================================
+// Combines close position inside the range, direction × relative body size,
+// and wick imbalance, then applies the optional volume adjustment.
+// -100 = maximum bearish pressure, +100 = maximum bullish pressure.
+closePressure = ((closePosition - 0.5) * 2.0) * 45.0
+bodyPressure = direction * bodyPct * 40.0
+wickPressure = (lowerWickPct - upperWickPct) * 15.0
+rawCandlePressure = closePressure + bodyPressure + wickPressure
+candlePressure = f_clamp(rawCandlePressure * volumeAdjustment, -100.0, 100.0)
+
+// ============================================================================
+// CANDLE QUALITY
+// ============================================================================
+// "If this candle is interpreted as bullish/bearish, how cleanly does its
+// internal structure support that interpretation?" Not a directional
+// probability.
+bullQuality = f_clamp(
+     bodyPct * 35.0 + closePosition * 40.0 + lowerWickPct * 15.0 +
+     f_clamp(rangeAtrRatio, 0.0, 1.5) / 1.5 * 10.0, 0.0, 100.0)
+bearQuality = f_clamp(
+     bodyPct * 35.0 + (1.0 - closePosition) * 40.0 + upperWickPct * 15.0 +
+     f_clamp(rangeAtrRatio, 0.0, 1.5) / 1.5 * 10.0, 0.0, 100.0)
+
+// ============================================================================
+// TREND CONTEXT
+// ============================================================================
+trendMa = ta.ema(close, trendMaLength)
+trendSlopeRaw = atr > 0 and not na(trendMa[trendSlopeLength])
+     ? (trendMa - trendMa[trendSlopeLength]) / atr
+     : 0.0
+trendSlopeScore = f_clamp(trendSlopeRaw * 35.0, -100.0, 100.0)
+priceTrendDistance = atr > 0 ? (close - trendMa) / atr : 0.0
+priceTrendScore = f_clamp(priceTrendDistance * 35.0, -100.0, 100.0)
+trendScore = useTrendContext
+     ? f_clamp(trendSlopeScore * 0.55 + priceTrendScore * 0.45, -100.0, 100.0)
+     : 0.0
+bullTrend = trendScore > exhaustionTrendMin
+bearTrend = trendScore < -exhaustionTrendMin
+
+// ============================================================================
+// MULTI-CANDLE SEQUENCE
+// ============================================================================
+float weightedPressureSum = 0.0
+float weightSum = 0.0
+float bullBodyTotal = 0.0
+float bearBodyTotal = 0.0
+int risingCloses = 0
+int fallingCloses = 0
+int bullCandles = 0
+int bearCandles = 0
+float bullRecentProgressSum = 0.0
+float bullOlderProgressSum = 0.0
+float bearRecentProgressSum = 0.0
+float bearOlderProgressSum = 0.0
+int recentProgressCount = 0
+int olderProgressCount = 0
+// There are sequenceLength - 1 close-to-close progress intervals. Split those
+// intervals, not the candle count, so a length of 5 compares 2 recent against
+// 2 older intervals.
+progressIntervalCount = sequenceLength - 1
+recentSplit = int(math.ceil(progressIntervalCount / 2.0))
+
+for i = 0 to sequenceLength - 1
+    historicalRange = math.max(high[i] - low[i], syminfo.mintick)
+    historicalBody = math.abs(close[i] - open[i])
+    historicalUpper = high[i] - math.max(open[i], close[i])
+    historicalLower = math.min(open[i], close[i]) - low[i]
+    historicalBodyPct = historicalBody / historicalRange
+    historicalClosePos = (close[i] - low[i]) / historicalRange
+    historicalUpperPct = historicalUpper / historicalRange
+    historicalLowerPct = historicalLower / historicalRange
+    historicalDirection = close[i] > open[i] ? 1.0 : close[i] < open[i] ? -1.0 : 0.0
+    historicalPressure =
+         ((historicalClosePos - 0.5) * 2.0) * 45.0 +
+         historicalDirection * historicalBodyPct * 40.0 +
+         (historicalLowerPct - historicalUpperPct) * 15.0
+    // More recent candles receive a higher weight.
+    candleWeight = sequenceLength - i
+    weightedPressureSum += historicalPressure * candleWeight
+    weightSum += candleWeight
+    // Keep neutral candles in the denominator later. Otherwise one tiny
+    // directional body among several Dojis can incorrectly look dominant.
+    bullBodyTotal += historicalDirection > 0 ? historicalBodyPct : 0.0
+    bearBodyTotal += historicalDirection < 0 ? historicalBodyPct : 0.0
+    bullCandles += historicalDirection > 0 ? 1 : 0
+    bearCandles += historicalDirection < 0 ? 1 : 0
+    if i < sequenceLength - 1
+        risingCloses += close[i] > close[i + 1] ? 1 : 0
+        fallingCloses += close[i] < close[i + 1] ? 1 : 0
+        // Progress-per-range: the share of this candle's range converted into
+        // net directional close progress. ATR would cancel from this ratio.
+        // A gap can be larger than the associated candle range. Bound the
+        // normalized contribution so one gap cannot saturate exhaustion.
+        progressPerRange = f_clamp(f_safeDiv(close[i] - close[i + 1], historicalRange), -1.0, 1.0)
+        bullProgressRatio = math.max(progressPerRange, 0.0)
+        bearProgressRatio = math.max(-progressPerRange, 0.0)
+        if i < recentSplit
+            bullRecentProgressSum += bullProgressRatio
+            bearRecentProgressSum += bearProgressRatio
+            recentProgressCount += 1
+        else
+            bullOlderProgressSum += bullProgressRatio
+            bearOlderProgressSum += bearProgressRatio
+            olderProgressCount += 1
+
+sequencePressure = weightSum > 0 ? f_clamp(weightedPressureSum / weightSum, -100.0, 100.0) : 0.0
+bullCountRatio = bullCandles / sequenceLength
+bearCountRatio = bearCandles / sequenceLength
+// Body share is relative to every candle in the sequence, including Doji.
+// This measures actual directional participation rather than the share of
+// the subset of candles that happened to have a directional body.
+bullBodyDominance = bullBodyTotal / sequenceLength
+bearBodyDominance = bearBodyTotal / sequenceLength
+bullDominance = f_clamp(bullCountRatio * 40.0 + bullBodyDominance * 60.0, 0.0, 100.0)
+bearDominance = f_clamp(bearCountRatio * 40.0 + bearBodyDominance * 60.0, 0.0, 100.0)
+closePersistenceBull = sequenceLength > 1 ? risingCloses / (sequenceLength - 1.0) * 100.0 : 0.0
+closePersistenceBear = sequenceLength > 1 ? fallingCloses / (sequenceLength - 1.0) * 100.0 : 0.0
+
+// ============================================================================
+// DECELERATION ENGINE
+// ============================================================================
+// Compares the older half of the sequence's progress-per-range against the
+// recent half. A trend that keeps producing range but converts a shrinking
+// share of it into net directional close progress is decelerating, even
+// while the raw range or a single-candle momentum delta still looks intact.
+bullRecentProgressAvg = recentProgressCount > 0 ? bullRecentProgressSum / recentProgressCount : 0.0
+bullOlderProgressAvg = olderProgressCount > 0 ? bullOlderProgressSum / olderProgressCount : 0.0
+bearRecentProgressAvg = recentProgressCount > 0 ? bearRecentProgressSum / recentProgressCount : 0.0
+bearOlderProgressAvg = olderProgressCount > 0 ? bearOlderProgressSum / olderProgressCount : 0.0
+hasDecelerationComparison = recentProgressCount > 0 and olderProgressCount > 0
+bullDecelerationScore = hasDecelerationComparison
+     ? f_clamp((bullOlderProgressAvg - bullRecentProgressAvg) * 150.0, 0.0, 100.0)
+     : 0.0
+bearDecelerationScore = hasDecelerationComparison
+     ? f_clamp((bearOlderProgressAvg - bearRecentProgressAvg) * 150.0, 0.0, 100.0)
+     : 0.0
+
+// ============================================================================
+// BODY EVOLUTION
+// ============================================================================
+bodyShrinking = body < body[1] and body[1] < body[2]
+// Shrinking bodies express fading participation regardless of the current
+// candle colour. Requiring a trend-coloured candle missed the first genuine
+// counter-candle of an exhausted move.
+bullBodyContraction = bodyShrinking
+bearBodyContraction = bodyShrinking
+
+// ============================================================================
+// RANGE COMPRESSION
+// ============================================================================
+shortRangeAverage = ta.sma(candleRange, compressionShort)
+longRangeAverage = ta.sma(candleRange, compressionLong)
+compressionRatio = longRangeAverage > 0 ? shortRangeAverage / longRangeAverage : 1.0
+compressionBase = f_clamp((1.0 - compressionRatio) * 150.0, 0.0, 70.0)
+insideBar = high <= high[1] and low >= low[1]
+narrowerRange = candleRange < candleRange[1]
+compressionScore = f_clamp(
+     compressionBase + (insideBar ? 20.0 : 0.0) + (narrowerRange ? 10.0 : 0.0), 0.0, 100.0)
+// Hysteresis instead of a hard 60-line: arms at >=60, only re-arms after
+// dropping back below 45. Prevents the marker from re-firing every time the
+// raw score wobbles across a single threshold.
+var bool compressionArmed = false
+if confirmedBar
+    compressionArmed := compressionScore >= 60.0 ? true : compressionScore <= 45.0 ? false : compressionArmed
+compressionActive = compressionArmed
+
+// ============================================================================
+// COMPRESSION-ZONE BREAKOUT STORY
+// ============================================================================
+// A compression zone is retained as an object, rather than a transient dot.
+// An expanded close outside that completed zone becomes BRK?. It is accepted
+// only if price extends beyond the attempt candle within the chosen window;
+// a close back through the broken zone boundary is a failure. Neither outcome
+// changes the BUY/SELL score — this is independent, testable market context.
+var float compressionZoneHigh = na
+var float compressionZoneLow = na
+var int compressionZoneBars = 0
+var bool compressionZoneConsumed = false
+var box compressionZoneBox = na
+var array<box> compressionZoneBoxes = array.new<box>()
+
+compressionStarted = confirmedBar and compressionActive and not compressionActive[1]
+compressionEnded = confirmedBar and not compressionActive and compressionActive[1]
+
+// Use the finished zone from the preceding bar. This prevents the breakout
+// candle from expanding its own reference range.
+zoneHighForBreakout = compressionZoneHigh[1]
+zoneLowForBreakout = compressionZoneLow[1]
+zoneBarsForBreakout = compressionZoneBars[1]
+zoneAvailable = compressionActive[1] and not compressionZoneConsumed[1] and
+     zoneBarsForBreakout >= minimumCompressionBars and not na(zoneHighForBreakout) and not na(zoneLowForBreakout)
+bullBreakoutAttempt = confirmedBar and zoneAvailable and rangeExpansion and
+     close > zoneHighForBreakout and closePosition >= 0.60
+bearBreakoutAttempt = confirmedBar and zoneAvailable and rangeExpansion and
+     close < zoneLowForBreakout and closePosition <= 0.40
+
+if confirmedBar
+    if compressionStarted
+        compressionZoneHigh := high
+        compressionZoneLow := low
+        compressionZoneBars := 1
+        compressionZoneConsumed := false
+        compressionZoneBox := na
+        if showCompression
+            compressionZoneBox := box.new(
+                 bar_index, high, bar_index, low, border_color = color.new(color.yellow, 25),
+                 border_width = 1, bgcolor = color.new(color.yellow, 90))
+            array.push(compressionZoneBoxes, compressionZoneBox)
+            if array.size(compressionZoneBoxes) > 150
+                box.delete(array.shift(compressionZoneBoxes))
+    // The attempt was calculated from the preceding completed zone. Do not
+    // add its expansion candle to that zone before freezing the box, or the
+    // rendered boundary no longer matches the boundary used for the signal.
+    else if compressionActive and not (bullBreakoutAttempt or bearBreakoutAttempt)
+        compressionZoneHigh := math.max(nz(compressionZoneHigh, high), high)
+        compressionZoneLow := math.min(nz(compressionZoneLow, low), low)
+        compressionZoneBars += 1
+        if not na(compressionZoneBox)
+            box.set_top(compressionZoneBox, compressionZoneHigh)
+            box.set_bottom(compressionZoneBox, compressionZoneLow)
+            box.set_right(compressionZoneBox, bar_index)
+    else if compressionEnded and not na(compressionZoneBox)
+        box.set_right(compressionZoneBox, bar_index - 1)
+
+    if bullBreakoutAttempt or bearBreakoutAttempt
+        compressionZoneConsumed := true
+        if not na(compressionZoneBox)
+            box.set_right(compressionZoneBox, bar_index - 1)
+
+var int breakoutDirection = 0
+var int breakoutStartBar = na
+var float breakoutAttemptHigh = na
+var float breakoutAttemptLow = na
+var float breakoutBoundary = na
+var label breakoutLabel = na
+var box breakoutZoneBox = na
+var array<label> breakoutStoryLabels = array.new<label>()
+int breakoutStoryEvent = 0
+
+if confirmedBar and breakoutDirection == 0 and (bullBreakoutAttempt or bearBreakoutAttempt)
+    breakoutDirection := bullBreakoutAttempt ? 1 : -1
+    breakoutStartBar := bar_index
+    breakoutAttemptHigh := high
+    breakoutAttemptLow := low
+    breakoutBoundary := breakoutDirection == 1 ? zoneHighForBreakout : zoneLowForBreakout
+    breakoutZoneBox := compressionZoneBox
+    breakoutStoryEvent := breakoutDirection
+    if showBreakouts
+        breakoutTooltip = "Breakout attempt from a " + str.tostring(zoneBarsForBreakout) +
+             "-bar compression zone.\nStatus: Pending.\nValidation: within " +
+             str.tostring(breakoutResolutionBars) + " confirmed bars, price must extend beyond this attempt candle.\n" +
+             "Failure: a confirmed close returns through the broken zone boundary."
+        breakoutLabel := label.new(
+             bar_index, na, "BRK?", yloc = breakoutDirection == 1 ? yloc.belowbar : yloc.abovebar,
+             color = breakoutDirection == 1 ? color.new(color.green, 5) : color.new(color.red, 5),
+             style = breakoutDirection == 1 ? label.style_label_up : label.style_label_down,
+             textcolor = color.white, size = size.normal, tooltip = breakoutTooltip)
+        array.push(breakoutStoryLabels, breakoutLabel)
+        if array.size(breakoutStoryLabels) > 200
+            label.delete(array.shift(breakoutStoryLabels))
+
+if confirmedBar and breakoutDirection != 0 and bar_index > breakoutStartBar
+    breakoutAge = bar_index - breakoutStartBar
+    breakoutAccepted = breakoutDirection == 1
+         ? close > breakoutAttemptHigh and closePosition >= 0.55
+         : close < breakoutAttemptLow and closePosition <= 0.45
+    breakoutFailed = breakoutDirection == 1 ? close < breakoutBoundary : close > breakoutBoundary
+    breakoutUnresolved = breakoutAge >= breakoutResolutionBars
+    if breakoutAccepted or breakoutFailed or breakoutUnresolved
+        breakoutStoryEvent := breakoutAccepted ? breakoutDirection * 2 : breakoutFailed ? breakoutDirection * 3 : breakoutDirection * 4
+        if not na(breakoutLabel)
+            outcomeDirection = breakoutDirection
+            outcomeText = "BRK·"
+            outcomeColor = color.new(color.gray, 15)
+            outcomeTooltip = "Breakout story from a compression zone.\nStatus: Unresolved.\nNo directional acceptance or boundary failure occurred within the validation window."
+            if breakoutAccepted
+                outcomeText := breakoutDirection == 1 ? "BRK↑" : "BRK↓"
+                outcomeColor := breakoutDirection == 1 ? color.new(color.green, 5) : color.new(color.red, 5)
+                outcomeTooltip := "Accepted breakout from a compression zone.\nDirection: " +
+                     (breakoutDirection == 1 ? "Bullish" : "Bearish") +
+                     ".\nPrice extended beyond the attempt candle within the validation window."
+            else if breakoutFailed
+                outcomeDirection := -breakoutDirection
+                outcomeText := breakoutDirection == 1 ? "TRAP↓" : "TRAP↑"
+                outcomeColor := outcomeDirection == 1 ? color.new(color.green, 5) : color.new(color.red, 5)
+                outcomeTooltip := breakoutDirection == 1
+                     ? "Bull trap\nA bullish breakout closed back through the zone boundary.\nDirectional implication: bearish reversal."
+                     : "Bear trap\nA bearish breakout closed back through the zone boundary.\nDirectional implication: bullish reversal."
+            if breakoutUnresolved and not showUnresolvedBreakouts
+                label.delete(breakoutLabel)
+                breakoutLabel := na
+            else
+                label.set_x(breakoutLabel, bar_index)
+                label.set_yloc(breakoutLabel, outcomeDirection == 1 ? yloc.belowbar : yloc.abovebar)
+                label.set_style(breakoutLabel, outcomeDirection == 1 ? label.style_label_up : label.style_label_down)
+                label.set_text(breakoutLabel, outcomeText)
+                label.set_color(breakoutLabel, outcomeColor)
+                label.set_tooltip(breakoutLabel, outcomeTooltip)
+        if not na(breakoutZoneBox)
+            box.set_border_color(breakoutZoneBox, breakoutAccepted
+                 ? breakoutDirection == 1 ? color.new(color.green, 20) : color.new(color.red, 20)
+                 : breakoutFailed ? color.new(color.orange, 20) : color.new(color.gray, 35))
+            box.set_bgcolor(breakoutZoneBox, breakoutAccepted
+                 ? breakoutDirection == 1 ? color.new(color.green, 90) : color.new(color.red, 90)
+                 : breakoutFailed ? color.new(color.orange, 90) : color.new(color.gray, 92))
+        breakoutDirection := 0
+
+// ============================================================================
+// CLASSIC CANDLE PATTERNS
+// ============================================================================
+bullEngulfing = bullCandle and close[1] < open[1] and open <= close[1] and close >= open[1]
+bearEngulfing = bearCandle and close[1] > open[1] and open >= close[1] and close <= open[1]
+// Pin bars must express rejection in both wick length and closing position.
+// Doji remain their own role and do not qualify as pin bars.
+bullPinBar = not doji and bodyPct <= pinBarBodyMax and lowerWickPct >= pinBarWickMin and
+     upperWickPct <= 1.0 - pinBarCloseMin and closePosition >= pinBarCloseMin
+bearPinBar = not doji and bodyPct <= pinBarBodyMax and upperWickPct >= pinBarWickMin and
+     lowerWickPct <= 1.0 - pinBarCloseMin and closePosition <= 1.0 - pinBarCloseMin
+hammer = bullPinBar
+shootingStar = bearPinBar
+morningStar = close[2] < open[2] and
+     math.abs(close[1] - open[1]) < math.abs(close[2] - open[2]) * 0.55 and
+     bullCandle and close > (open[2] + close[2]) / 2.0
+eveningStar = close[2] > open[2] and
+     math.abs(close[1] - open[1]) < math.abs(close[2] - open[2]) * 0.55 and
+     bearCandle and close < (open[2] + close[2]) / 2.0
+priorBullStrong = bullCandle[1] and bodyPct[1] >= strongPatternBodyMin
+priorBearStrong = bearCandle[1] and bodyPct[1] >= strongPatternBodyMin
+bullPiercingLine = priorBearStrong and bullCandle and bodyPct >= strongPatternBodyMin and
+     open <= close[1] and close > (open[1] + close[1]) / 2.0 and close < open[1]
+bearDarkCloud = priorBullStrong and bearCandle and bodyPct >= strongPatternBodyMin and
+     open >= close[1] and close < (open[1] + close[1]) / 2.0 and close > open[1]
+bullHarami = priorBearStrong and bullCandle and body <= body[1] * haramiBodyMax and
+     math.min(open, close) >= math.min(open[1], close[1]) and math.max(open, close) <= math.max(open[1], close[1])
+bearHarami = priorBullStrong and bearCandle and body <= body[1] * haramiBodyMax and
+     math.min(open, close) >= math.min(open[1], close[1]) and math.max(open, close) <= math.max(open[1], close[1])
+bullCorePattern = bullEngulfing or bullPinBar or morningStar
+bearCorePattern = bearEngulfing or bearPinBar or eveningStar
+bullExtendedPattern = bullPiercingLine or bullHarami
+bearExtendedPattern = bearDarkCloud or bearHarami
+bullPattern = bullCorePattern or (useExtendedPatternEvidence and bullExtendedPattern)
+bearPattern = bearCorePattern or (useExtendedPatternEvidence and bearExtendedPattern)
+// Pattern evidence is only meaningful as a reversal trigger after an
+// established opposing trend. Otherwise it duplicates the existing candle
+// and sequence momentum evidence in the same direction.
+bullPatternEvidence = usePatterns and bullPattern and (not useTrendContext or bearTrend) ? patternWeight : 0.0
+bearPatternEvidence = usePatterns and bearPattern and (not useTrendContext or bullTrend) ? patternWeight : 0.0
+
+// Labels are a chart-reading aid, not a complete list of every raw match.
+// Reversal patterns are shown only against the active trend unless raw debug
+// mode is requested. One priority code guarantees one label per candle.
+bullPatternLabelContext = showAllPatternLabels or not useTrendContext or bearTrend
+bearPatternLabelContext = showAllPatternLabels or not useTrendContext or bullTrend
+patternLabelCode = morningStar and bullPatternLabelContext ? 6
+     : eveningStar and bearPatternLabelContext ? -6
+     : showExtendedPatternLabels and bullPiercingLine and bullPatternLabelContext ? 5
+     : showExtendedPatternLabels and bearDarkCloud and bearPatternLabelContext ? -5
+     : bullEngulfing and bullPatternLabelContext ? 4
+     : bearEngulfing and bearPatternLabelContext ? -4
+     : showExtendedPatternLabels and bullHarami and bullPatternLabelContext ? 3
+     : showExtendedPatternLabels and bearHarami and bearPatternLabelContext ? -3
+     : bullPinBar and bullPatternLabelContext ? 2
+     : bearPinBar and bearPatternLabelContext ? -2
+     : 0
+patternLabelText = switch patternLabelCode
+    6 => "MS"
+    -6 => "ES"
+    5 => "PRC"
+    -5 => "DCC"
+    4 => "ENG"
+    -4 => "ENG"
+    3 => "HAR"
+    -3 => "HAR"
+    2 => "PIN"
+    -2 => "PIN"
+    => ""
+patternLabelTooltip = switch patternLabelCode
+    6 => "Morning Star\nThree-candle reversal pattern after downward pressure: a strong bearish candle, a small middle candle, and a bullish close above the first candle's midpoint.\nContext marker, not an automatic buy signal."
+    -6 => "Evening Star\nThree-candle reversal pattern after upward pressure: a strong bullish candle, a small middle candle, and a bearish close below the first candle's midpoint.\nContext marker, not an automatic sell signal."
+    5 => "Piercing Line\nA strong bullish counter-candle closes above the midpoint of the previous bearish candle.\nMay indicate rejection of lower prices; wait for confirmation."
+    -5 => "Dark Cloud Cover\nA strong bearish counter-candle closes below the midpoint of the previous bullish candle.\nMay indicate rejection of higher prices; wait for confirmation."
+    4 => "Bullish Engulfing\nThe current bullish body engulfs the previous bearish body.\nMay show buyer takeover; context marker, not an automatic buy signal."
+    -4 => "Bearish Engulfing\nThe current bearish body engulfs the previous bullish body.\nMay show seller takeover; context marker, not an automatic sell signal."
+    3 => "Bullish Harami\nA small bullish body sits inside the previous strong bearish candle.\nDownward pressure may be fading; wait for confirmation."
+    -3 => "Bearish Harami\nA small bearish body sits inside the previous strong bullish candle.\nUpward pressure may be fading; wait for confirmation."
+    2 => "Bullish Pin Bar\nA long lower wick and a close near the high show rejection of lower prices.\nContext marker, not an automatic buy signal."
+    -2 => "Bearish Pin Bar\nA long upper wick and a close near the low show rejection of higher prices.\nContext marker, not an automatic sell signal."
+    => ""
+patternValidationPlan = patternLabelCode > 0
+     ? "\nValidation plan: within " + str.tostring(patternValidationBars) +
+         " confirmed bars, price must close above this pattern's high. A close below its low invalidates it."
+     : "\nValidation plan: within " + str.tostring(patternValidationBars) +
+         " confirmed bars, price must close below this pattern's low. A close above its high invalidates it."
+patternLabelTooltip := patternLabelTooltip + patternValidationPlan
+
+// ============================================================================
+// STRUCTURAL CANDLE ROLES
+// ============================================================================
+// Roles are diagnostic only. They are mutually exclusive inside each family
+// and never add score weight; the chart's OHLC already represents plain bull
+// and bear bodies, so markers are reserved for structurally distinctive bars.
+bullMarubozu = bullCandle and bodyPct >= marubozuBodyMin and
+     upperWickPct <= marubozuWickMax and lowerWickPct <= marubozuWickMax
+bearMarubozu = bearCandle and bodyPct >= marubozuBodyMin and
+     upperWickPct <= marubozuWickMax and lowerWickPct <= marubozuWickMax
+dragonflyDoji = doji and lowerWickPct >= 0.60 and upperWickPct <= 0.15
+gravestoneDoji = doji and upperWickPct >= 0.60 and lowerWickPct <= 0.15
+longLeggedDoji = doji and upperWickPct >= 0.30 and lowerWickPct >= 0.30
+standardDoji = doji and not dragonflyDoji and not gravestoneDoji and not longLeggedDoji
+spinningTop = not doji and not bullMarubozu and not bearMarubozu and
+     bodyPct <= spinningTopBodyMax and upperWickPct >= spinningTopWickMin and lowerWickPct >= spinningTopWickMin
+candleRoleCode = bullMarubozu ? 1.0 : bearMarubozu ? -1.0 : dragonflyDoji ? 2.0
+     : gravestoneDoji ? -2.0 : longLeggedDoji ? 3.0 : standardDoji ? 4.0
+     : spinningTop ? 5.0 : 0.0
+
+// ============================================================================
+// DIRECTIONAL EVIDENCE
+// ============================================================================
+// Candle structure is the trigger role. Sequence pressure, directional body
+// participation and close persistence are one shared sequence role, not four
+// independent votes for the same OHLC movement. Trend context and reversal
+// patterns remain separate contextual evidence.
+// Quality qualifies directional pressure; it is not a second directional
+// source. A large-range candle must not add evidence to the side opposite its
+// measured pressure merely because it has a large body.
+bullPressure = math.max(candlePressure, 0.0)
+bearPressure = math.max(-candlePressure, 0.0)
+bullCandleEvidence = bullPressure * (0.55 + bullQuality / 100.0 * 0.45)
+bearCandleEvidence = bearPressure * (0.55 + bearQuality / 100.0 * 0.45)
+bullSequenceEvidence = math.max(sequencePressure, 0.0) * 0.50 + bullDominance * 0.30 + closePersistenceBull * 0.20
+bearSequenceEvidence = math.max(-sequencePressure, 0.0) * 0.50 + bearDominance * 0.30 + closePersistenceBear * 0.20
+baseBullEvidence = bullCandleEvidence * 0.45 + bullSequenceEvidence * 0.55
+baseBearEvidence = bearCandleEvidence * 0.45 + bearSequenceEvidence * 0.55
+bullTrendEvidence = useTrendContext ? math.max(trendScore, 0.0) / 100.0 * trendWeight : 0.0
+bearTrendEvidence = useTrendContext ? math.max(-trendScore, 0.0) / 100.0 * trendWeight : 0.0
+bullEvidence = f_clamp(baseBullEvidence + bullTrendEvidence + bullPatternEvidence, 0.0, 100.0)
+bearEvidence = f_clamp(baseBearEvidence + bearTrendEvidence + bearPatternEvidence, 0.0, 100.0)
+directionalBalance = bullEvidence - bearEvidence
+
+// ============================================================================
+// EXHAUSTION ENGINE
+// ============================================================================
+// Bull exhaustion: an existing bullish trend shows evidence that buyers are
+// losing control. Bear exhaustion: the bearish mirror. Deliberately separate
+// from a directional reversal signal.
+bullOpposingWickScore = f_clamp(upperWickPct * 100.0, 0.0, 100.0)
+bearOpposingWickScore = f_clamp(lowerWickPct * 100.0, 0.0, 100.0)
+bullContractionScore = bullBodyContraction ? 100.0 : body < body[1] ? 50.0 : 0.0
+bearContractionScore = bearBodyContraction ? 100.0 : body < body[1] ? 50.0 : 0.0
+bullTrendExhaustionContext = bullTrend ? f_clamp(trendScore, 0.0, 100.0) : 0.0
+bearTrendExhaustionContext = bearTrend ? f_clamp(-trendScore, 0.0, 100.0) : 0.0
+bullExhaustion = bullTrend
+     ? f_clamp(
+         bullOpposingWickScore * (wickExhaustionWeight / 100.0) +
+         bullContractionScore * (bodyContractionWeight / 100.0) +
+         bullDecelerationScore * 0.25 + bullTrendExhaustionContext * 0.20, 0.0, 100.0)
+     : 0.0
+bearExhaustion = bearTrend
+     ? f_clamp(
+         bearOpposingWickScore * (wickExhaustionWeight / 100.0) +
+         bearContractionScore * (bodyContractionWeight / 100.0) +
+         bearDecelerationScore * 0.25 + bearTrendExhaustionContext * 0.20, 0.0, 100.0)
+     : 0.0
+bullExhausted = bullExhaustion >= exhaustionThreshold
+bearExhausted = bearExhaustion >= exhaustionThreshold
+
+// ============================================================================
+// FRESH DIRECTIONAL SIGNALS
+// ============================================================================
+// bullSignalCondition/bearSignalCondition are the stable "in control" state
+// and stay true for the duration of a trend leg. A raw threshold cross alone
+// still flickers bar-to-bar (Candle Evidence is ~30% driven by the single
+// current candle, so one weak pullback candle mid-trend can dip evidence
+// under signalThreshold for a bar), so entry/exit use hysteresis: arm at
+// signalThreshold, only disarm once evidence drops signalExitBuffer points
+// below it. Losing to the opposite side or tripping exhaustion still exits
+// immediately — that is real information, not noise. The minimum improvement
+// is part of the entry condition, so a sub-threshold first cross cannot consume
+// the state transition and suppress a later valid signal.
+bullScoreImproving = bullEvidence - bullEvidence[1] >= minimumSignalChange
+bearScoreImproving = bearEvidence - bearEvidence[1] >= minimumSignalChange
+bullEntryCandidate = bullEvidence >= signalThreshold and bullEvidence > bearEvidence and not bullExhausted and bullScoreImproving
+bearEntryCandidate = bearEvidence >= signalThreshold and bearEvidence > bullEvidence and not bearExhausted and bearScoreImproving
+
+var bool bullArmed = false
+var bool bearArmed = false
+if confirmedBar
+    if not bullArmed and bullEntryCandidate
+        bullArmed := true
+    else if bullEvidence < signalThreshold - signalExitBuffer or bullEvidence <= bearEvidence or bullExhausted
+        bullArmed := false
+
+    if not bearArmed and bearEntryCandidate
+        bearArmed := true
+    else if bearEvidence < signalThreshold - signalExitBuffer or bearEvidence <= bullEvidence or bearExhausted
+        bearArmed := false
+
+bullSignalCondition = bullArmed
+bearSignalCondition = bearArmed
+newBullSignal = bullSignalCondition and not bullSignalCondition[1]
+newBearSignal = bearSignalCondition and not bearSignalCondition[1]
+
+// ============================================================================
+// FOLLOW-THROUGH
+// ============================================================================
+// The candle right after a fresh signal confirms directional evidence when
+// it breaks the signal candle in the expected direction and closes
+// directionally. Anchored to newBullSignal/newBearSignal (not the persistent
+// control state) so this only evaluates once per signal, not on every bar
+// the trend remains in control.
+bullFollowThrough = confirmedBar and newBullSignal[1] and high > high[1] and close > close[1] and closePosition >= 0.60
+bearFollowThrough = confirmedBar and newBearSignal[1] and low < low[1] and close < close[1] and closePosition <= 0.40
+
+// ============================================================================
+// SIGNAL FAILURE
+// ============================================================================
+// The candle right after a fresh signal immediately loses the signal
+// candle's opposite extreme.
+bullFailure = confirmedBar and newBullSignal[1] and close < low[1]
+bearFailure = confirmedBar and newBearSignal[1] and close > high[1]
+
+// ============================================================================
+// MARKET STORY STATES
+// ============================================================================
+strongBull = bullEvidence >= strongThreshold and bullEvidence > bearEvidence
+strongBear = bearEvidence >= strongThreshold and bearEvidence > bullEvidence
+bullControl = bullEvidence >= signalThreshold and bullEvidence > bearEvidence
+bearControl = bearEvidence >= signalThreshold and bearEvidence > bullEvidence
+indecision = math.abs(directionalBalance) < 12.0 and bodyPct < 0.35
+
+// ============================================================================
+// DIRECTIONAL CANDLE COLOR COVERAGE
+// ============================================================================
+// Color Candles is a hierarchy of meaningful directional states, not a second
+// copy of the chart's ordinary green/red candle scheme. Every condition below
+// represents direction plus additional structure: accepted/pending breakout,
+// control, contextual reversal pattern, follow-through/failure, distinctive
+// role or exhaustion. Candles without that additional meaning stay native.
+bullContextualPattern = (bullCorePattern or bullExtendedPattern) and
+     (not useTrendContext or bearTrend)
+bearContextualPattern = (bearCorePattern or bearExtendedPattern) and
+     (not useTrendContext or bullTrend)
+bullBreakoutAccepted = breakoutStoryEvent == 2
+bearBreakoutAccepted = breakoutStoryEvent == -2
+// A failed bullish breakout is bearish information; a failed bearish breakout
+// is bullish information because price returned through the zone boundary.
+bullBreakoutFailure = breakoutStoryEvent == -3
+bearBreakoutFailure = breakoutStoryEvent == 3
+bullDirectionalRole = bullMarubozu or dragonflyDoji
+bearDirectionalRole = bearMarubozu or gravestoneDoji
+bullDirectionalFailure = bearFailure
+bearDirectionalFailure = bullFailure
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+plot(showTrendMa ? trendMa : na, "Trend EMA", color = color.new(color.gray, 40), linewidth = 1)
+
+plotshape(showBuySell and newBullSignal, title = "Bullish Candle Story", style = shape.triangleup,
+     location = location.belowbar, color = color.lime, size = size.small)
+plotshape(showBuySell and newBearSignal, title = "Bearish Candle Story", style = shape.triangledown,
+     location = location.abovebar, color = color.red, size = size.small)
+
+plotshape(showExhaustion and confirmedBar and bullExhausted and not bullExhausted[1], title = "Bull Trend Exhaustion",
+     style = shape.diamond, location = location.abovebar, color = color.orange, size = size.tiny)
+plotshape(showExhaustion and confirmedBar and bearExhausted and not bearExhausted[1], title = "Bear Trend Exhaustion",
+     style = shape.diamond, location = location.belowbar, color = color.aqua, size = size.tiny)
+
+plotshape(showFollowThrough and bullFollowThrough, title = "Bull Follow Through", style = shape.circle,
+     location = location.belowbar, color = color.green, size = size.tiny)
+plotshape(showFollowThrough and bearFollowThrough, title = "Bear Follow Through", style = shape.circle,
+     location = location.abovebar, color = color.maroon, size = size.tiny)
+
+plotshape(showFailures and bullFailure, title = "Bull Signal Failure", style = shape.xcross,
+     location = location.abovebar, color = color.red, size = size.small)
+plotshape(showFailures and bearFailure, title = "Bear Signal Failure", style = shape.xcross,
+     location = location.belowbar, color = color.lime, size = size.small)
+
+var array<label> patternLabels = array.new<label>()
+var array<int> patternDirections = array.new<int>()
+var array<float> patternHighs = array.new<float>()
+var array<float> patternLows = array.new<float>()
+var array<int> patternStartBars = array.new<int>()
+var array<string> patternTexts = array.new<string>()
+var array<string> patternTooltips = array.new<string>()
+var array<bool> patternResolved = array.new<bool>()
+
+// A pattern starts as a hypothesis. Its label is updated only after later
+// confirmed bars either validate its directional extreme, invalidate its
+// opposite extreme, or exhaust the selected validation window.
+if confirmedBar and array.size(patternLabels) > 0
+    for patternIndex = 0 to array.size(patternLabels) - 1
+        if not array.get(patternResolved, patternIndex)
+            patternAge = bar_index - array.get(patternStartBars, patternIndex)
+            if patternAge > 0
+                patternDirection = array.get(patternDirections, patternIndex)
+                patternHigh = array.get(patternHighs, patternIndex)
+                patternLow = array.get(patternLows, patternIndex)
+                patternValidated = patternDirection == 1 ? close > patternHigh : close < patternLow
+                patternInvalidated = patternDirection == 1 ? close < patternLow : close > patternHigh
+                patternUnresolved = patternAge >= patternValidationBars
+                if patternValidated or patternInvalidated or patternUnresolved
+                    patternLabel = array.get(patternLabels, patternIndex)
+                    patternText = array.get(patternTexts, patternIndex)
+                    patternTooltip = array.get(patternTooltips, patternIndex)
+                    patternStatus = patternValidated ? "Validated" : patternInvalidated ? "Invalidated" : "Unresolved"
+                    patternOutcome = patternValidated ? "✓" : patternInvalidated ? "×" : "·"
+                    patternColor = patternValidated
+                         ? patternDirection == 1 ? color.new(color.green, 5) : color.new(color.red, 5)
+                         : patternInvalidated ? color.new(color.orange, 5) : color.new(color.gray, 15)
+                    patternOutcomeText = patternValidated
+                         ? "Price closed beyond the pattern extreme within the validation window."
+                         : patternInvalidated ? "Price closed through the opposite pattern extreme."
+                         : "No validation or invalidation occurred within the selected window."
+                    label.set_text(patternLabel, patternText + patternOutcome)
+                    label.set_color(patternLabel, patternColor)
+                    label.set_tooltip(patternLabel, patternTooltip + "\nStatus: " + patternStatus + ".\n" + patternOutcomeText)
+                    array.set(patternResolved, patternIndex, true)
+
+if showPatterns and confirmedBar and patternLabelCode != 0
+    patternBullish = patternLabelCode > 0
+    label patternLabel = na
+    if patternBullish
+        patternLabel := label.new(
+             bar_index, na, patternLabelText + "?", yloc = yloc.belowbar,
+             color = color.new(color.green, 5), style = label.style_label_up,
+             textcolor = color.white, size = size.normal, tooltip = patternLabelTooltip)
+    else
+        patternLabel := label.new(
+             bar_index, na, patternLabelText + "?", yloc = yloc.abovebar,
+             color = color.new(color.red, 5), style = label.style_label_down,
+             textcolor = color.white, size = size.normal, tooltip = patternLabelTooltip)
+    array.push(patternLabels, patternLabel)
+    array.push(patternDirections, patternBullish ? 1 : -1)
+    array.push(patternHighs, high)
+    array.push(patternLows, low)
+    array.push(patternStartBars, bar_index)
+    array.push(patternTexts, patternLabelText)
+    array.push(patternTooltips, patternLabelTooltip)
+    array.push(patternResolved, false)
+    if array.size(patternLabels) > 200
+        label.delete(array.shift(patternLabels))
+        array.shift(patternDirections)
+        array.shift(patternHighs)
+        array.shift(patternLows)
+        array.shift(patternStartBars)
+        array.shift(patternTexts)
+        array.shift(patternTooltips)
+        array.shift(patternResolved)
+
+// Only distinctive roles receive chart markers. Frequent neutral roles remain
+// available through Candle Role in the Data Window to keep the chart readable.
+plotshape(showCandleRoles and bullMarubozu, title = "Bullish Marubozu", style = shape.square,
+     location = location.belowbar, color = color.new(color.green, 10), size = size.tiny)
+plotshape(showCandleRoles and bearMarubozu, title = "Bearish Marubozu", style = shape.square,
+     location = location.abovebar, color = color.new(color.red, 10), size = size.tiny)
+plotshape(showCandleRoles and dragonflyDoji, title = "Dragonfly Doji", style = shape.diamond,
+     location = location.belowbar, color = color.new(color.aqua, 10), size = size.tiny)
+plotshape(showCandleRoles and gravestoneDoji, title = "Gravestone Doji", style = shape.diamond,
+     location = location.abovebar, color = color.new(color.orange, 10), size = size.tiny)
+
+barStateColor = bullBreakoutAccepted ? color.new(color.lime, 5)
+     : bearBreakoutAccepted ? color.new(color.red, 5)
+     : bullBreakoutFailure ? color.new(color.aqua, 5)
+     : bearBreakoutFailure ? color.new(color.orange, 5)
+     : bullBreakoutAttempt ? color.new(color.green, 25)
+     : bearBreakoutAttempt ? color.new(color.red, 25)
+     : strongBull ? color.new(color.lime, 35)
+     : strongBear ? color.new(color.red, 35)
+     : bullControl ? color.new(color.green, 60)
+     : bearControl ? color.new(color.maroon, 60)
+     : bullFollowThrough ? color.new(color.green, 20)
+     : bearFollowThrough ? color.new(color.red, 20)
+     : bullDirectionalFailure ? color.new(color.aqua, 20)
+     : bearDirectionalFailure ? color.new(color.orange, 20)
+     : bullContextualPattern ? color.new(color.green, 35)
+     : bearContextualPattern ? color.new(color.red, 35)
+     : bullDirectionalRole ? color.new(color.green, 45)
+     : bearDirectionalRole ? color.new(color.red, 45)
+     : bearExhausted ? color.new(color.aqua, 35)
+     : bullExhausted ? color.new(color.orange, 35)
+     : indecision ? color.new(color.gray, 55)
+     : na
+barcolor(colorBars ? barStateColor : na)
+
+// ============================================================================
+// DATA WINDOW
+// ============================================================================
+plot(bullEvidence, "Bull Evidence", display = display.data_window)
+plot(bearEvidence, "Bear Evidence", display = display.data_window)
+plot(directionalBalance, "Directional Balance", display = display.data_window)
+plot(candlePressure, "Candle Pressure", display = display.data_window)
+plot(sequencePressure, "Sequence Pressure", display = display.data_window)
+plot(bullQuality, "Bull Candle Quality", display = display.data_window)
+plot(bearQuality, "Bear Candle Quality", display = display.data_window)
+plot(bullDominance, "Bull Dominance", display = display.data_window)
+plot(bearDominance, "Bear Dominance", display = display.data_window)
+plot(closePersistenceBull, "Bull Close Persistence", display = display.data_window)
+plot(closePersistenceBear, "Bear Close Persistence", display = display.data_window)
+plot(bullDecelerationScore, "Bull Deceleration", display = display.data_window)
+plot(bearDecelerationScore, "Bear Deceleration", display = display.data_window)
+plot(bullExhaustion, "Bull Trend Exhaustion", display = display.data_window)
+plot(bearExhaustion, "Bear Trend Exhaustion", display = display.data_window)
+plot(compressionScore, "Compression Score", display = display.data_window)
+plot(candleRoleCode, "Candle Role (1/-1=Marubozu, 2/-2=Dragonfly/Gravestone, 3=Long-Legged, 4=Doji, 5=Spinning Top)", display = display.data_window)
+plot(trendScore, "Trend Context", display = display.data_window)
+plot(rangeAtrRatio, "Range / ATR", display = display.data_window)
+plot(rangeExpansion ? 1.0 : 0.0, "Range Expansion Active", display = display.data_window)
+plot(bullBreakoutAttempt ? 1.0 : bearBreakoutAttempt ? -1.0 : 0.0, "Compression Breakout Attempt", display = display.data_window)
+plot(breakoutStoryEvent, "Breakout Story (1/-1=Pending, 2/-2=Accepted, 3/-3=Trap Reversal, 4/-4=Unresolved)", display = display.data_window)
+plot(volumeRatio, "Relative Volume", display = display.data_window)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(newBullSignal, "Bullish Candle Story", "Candle Story Engine: New bullish candle-sequence signal.")
+alertcondition(newBearSignal, "Bearish Candle Story", "Candle Story Engine: New bearish candle-sequence signal.")
+alertcondition(confirmedBar and bullExhausted and not bullExhausted[1], "Bull Trend Exhaustion", "Candle Story Engine: Bullish trend shows exhaustion.")
+alertcondition(confirmedBar and bearExhausted and not bearExhausted[1], "Bear Trend Exhaustion", "Candle Story Engine: Bearish trend shows exhaustion.")
+alertcondition(bullFollowThrough, "Bullish Follow Through", "Candle Story Engine: Bullish signal received follow-through.")
+alertcondition(bearFollowThrough, "Bearish Follow Through", "Candle Story Engine: Bearish signal received follow-through.")
+alertcondition(bullFailure, "Bullish Signal Failure", "Candle Story Engine: Previous bullish signal failed.")
+alertcondition(bearFailure, "Bearish Signal Failure", "Candle Story Engine: Previous bearish signal failed.")
+alertcondition(confirmedBar and compressionActive and not compressionActive[1], "Candle Compression", "Candle Story Engine: Significant candle-range compression detected.")
+alertcondition(bullBreakoutAttempt, "Bullish Compression Breakout Attempt", "Candle Story Engine: Bullish breakout attempt from recent compression.")
+alertcondition(bearBreakoutAttempt, "Bearish Compression Breakout Attempt", "Candle Story Engine: Bearish breakout attempt from recent compression.")
+alertcondition(breakoutStoryEvent == 2, "Bullish Breakout Accepted", "Candle Story Engine: Bullish compression breakout was accepted.")
+alertcondition(breakoutStoryEvent == -2, "Bearish Breakout Accepted", "Candle Story Engine: Bearish compression breakout was accepted.")
+alertcondition(bearBreakoutFailure, "Bull Trap Reversal", "Candle Story Engine: Bullish breakout failed and reversed bearish through the compression-zone boundary.")
+alertcondition(bullBreakoutFailure, "Bear Trap Reversal", "Candle Story Engine: Bearish breakout failed and reversed bullish through the compression-zone boundary.")

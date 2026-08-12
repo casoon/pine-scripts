@@ -1,0 +1,849 @@
+//@version=6
+// ============================================================================
+// Fib Reaction Memory [WavesUnchained]
+// Version: 1.4
+// Author: WavesUnchained
+// Build: 2026-08-11 00:00:00
+// ============================================================================
+// Scores Fibonacci retracement levels of an active A->B reference leg by
+// confirmed local price reactions that occurred INSIDE that leg, instead of
+// by geometric proximity alone.
+//
+// Features:
+//   ✓ Confirmed structural A->B reference leg, frozen while price retraces
+//   ✓ Micro-pivot reaction memory inside the leg, weighted by ATR size
+//   ✓ Reactions normalized onto Fib levels (reaction-first, not fib-first)
+//   ✓ 0-100 Fib Memory Score per level with recency, saturation,
+//     consumption-decay and broken-level-penalty controls
+//   ✓ Per-level Hold Rate — % of historical reactions never later broken
+//   ✓ APPROACHING / TESTING / REJECTED / ACCEPTED / RECLAIMED state per level
+//   ✓ Score-based NEXT level highlight (not the nearest geometric fib)
+//   ✓ Persistent line/label objects, no per-bar drawing churn
+//
+// ============================================================================
+
+indicator(
+     "Fib Reaction Memory [WavesUnchained]",
+     shorttitle = "Fib Memory",
+     overlay = true,
+     max_bars_back = 5000,
+     max_lines_count = 100,
+     max_labels_count = 100
+)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Reference swing
+// ----------------------------------------------------------------------------
+groupSwing = "01 · Reference Swing"
+
+swingPivotLen = input.int(
+     8,
+     "Structural Pivot Length",
+     minval = 2,
+     maxval = 50,
+     group = groupSwing,
+     tooltip =
+         "Controls the structural A→B swing.\n\n" +
+         "Higher = fewer, larger swings.\n" +
+         "Lower = more responsive, smaller swings."
+)
+
+invalidationRatio = input.float(
+     1.03,
+     "Reference Leg Invalidation",
+     minval = 1.0,
+     maxval = 1.50,
+     step = 0.01,
+     group = groupSwing,
+     tooltip =
+         "The active reference leg is invalidated when the pullback moves " +
+         "beyond this normalized retracement.\n\n" +
+         "1.00 = origin A\n" +
+         "1.03 = 3% beyond the full retracement."
+)
+
+// ----------------------------------------------------------------------------
+// Reaction detection
+// ----------------------------------------------------------------------------
+groupReaction = "02 · Reaction Memory"
+
+reactionPivotLen = input.int(
+     2,
+     "Reaction Pivot Length",
+     minval = 1,
+     maxval = 10,
+     group = groupReaction,
+     tooltip =
+         "Detects smaller pivots INSIDE the structural A→B leg.\n\n" +
+         "These micro pivots form the reaction memory."
+)
+
+atrLen = input.int(
+     14,
+     "ATR Length",
+     minval = 2,
+     maxval = 100,
+     group = groupReaction
+)
+
+minReactionATR = input.float(
+     0.20,
+     "Minimum Reaction · ATR",
+     minval = 0.0,
+     maxval = 5.0,
+     step = 0.05,
+     group = groupReaction,
+     tooltip =
+         "Micro reactions smaller than this are ignored.\n\n" +
+         "Example: 0.30 means the reaction away from the micro pivot must " +
+         "reach at least 0.30 ATR."
+)
+
+strongReactionATR = input.float(
+     1.00,
+     "Strong Reaction · ATR",
+     minval = 0.1,
+     maxval = 10.0,
+     step = 0.05,
+     group = groupReaction,
+     tooltip =
+         "Reaction size at which an event receives approximately full " +
+         "reaction-strength weighting."
+)
+
+fibTolerance = input.float(
+     0.035,
+     "Fib Reaction Radius",
+     minval = 0.005,
+     maxval = 0.15,
+     step = 0.005,
+     group = groupReaction,
+     tooltip =
+         "Maximum normalized distance between a historical reaction and a " +
+         "Fib level.\n\n" +
+         "0.035 = ±3.5% of the complete A→B range."
+)
+
+recencyWeight = input.float(
+     0.25,
+     "Recency Influence",
+     minval = 0.0,
+     maxval = 1.0,
+     step = 0.05,
+     group = groupReaction,
+     tooltip =
+         "Controls whether reactions occurring later in the A→B leg receive " +
+         "slightly more weight.\n\n" +
+         "0 = no recency weighting."
+)
+
+scoreSaturation = input.float(
+     1.75,
+     "Score Saturation",
+     minval = 0.25,
+     maxval = 10.0,
+     step = 0.25,
+     group = groupReaction,
+     tooltip =
+         "Controls how quickly multiple reactions produce a high score.\n\n" +
+         "Higher values require more evidence."
+)
+
+consumptionDecay = input.float(
+     0.35,
+     "Level Consumption",
+     minval = 0.0,
+     maxval = 2.0,
+     step = 0.05,
+     group = groupReaction,
+     tooltip =
+         "Each additional reaction at the same level counts for less than " +
+         "the first one, reflecting that a repeatedly tested level " +
+         "typically weakens rather than staying equally valid.\n\n" +
+         "0 = disabled (every test counts fully).\n" +
+         "Higher = later tests at the same level decay faster."
+)
+
+brokenLevelPenalty = input.float(
+     0.5,
+     "Broken Level Penalty",
+     minval = 0.0,
+     maxval = 1.0,
+     step = 0.05,
+     group = groupReaction,
+     tooltip =
+         "Discounts a reaction's evidence if price later moved decisively " +
+         "past that level anyway (checked against the current leg's fixed " +
+         "A/B range, from the reaction's bar up to now) — a clean rejection " +
+         "that was never broken counts as stronger evidence than one that " +
+         "was later broken through.\n\n" +
+         "0 = disabled (broken levels count the same as held ones).\n" +
+         "1 = broken levels contribute nothing."
+)
+
+maxScanBars = input.int(
+     1500,
+     "Maximum Memory Scan",
+     minval = 100,
+     maxval = 4500,
+     step = 100,
+     group = groupReaction,
+     tooltip =
+         "Safety/performance limit for historical analysis."
+)
+
+// ----------------------------------------------------------------------------
+// Fib levels
+// ----------------------------------------------------------------------------
+groupFib = "03 · Fibonacci Levels"
+
+show236 = input.bool(true, "23.6 %", group = groupFib)
+show382 = input.bool(true, "38.2 %", group = groupFib)
+show500 = input.bool(true, "50.0 %", group = groupFib)
+show618 = input.bool(true, "61.8 %", group = groupFib)
+show786 = input.bool(true, "78.6 %", group = groupFib)
+show100 = input.bool(true, "100.0 %", group = groupFib)
+
+// ----------------------------------------------------------------------------
+// Current pullback
+// ----------------------------------------------------------------------------
+groupCurrent = "04 · Current Pullback"
+
+testTolerance = input.float(
+     0.015,
+     "Current Test Radius",
+     minval = 0.002,
+     maxval = 0.10,
+     step = 0.001,
+     group = groupCurrent,
+     tooltip =
+         "Distance around a Fib level that counts as the current TESTING zone."
+)
+
+nextMinScore = input.float(
+     15.0,
+     "Minimum Score for NEXT",
+     minval = 0,
+     maxval = 100,
+     step = 5,
+     group = groupCurrent,
+     tooltip =
+         "Upcoming levels below this Memory Score are not promoted as the " +
+         "preferred NEXT structural level."
+)
+
+highlightNext = input.bool(
+     true,
+     "Highlight NEXT Level",
+     group = groupCurrent
+)
+
+// ----------------------------------------------------------------------------
+// Visuals
+// ----------------------------------------------------------------------------
+groupVisual = "05 · Visuals"
+
+showAnchors = input.bool(true, "Show A / B Anchors", group = groupVisual)
+showLabels = input.bool(true, "Show Fib Labels", group = groupVisual)
+showWeakLevels = input.bool(true, "Show Weak Levels", group = groupVisual)
+showHoldRate = input.bool(true, "Show Hold Rate", group = groupVisual)
+rightProjection = input.int(15, "Right Projection · Bars", minval = 3, maxval = 100, group = groupVisual)
+strongScore = input.float(65, "Strong Score", minval = 0, maxval = 100, group = groupVisual)
+mediumScore = input.float(35, "Medium Score", minval = 0, maxval = 100, group = groupVisual)
+
+// ============================================================================
+// CONSTANT DATA
+// ============================================================================
+var array<float> fibRatios = array.from(0.236, 0.382, 0.500, 0.618, 0.786, 1.000)
+var array<string> fibNames = array.from("23.6", "38.2", "50.0", "61.8", "78.6", "100.0")
+var array<float> fibScores = array.new_float(6, 0.0)
+// % of historical reactions near this level that were never subsequently
+// broken (na until at least one qualifying reaction has been scored).
+var array<float> fibHoldRate = array.new_float(6, na)
+
+// ============================================================================
+// DRAWING OBJECTS
+// ============================================================================
+var array<line> fibLines = array.new<line>()
+var array<label> fibLabels = array.new<label>()
+var line legLine = na
+var label anchorALabel = na
+var label anchorBLabel = na
+
+if barstate.isfirst
+    for i = 0 to 5
+        line newLine = line.new(bar_index, close, bar_index + 1, close, xloc = xloc.bar_index, extend = extend.none)
+        label newLabel = label.new(bar_index, close, "", xloc = xloc.bar_index, style = label.style_label_left, size = size.small)
+        array.push(fibLines, newLine)
+        array.push(fibLabels, newLabel)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_isFibEnabled(int index) =>
+    bool enabled = switch index
+        0 => show236
+        1 => show382
+        2 => show500
+        3 => show618
+        4 => show786
+        5 => show100
+        => false
+    enabled
+
+f_clamp(float value, float minimum, float maximum) =>
+    math.max(minimum, math.min(maximum, value))
+
+// Multi-line ternaries over series values are unreliable in Pine v6 (CE10156);
+// use explicit if/else instead.
+f_scoreColor(float score) =>
+    color result = color.new(color.gray, 45)
+    if score >= strongScore
+        result := color.new(color.lime, 0)
+    else if score >= mediumScore
+        result := color.new(color.orange, 0)
+    result
+
+f_scoreWidth(float score) =>
+    int result = 1
+    if score >= strongScore
+        result := 3
+    else if score >= mediumScore
+        result := 2
+    result
+
+// State machine per level, derived from two monotonic scalars:
+// currentRetracement (now) and pullbackDeepest (max retracement reached
+// since B). pullbackDeepest >= currentRetracement always, which keeps the
+// branches below mutually exclusive and exhaustive.
+//   APPROACHING — never reached the level's tolerance band
+//   TESTING     — currently inside the level's tolerance band
+//   REJECTED    — reached the band, pulled back shallower, never broke through
+//   ACCEPTED    — broke decisively past the level and is still beyond it
+//   RECLAIMED   — broke past the level, then pulled back shallower again
+f_levelState(float currentRetracement, float pullbackDeepest, float fib) =>
+    string state = "APPROACHING"
+    bool testingNow = currentRetracement >= fib - testTolerance and currentRetracement <= fib + testTolerance
+    if testingNow
+        state := "TESTING"
+    else if pullbackDeepest < fib - testTolerance
+        state := "APPROACHING"
+    else if pullbackDeepest >= fib + testTolerance
+        if currentRetracement < fib - testTolerance
+            state := "RECLAIMED"
+        else
+            state := "ACCEPTED"
+    else
+        state := "REJECTED"
+    state
+
+// ============================================================================
+// STRUCTURAL PIVOTS
+// ============================================================================
+float structuralPH = ta.pivothigh(high, swingPivotLen, swingPivotLen)
+float structuralPL = ta.pivotlow(low, swingPivotLen, swingPivotLen)
+int structuralPHBar = bar_index - swingPivotLen
+int structuralPLBar = bar_index - swingPivotLen
+
+// Most recent structural highs/lows.
+// Used later when an old reference leg is extended by a new impulse.
+var float lastHighPivotPrice = na
+var int lastHighPivotBar = na
+var float lastLowPivotPrice = na
+var int lastLowPivotBar = na
+
+if not na(structuralPH)
+    lastHighPivotPrice := structuralPH
+    lastHighPivotBar := structuralPHBar
+if not na(structuralPL)
+    lastLowPivotPrice := structuralPL
+    lastLowPivotBar := structuralPLBar
+
+// ============================================================================
+// INITIAL ALTERNATING PIVOT COLLECTOR
+// ============================================================================
+// candidateType: +1 = high, -1 = low
+var float candidatePrice = na
+var int candidateBar = na
+var int candidateType = 0
+
+// ============================================================================
+// ACTIVE REFERENCE LEG
+// ============================================================================
+var bool legActive = false
+var float legA = na
+var int legABar = na
+var float legB = na
+var int legBBar = na
+// +1 = bullish A low -> B high, -1 = bearish A high -> B low
+var int legDirection = 0
+var int legGeneration = 0
+
+// ============================================================================
+// PIVOT EVENT PROCESSING
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// High pivot
+// ----------------------------------------------------------------------------
+if not na(structuralPH)
+    if not legActive
+        if candidateType == 0
+            candidatePrice := structuralPH
+            candidateBar := structuralPHBar
+            candidateType := 1
+        else if candidateType == 1
+            // Same-type pivot: keep only the more extreme high.
+            if structuralPH > candidatePrice
+                candidatePrice := structuralPH
+                candidateBar := structuralPHBar
+        else
+            // Previous candidate was LOW. LOW -> HIGH = bullish reference leg.
+            legA := candidatePrice
+            legABar := candidateBar
+            legB := structuralPH
+            legBBar := structuralPHBar
+            legDirection := 1
+            legActive := true
+            legGeneration += 1
+            candidatePrice := structuralPH
+            candidateBar := structuralPHBar
+            candidateType := 1
+    else
+        // Existing bullish reference leg gets replaced only when a confirmed
+        // HIGH extends beyond B. Prefer the most recent confirmed LOW after
+        // old B as the origin of the new impulse.
+        if legDirection == 1 and structuralPH > legB
+            float newA = legA
+            int newABar = legABar
+            bool haveFreshLow = not na(lastLowPivotPrice) and not na(lastLowPivotBar) and lastLowPivotBar > legBBar and lastLowPivotBar < structuralPHBar
+            if haveFreshLow
+                newA := lastLowPivotPrice
+                newABar := lastLowPivotBar
+            legA := newA
+            legABar := newABar
+            legB := structuralPH
+            legBBar := structuralPHBar
+            legGeneration += 1
+
+// ----------------------------------------------------------------------------
+// Low pivot
+// ----------------------------------------------------------------------------
+if not na(structuralPL)
+    if not legActive
+        if candidateType == 0
+            candidatePrice := structuralPL
+            candidateBar := structuralPLBar
+            candidateType := -1
+        else if candidateType == -1
+            // Same-type pivot: keep only the more extreme low.
+            if structuralPL < candidatePrice
+                candidatePrice := structuralPL
+                candidateBar := structuralPLBar
+        else
+            // Previous candidate was HIGH. HIGH -> LOW = bearish reference leg.
+            legA := candidatePrice
+            legABar := candidateBar
+            legB := structuralPL
+            legBBar := structuralPLBar
+            legDirection := -1
+            legActive := true
+            legGeneration += 1
+            candidatePrice := structuralPL
+            candidateBar := structuralPLBar
+            candidateType := -1
+    else
+        // Existing bearish reference leg gets replaced only when a confirmed
+        // LOW extends beyond B.
+        if legDirection == -1 and structuralPL < legB
+            float newA = legA
+            int newABar = legABar
+            bool haveFreshHigh = not na(lastHighPivotPrice) and not na(lastHighPivotBar) and lastHighPivotBar > legBBar and lastHighPivotBar < structuralPLBar
+            if haveFreshHigh
+                newA := lastHighPivotPrice
+                newABar := lastHighPivotBar
+            legA := newA
+            legABar := newABar
+            legB := structuralPL
+            legBBar := structuralPLBar
+            legGeneration += 1
+
+// ============================================================================
+// CURRENT RETRACEMENT
+// ============================================================================
+float legRange = na
+if legActive
+    legRange := math.abs(legB - legA)
+
+float currentRetracement = na
+if legActive and legRange > syminfo.mintick
+    currentRetracement := ((legB - close) * legDirection) / legRange
+
+// Deepest point reached during the CURRENT bar.
+// Bullish impulse: pullback gets deeper through LOW.
+// Bearish impulse: pullback gets deeper through HIGH.
+float currentBarDeepRetracement = na
+if legActive and legRange > syminfo.mintick
+    float deepPrice = high
+    if legDirection == 1
+        deepPrice := low
+    currentBarDeepRetracement := ((legB - deepPrice) * legDirection) / legRange
+
+// ============================================================================
+// REFERENCE LEG INVALIDATION
+// ============================================================================
+bool legInvalidated = legActive and not na(currentBarDeepRetracement) and currentBarDeepRetracement > invalidationRatio
+
+if legInvalidated
+    legActive := false
+    legGeneration += 1
+    // Restart pivot acquisition using the most recently confirmed structural
+    // pivot, depending on which one occurred last.
+    bool highIsNewest = not na(lastHighPivotBar) and (na(lastLowPivotBar) or lastHighPivotBar > lastLowPivotBar)
+    if highIsNewest
+        candidatePrice := lastHighPivotPrice
+        candidateBar := lastHighPivotBar
+        candidateType := 1
+    else if not na(lastLowPivotBar)
+        candidatePrice := lastLowPivotPrice
+        candidateBar := lastLowPivotBar
+        candidateType := -1
+    else
+        candidatePrice := na
+        candidateBar := na
+        candidateType := 0
+
+// ============================================================================
+// MICRO REACTIONS
+// ============================================================================
+// A high micro pivot creates a reaction when price subsequently moves down.
+// A low micro pivot creates a reaction when price subsequently moves up.
+// At the time the pivot becomes confirmed, reactionPivotLen bars have already
+// occurred on its right side; those bars estimate the immediate reaction size.
+// ta.lowest/ta.highest must run unconditionally every bar (conditional ta.*
+// calls produce inconsistent series in Pine v6) — computed here, used below.
+float atr = ta.atr(atrLen)
+float microPH = ta.pivothigh(high, reactionPivotLen, reactionPivotLen)
+float microPL = ta.pivotlow(low, reactionPivotLen, reactionPivotLen)
+float recentLow = ta.lowest(low, reactionPivotLen + 1)
+float recentHigh = ta.highest(high, reactionPivotLen + 1)
+
+float highReactionDistance = na
+if not na(microPH)
+    highReactionDistance := microPH - recentLow
+
+float highReactionATR = na
+if not na(highReactionDistance) and atr > 0
+    highReactionATR := highReactionDistance / atr
+
+float lowReactionDistance = na
+if not na(microPL)
+    lowReactionDistance := recentHigh - microPL
+
+float lowReactionATR = na
+if not na(lowReactionDistance) and atr > 0
+    lowReactionATR := lowReactionDistance / atr
+
+// ============================================================================
+// LEG CHANGE RESET
+// ============================================================================
+var int previousLegGeneration = na
+bool newLegGeneration = na(previousLegGeneration) or legGeneration != previousLegGeneration
+previousLegGeneration := legGeneration
+
+// ============================================================================
+// PULLBACK DEPTH MEMORY
+// ============================================================================
+// Running max of currentBarDeepRetracement since B — drives the per-level
+// state machine below (APPROACHING/TESTING/REJECTED/ACCEPTED/RECLAIMED).
+// pullbackDeepest >= currentRetracement always (deepest intrabar excursion
+// vs. close), which keeps f_levelState's branches mutually exclusive.
+var float pullbackDeepest = 0.0
+if newLegGeneration
+    pullbackDeepest := 0.0
+if legActive and legRange > syminfo.mintick and bar_index > legBBar
+    pullbackDeepest := math.max(pullbackDeepest, currentBarDeepRetracement)
+
+// ============================================================================
+// HISTORICAL REACTION MEMORY
+// ============================================================================
+// Computed only on the last chart bar. Each confirmed micro pivot inside
+// A -> B contributes evidence to nearby Fib levels.
+//
+// Weight = reaction strength × proximity to Fib × optional recency ×
+// consumption decay × broken-level penalty. Score uses saturation:
+// 100 × (1 - exp(-raw / saturation)), which prevents repeated touches from
+// creating an unbounded linear score.
+//
+// The scan runs oldest -> newest (offset descending from availableBars to
+// 0) so consumption decay applies in real chronological order: the first
+// test of a level counts fully, each later test at the same level counts
+// less, per levelTestCount below.
+if barstate.islast
+    for fibIndex = 0 to 5
+        array.set(fibScores, fibIndex, 0.0)
+        array.set(fibHoldRate, fibIndex, na)
+
+    if legActive and legRange > syminfo.mintick
+        int availableBars = math.min(bar_index, maxScanBars)
+        array<int> levelTestCount = array.new_int(6, 0)
+        array<int> levelBrokenCount = array.new_int(6, 0)
+
+        // Pass A: for every offset, the deepest normalized retracement
+        // reached from that bar's time up to now, projected onto the
+        // CURRENT fixed A/B range using that bar's own raw high/low (not a
+        // historical live-leg series, which would reflect whatever leg was
+        // active back then, not this one). Feeds the break-penalty check
+        // in Pass B below.
+        array<float> futureMaxAtOffset = array.new_float(availableBars + 1, 0.0)
+        float runningFutureMax = 0.0
+        for offset = 0 to availableBars
+            float extremePrice = high[offset]
+            if legDirection == 1
+                extremePrice := low[offset]
+            float depthAtOffset = ((legB - extremePrice) * legDirection) / legRange
+            runningFutureMax := math.max(runningFutureMax, depthAtOffset)
+            array.set(futureMaxAtOffset, offset, runningFutureMax)
+
+        // Pass B: oldest -> newest scoring with consumption decay and the
+        // broken-level penalty.
+        for offset = availableBars to 0
+            float futureMax = array.get(futureMaxAtOffset, offset)
+
+            // -----------------------------------------------------------
+            // Historical micro HIGH event
+            // -----------------------------------------------------------
+            float histPH = microPH[offset]
+            if not na(histPH)
+                int confirmationBar = bar_index - offset
+                int pivotBar = confirmationBar - reactionPivotLen
+                bool insideLeg = pivotBar > legABar and pivotBar < legBBar
+                if insideLeg
+                    float reactionATRValue = highReactionATR[offset]
+                    if not na(reactionATRValue) and reactionATRValue >= minReactionATR
+                        float normalizedPosition = ((legB - histPH) * legDirection) / legRange
+                        bool normalizedInside = normalizedPosition >= 0 and normalizedPosition <= 1
+                        if normalizedInside
+                            float reactionStrength = f_clamp(reactionATRValue / strongReactionATR, 0.0, 1.0)
+                            float legProgress = float(pivotBar - legABar) / math.max(float(legBBar - legABar), 1.0)
+                            float temporalWeight = 1.0 + recencyWeight * f_clamp(legProgress, 0.0, 1.0)
+                            for fibIndex = 0 to 5
+                                float fib = array.get(fibRatios, fibIndex)
+                                float distance = math.abs(normalizedPosition - fib)
+                                if distance <= fibTolerance
+                                    float proximity = 1.0 - distance / fibTolerance
+                                    int testsSoFar = array.get(levelTestCount, fibIndex)
+                                    float decayFactor = 1.0 / (1.0 + consumptionDecay * testsSoFar)
+                                    bool wasBroken = futureMax >= fib + testTolerance
+                                    float breakMultiplier = wasBroken ? (1.0 - brokenLevelPenalty) : 1.0
+                                    float contribution = reactionStrength * proximity * temporalWeight * decayFactor * breakMultiplier
+                                    float oldScore = array.get(fibScores, fibIndex)
+                                    array.set(fibScores, fibIndex, oldScore + contribution)
+                                    array.set(levelTestCount, fibIndex, testsSoFar + 1)
+                                    if wasBroken
+                                        array.set(levelBrokenCount, fibIndex, array.get(levelBrokenCount, fibIndex) + 1)
+
+            // -----------------------------------------------------------
+            // Historical micro LOW event
+            // -----------------------------------------------------------
+            float histPL = microPL[offset]
+            if not na(histPL)
+                int confirmationBar = bar_index - offset
+                int pivotBar = confirmationBar - reactionPivotLen
+                bool insideLeg = pivotBar > legABar and pivotBar < legBBar
+                if insideLeg
+                    float reactionATRValue = lowReactionATR[offset]
+                    if not na(reactionATRValue) and reactionATRValue >= minReactionATR
+                        float normalizedPosition = ((legB - histPL) * legDirection) / legRange
+                        bool normalizedInside = normalizedPosition >= 0 and normalizedPosition <= 1
+                        if normalizedInside
+                            float reactionStrength = f_clamp(reactionATRValue / strongReactionATR, 0.0, 1.0)
+                            float legProgress = float(pivotBar - legABar) / math.max(float(legBBar - legABar), 1.0)
+                            float temporalWeight = 1.0 + recencyWeight * f_clamp(legProgress, 0.0, 1.0)
+                            for fibIndex = 0 to 5
+                                float fib = array.get(fibRatios, fibIndex)
+                                float distance = math.abs(normalizedPosition - fib)
+                                if distance <= fibTolerance
+                                    float proximity = 1.0 - distance / fibTolerance
+                                    int testsSoFar = array.get(levelTestCount, fibIndex)
+                                    float decayFactor = 1.0 / (1.0 + consumptionDecay * testsSoFar)
+                                    bool wasBroken = futureMax >= fib + testTolerance
+                                    float breakMultiplier = wasBroken ? (1.0 - brokenLevelPenalty) : 1.0
+                                    float contribution = reactionStrength * proximity * temporalWeight * decayFactor * breakMultiplier
+                                    float oldScore = array.get(fibScores, fibIndex)
+                                    array.set(fibScores, fibIndex, oldScore + contribution)
+                                    array.set(levelTestCount, fibIndex, testsSoFar + 1)
+                                    if wasBroken
+                                        array.set(levelBrokenCount, fibIndex, array.get(levelBrokenCount, fibIndex) + 1)
+
+        // -----------------------------------------------------------------
+        // Convert raw evidence into a 0..100 score, plus a hold rate: % of
+        // qualifying reactions near this level that were never subsequently
+        // broken (na if the level was never tested this leg).
+        // -----------------------------------------------------------------
+        for fibIndex = 0 to 5
+            float rawScore = array.get(fibScores, fibIndex)
+            float normalizedScore = 100.0 * (1.0 - math.exp(-rawScore / scoreSaturation))
+            array.set(fibScores, fibIndex, normalizedScore)
+
+            int totalTests = array.get(levelTestCount, fibIndex)
+            if totalTests > 0
+                int brokenTests = array.get(levelBrokenCount, fibIndex)
+                array.set(fibHoldRate, fibIndex, 100.0 * (1.0 - float(brokenTests) / float(totalTests)))
+
+// ============================================================================
+// SELECT NEXT RELEVANT LEVEL
+// ============================================================================
+// The closest geometric Fib is NOT automatically selected. Search all Fib
+// levels still ahead of the current pullback and prefer the highest Memory
+// Score above nextMinScore. If none qualifies, fall back to the nearest
+// upcoming enabled Fib.
+int nextFibIndex = na
+float nextFibScore = -1.0
+int nearestAheadIndex = na
+float nearestAheadDistance = 10.0
+
+if barstate.islast and legActive and not na(currentRetracement)
+    for i = 0 to 5
+        if f_isFibEnabled(i)
+            float fib = array.get(fibRatios, i)
+            float score = array.get(fibScores, i)
+            bool ahead = fib > currentRetracement + testTolerance
+            if ahead
+                float distance = fib - currentRetracement
+                if distance < nearestAheadDistance
+                    nearestAheadDistance := distance
+                    nearestAheadIndex := i
+                if score >= nextMinScore and score > nextFibScore
+                    nextFibScore := score
+                    nextFibIndex := i
+    if na(nextFibIndex)
+        nextFibIndex := nearestAheadIndex
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+if barstate.islast
+    // -------------------------------------------------------------------
+    // No active reference leg
+    // -------------------------------------------------------------------
+    if not legActive
+        for i = 0 to 5
+            line fibLine = array.get(fibLines, i)
+            label fibLabel = array.get(fibLabels, i)
+            line.set_color(fibLine, color.new(color.gray, 100))
+            label.set_text(fibLabel, "")
+        if not na(legLine)
+            line.delete(legLine)
+            legLine := na
+        if not na(anchorALabel)
+            label.delete(anchorALabel)
+            anchorALabel := na
+        if not na(anchorBLabel)
+            label.delete(anchorBLabel)
+            anchorBLabel := na
+    // -------------------------------------------------------------------
+    // Active reference leg
+    // -------------------------------------------------------------------
+    else
+        // A -> B structural leg
+        if na(legLine)
+            legLine := line.new(legABar, legA, legBBar, legB, xloc = xloc.bar_index, color = color.new(color.silver, 35), width = 2)
+        else
+            line.set_xy1(legLine, legABar, legA)
+            line.set_xy2(legLine, legBBar, legB)
+            line.set_color(legLine, color.new(color.silver, 35))
+
+        // -----------------------------------------------------------------
+        // Anchor labels
+        // -----------------------------------------------------------------
+        if showAnchors
+            aStyle = label.style_label_down
+            bStyle = label.style_label_up
+            if legDirection == 1
+                aStyle := label.style_label_up
+                bStyle := label.style_label_down
+
+            if na(anchorALabel)
+                anchorALabel := label.new(legABar, legA, "A", xloc = xloc.bar_index, style = aStyle, color = color.new(color.gray, 20), textcolor = color.white, size = size.tiny)
+            else
+                label.set_xy(anchorALabel, legABar, legA)
+                label.set_text(anchorALabel, "A")
+
+            if na(anchorBLabel)
+                anchorBLabel := label.new(legBBar, legB, "B", xloc = xloc.bar_index, style = bStyle, color = color.new(color.gray, 20), textcolor = color.white, size = size.tiny)
+            else
+                label.set_xy(anchorBLabel, legBBar, legB)
+                label.set_text(anchorBLabel, "B")
+        else
+            if not na(anchorALabel)
+                label.delete(anchorALabel)
+                anchorALabel := na
+            if not na(anchorBLabel)
+                label.delete(anchorBLabel)
+                anchorBLabel := na
+
+        // -----------------------------------------------------------------
+        // Fib levels
+        // -----------------------------------------------------------------
+        for i = 0 to 5
+            line fibLine = array.get(fibLines, i)
+            label fibLabel = array.get(fibLabels, i)
+            float fib = array.get(fibRatios, i)
+            string fibName = array.get(fibNames, i)
+            float score = array.get(fibScores, i)
+            float holdRate = array.get(fibHoldRate, i)
+            bool enabled = f_isFibEnabled(i)
+            float fibPrice = legB - (legDirection * legRange * fib)
+            string state = f_levelState(currentRetracement, pullbackDeepest, fib)
+            bool isNext = highlightNext and not na(nextFibIndex) and i == nextFibIndex
+            bool weakHidden = not showWeakLevels and score < mediumScore and not isNext
+            bool visible = enabled and not weakHidden
+
+            color baseColor = f_scoreColor(score)
+            color finalColor = baseColor
+            int finalWidth = f_scoreWidth(score)
+            lineStyle = line.style_dotted
+            if isNext
+                finalColor := color.new(color.aqua, 0)
+                finalWidth := 4
+                lineStyle := line.style_solid
+
+            if visible
+                line.set_xy1(fibLine, legBBar, fibPrice)
+                line.set_xy2(fibLine, bar_index + rightProjection, fibPrice)
+                line.set_color(fibLine, finalColor)
+                line.set_width(fibLine, finalWidth)
+                line.set_style(fibLine, lineStyle)
+
+                if showLabels
+                    string prefix = ""
+                    if isNext
+                        prefix := "NEXT · "
+                    string holdSuffix = ""
+                    if showHoldRate and not na(holdRate)
+                        holdSuffix := "  ·  Held " + str.tostring(holdRate, "#") + "%"
+                    string labelText = prefix + fibName + "%  ·  " + str.tostring(score, "#") + "  ·  " + state + holdSuffix
+                    label.set_xy(fibLabel, bar_index + rightProjection, fibPrice)
+                    label.set_text(fibLabel, labelText)
+                    label.set_style(fibLabel, label.style_label_left)
+                    label.set_color(fibLabel, color.new(finalColor, 75))
+                    label.set_textcolor(fibLabel, finalColor)
+                    label.set_size(fibLabel, size.small)
+                else
+                    label.set_text(fibLabel, "")
+            else
+                line.set_color(fibLine, color.new(color.gray, 100))
+                label.set_text(fibLabel, "")
+
+// ============================================================================
+// OPTIONAL DATA WINDOW OUTPUTS
+// ============================================================================
+plot(legActive ? currentRetracement : na, "Current Retracement", display = display.data_window)
+plot(legActive ? legA : na, "Reference A", display = display.data_window)
+plot(legActive ? legB : na, "Reference B", display = display.data_window)
+plot(legActive ? legDirection : na, "Reference Direction", display = display.data_window)
