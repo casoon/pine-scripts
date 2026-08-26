@@ -1,5 +1,147 @@
 # Changelog
 
+## v1.3.0 — 2026-08-20
+- Reverted the v1.2.0 "Decision Timeline" (three fixed-height lanes, height carries no information)
+  back to plain value curves - real chart feedback, after the state-lifecycle bugs in that version
+  were fixed (see v1.2.1), was blunt: "mit den Kurven konnte ich was anfangen, hiermit nicht" ("I
+  could work with the curves, not with this"). The lane concept matched the engine's actual
+  situation → entry → position sequence on paper, but flat bands at a constant height turned out not
+  to be interpretable the way a moving curve is - no amount of debugging the underlying state logic
+  fixes a wrong visualization idea. `longPermission`/`shortPermission` are now a plain mirrored
+  0–100 line pair (no display stretch, no debounce - a continuous value has nothing to flicker the
+  way a boolean-gated flat line did), with `permissionThresholdInput` drawn as a reference line.
+  Position Health is a second `style_circles` curve, still gated to one side via
+  `healthDisplayModeInput` (kept from v1.2.0 - showing both sides at once was still the wrong idea,
+  independent of the lane-vs-curve question). Entry is now a lean marker
+  (`newLongTrigger`/`newShortTrigger`, fires once) placed directly on the Permission curve, not a
+  separate series with its own display-duration window.
+- Removed `laneStabilityBarsInput` and `entryDisplayBarsInput` - both existed only to manage the
+  lane display's on/off flicker and duration, which curves don't have.
+- Dropped the now-redundant `longPermission`/`shortPermission`/`longPositionHealth`/
+  `shortPositionHealth` data-window-only diagnostics - the pane curves above already carry their
+  values into the data window automatically, so a second copy under a "Diagnostic:" label was the
+  same number twice. `longScore`/`shortScore` (Active Permission, which has no pane plot of its own)
+  stay.
+- The entry marker started as `shape.triangleup`/`shape.triangledown` - a real chart showed them
+  visibly off the Permission curve ("die Position der Pfeile ist nicht gut") even though
+  `location.absolute` centers a shape's anchor exactly on the given value. Root cause: a triangle
+  is asymmetric (apex at one end, wide base at the other), so its visual weight reads as offset from
+  its true anchor point even when correctly centered. Switched to `shape.circle`, which is
+  symmetric and sits cleanly on the curve.
+
+## v1.2.0 — 2026-08-19
+- Reworked the pane display from a multi-line oscillator into a "Decision Timeline": three
+  fixed-height lanes (**Market** = Permission/Continuation-Reversal, **Entry** = Trigger state
+  Watch/Broken/Confirmed/Accepted, **Health** = Position Health Hold/Protect/Reduce/Exit) instead
+  of a shared 0-100-ish axis. The old display packed several different semantic levels onto one
+  axis — a raw 0-100 Permission score, a further-chained Active Permission score, a state-classified
+  Position Health score, and their derivatives (velocity, balance) — so the pane read as a pile of
+  scores instead of the sequence of decisions the engine actually reasons through (is there a
+  situation → has it become an entry → if I'm in it, is it still healthy). Lane height now carries
+  no information by itself; only which lane, which side (color) and color transparency
+  (strength/state — a Reversal reading additionally fades further than an equally strong
+  Continuation one on the Market lane) do — matching how the engine actually works instead of how
+  an oscillator conventionally looks.
+- Removed the Permission histogram (light/solid columns), the duplicate Permission line, both
+  Velocity lines, the Directional Balance line, the six Position Health threshold reference lines,
+  and both backgrounds (Permission confidence band, Position Health deterioration warning) — all
+  superseded by the lane display above. Removed their now-dead inputs: `highlightRegimesInput`,
+  `permissionDisplayStretchInput`, `extensionShadingInput`, `showPositionHealthBackgroundInput`.
+  Permission's fade-in-by-strength behavior is kept but now driven directly by the raw Permission
+  value (via a new `permissionThresholdInput`-anchored transparency curve) instead of the old
+  ATR-move-extension proxy, which answered "how far has price run", not "how permitted is this".
+- Position Health's pane display no longer shows Long and Short simultaneously — replaced
+  `showPositionHealthInput` with `healthDisplayModeInput` (Auto/Long/Short/Off, default Auto). Auto
+  shows only whichever side currently has a TPE-tracked trade open (the Health lane is empty when
+  neither does); Long/Short is a manual override to watch a position TPE itself never triggered.
+  Showing both sides at once answered a question nobody has ("what's the hypothetical health of a
+  position I'm not in"). The price-chart downgrade/upgrade/divergence markers are unaffected by
+  which side the lane shows — only by the master Off switch.
+- Added a small price-chart marker (`▵`/`▿`) on `newLongSetup`/`newShortSetup` - a permission phase
+  beginning is now visible directly on price, not only as a lane color change or an alert.
+- Every raw score the old display plotted directly (Permission, Active Permission, Position Health)
+  is now in the data window instead, since the new lanes deliberately don't encode magnitude as
+  height.
+- First pass at the lane display used a separate plot per side per scenario (Continuation/Reversal
+  as line vs. dots) and a separate Watch-state dot alongside the Armed-state line — hit `RE10140`
+  ("script creates too many plots (65)") on compile. Collapsed both lanes to one plot per side:
+  Market's Continuation/Reversal distinction and Entry's Watch/Broken/Confirmed/Accepted distinction
+  both now read through color transparency alone (already the mechanism used for strength/state
+  elsewhere in this display), not a second plot. Also dropped 5 data-window diagnostics that had
+  become redundant with the new lanes or with other diagnostics already there (`longStaleBars`/
+  `shortStaleBars` - `longDecayFactor`/`shortDecayFactor` already carry the same information as an
+  actual factor; `referenceEpoch` - internal bookkeeping; the dominant-scenario 1/0 flags - the
+  Market lane's saturation now shows this) to make room for the 6 new raw-value diagnostics with
+  margin to spare.
+
+## v1.2.1 — 2026-08-19
+- Fixed the Market/Entry lanes reading as scattered dashes instead of coherent bands on a real
+  chart (user report: "nicht brauchbar") - `longSetup`/`shortSetup` toggle on the raw
+  `longPermission > shortPermission` comparison, which crosses narrowly and often, so plotting them
+  directly turned every brief single-bar cross into a visible gap. Added `laneStabilityBarsInput`
+  (default 3, new "Lane stability (bars)" input) - a display-only debounce (`longSetupDisplay`/
+  `shortSetupDisplay`) that keeps a lane showing for this many bars after its side last actually
+  dominated, bridging brief flips. Purely a display smoothing layer: `longSetup`/`shortSetup`
+  themselves, and everything downstream of them (alerts, Trigger eligibility, `newLongTrigger`/
+  `newShortTrigger` arbitration), are untouched.
+- The debounce fix above wasn't enough - a follow-up real chart report ("die vielen roten Punkte auf
+  einer Linie... noch schlechter als die zu Beginn") showed the Entry lane specifically was still
+  unreadable, for a different reason than the Market lane's flicker: WATCH and BROKEN were folded
+  into the same alpha-ramped line as CONFIRMED/ACCEPTED. WATCH (Trigger state 0, permission
+  qualifies) is exactly `longSetupDisplay`/`shortSetupDisplay` - the same condition the Market lane
+  already draws, so a second, fainter copy of it on the Entry lane added no information, just a
+  permanent pale baseline. BROKEN (state 1) reverts to `UNTRIGGERED` within a bar or two often
+  enough in normal price action that drawing it as part of a continuous line made every attempt look
+  like an isolated dot on an otherwise-uniform thick band. Fixed by removing WATCH from the Entry
+  lane entirely and moving BROKEN out of the continuous plot into a small discrete `◇` price-chart
+  marker (same bounded-history-array pattern as the Setup markers) - the Entry lane itself now only
+  draws a band from CONFIRMED onward, a real held trigger instead of every attempt.
+- Still not fixed - a third real chart report showed the Entry lane still reading as scattered dots,
+  now on BOTH sides simultaneously, most of the visible chart. Root cause: `longTriggerState`/
+  `shortTriggerState` reverting from CONFIRMED to UNTRIGGERED the moment `close` crosses back over
+  `breakLevel` is exactly the same kind of narrow, frequent flip the Market lane's debounce already
+  fixes for `longSetup`/`shortSetup` - the Entry lane change above dropped WATCH/BROKEN correctly but
+  never applied the same debounce to CONFIRMED/ACCEPTED itself. Fixed by extending
+  `laneStabilityBarsInput` to the Entry lane too (`longConfirmedOffStreak`/`shortConfirmedOffStreak`,
+  same pattern as `longSetupOffStreak`/`shortSetupOffStreak`) - `longTriggerState`/`shortTriggerState`
+  themselves are untouched. Separately flagged, not fixed here since it's a signal-logic question, not
+  a display one: both sides showing CONFIRMED near-simultaneously across most of the chart is likely a
+  real property of this Trigger design on short timeframes, where `microPivotLen` can be as small as 2
+  bars (Scalping/Intraday presets) - a micro-pivot that short reforms constantly, so "closed beyond
+  the last micro-swing" stops being a meaningful discriminator. This was already true before the
+  Decision Timeline rework; it was just never visible outside the data window before.
+- Found the actual bug behind the last three fixes not helping (user diagnosis, confirmed against a
+  real screenshot): the Entry lane was reading `longTriggerState`/`shortTriggerState` >= CONFIRMED
+  directly, but that state does NOT mean "there was recently an entry" - once ACCEPTED, it stays >= 2
+  for as long as `close` doesn't cross back below `longBreakLevel`/`shortBreakLevel`, which can be an
+  arbitrarily old micro-pivot. On a real chart this produced ±40 bands lasting weeks or months,
+  answering "has this historical break-level not been violated yet", not "was there an entry" -
+  `longTriggerState` was conflating two different lifecycles (how far the CURRENT entry attempt has
+  progressed, vs. whether a past trigger's level is still intact), a question Position
+  Health/`longTradeOpen` already own. No debounce could have fixed this - it wasn't flicker, it was
+  the wrong variable. Replaced with the actual entry EVENT: `newLongTrigger`/`newShortTrigger` (fires
+  once, on the bar entry is granted) tracked via `lastLongEntryBar`/`lastShortEntryBar`, shown for a
+  short fixed window (`entryDisplayBarsInput`, default 5 bars, new "Entry lane display bars" input,
+  replaces the Entry-lane use of `laneStabilityBarsInput` - that input now only affects the Market
+  lane, renamed to "Market lane stability (bars)"). Separately noted, not fixed here per the
+  established rule of not mixing display and calibration changes in one pass: the Market lane (±80)
+  likely appears far less often than expected too, since Permission is a product of several gated
+  0-1 factors and a 55 threshold is comparatively high for that shape - worth checking against the
+  real `longPermission`/`shortPermission` distribution (now in the data window) before touching
+  `permissionThresholdInput`'s default.
+- The Entry-lane fix above still left every lane empty over 1-2 years of real history on every
+  instrument tested, ruling out "just a quiet period". Temporarily surfaced `longPermission`/
+  `shortPermission` directly on the pane (not just the data window) to check at a glance - both
+  peaked around 10-15 over the sample checked, nowhere near the 55 threshold. Confirms the deferred
+  calibration question from the previous entry, with real numbers: `permissionThresholdInput` gates
+  not just the Market/Entry lanes but `longTriggerEligible`/`shortTriggerEligible` themselves, so a
+  threshold this far out of reach means `newLongTrigger`/`newShortTrigger` (and so the Setup/Trigger/
+  Signal alerts) may never have fired in practice, on any instrument, since this existed - the
+  Decision Timeline rework didn't create this gap, it just made it visible for the first time.
+  Lowered the default from 55.0 to 12.0. Provisional, not a validated figure - one instrument, a few
+  days of data - revisit against a wider sample before trusting it long-term. Reverted the temporary
+  pane-visible Permission plots back to data-window-only once diagnosed.
+
 ## v1.1.2 — 2026-08-01
 - Added move-extension shading to the Permission histogram bars (`extensionShadingInput`, default
   on): Permission's floored-multiplicative gates saturate once a trend is established, so the bars

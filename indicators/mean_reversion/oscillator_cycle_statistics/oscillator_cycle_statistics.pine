@@ -1,0 +1,2412 @@
+//@version=6
+// ============================================================================
+// Oscillator Cycle Statistics [WavesUnchained]
+// Version: 1.5.2
+// Author: WavesUnchained
+// Build: 2026-08-26
+// ============================================================================
+// Empirical cycle statistics for bounded oscillators. Tracks the full cycle
+// from one extreme (overbought/oversold) to the opposite extreme as a state
+// machine, stores every completed attempt, and reports how often the opposite
+// extreme was historically reached — conditioned on progress already made and
+// on market regime.
+//
+// Features:
+//   ✓ RSI, StochRSI, smoothed Stochastic/raw normalized Williams %R, MFI,
+//     CCI, WaveTrend,
+//     DeMarker, RVI, EOM, Klinger (MFI/EOM/Klinger need real volume — sit at
+//     a neutral 50 on zero-volume feeds, no crash, no cycles either)
+//   ✓ Oscillator-specific default zones with optional custom OB/OS levels
+//   ✓ OB → OS and OS → OB cycle state machine (armed / success / failure / timeout)
+//   ✓ Time-consistent progress- and age-conditioned probability (10-point buckets)
+//   ✓ Regime-conditioned probability (Bull Trend / Bear Trend / Range)
+//   ✓ Recent / Medium / Long lookback comparison
+//   ✓ Descriptive Wilson interval and explicit minimum-sample status
+//   ✓ Time-to-target and price MFE/MAE for successful and failed cycles in ATR
+//   ✓ Cycle-stage readout driven by current progress, evidence by peak progress
+//   ✓ Walk-forward reliability table, paired base/regime Brier, and a naive
+//     direction-base-rate Brier Skill Score with a true walk-forward baseline
+//     (the naive benchmark is snapshotted at capture time, not re-derived
+//     from today's base rate) to judge the model against
+//   ✓ Explicit trade-evidence limits (fresh-entry and exit are not validated)
+//   ✓ Cycle zigzag: successful cycles draw a straight royal-blue line to the
+//     opposite rail; reverted failures draw a gray V-shape (origin → deepest
+//     point reached → back to origin) instead of a straight line, which
+//     would land on the exact same rail as its own start and camouflage
+//     against the OB/OS gridline; a live line to the current bar, target
+//     marker, and a dashed Expected Target Time projection (skipped once
+//     STALLED) track the active cycle
+//   ✓ Edge (Conditional minus the direction's plain base rate) drives the
+//     live label and a once-per-cycle Opportunity marker, both gated on the
+//     identical sample-size, zone, and Wilson-CI-width conditions — the
+//     label can state LOW DATA / STALLED / UNCERTAIN / LATE / OPPORTUNITY /
+//     WATCH / WAIT, never a state the marker itself would refuse to fire on
+//   ✓ Cycle Start/Success/Failure markers off by default, Opportunity on —
+//     outcome is already encoded in the completed line's color and style
+//   ✓ Recent mutable cycle lines stay prominent, older ones fade
+//   ✓ Visual / Compact / Research dashboard modes
+//   ✓ Confirmed-bar processing by default
+//
+// ============================================================================
+
+indicator(
+     "Oscillator Cycle Statistics [WavesUnchained]",
+     shorttitle = "OCS [WU]",
+     overlay = false,
+     max_bars_back = 5000,
+     max_lines_count = 500,
+     max_labels_count = 500,
+     max_polylines_count = 100
+ )
+// ============================================================================
+// INPUTS
+// ============================================================================
+// --------------------------------------------------------------------------
+// Oscillator
+// --------------------------------------------------------------------------
+string GROUP_OSC = "01 — Oscillator"
+string oscType = input.string(
+     "RSI",
+     "Oscillator",
+     options = [
+         "RSI",
+         "Stochastic RSI",
+         "Stochastic",
+         "Williams %R (normalized = Fast Stoch %K)",
+         "MFI (volume)",
+         "CCI",
+         "WaveTrend",
+         "DeMarker",
+         "RVI",
+         "EOM (volume)",
+         "Klinger (volume)"
+     ],
+     tooltip = "MFI, EOM, and Klinger need real volume data. CFD/index feeds (Capital.com, FOREX.com — NatGas, SPX500, etc.) may report no volume, which makes these oscillators sit neutral at 50 — no crash, but no cycles either.",
+     group = GROUP_OSC
+ )
+int oscLength = input.int(
+     14,
+     "Primary Length",
+     minval = 2,
+     maxval = 200,
+     group = GROUP_OSC
+ )
+int smoothK = input.int(
+     3,
+     "Stochastic / StochRSI K Smoothing",
+     minval = 1,
+     maxval = 20,
+     group = GROUP_OSC
+ )
+int wtChannelLength = input.int(
+     10,
+     "WaveTrend Channel Length",
+     minval = 2,
+     maxval = 100,
+     group = GROUP_OSC
+ )
+int wtAverageLength = input.int(
+     21,
+     "WaveTrend Average Length",
+     minval = 2,
+     maxval = 100,
+     group = GROUP_OSC
+ )
+float cciReference = input.float(
+     100.0,
+     "CCI value mapped to 70 / 30",
+     minval = 20.0,
+     step = 10.0,
+     group = GROUP_OSC
+ )
+float wtReference = input.float(
+     60.0,
+     "WaveTrend value mapped to 70 / 30",
+     minval = 10.0,
+     step = 5.0,
+     group = GROUP_OSC
+ )
+float rviReference = input.float(
+     0.3,
+     "RVI value mapped to 70 / 30",
+     minval = 0.05,
+     step = 0.05,
+     group = GROUP_OSC
+ )
+float eomReference = input.float(
+     1.0,
+     "EOM value mapped to 70 / 30",
+     minval = 0.05,
+     step = 0.05,
+     tooltip = "EOM's raw magnitude depends heavily on the instrument's typical volume and range — this default is a starting point, not a calibrated value. Requires real volume data.",
+     group = GROUP_OSC
+ )
+int klingerShortLength = input.int(
+     34,
+     "Klinger Fast EMA Length",
+     minval = 2,
+     maxval = 200,
+     group = GROUP_OSC
+ )
+int klingerLongLength = input.int(
+     55,
+     "Klinger Slow EMA Length",
+     minval = 2,
+     maxval = 300,
+     group = GROUP_OSC
+ )
+float klingerReference = input.float(
+     100000.0,
+     "Klinger value mapped to 70 / 30",
+     minval = 100.0,
+     step = 1000.0,
+     tooltip = "Klinger's raw magnitude depends heavily on the instrument's typical volume — this default is a starting point, not a calibrated value. Requires real volume data.",
+     group = GROUP_OSC
+ )
+// --------------------------------------------------------------------------
+// Zones
+// --------------------------------------------------------------------------
+string GROUP_ZONE = "02 — Cycle Zones"
+bool useOscillatorDefaultZones = input.bool(
+     true,
+     "Use Oscillator-Specific Default Zones",
+     tooltip = "Uses 80/20 for Stochastic RSI, Stochastic, normalized Williams %R, and MFI; 70/30 for RSI, DeMarker, and the reference-normalized oscillators. Disable to use the custom levels below.",
+     group = GROUP_ZONE
+ )
+float customOverbought = input.float(
+     70.0,
+     "Custom Overbought",
+     minval = 51.0,
+     maxval = 99.0,
+     step = 1.0,
+     active = not useOscillatorDefaultZones,
+     group = GROUP_ZONE
+ )
+float customOversold = input.float(
+     30.0,
+     "Custom Oversold",
+     minval = 1.0,
+     maxval = 49.0,
+     step = 1.0,
+     active = not useOscillatorDefaultZones,
+     group = GROUP_ZONE
+ )
+bool usesEightyTwentyZones =
+     oscType == "Stochastic RSI" or
+     oscType == "Stochastic" or
+     oscType == "Williams %R (normalized = Fast Stoch %K)" or
+     oscType == "MFI (volume)"
+float overbought =
+     useOscillatorDefaultZones ?
+     (usesEightyTwentyZones ? 80.0 : 70.0) :
+     customOverbought
+float oversold =
+     useOscillatorDefaultZones ?
+     (usesEightyTwentyZones ? 20.0 : 30.0) :
+     customOversold
+float extremeOverbought = math.max(90.0, overbought)
+float extremeOversold = math.min(10.0, oversold)
+int maxCycleBars = input.int(
+     150,
+     "Maximum Cycle Bars",
+     minval = 5,
+     maxval = 2000,
+     tooltip = "An unresolved cycle is classified as a timeout failure after this many bars.",
+     group = GROUP_ZONE
+ )
+bool confirmedOnly = input.bool(
+     true,
+     "Process Confirmed Bars Only",
+     tooltip = "Recommended. Prevents realtime intrabar oscillator movements from creating temporary statistical events.",
+     group = GROUP_ZONE
+ )
+// --------------------------------------------------------------------------
+// Statistics
+// --------------------------------------------------------------------------
+string GROUP_STATS = "03 — Statistics"
+int recentLookback = input.int(
+     300,
+     "Recent Lookback Bars",
+     minval = 50,
+     maxval = 10000,
+     group = GROUP_STATS
+ )
+int mediumLookback = input.int(
+     1000,
+     "Medium Lookback Bars",
+     minval = 100,
+     maxval = 20000,
+     group = GROUP_STATS
+ )
+int longLookback = input.int(
+     3000,
+     "Long Lookback Bars",
+     minval = 200,
+     maxval = 50000,
+     group = GROUP_STATS
+ )
+int maxStoredSamples = input.int(
+     1500,
+     "Maximum Stored Cycles",
+     minval = 100,
+     maxval = 10000,
+     group = GROUP_STATS
+ )
+int minConditionalSamples = input.int(
+     20,
+     "Minimum Conditional Samples",
+     minval = 5,
+     maxval = 500,
+     tooltip = "Shows when the Conditional sample count is below this minimum. Predictions below it are excluded from calibration.",
+     group = GROUP_STATS
+ )
+// --------------------------------------------------------------------------
+// Regime model
+// --------------------------------------------------------------------------
+string GROUP_REGIME = "04 — Market Regime"
+bool useRegimeStats = input.bool(
+     true,
+     "Calculate Regime-Conditioned Statistics",
+     group = GROUP_REGIME
+ )
+int regimeEmaLength = input.int(
+     200,
+     "Regime EMA Length",
+     minval = 20,
+     maxval = 500,
+     group = GROUP_REGIME
+ )
+int regimeSlopeBars = input.int(
+     10,
+     "EMA Slope Lookback",
+     minval = 1,
+     maxval = 100,
+     group = GROUP_REGIME
+ )
+int regimeAtrLength = input.int(
+     14,
+     "ATR Length",
+     minval = 2,
+     maxval = 100,
+     group = GROUP_REGIME
+ )
+float regimeSlopeThreshold = input.float(
+     0.20,
+     "Trend Threshold / ATR",
+     minval = 0.0,
+     maxval = 5.0,
+     step = 0.05,
+     tooltip = "EMA movement over the slope lookback divided by ATR.",
+     group = GROUP_REGIME
+ )
+// --------------------------------------------------------------------------
+// Display
+// --------------------------------------------------------------------------
+string GROUP_DISPLAY = "05 — Display"
+bool showDashboard = input.bool(
+     true,
+     "Show Dashboard",
+     group = GROUP_DISPLAY
+ )
+string dashboardMode = input.string(
+     "Visual",
+     "Dashboard Detail",
+     options = ["Visual", "Compact", "Research"],
+     tooltip = "Visual shows only a one-line status tag — the chart itself (cycle lines, target, live probability) carries the read. Compact adds a decision-relevant two-column table. Research shows the full statistics dashboard.",
+     group = GROUP_DISPLAY
+ )
+bool showCycleBackground = input.bool(
+     false,
+     "Shade Active Cycle",
+     group = GROUP_DISPLAY
+ )
+bool showCycleOrigins = input.bool(
+     false,
+     "Show Cycle Start Markers",
+     tooltip = "Where a cycle begins is already unambiguous from the zigzag line itself starting on the extreme rail. Off by default to keep the pane quiet.",
+     group = GROUP_DISPLAY
+ )
+bool showOutcomeMarkers = input.bool(
+     false,
+     "Show Success/Failure Markers",
+     tooltip = "Success/failure is already encoded in the completed cycle line's color and style (royal blue solid vs. light gray dashed). Off by default; the Opportunity marker is the one meant to draw the eye.",
+     group = GROUP_DISPLAY
+ )
+bool showOpportunityMarkers = input.bool(
+     true,
+     "Show Opportunity Markers",
+     group = GROUP_DISPLAY
+ )
+int maxDisplayedCycles = input.int(
+     100,
+     "Max Displayed Cycles",
+     minval = 10,
+     maxval = 100,
+     tooltip = "Caps the total number of completed cycle drawings, across straight lines and reverted-failure V-shapes. Oldest drawings are removed first.",
+     group = GROUP_DISPLAY
+ )
+// --------------------------------------------------------------------------
+// Calibration
+// --------------------------------------------------------------------------
+string GROUP_CALIB = "06 — Reliability"
+bool showCalibration = input.bool(
+     false,
+     "Show Reliability Table",
+     tooltip = (
+         "Walk-forward check within the Medium lookback: compares the " +
+         "Conditional forecast shown mid-cycle with the resolved outcome. " +
+         "Forecasts below the configured sample minimum are excluded."
+     ),
+     group = GROUP_CALIB
+ )
+float calibCheckpoint = input.float(
+     50.0,
+     "Forecast Checkpoint (Progress %)",
+     minval = 10.0,
+     maxval = 90.0,
+     step = 5.0,
+     tooltip = "Progress level at which the live Conditional forecast is snapshotted for later reliability assessment.",
+     group = GROUP_CALIB
+ )
+// --------------------------------------------------------------------------
+// Opportunity marker
+// --------------------------------------------------------------------------
+string GROUP_OPPORTUNITY = "07 — Opportunity Marker"
+float opportunityEdgeThreshold = input.float(
+     15.0,
+     "Edge Threshold (pp)",
+     minval = 5.0,
+     maxval = 50.0,
+     step = 1.0,
+     tooltip = "Edge = Conditional completion minus the direction's plain base rate. A cycle only qualifies as an Opportunity once Edge reaches this many percentage points above the base rate — unvalidated starting point, not an empirically proven cutoff. Half this value is shown as WATCH on the live label.",
+     group = GROUP_OPPORTUNITY
+ )
+int opportunityZoneMin = input.int(
+     30,
+     "Opportunity Zone Min Progress %",
+     minval = 0,
+     maxval = 90,
+     tooltip = "The Opportunity marker is only evaluated while progress is inside [Min, Max] — early enough that acting on it isn't chasing a move that's already mostly over.",
+     group = GROUP_OPPORTUNITY
+ )
+int opportunityZoneMax = input.int(
+     65,
+     "Opportunity Zone Max Progress %",
+     minval = 10,
+     maxval = 90,
+     group = GROUP_OPPORTUNITY
+ )
+float opportunityMaxCIWidth = input.float(
+     40.0,
+     "Max Wilson CI Width (pp)",
+     minval = 10.0,
+     maxval = 100.0,
+     step = 5.0,
+     tooltip = "Blocks the Opportunity marker when the Wilson interval is still too wide to trust, even if the point estimate looks good and the raw sample count passed the minimum.",
+     group = GROUP_OPPORTUNITY
+ )
+int prominentCycleCount = input.int(
+     25,
+     "Prominent Recent Cycles",
+     minval = 5,
+     maxval = 100,
+     tooltip = "The most recent N mutable straight cycle lines stay at full color; older straight lines fade. Reverted-failure V-shapes remain low-weight gray because Pine polylines have no property setters.",
+     group = GROUP_OPPORTUNITY
+ )
+if barstate.isfirst and oscType == "Klinger (volume)" and klingerShortLength >= klingerLongLength
+    runtime.error("Klinger Fast EMA Length must be smaller than Klinger Slow EMA Length.")
+if barstate.isfirst and opportunityZoneMin > opportunityZoneMax
+    runtime.error("Opportunity Zone Min Progress % must not exceed Opportunity Zone Max Progress %.")
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_clamp(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+f_pct(int success, int total) =>
+    total > 0 ? 100.0 * success / total : na
+f_fmtPct(float value) =>
+    na(value) ? "n/a" : str.tostring(value, "#.0") + "%"
+f_fmtAtr(float value) =>
+    na(value) ? "n/a" : str.tostring(value, "#.00") + " ATR"
+f_fmtBars(float value) =>
+    na(value) ? "n/a" : str.tostring(value, "#.0") + " bars"
+f_fmtBrier(float value) =>
+    na(value) ? "n/a" : str.tostring(value, "#.000")
+f_fmtSignedPp(float value) =>
+    string result = "n/a"
+    if not na(value)
+        string sign = value > 0 ? "+" : ""
+        result := sign + str.tostring(value, "#.0") + " pp"
+    result
+f_regimeName(int regime) =>
+    string result = "Range"
+    if regime == 1
+        result := "Bull Trend"
+    else if regime == -1
+        result := "Bear Trend"
+    result
+f_directionName(int direction) =>
+    string result = "Waiting"
+    if direction == -1
+        result := "OB → OS"
+    else if direction == 1
+        result := "OS → OB"
+    result
+f_stateName(int state) =>
+    switch state
+        0 => "Extreme OS"
+        1 => "OS"
+        2 => "Bear Neutral"
+        3 => "Neutral"
+        4 => "Bull Neutral"
+        5 => "OB"
+        => "Extreme OB"
+f_state(float value) =>
+    int result = 4
+    if value <= extremeOversold
+        result := 0
+    else if value <= oversold
+        result := 1
+    else if value >= extremeOverbought
+        result := 6
+    else if value >= overbought
+        result := 5
+    else if value < 45
+        result := 2
+    else if value <= 55
+        result := 3
+    result
+// Median of a float array.
+// Array is copied because sorting modifies its contents.
+f_median(array<float> values) =>
+    float result = na
+    int n = array.size(values)
+    if n > 0
+        array<float> copy = array.copy(values)
+        array.sort(copy, order.ascending)
+        int middle = int(math.floor(n * 0.5))
+        if n % 2 == 1
+            result := array.get(copy, middle)
+        else
+            result := (
+                 array.get(copy, middle - 1) +
+                 array.get(copy, middle)
+             ) * 0.5
+    result
+// Wilson score interval.
+// More informative than displaying the raw percentage alone when sample size
+// is small.
+f_wilson(int success, int total) =>
+    float lower = na
+    float upper = na
+    if total > 0
+        float z = 1.96
+        float n = total
+        float p = success / n
+        float z2 = z * z
+        float center =
+             (p + z2 / (2.0 * n)) /
+             (1.0 + z2 / n)
+        float margin =
+             z /
+             (1.0 + z2 / n) *
+             math.sqrt(
+                 p * (1.0 - p) / n +
+                 z2 / (4.0 * n * n)
+             )
+        lower := 100.0 * math.max(0.0, center - margin)
+        upper := 100.0 * math.min(1.0, center + margin)
+    [lower, upper]
+// ============================================================================
+// OSCILLATORS
+// ============================================================================
+// RSI
+float rsi = ta.rsi(close, oscLength)
+// Stochastic RSI — ta.stoch(source, source, source, len) collapses to the
+// standard %K formula against the source series itself.
+float stochRsi = ta.sma(ta.stoch(rsi, rsi, rsi, oscLength), smoothK)
+// Classic stochastic %K, native 0..100 scale. TradingView's standard
+// Stochastic applies an SMA to raw %K; smoothK=1 selects Fast %K.
+float stochasticRaw = ta.stoch(close, high, low, oscLength)
+float stochastic = ta.sma(stochasticRaw, smoothK)
+// Williams %R normalized 0..100 (0 original Williams = 100 normalized) is
+// mathematically identical to raw Fast Stochastic %K — same source range.
+float williams = stochasticRaw
+// Money Flow Index — volume-dependent. Keep a zero-volume window neutral
+// instead of allowing an undefined 0/0 money-flow ratio to create an extreme.
+float mfiRaw = ta.mfi(hlc3, oscLength)
+float mfiVolumeAverage = ta.sma(nz(volume), oscLength)
+float mfi = mfiVolumeAverage > 0 and not na(mfiRaw) ? mfiRaw : 50.0
+// CCI normalization.
+// CCI +reference maps approximately to 70.
+// CCI -reference maps approximately to 30.
+float cci = ta.cci(hlc3, oscLength)
+float cciNormalized =
+     f_clamp(
+         50.0 + cci * (20.0 / cciReference),
+         0.0,
+         100.0
+     )
+// WaveTrend
+float wtAp = hlc3
+float wtEsa = ta.ema(wtAp, wtChannelLength)
+float wtDeviation = ta.ema(math.abs(wtAp - wtEsa), wtChannelLength)
+float wtCi = 0.0
+if wtDeviation != 0
+    wtCi := (wtAp - wtEsa) / (0.015 * wtDeviation)
+float wt1 = ta.ema(wtCi, wtAverageLength)
+float wtNormalized =
+     f_clamp(
+         50.0 + wt1 * (20.0 / wtReference),
+         0.0,
+         100.0
+     )
+// DeMarker — naturally bounded 0..100 (well, 0..1 * 100), no normalization
+// reference needed. High > high[1] energy vs. low < low[1] energy, smoothed.
+float deMax = high > high[1] ? high - high[1] : 0.0
+float deMin = low < low[1] ? low[1] - low : 0.0
+float deMaxAvg = ta.sma(deMax, oscLength)
+float deMinAvg = ta.sma(deMin, oscLength)
+float deMarkerDenom = deMaxAvg + deMinAvg
+float deMarker = deMarkerDenom > 0 ? 100.0 * deMaxAvg / deMarkerDenom : 50.0
+// RVI (Relative Vigor Index) — classic nested 4-bar weighted (1,2,2,1)/6
+// numerator/denominator, each further smoothed by oscLength. Naturally
+// bounded to roughly [-1, 1] (|close-open| <= high-low), so it gets the
+// same fixed-reference normalization as CCI/WaveTrend above, not the
+// division-free 0..100 construction DeMarker gets.
+float rviNum4 =
+     (close - open) + 2.0 * (close[1] - open[1]) +
+     2.0 * (close[2] - open[2]) + (close[3] - open[3])
+float rviDen4 =
+     (high - low) + 2.0 * (high[1] - low[1]) +
+     2.0 * (high[2] - low[2]) + (high[3] - low[3])
+float rviNumSmooth = ta.sma(rviNum4, oscLength)
+float rviDenSmooth = ta.sma(rviDen4, oscLength)
+float rviRaw = rviDenSmooth != 0 ? rviNumSmooth / rviDenSmooth : 0.0
+float rviNormalized =
+     f_clamp(
+         50.0 + rviRaw * (20.0 / rviReference),
+         0.0,
+         100.0
+     )
+// EOM (Ease of Movement) — volume-dependent. nz(volume) guards against na;
+// the box-ratio guard against high==low keeps it from ever dividing by
+// zero. On a zero-volume feed this collapses to a constant 0 -> neutral 50,
+// not a crash, but also never usable for cycle detection on that feed.
+float eomDistance =
+     ((high + low) / 2.0) - ((high[1] + low[1]) / 2.0)
+float eomRange = high - low
+float eomBoxRatio =
+     eomRange != 0 ? (nz(volume) / 100000000.0) / eomRange : 0.0
+float eomRaw = eomBoxRatio != 0 ? eomDistance / eomBoxRatio : 0.0
+float eom = ta.sma(eomRaw, oscLength)
+float eomNormalized =
+     f_clamp(
+         50.0 + eom * (20.0 / eomReference),
+         0.0,
+         100.0
+     )
+// Klinger Volume Oscillator — volume force accumulated while the H+L+C
+// trend direction persists, reset on trend flip, then fast/slow EMA
+// spread. Same zero-volume caveat as EOM. Uses its own Fast/Slow EMA
+// lengths (not the shared Primary Length) since a meaningful spread needs
+// two genuinely different periods, unlike every other oscillator here.
+var float klingerCm = 0.0
+var int klingerTrend = -1
+float klingerHlc3Sum = high + low + close
+float klingerPrevHlc3Sum = nz(klingerHlc3Sum[1], klingerHlc3Sum)
+int klingerNewTrend = klingerHlc3Sum > klingerPrevHlc3Sum ? 1 : -1
+float klingerDm = high - low
+if klingerNewTrend == klingerTrend
+    klingerCm := klingerCm + klingerDm
+else
+    klingerCm := nz(klingerDm[1], klingerDm) + klingerDm
+    klingerTrend := klingerNewTrend
+float klingerVf =
+     klingerCm != 0 ?
+     nz(volume) * 2.0 * (klingerDm / klingerCm - 1.0) * klingerTrend * 100.0 :
+     0.0
+float klingerFast = ta.ema(klingerVf, klingerShortLength)
+float klingerSlow = ta.ema(klingerVf, klingerLongLength)
+float klingerRaw = klingerFast - klingerSlow
+float klingerNormalized =
+     f_clamp(
+         50.0 + klingerRaw * (20.0 / klingerReference),
+         0.0,
+         100.0
+     )
+float osc = switch oscType
+    "RSI"            => rsi
+    "Stochastic RSI" => stochRsi
+    "Stochastic"     => stochastic
+    "Williams %R (normalized = Fast Stoch %K)" => williams
+    "MFI (volume)"   => mfi
+    "CCI"            => cciNormalized
+    "DeMarker"       => deMarker
+    "RVI"            => rviNormalized
+    "EOM (volume)"   => eomNormalized
+    "Klinger (volume)" => klingerNormalized
+    => wtNormalized
+osc := f_clamp(osc, 0.0, 100.0)
+// ============================================================================
+// MARKET REGIME
+// ============================================================================
+float regimeEma = ta.ema(close, regimeEmaLength)
+float regimeAtr = ta.atr(regimeAtrLength)
+float emaSlopeAtr = 0.0
+if not na(regimeEma[regimeSlopeBars]) and regimeAtr > 0
+    emaSlopeAtr := (regimeEma - regimeEma[regimeSlopeBars]) / regimeAtr
+int currentRegime = 0
+if close > regimeEma and emaSlopeAtr > regimeSlopeThreshold
+    currentRegime := 1
+else if close < regimeEma and emaSlopeAtr < -regimeSlopeThreshold
+    currentRegime := -1
+// ============================================================================
+// SAMPLE STORAGE
+// ============================================================================
+//
+// Direction:
+//   -1 = OB -> OS
+//   +1 = OS -> OB
+//
+// Result:
+//   1 = success
+//   0 = failure
+//
+// Failure reason:
+//   0 = success
+//   1 = source extreme revisited
+//   2 = timeout
+//
+// Progress timing is stored in ten 10-percentage-point buckets. This makes
+// age-conditioned comparisons time-consistent: a historical cycle must have
+// reached the relevant progress bucket at the queried age.
+// ============================================================================
+const int PROGRESS_BUCKET_COUNT = 10
+// Descriptive cycle stages only. These are not optimized trading thresholds.
+const float STAGE_EARLY_END = 0.30
+const float STAGE_DEVELOPING_END = 0.60
+const float STAGE_MATURE_END = 0.80
+const float COMPLETION_MAJORITY = 50.0
+var array<int> sampleDirection = array.new<int>()
+var array<int> sampleSuccess = array.new<int>()
+var array<int> sampleReason = array.new<int>()
+var array<int> sampleRegime = array.new<int>()
+var array<int> sampleDuration = array.new<int>()
+var array<int> sampleEndBar = array.new<int>()
+var array<float> sampleMaxProgress = array.new<float>()
+var array<float> sampleMfeAtr = array.new<float>()
+var array<float> sampleMaeAtr = array.new<float>()
+var array<int> sampleFirstReachAge = array.new<int>()
+// Push a completed sample into all parallel arrays.
+f_storeSample(
+     int direction,
+     int success,
+     int reason,
+     int startRegime,
+     int duration,
+     int endBar,
+     float maxProgress,
+     float mfeAtr,
+     float maeAtr,
+     array<int> firstReachAges
+ ) =>
+    if array.size(sampleDirection) >= maxStoredSamples
+        array.shift(sampleDirection)
+        array.shift(sampleSuccess)
+        array.shift(sampleReason)
+        array.shift(sampleRegime)
+        array.shift(sampleDuration)
+        array.shift(sampleEndBar)
+        array.shift(sampleMaxProgress)
+        array.shift(sampleMfeAtr)
+        array.shift(sampleMaeAtr)
+        for bucket = 0 to PROGRESS_BUCKET_COUNT - 1
+            array.shift(sampleFirstReachAge)
+    array.push(sampleDirection, direction)
+    array.push(sampleSuccess, success)
+    array.push(sampleReason, reason)
+    array.push(sampleRegime, startRegime)
+    array.push(sampleDuration, duration)
+    array.push(sampleEndBar, endBar)
+    array.push(sampleMaxProgress, maxProgress)
+    array.push(sampleMfeAtr, mfeAtr)
+    array.push(sampleMaeAtr, maeAtr)
+    for bucket = 0 to PROGRESS_BUCKET_COUNT - 1
+        array.push(
+             sampleFirstReachAge,
+             array.get(firstReachAges, bucket)
+         )
+// Walk-forward calibration record: a live Conditional prediction snapshotted
+// mid-cycle (at calibCheckpoint progress), paired with the cycle's actual
+// eventual outcome. Independent of the sample* arrays above.
+var array<float> calibPredicted = array.new<float>()
+var array<float> calibRegimePredicted = array.new<float>()
+var array<float> calibNaivePredicted = array.new<float>()
+var array<int> calibOutcome = array.new<int>()
+var array<int> calibEndBar = array.new<int>()
+var array<int> calibDirection = array.new<int>()
+f_storeCalibration(
+     float predicted,
+     float regimePredicted,
+     float naivePredicted,
+     int outcome,
+     int n,
+     int regimeN,
+     int endBar,
+     int direction
+ ) =>
+    // Forecasts based on fewer than the configured minimum samples are not
+    // informative enough to include in the reliability assessment.
+    if n >= minConditionalSamples and not na(predicted)
+        array.push(calibPredicted, predicted)
+        array.push(
+             calibRegimePredicted,
+             regimeN >= minConditionalSamples ? regimePredicted : na
+         )
+        // Naive predicted is the direction base rate AS IT WAS AT CAPTURE
+        // TIME (see capturedBaseRate) — not re-derived from today's base
+        // rate later, which would leak hindsight into the naive benchmark.
+        array.push(calibNaivePredicted, naivePredicted)
+        array.push(calibOutcome, outcome)
+        array.push(calibEndBar, endBar)
+        array.push(calibDirection, direction)
+        if array.size(calibPredicted) > maxStoredSamples
+            array.shift(calibPredicted)
+            array.shift(calibRegimePredicted)
+            array.shift(calibNaivePredicted)
+            array.shift(calibOutcome)
+            array.shift(calibEndBar)
+            array.shift(calibDirection)
+// ============================================================================
+// STATISTICS FUNCTION
+// ============================================================================
+//
+// Returns:
+//   success count
+//   total count
+//   completion probability
+//
+//   conditional success count
+//   conditional total count
+//   conditional probability
+//
+//   median successful duration
+//   median MFE
+//   median MAE (successful cycles)
+//   median MFE (failed cycles)
+//   median MAE (failed cycles — adverse excursion before the cycle failed)
+//
+// Conditional criterion:
+//   historical sample must have reached the current cycle's 10-point progress
+//   bucket by ageThreshold, AND its total duration must exceed ageThreshold.
+//   Pass ageThreshold=-1 to compare eventual progress without age filtering.
+//
+// This answers:
+//
+//   "Among historical cycles which had reached this progress bucket by the
+//    current age and were still active, how often did they complete?"
+// ============================================================================
+f_statistics(
+     int direction,
+     int lookbackBars,
+     bool filterRegime,
+     int wantedRegime,
+     float progressThreshold,
+     int ageThreshold,
+     bool collectDistributions
+ ) =>
+    int successCount = 0
+    int totalCount = 0
+    int conditionedSuccess = 0
+    int conditionedTotal = 0
+    array<float> successfulDurations = array.new<float>()
+    array<float> successfulMfe = array.new<float>()
+    array<float> successfulMae = array.new<float>()
+    array<float> failedMfe = array.new<float>()
+    array<float> failedMae = array.new<float>()
+    int progressBucket = int(math.floor(
+         f_clamp(progressThreshold, 0.0, 1.0) *
+         PROGRESS_BUCKET_COUNT + 0.000001
+     ))
+    float bucketProgress =
+         progressBucket * 1.0 / PROGRESS_BUCKET_COUNT
+    int n = array.size(sampleDirection)
+    if n > 0
+        for i = 0 to n - 1
+            int sampleDir = array.get(sampleDirection, i)
+            int result = array.get(sampleSuccess, i)
+            int startReg = array.get(sampleRegime, i)
+            int endingBar = array.get(sampleEndBar, i)
+            int duration = array.get(sampleDuration, i)
+            float reachedProgress = array.get(sampleMaxProgress, i)
+            bool inLookback = bar_index - endingBar <= lookbackBars
+            bool sameDirection = sampleDir == direction
+            bool regimeMatches = not filterRegime or startReg == wantedRegime
+            if inLookback and sameDirection and regimeMatches
+                totalCount += 1
+                successCount += result
+                bool progressComparable = reachedProgress >= bucketProgress
+                bool ageComparable =
+                     ageThreshold < 0 or duration > ageThreshold
+                bool reachedByAge = true
+                if ageThreshold >= 0 and progressBucket > 0
+                    int reachIndex =
+                         i * PROGRESS_BUCKET_COUNT + progressBucket - 1
+                    int firstReachAge =
+                         array.get(sampleFirstReachAge, reachIndex)
+                    reachedByAge :=
+                         firstReachAge >= 0 and firstReachAge <= ageThreshold
+                if progressComparable and ageComparable and reachedByAge
+                    conditionedTotal += 1
+                    conditionedSuccess += result
+                    if collectDistributions and result == 1
+                        array.push(successfulDurations, duration)
+                        array.push(successfulMfe, array.get(sampleMfeAtr, i))
+                        array.push(successfulMae, array.get(sampleMaeAtr, i))
+                    else if collectDistributions
+                        array.push(failedMfe, array.get(sampleMfeAtr, i))
+                        array.push(failedMae, array.get(sampleMaeAtr, i))
+    float probability = f_pct(successCount, totalCount)
+    float conditionalProbability = f_pct(conditionedSuccess, conditionedTotal)
+    float medianDuration =
+         collectDistributions ? f_median(successfulDurations) : na
+    float medianMfe =
+         collectDistributions ? f_median(successfulMfe) : na
+    float medianMae =
+         collectDistributions ? f_median(successfulMae) : na
+    float medianFailedMfe =
+         collectDistributions ? f_median(failedMfe) : na
+    float medianFailedMae =
+         collectDistributions ? f_median(failedMae) : na
+    [successCount, totalCount, probability, conditionedSuccess, conditionedTotal, conditionalProbability, medianDuration, medianMfe, medianMae, medianFailedMfe, medianFailedMae]
+// Directional base rate: the plain, unconditioned completion rate for each
+// direction over lookbackBars. Moved up here (ahead of the cycle state
+// machine) because the Opportunity check below needs it inline, per-cycle,
+// not only inside the barstate.islast dashboard block.
+f_directionBaseRates(int lookbackBars) =>
+    int downSuccess = 0
+    int downTotal = 0
+    int upSuccess = 0
+    int upTotal = 0
+    int n = array.size(sampleDirection)
+    if n > 0
+        for i = 0 to n - 1
+            int endingBar = array.get(sampleEndBar, i)
+            if bar_index - endingBar <= lookbackBars
+                int direction = array.get(sampleDirection, i)
+                int result = array.get(sampleSuccess, i)
+                if direction == -1
+                    downSuccess += result
+                    downTotal += 1
+                else
+                    upSuccess += result
+                    upTotal += 1
+    [f_pct(downSuccess, downTotal), downTotal, f_pct(upSuccess, upTotal), upTotal]
+// ============================================================================
+// CYCLE STATE MACHINE
+// ============================================================================
+var int activeDirection = 0
+var int cycleStartBar = na
+var int cycleStartRegime = 0
+var float cycleStartPrice = na
+var float cycleStartAtr = na
+var bool cycleArmed = false
+var float cycleMaxProgress = 0.0
+var int cycleMaxProgressBar = na
+var float cycleMfeAtr = 0.0
+var float cycleMaeAtr = 0.0
+var array<int> cycleFirstReachAge =
+     array.new<int>(PROGRESS_BUCKET_COUNT, -1)
+var bool predictionCaptured = false
+var float capturedPrediction = na
+var int capturedSampleN = 0
+var float capturedRegimePrediction = na
+var int capturedRegimeSampleN = 0
+var float capturedBaseRate = na
+// --------------------------------------------------------------------------
+// Cycle zigzag drawing state — one unified rolling window across straight
+// lines and reverted-failure polylines, capped at maxDisplayedCycles.
+// activeCycleLine/activeTargetLabel track the one in-flight cycle and are
+// re-created on every new cycle.
+// --------------------------------------------------------------------------
+var array<line> completedCycleLineIds = array.new<line>()
+var array<polyline> completedCyclePolylineIds = array.new<polyline>()
+var array<bool> completedCycleSuccess = array.new<bool>()
+// Reverted failures (origin revisited) get a 3-point V-shape instead of a
+// straight line: origin -> deepest point actually reached -> back to
+// origin. A straight line would have identical start/end Y (both pinned to
+// the origin rail) and render perfectly horizontal, camouflaged against the
+// OB/OS gridline. The V-shape is also strictly more informative — it shows
+// how far the attempt got, not just that it failed. Timeouts keep the
+// simple line (their endpoint is wherever the oscillator actually was, not
+// forced onto the origin rail, so they were never camouflaged). Polylines
+// have no property setters, so they remain low-weight gray instead of fading.
+var line activeCycleLine = na
+var label activeTargetLabel = na
+var label activeCycleLabel = na
+var line activeProjectionLine = na
+var bool opportunityMarked = false
+// Outcome colors deliberately avoid red/green — those read as bearish/
+// bullish price direction, which a cycle's own success/failure is not.
+// Royal blue vs. light gray keeps the completion-rate pattern visible in
+// the chart geometry without implying a directional price call. Line width
+// carries a second, continuous signal: how far the cycle actually got
+// (cycleMaxProgress) — successes are always full-width since they by
+// definition reached 100%, failures scale down toward a thin line the
+// earlier they reverted. Lines older than the Prominent Recent Cycles
+// window fade to the *Faded variants so the current cycle isn't visually
+// competing with a wall of history.
+color cycleLineSuccessColor = color.new(#4169e1, 20)
+color cycleLineFailedColor = color.new(color.gray, 55)
+color cycleLineSuccessFadedColor = color.new(#4169e1, 80)
+color cycleLineFailedFadedColor = color.new(color.gray, 90)
+color cycleLineActiveColor = color.new(#2962ff, 15)
+color cycleTargetColor = color.new(color.gray, 25)
+f_registerCompletedCycle(line completedLine, polyline completedPolyline, bool succeeded) =>
+    array.push(completedCycleLineIds, completedLine)
+    array.push(completedCyclePolylineIds, completedPolyline)
+    array.push(completedCycleSuccess, succeeded)
+    int completedCount = array.size(completedCycleSuccess)
+    int prominentLimit = math.min(prominentCycleCount, maxDisplayedCycles)
+    if completedCount > prominentLimit
+        int fadeIndex = completedCount - prominentLimit - 1
+        line fadeLine = array.get(completedCycleLineIds, fadeIndex)
+        if not na(fadeLine)
+            line.set_color(
+                 fadeLine,
+                 array.get(completedCycleSuccess, fadeIndex) ?
+                 cycleLineSuccessFadedColor : cycleLineFailedFadedColor
+             )
+    if completedCount > maxDisplayedCycles
+        line oldestLine = array.shift(completedCycleLineIds)
+        polyline oldestPolyline = array.shift(completedCyclePolylineIds)
+        array.shift(completedCycleSuccess)
+        if not na(oldestLine)
+            line.delete(oldestLine)
+        if not na(oldestPolyline)
+            polyline.delete(oldestPolyline)
+bool successEvent = false
+bool failureEvent = false
+bool timeoutEvent = false
+bool newCycleEvent = false
+bool opportunityEvent = false
+// Exact bar and normalized level where a failed cycle's excursion peaked.
+f_cycleFailurePeak(float originLevel, float targetLevel) =>
+    int peakBar = na(cycleMaxProgressBar) ? cycleStartBar : cycleMaxProgressBar
+    float peakLevel = originLevel + (targetLevel - originLevel) * cycleMaxProgress
+    [peakBar, peakLevel]
+bool processBar =
+     not confirmedOnly or barstate.isconfirmed
+bool enteredOB =
+     osc >= overbought and
+     nz(osc[1], overbought - 1) < overbought
+bool enteredOS =
+     osc <= oversold and
+     nz(osc[1], oversold + 1) > oversold
+// Current normalized target progress.
+// 0 = source boundary
+// 1 = opposite boundary
+float currentProgress = 0.0
+if activeDirection == -1
+    currentProgress :=
+         f_clamp(
+             (overbought - osc) /
+             (overbought - oversold),
+             0.0,
+             1.0
+         )
+else if activeDirection == 1
+    currentProgress :=
+         f_clamp(
+             (osc - oversold) /
+             (overbought - oversold),
+             0.0,
+             1.0
+         )
+// --------------------------------------------------------------------------
+// Price excursion tracking
+// --------------------------------------------------------------------------
+if activeDirection != 0 and not na(cycleStartAtr) and cycleStartAtr > 0
+    if activeDirection == -1
+        // Price excursion aligned with a downward oscillator cycle.
+        float favorable =
+             math.max(
+                 0.0,
+                 (cycleStartPrice - low) / cycleStartAtr
+             )
+        float adverse =
+             math.max(
+                 0.0,
+                 (high - cycleStartPrice) / cycleStartAtr
+             )
+        cycleMfeAtr := math.max(cycleMfeAtr, favorable)
+        cycleMaeAtr := math.max(cycleMaeAtr, adverse)
+    else
+        // Price excursion aligned with an upward oscillator cycle.
+        float favorable =
+             math.max(
+                 0.0,
+                 (high - cycleStartPrice) / cycleStartAtr
+             )
+        float adverse =
+             math.max(
+                 0.0,
+                 (cycleStartPrice - low) / cycleStartAtr
+             )
+        cycleMfeAtr := math.max(cycleMfeAtr, favorable)
+        cycleMaeAtr := math.max(cycleMaeAtr, adverse)
+if activeDirection != 0
+    if currentProgress > cycleMaxProgress
+        cycleMaxProgress := currentProgress
+        cycleMaxProgressBar := bar_index
+    int progressAge = bar_index - cycleStartBar
+    for bucket = 0 to PROGRESS_BUCKET_COUNT - 1
+        float bucketThreshold =
+             (bucket + 1.0) / PROGRESS_BUCKET_COUNT
+        if currentProgress >= bucketThreshold and array.get(cycleFirstReachAge, bucket) < 0
+            array.set(cycleFirstReachAge, bucket, progressAge)
+            // Opportunity check — evaluated only at bucket-crossing moments
+            // (not every bar), keeping the cost to a handful of extra
+            // f_statistics calls per cycle, same order as the calibration
+            // checkpoint below. Requires: Edge (Conditional minus the plain
+            // direction base rate) above threshold, a sample big enough to
+            // trust, a Wilson interval that isn't still too wide, and
+            // progress still inside the opportunity zone — a strong read
+            // that's already mostly done isn't actionable anymore.
+            if not opportunityMarked and bucketThreshold >= opportunityZoneMin / 100.0 and bucketThreshold <= opportunityZoneMax / 100.0
+                [_, _, _, oppCondSuccess, oppCondTotal, oppCondProb, _, _, _, _, _] = f_statistics(
+                     activeDirection,
+                     mediumLookback,
+                     false,
+                     0,
+                     bucketThreshold,
+                     progressAge,
+                     false
+                 )
+                [oppDownBase, _, oppUpBase, _] = f_directionBaseRates(mediumLookback)
+                float oppBaseRate = activeDirection == -1 ? oppDownBase : oppUpBase
+                float oppEdge =
+                     not na(oppCondProb) and not na(oppBaseRate) ?
+                     oppCondProb - oppBaseRate : na
+                [oppCiLower, oppCiUpper] = f_wilson(oppCondSuccess, oppCondTotal)
+                float oppCiWidth = not na(oppCiLower) ? oppCiUpper - oppCiLower : na
+                if oppCondTotal >= minConditionalSamples and not na(oppEdge) and oppEdge >= opportunityEdgeThreshold and not na(oppCiWidth) and oppCiWidth <= opportunityMaxCIWidth
+                    opportunityEvent := true
+                    opportunityMarked := true
+    // Extend the live cycle line to the current bar/oscillator reading every
+    // bar the cycle stays active; state-transition blocks below snap the
+    // final segment onto the extreme rail when a cycle actually resolves.
+    if not na(activeCycleLine)
+        line.set_xy2(activeCycleLine, bar_index, osc)
+    if not na(activeTargetLabel)
+        label.set_x(activeTargetLabel, bar_index)
+// --------------------------------------------------------------------------
+// Calibration checkpoint capture
+// --------------------------------------------------------------------------
+// The first time this cycle crosses calibCheckpoint progress, snapshot what
+// the live Conditional prediction says at that moment (using only samples
+// completed before now — no lookahead). Compared against the actual outcome
+// once this cycle resolves, in the Reliability table below.
+int activeCycleAge =
+     activeDirection != 0 ? bar_index - cycleStartBar : 0
+bool targetReachedNow =
+     (activeDirection == -1 and osc <= oversold) or
+     (activeDirection == 1 and osc >= overbought)
+bool timeoutNow =
+     activeDirection != 0 and activeCycleAge >= maxCycleBars
+if processBar and activeDirection != 0 and not targetReachedNow and not timeoutNow and not predictionCaptured and currentProgress >= calibCheckpoint / 100.0
+    [_, _, _, _, capCondTotal, capCondProbability, _, _, _, _, _] = f_statistics(
+         activeDirection,
+         mediumLookback,
+         false,
+         0,
+         calibCheckpoint / 100.0,
+         activeCycleAge,
+         false
+     )
+    [_, _, _, _, capRegimeTotal, capRegimeProbability, _, _, _, _, _] = f_statistics(
+         activeDirection,
+         mediumLookback,
+         true,
+         cycleStartRegime,
+         calibCheckpoint / 100.0,
+         activeCycleAge,
+         false
+     )
+    // The naive-benchmark base rate must be captured NOW too, not re-derived
+    // from today's base rate when the Reliability table is built later —
+    // otherwise a forecast made 700 bars ago gets judged against a naive
+    // competitor that only exists with hindsight. Same walk-forward
+    // discipline as capturedPrediction itself.
+    [capDownBase, _, capUpBase, _] = f_directionBaseRates(mediumLookback)
+    capturedPrediction := capCondProbability
+    capturedSampleN := capCondTotal
+    capturedRegimePrediction :=
+         useRegimeStats ? capRegimeProbability : na
+    capturedRegimeSampleN := useRegimeStats ? capRegimeTotal : 0
+    capturedBaseRate := activeDirection == -1 ? capDownBase : capUpBase
+    predictionCaptured := true
+// --------------------------------------------------------------------------
+// State transitions
+// --------------------------------------------------------------------------
+if processBar
+    // ----------------------------------------------------------------------
+    // No active cycle
+    // ----------------------------------------------------------------------
+    if activeDirection == 0
+        if enteredOB
+            activeDirection := -1
+            cycleStartBar := bar_index
+            cycleStartPrice := close
+            cycleStartAtr := regimeAtr
+            cycleStartRegime := currentRegime
+            cycleArmed := false
+            cycleMaxProgress := 0.0
+            cycleMaxProgressBar := na
+            cycleMfeAtr := 0.0
+            cycleMaeAtr := 0.0
+            array.fill(cycleFirstReachAge, -1)
+            predictionCaptured := false
+            opportunityMarked := false
+            capturedPrediction := na
+            capturedSampleN := 0
+            capturedRegimePrediction := na
+            capturedRegimeSampleN := 0
+            capturedBaseRate := na
+            if not na(activeCycleLine)
+                line.delete(activeCycleLine)
+            activeCycleLine := line.new(bar_index, overbought, bar_index, overbought, color = cycleLineActiveColor, width = 2, style = line.style_solid)
+            if not na(activeTargetLabel)
+                label.delete(activeTargetLabel)
+            activeTargetLabel := label.new(bar_index, oversold, "TARGET", style = label.style_none, textcolor = cycleTargetColor, size = size.tiny)
+            newCycleEvent := true
+        else if enteredOS
+            activeDirection := 1
+            cycleStartBar := bar_index
+            cycleStartPrice := close
+            cycleStartAtr := regimeAtr
+            cycleStartRegime := currentRegime
+            cycleArmed := false
+            cycleMaxProgress := 0.0
+            cycleMaxProgressBar := na
+            cycleMfeAtr := 0.0
+            cycleMaeAtr := 0.0
+            array.fill(cycleFirstReachAge, -1)
+            predictionCaptured := false
+            opportunityMarked := false
+            capturedPrediction := na
+            capturedSampleN := 0
+            capturedRegimePrediction := na
+            capturedRegimeSampleN := 0
+            capturedBaseRate := na
+            if not na(activeCycleLine)
+                line.delete(activeCycleLine)
+            activeCycleLine := line.new(bar_index, oversold, bar_index, oversold, color = cycleLineActiveColor, width = 2, style = line.style_solid)
+            if not na(activeTargetLabel)
+                label.delete(activeTargetLabel)
+            activeTargetLabel := label.new(bar_index, overbought, "TARGET", style = label.style_none, textcolor = cycleTargetColor, size = size.tiny)
+            newCycleEvent := true
+    // ----------------------------------------------------------------------
+    // OB -> OS
+    // ----------------------------------------------------------------------
+    else if activeDirection == -1
+        int age = bar_index - cycleStartBar
+        if not cycleArmed and osc < overbought
+            cycleArmed := true
+        // SUCCESS: opposite extreme reached.
+        if osc <= oversold
+            f_storeSample(
+                 -1,
+                 1,
+                 0,
+                 cycleStartRegime,
+                 age,
+                 bar_index,
+                 cycleMaxProgress,
+                 cycleMfeAtr,
+                 cycleMaeAtr,
+                 cycleFirstReachAge
+             )
+            if predictionCaptured and not na(capturedPrediction)
+                f_storeCalibration(
+                     capturedPrediction,
+                     capturedRegimePrediction,
+                     capturedBaseRate,
+                     1,
+                     capturedSampleN,
+                     capturedRegimeSampleN,
+                     bar_index,
+                     activeDirection
+                 )
+            successEvent := true
+            if not na(activeCycleLine)
+                line.set_xy2(activeCycleLine, bar_index, oversold)
+                line.set_color(activeCycleLine, cycleLineSuccessColor)
+                line.set_width(activeCycleLine, int(math.max(1.0, math.round(cycleMaxProgress * 4))))
+                f_registerCompletedCycle(activeCycleLine, na, true)
+            if not na(activeTargetLabel)
+                label.delete(activeTargetLabel)
+            // The target OS is simultaneously the start of the
+            // opposite OS -> OB cycle.
+            activeDirection := 1
+            cycleStartBar := bar_index
+            cycleStartPrice := close
+            cycleStartAtr := regimeAtr
+            cycleStartRegime := currentRegime
+            cycleArmed := false
+            cycleMaxProgress := 0.0
+            cycleMaxProgressBar := na
+            cycleMfeAtr := 0.0
+            cycleMaeAtr := 0.0
+            array.fill(cycleFirstReachAge, -1)
+            predictionCaptured := false
+            opportunityMarked := false
+            capturedPrediction := na
+            capturedSampleN := 0
+            capturedRegimePrediction := na
+            capturedRegimeSampleN := 0
+            capturedBaseRate := na
+            activeCycleLine := line.new(bar_index, oversold, bar_index, oversold, color = cycleLineActiveColor, width = 2, style = line.style_solid)
+            activeTargetLabel := label.new(bar_index, overbought, "TARGET", style = label.style_none, textcolor = cycleTargetColor, size = size.tiny)
+            newCycleEvent := true
+        // FAILURE: after leaving OB, oscillator returns to OB
+        // before reaching OS.
+        else if cycleArmed and osc >= overbought
+            f_storeSample(
+                 -1,
+                 0,
+                 1,
+                 cycleStartRegime,
+                 age,
+                 bar_index,
+                 cycleMaxProgress,
+                 cycleMfeAtr,
+                 cycleMaeAtr,
+                 cycleFirstReachAge
+             )
+            if predictionCaptured and not na(capturedPrediction)
+                f_storeCalibration(
+                     capturedPrediction,
+                     capturedRegimePrediction,
+                     capturedBaseRate,
+                     0,
+                     capturedSampleN,
+                     capturedRegimeSampleN,
+                     bar_index,
+                     activeDirection
+                 )
+            failureEvent := true
+            if not na(activeCycleLine)
+                line.delete(activeCycleLine)
+                [failPeakBar1, failPeakLevel1] = f_cycleFailurePeak(overbought, oversold)
+                array<chart.point> failPts1 = array.new<chart.point>()
+                array.push(failPts1, chart.point.from_index(cycleStartBar, overbought))
+                array.push(failPts1, chart.point.from_index(failPeakBar1, failPeakLevel1))
+                array.push(failPts1, chart.point.from_index(bar_index, overbought))
+                polyline failPl1 = polyline.new(
+                     failPts1,
+                     curved = false,
+                     closed = false,
+                     line_color = cycleLineFailedColor,
+                     line_style = line.style_dashed,
+                     line_width = int(math.max(1.0, math.round(cycleMaxProgress * 4)))
+                 )
+                f_registerCompletedCycle(na, failPl1, false)
+            activeCycleLine := na
+            if not na(activeTargetLabel)
+                label.delete(activeTargetLabel)
+            // Returning OB starts a fresh OB -> OS attempt.
+            activeDirection := -1
+            cycleStartBar := bar_index
+            cycleStartPrice := close
+            cycleStartAtr := regimeAtr
+            cycleStartRegime := currentRegime
+            cycleArmed := false
+            cycleMaxProgress := 0.0
+            cycleMaxProgressBar := na
+            cycleMfeAtr := 0.0
+            cycleMaeAtr := 0.0
+            array.fill(cycleFirstReachAge, -1)
+            predictionCaptured := false
+            opportunityMarked := false
+            capturedPrediction := na
+            capturedSampleN := 0
+            capturedRegimePrediction := na
+            capturedRegimeSampleN := 0
+            capturedBaseRate := na
+            activeCycleLine := line.new(bar_index, overbought, bar_index, overbought, color = cycleLineActiveColor, width = 2, style = line.style_solid)
+            activeTargetLabel := label.new(bar_index, oversold, "TARGET", style = label.style_none, textcolor = cycleTargetColor, size = size.tiny)
+            newCycleEvent := true
+        // TIMEOUT
+        else if age >= maxCycleBars
+            f_storeSample(
+                 -1,
+                 0,
+                 2,
+                 cycleStartRegime,
+                 age,
+                 bar_index,
+                 cycleMaxProgress,
+                 cycleMfeAtr,
+                 cycleMaeAtr,
+                 cycleFirstReachAge
+             )
+            if predictionCaptured and not na(capturedPrediction)
+                f_storeCalibration(
+                     capturedPrediction,
+                     capturedRegimePrediction,
+                     capturedBaseRate,
+                     0,
+                     capturedSampleN,
+                     capturedRegimeSampleN,
+                     bar_index,
+                     activeDirection
+                 )
+            failureEvent := true
+            timeoutEvent := true
+            if not na(activeCycleLine)
+                line.set_color(activeCycleLine, cycleLineFailedColor)
+                line.set_style(activeCycleLine, line.style_dashed)
+                line.set_width(activeCycleLine, int(math.max(1.0, math.round(cycleMaxProgress * 4))))
+                f_registerCompletedCycle(activeCycleLine, na, false)
+            activeCycleLine := na
+            if not na(activeTargetLabel)
+                label.delete(activeTargetLabel)
+            activeTargetLabel := na
+            activeDirection := 0
+            cycleStartBar := na
+            cycleStartPrice := na
+            cycleStartAtr := na
+            cycleArmed := false
+            cycleMaxProgress := 0.0
+            cycleMaxProgressBar := na
+            cycleMfeAtr := 0.0
+            cycleMaeAtr := 0.0
+            array.fill(cycleFirstReachAge, -1)
+            predictionCaptured := false
+            opportunityMarked := false
+            capturedPrediction := na
+            capturedSampleN := 0
+            capturedRegimePrediction := na
+            capturedRegimeSampleN := 0
+            capturedBaseRate := na
+    // ----------------------------------------------------------------------
+    // OS -> OB
+    // ----------------------------------------------------------------------
+    else if activeDirection == 1
+        int age = bar_index - cycleStartBar
+        if not cycleArmed and osc > oversold
+            cycleArmed := true
+        // SUCCESS
+        if osc >= overbought
+            f_storeSample(
+                 1,
+                 1,
+                 0,
+                 cycleStartRegime,
+                 age,
+                 bar_index,
+                 cycleMaxProgress,
+                 cycleMfeAtr,
+                 cycleMaeAtr,
+                 cycleFirstReachAge
+             )
+            if predictionCaptured and not na(capturedPrediction)
+                f_storeCalibration(
+                     capturedPrediction,
+                     capturedRegimePrediction,
+                     capturedBaseRate,
+                     1,
+                     capturedSampleN,
+                     capturedRegimeSampleN,
+                     bar_index,
+                     activeDirection
+                 )
+            successEvent := true
+            if not na(activeCycleLine)
+                line.set_xy2(activeCycleLine, bar_index, overbought)
+                line.set_color(activeCycleLine, cycleLineSuccessColor)
+                line.set_width(activeCycleLine, int(math.max(1.0, math.round(cycleMaxProgress * 4))))
+                f_registerCompletedCycle(activeCycleLine, na, true)
+            if not na(activeTargetLabel)
+                label.delete(activeTargetLabel)
+            // Target OB starts opposite cycle.
+            activeDirection := -1
+            cycleStartBar := bar_index
+            cycleStartPrice := close
+            cycleStartAtr := regimeAtr
+            cycleStartRegime := currentRegime
+            cycleArmed := false
+            cycleMaxProgress := 0.0
+            cycleMaxProgressBar := na
+            cycleMfeAtr := 0.0
+            cycleMaeAtr := 0.0
+            array.fill(cycleFirstReachAge, -1)
+            predictionCaptured := false
+            opportunityMarked := false
+            capturedPrediction := na
+            capturedSampleN := 0
+            capturedRegimePrediction := na
+            capturedRegimeSampleN := 0
+            capturedBaseRate := na
+            activeCycleLine := line.new(bar_index, overbought, bar_index, overbought, color = cycleLineActiveColor, width = 2, style = line.style_solid)
+            activeTargetLabel := label.new(bar_index, oversold, "TARGET", style = label.style_none, textcolor = cycleTargetColor, size = size.tiny)
+            newCycleEvent := true
+        // FAILURE
+        else if cycleArmed and osc <= oversold
+            f_storeSample(
+                 1,
+                 0,
+                 1,
+                 cycleStartRegime,
+                 age,
+                 bar_index,
+                 cycleMaxProgress,
+                 cycleMfeAtr,
+                 cycleMaeAtr,
+                 cycleFirstReachAge
+             )
+            if predictionCaptured and not na(capturedPrediction)
+                f_storeCalibration(
+                     capturedPrediction,
+                     capturedRegimePrediction,
+                     capturedBaseRate,
+                     0,
+                     capturedSampleN,
+                     capturedRegimeSampleN,
+                     bar_index,
+                     activeDirection
+                 )
+            failureEvent := true
+            if not na(activeCycleLine)
+                line.delete(activeCycleLine)
+                [failPeakBar2, failPeakLevel2] = f_cycleFailurePeak(oversold, overbought)
+                array<chart.point> failPts2 = array.new<chart.point>()
+                array.push(failPts2, chart.point.from_index(cycleStartBar, oversold))
+                array.push(failPts2, chart.point.from_index(failPeakBar2, failPeakLevel2))
+                array.push(failPts2, chart.point.from_index(bar_index, oversold))
+                polyline failPl2 = polyline.new(
+                     failPts2,
+                     curved = false,
+                     closed = false,
+                     line_color = cycleLineFailedColor,
+                     line_style = line.style_dashed,
+                     line_width = int(math.max(1.0, math.round(cycleMaxProgress * 4)))
+                 )
+                f_registerCompletedCycle(na, failPl2, false)
+            activeCycleLine := na
+            if not na(activeTargetLabel)
+                label.delete(activeTargetLabel)
+            // Returning OS starts a new OS -> OB attempt.
+            activeDirection := 1
+            cycleStartBar := bar_index
+            cycleStartPrice := close
+            cycleStartAtr := regimeAtr
+            cycleStartRegime := currentRegime
+            cycleArmed := false
+            cycleMaxProgress := 0.0
+            cycleMaxProgressBar := na
+            cycleMfeAtr := 0.0
+            cycleMaeAtr := 0.0
+            array.fill(cycleFirstReachAge, -1)
+            predictionCaptured := false
+            opportunityMarked := false
+            capturedPrediction := na
+            capturedSampleN := 0
+            capturedRegimePrediction := na
+            capturedRegimeSampleN := 0
+            capturedBaseRate := na
+            activeCycleLine := line.new(bar_index, oversold, bar_index, oversold, color = cycleLineActiveColor, width = 2, style = line.style_solid)
+            activeTargetLabel := label.new(bar_index, overbought, "TARGET", style = label.style_none, textcolor = cycleTargetColor, size = size.tiny)
+            newCycleEvent := true
+        // TIMEOUT
+        else if age >= maxCycleBars
+            f_storeSample(
+                 1,
+                 0,
+                 2,
+                 cycleStartRegime,
+                 age,
+                 bar_index,
+                 cycleMaxProgress,
+                 cycleMfeAtr,
+                 cycleMaeAtr,
+                 cycleFirstReachAge
+             )
+            if predictionCaptured and not na(capturedPrediction)
+                f_storeCalibration(
+                     capturedPrediction,
+                     capturedRegimePrediction,
+                     capturedBaseRate,
+                     0,
+                     capturedSampleN,
+                     capturedRegimeSampleN,
+                     bar_index,
+                     activeDirection
+                 )
+            failureEvent := true
+            timeoutEvent := true
+            if not na(activeCycleLine)
+                line.set_color(activeCycleLine, cycleLineFailedColor)
+                line.set_style(activeCycleLine, line.style_dashed)
+                line.set_width(activeCycleLine, int(math.max(1.0, math.round(cycleMaxProgress * 4))))
+                f_registerCompletedCycle(activeCycleLine, na, false)
+            activeCycleLine := na
+            if not na(activeTargetLabel)
+                label.delete(activeTargetLabel)
+            activeTargetLabel := na
+            activeDirection := 0
+            cycleStartBar := na
+            cycleStartPrice := na
+            cycleStartAtr := na
+            cycleArmed := false
+            cycleMaxProgress := 0.0
+            cycleMaxProgressBar := na
+            cycleMfeAtr := 0.0
+            cycleMaeAtr := 0.0
+            array.fill(cycleFirstReachAge, -1)
+            predictionCaptured := false
+            opportunityMarked := false
+            capturedPrediction := na
+            capturedSampleN := 0
+            capturedRegimePrediction := na
+            capturedRegimeSampleN := 0
+            capturedBaseRate := na
+// Recalculate progress after possible state transition.
+if activeDirection == -1
+    currentProgress := f_clamp(
+         (overbought - osc) /
+         (overbought - oversold),
+         0.0,
+         1.0
+     )
+else if activeDirection == 1
+    currentProgress := f_clamp(
+         (osc - oversold) /
+         (overbought - oversold),
+         0.0,
+         1.0
+     )
+else
+    currentProgress := 0.0
+// ============================================================================
+// CALIBRATION WINDOW HELPER
+// ============================================================================
+f_calibrationCount(int lookbackBars) =>
+    int total = 0
+    int n = array.size(calibPredicted)
+    if n > 0
+        for i = 0 to n - 1
+            if bar_index - array.get(calibEndBar, i) <= lookbackBars
+                total += 1
+    total
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+color oscColor = color.new(color.silver, 0)
+if osc >= overbought
+    oscColor := color.new(color.red, 0)
+else if osc <= oversold
+    oscColor := color.new(color.lime, 0)
+plot(
+     osc,
+     "Oscillator",
+     color = oscColor,
+     linewidth = 2
+ )
+hline(
+     extremeOverbought,
+     "Extreme OB",
+     color = color.new(color.red, 75),
+     linestyle = hline.style_dotted
+ )
+hline(
+     overbought,
+     "Overbought",
+     color = color.new(color.red, 35)
+ )
+hline(
+     50,
+     "Midline",
+     color = color.new(color.gray, 70),
+     linestyle = hline.style_dotted
+ )
+hline(
+     oversold,
+     "Oversold",
+     color = color.new(color.green, 35)
+ )
+hline(
+     extremeOversold,
+     "Extreme OS",
+     color = color.new(color.green, 75),
+     linestyle = hline.style_dotted
+ )
+// Active-cycle background.
+color cycleBg = na
+if activeDirection == -1
+    cycleBg := color.new(color.red, 94)
+else if activeDirection == 1
+    cycleBg := color.new(color.green, 94)
+bgcolor(showCycleBackground ? cycleBg : na)
+// Event markers reduced to three: where a cycle started, and how it ended.
+// Timeout is visually folded into Failure — the cycle line style (dashed,
+// landing off the rail rather than on it) is what distinguishes a timeout
+// from a clean origin-revisit; the marker doesn't need a fourth shape.
+plot(
+     showCycleOrigins and newCycleEvent ? osc : na,
+     "Cycle Start",
+     color = color.new(color.gray, 25),
+     linewidth = 2,
+     style = plot.style_circles
+ )
+plot(
+     showOutcomeMarkers and successEvent ? osc : na,
+     "Cycle Success",
+     color = color.new(color.lime, 0),
+     linewidth = 4,
+     style = plot.style_circles
+ )
+plot(
+     showOutcomeMarkers and failureEvent ? osc : na,
+     "Cycle Failure",
+     color = color.new(color.red, 0),
+     linewidth = 4,
+     style = plot.style_circles
+ )
+// One marker per cycle, at most — the moment Edge/N/CI-width/zone all
+// clear the bar. Triangle direction matches the cycle direction (up for
+// OS -> OB, down for OB -> OS) so it reads the same way a trend arrow would.
+plotshape(
+     showOpportunityMarkers and opportunityEvent and activeDirection == 1 ? osc : na,
+     title = "Opportunity (Up Cycle)",
+     style = shape.triangleup,
+     location = location.absolute,
+     color = color.new(#4169e1, 0),
+     size = size.small
+ )
+plotshape(
+     showOpportunityMarkers and opportunityEvent and activeDirection == -1 ? osc : na,
+     title = "Opportunity (Down Cycle)",
+     style = shape.triangledown,
+     location = location.absolute,
+     color = color.new(#4169e1, 0),
+     size = size.small
+ )
+// ============================================================================
+// ACTIVE CYCLE LABEL
+// ============================================================================
+// Readout attached directly to the live cycle line's current endpoint,
+// replacing the removed progress plot. Self-contained: computes its own
+// Medium-lookback stats rather than depending on the (optional) dashboard
+// table, so the on-chart read works even with Dashboard Detail = Visual.
+//
+// Deliberately does NOT lead with the raw Conditional percentage — a "100%"
+// backed by n1 reads as a strong signal when it's actually no evidence at
+// all. Edge (Conditional minus the direction's plain base rate) plus an
+// explicit sample-size gate is what actually answers "does this situation
+// tell me more than just knowing the market's normal up/down cycle odds."
+if barstate.islast
+    if activeDirection == 0
+        if not na(activeCycleLabel)
+            label.delete(activeCycleLabel)
+        activeCycleLabel := na
+        if not na(activeProjectionLine)
+            line.delete(activeProjectionLine)
+        activeProjectionLine := na
+    else
+        int labelAge = bar_index - cycleStartBar
+        [_, _, _, labelCondSuccess, labelCondTotal, labelCondProb, labelMedianDuration, _, _, _, _] = f_statistics(
+             activeDirection,
+             mediumLookback,
+             false,
+             0,
+             cycleMaxProgress,
+             labelAge,
+             true
+         )
+        [labelDownBase, _, labelUpBase, _] = f_directionBaseRates(mediumLookback)
+        float labelBaseRate = activeDirection == -1 ? labelDownBase : labelUpBase
+        float labelEdge =
+             not na(labelCondProb) and not na(labelBaseRate) ?
+             labelCondProb - labelBaseRate : na
+        string labelDirectionTag = activeDirection == -1 ? "DOWN CYCLE" : "UP CYCLE"
+        // Same gates as the Opportunity marker (bucket-crossing check
+        // above), evaluated live instead of once per cycle, so the label
+        // can never claim OPPORTUNITY in a situation where the marker
+        // itself would refuse to fire (too late, too uncertain).
+        [labelCiLower, labelCiUpper] = f_wilson(labelCondSuccess, labelCondTotal)
+        float labelCiWidth = not na(labelCiLower) ? labelCiUpper - labelCiLower : na
+        bool labelLowData = labelCondTotal < minConditionalSamples or na(labelEdge)
+        bool labelStalled = not na(labelMedianDuration) and labelAge > labelMedianDuration
+        bool labelUncertain = not labelLowData and (na(labelCiWidth) or labelCiWidth > opportunityMaxCIWidth)
+        bool labelLate = currentProgress > opportunityZoneMax / 100.0
+        bool labelInZone =
+             currentProgress >= opportunityZoneMin / 100.0 and
+             currentProgress <= opportunityZoneMax / 100.0
+        string labelStateWord = "WAIT"
+        if labelLowData
+            labelStateWord := "LOW DATA"
+        else if labelStalled
+            labelStateWord := "STALLED"
+        else if labelUncertain
+            labelStateWord := "UNCERTAIN"
+        else if labelLate
+            labelStateWord := "LATE"
+        else if labelEdge >= opportunityEdgeThreshold and labelInZone
+            labelStateWord := "OPPORTUNITY"
+        else if labelEdge >= opportunityEdgeThreshold / 2.0
+            labelStateWord := "WATCH"
+        string labelSecondLine = labelStateWord
+        if labelStateWord != "LOW DATA"
+            string labelEdgeSign = labelEdge >= 0 ? "+" : ""
+            labelSecondLine := labelEdgeSign + str.tostring(labelEdge, "#") + " EDGE · " + labelStateWord
+        string labelText = labelDirectionTag + "\n" + labelSecondLine
+        color labelBg = color.new(color.gray, 20)
+        if labelStateWord == "OPPORTUNITY"
+            labelBg := color.new(#4169e1, 10)
+        else if labelStateWord == "WATCH" or labelStateWord == "STALLED"
+            labelBg := color.new(#ff6f00, 15)
+        if na(activeCycleLabel)
+            activeCycleLabel := label.new(
+                 bar_index + 3,
+                 osc,
+                 labelText,
+                 style = label.style_label_left,
+                 color = labelBg,
+                 textcolor = color.white,
+                 size = size.small
+             )
+        else
+            label.set_xy(activeCycleLabel, bar_index + 3, osc)
+            label.set_text(activeCycleLabel, labelText)
+            label.set_color(activeCycleLabel, labelBg)
+        // Expected Target Time: a dashed time projection, not a price
+        // forecast. Says "if this cycle runs typical length, the target
+        // extreme would land around here" — geometry instead of a bars
+        // number nobody wants to mentally place on the chart. Skipped once
+        // the cycle is STALLED (already past the historical median
+        // duration) — the projection would otherwise collapse to a near-
+        // vertical line straight down to the target on this very bar,
+        // which reads as "arriving now" rather than "already overdue".
+        if not na(labelMedianDuration) and not labelStalled
+            int expectedRemainingBars = int(math.max(1.0, math.round(labelMedianDuration - labelAge)))
+            int projectedBar = bar_index + expectedRemainingBars
+            float projectedLevel = activeDirection == -1 ? oversold : overbought
+            if na(activeProjectionLine)
+                activeProjectionLine := line.new(
+                     bar_index,
+                     osc,
+                     projectedBar,
+                     projectedLevel,
+                     color = cycleTargetColor,
+                     style = line.style_dotted,
+                     width = 1
+                 )
+            else
+                line.set_xy1(activeProjectionLine, bar_index, osc)
+                line.set_xy2(activeProjectionLine, projectedBar, projectedLevel)
+        else if not na(activeProjectionLine)
+            line.delete(activeProjectionLine)
+            activeProjectionLine := na
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+var table dashboard =
+     table.new(
+         position.top_right,
+         3,
+         16,
+         bgcolor = color.new(color.white, 5),
+         border_color = color.new(color.gray, 60),
+         border_width = 1,
+         frame_color = color.new(color.gray, 40),
+         frame_width = 1
+     )
+var table calibTable =
+     table.new(
+         position.bottom_left,
+         5,
+         10,
+         bgcolor = color.new(color.white, 5),
+         border_color = color.new(color.gray, 60),
+         border_width = 1,
+         frame_color = color.new(color.gray, 40),
+         frame_width = 1
+     )
+f_cell(
+     table tbl,
+     int col,
+     int row,
+     string txt
+ ) =>
+    table.cell(
+         tbl,
+         col,
+         row,
+         txt,
+         text_color = tc,
+         text_size = size.small
+     )
+f_cellHeader(
+     table tbl,
+     int col,
+     int row,
+     string txt
+ ) =>
+    table.cell(
+         tbl,
+         col,
+         row,
+         txt,
+         text_color = tc,
+         bgcolor = hd,
+         text_size = size.small
+     )
+f_cellStatus(
+     table tbl,
+     int col,
+     int row,
+     string txt,
+     color bg,
+     color txtCol
+ ) =>
+    table.cell(
+         tbl,
+         col,
+         row,
+         txt,
+         text_color = txtCol,
+         bgcolor = bg,
+         text_size = size.small
+     )
+f_cellTiny(
+     table tbl,
+     int col,
+     int row,
+     string txt
+ ) =>
+    table.cell(
+         tbl,
+         col,
+         row,
+         txt,
+         text_color = tc,
+         text_size = size.small
+     )
+f_cellTinyHeader(
+     table tbl,
+     int col,
+     int row,
+     string txt
+ ) =>
+    table.cell(
+         tbl,
+         col,
+         row,
+         txt,
+         text_color = tc,
+         bgcolor = hd,
+         text_size = size.small
+     )
+f_cellTinyStatus(
+     table tbl,
+     int col,
+     int row,
+     string txt,
+     color bg,
+     color txtCol
+ ) =>
+    table.cell(
+         tbl,
+         col,
+         row,
+         txt,
+         text_color = txtCol,
+         bgcolor = bg,
+         text_size = size.small
+     )
+if barstate.islast
+    table.clear(dashboard, 0, 0, 2, 15)
+    table.clear(calibTable, 0, 0, 4, 9)
+if barstate.islast and showDashboard
+    int statDirection = osc >= 50 ? -1 : 1
+    if activeDirection != 0
+        statDirection := activeDirection
+    float progressForStats = 0.0
+    if activeDirection != 0
+        progressForStats := cycleMaxProgress
+    int cycleAge = activeCycleAge
+    // ----------------------------------------------------------------------
+    // Recent
+    // ----------------------------------------------------------------------
+    [_, recTotal, recProb, _, _, _, _, _, _, _, _] = f_statistics(
+         statDirection,
+         recentLookback,
+         false,
+         0,
+         progressForStats,
+         -1,
+         false
+     )
+    // ----------------------------------------------------------------------
+    // Medium — the age threshold conditions on the current cycle's own age,
+    // so "Conditional" only pools historical cycles that were still in
+    // flight at a comparable duration and had already reached the same
+    // 10-point progress bucket by then.
+    // ----------------------------------------------------------------------
+    [_, medTotal, medProb, medCondSuccess, medCondTotal, medCondProb, medMedianDuration, medMedianMfe, medMedianMae, medMedianFailedMfe, medMedianFailedMae] = f_statistics(
+         statDirection,
+         mediumLookback,
+         false,
+         0,
+         progressForStats,
+         cycleAge,
+         true
+     )
+    // ----------------------------------------------------------------------
+    // Long
+    // ----------------------------------------------------------------------
+    [_, longTotal, longProb, _, _, _, _, _, _, _, _] = f_statistics(
+         statDirection,
+         longLookback,
+         false,
+         0,
+         progressForStats,
+         -1,
+         false
+     )
+    // ----------------------------------------------------------------------
+    // Regime-conditioned
+    // ----------------------------------------------------------------------
+    int regimeForStats = currentRegime
+    if activeDirection != 0
+        regimeForStats := cycleStartRegime
+    [_, _, _, _, regCondTotal, regCondProb, _, _, _, _, _] = f_statistics(
+         statDirection,
+         mediumLookback,
+         useRegimeStats,
+         regimeForStats,
+         progressForStats,
+         cycleAge,
+         false
+     )
+    // ----------------------------------------------------------------------
+    // Directional base rates
+    // ----------------------------------------------------------------------
+    [downBaseProb, downBaseTotal, upBaseProb, upBaseTotal] =
+         f_directionBaseRates(mediumLookback)
+    // ----------------------------------------------------------------------
+    // Descriptive Wilson interval for the main conditional statistic
+    // ----------------------------------------------------------------------
+    [ciLower, ciUpper] = f_wilson(
+         medCondSuccess,
+         medCondTotal
+     )
+    string ciText = "n/a"
+    if not na(ciLower)
+        ciText := str.tostring(ciLower, "#.0") + "–" + str.tostring(ciUpper, "#.0") + "%"
+    float estimatedRemaining = na
+    if not na(medMedianDuration)
+        estimatedRemaining := math.max(
+             0.0,
+             medMedianDuration - cycleAge
+         )
+    bool sampleMinimumMet = medCondTotal >= minConditionalSamples
+    bool hasActiveCycle = activeDirection != 0
+    int decisionCalibN = f_calibrationCount(mediumLookback)
+    color sampleBg =
+         sampleMinimumMet ?
+         color.new(color.gray, 80) :
+         color.new(#ff6f00, 15)
+    color sampleTextCol = sampleMinimumMet ? tc : color.white
+    string cycleDirection =
+         activeDirection == 1 ? "UP CYCLE" :
+         activeDirection == -1 ? "DOWN CYCLE" : "NONE"
+    string priorCycleDirection =
+         activeDirection == -1 ? "UP CYCLE" : "DOWN CYCLE"
+    // Stage reflects where the cycle stands right now (currentProgress), not
+    // the best it ever did (progressForStats / cycleMaxProgress) — those two
+    // can diverge sharply after a retracement and describe different things.
+    string cycleStage = "WAITING"
+    if hasActiveCycle
+        if not cycleArmed
+            cycleStage := "ORIGIN"
+        else if currentProgress < STAGE_EARLY_END
+            cycleStage := "EARLY"
+        else if currentProgress < STAGE_DEVELOPING_END
+            cycleStage := "DEVELOPING"
+        else if currentProgress < STAGE_MATURE_END
+            cycleStage := "MATURE"
+        else
+            cycleStage := "LATE"
+    string overallText = hasActiveCycle ? cycleDirection : "WAITING"
+    string overallDetail = cycleStage
+    color overallBg = color.new(color.gray, 80)
+    color overallTextCol = tc
+    if timeoutEvent
+        overallText := "CYCLE TIMED OUT"
+        overallDetail := "Outcome recorded"
+        overallBg := color.new(#d50000, 20)
+        overallTextCol := color.white
+    else if failureEvent
+        overallText := "CYCLE FAILED"
+        overallDetail := "Origin revisited"
+        overallBg := color.new(#d50000, 20)
+        overallTextCol := color.white
+    else if successEvent
+        overallText := "TARGET REACHED"
+        overallDetail := priorCycleDirection
+        overallBg := color.new(#ff6f00, 15)
+        overallTextCol := color.white
+    string cycleEvidenceText = "n/a"
+    string cycleEvidenceDetail = "No active cycle"
+    color cycleEvidenceBg = color.new(color.gray, 80)
+    color cycleEvidenceTextCol = tc
+    if hasActiveCycle
+        cycleEvidenceDetail =
+             f_fmtPct(medCondProb) + " · n " +
+             str.tostring(medCondTotal) + " · " + ciText
+        if not sampleMinimumMet
+            cycleEvidenceText := "INSUFFICIENT"
+            cycleEvidenceBg := color.new(#ff6f00, 15)
+            cycleEvidenceTextCol := color.white
+        else if medCondProb >= COMPLETION_MAJORITY
+            cycleEvidenceText := "COMPLETION >=50%"
+        else
+            cycleEvidenceText := "COMPLETION <50%"
+            cycleEvidenceBg := color.new(#d50000, 20)
+            cycleEvidenceTextCol := color.white
+    string freshEntryText = hasActiveCycle ? "NOT VALIDATED" : "NO ACTIVE CYCLE"
+    string freshEntryDetail =
+         hasActiveCycle ? cycleStage + " · no checkpoint price outcome" : "Wait for cycle"
+    color freshEntryBg =
+         hasActiveCycle ? color.new(#ff6f00, 15) : color.new(color.gray, 80)
+    color freshEntryTextCol = hasActiveCycle ? color.white : tc
+    string positionText = "NO CYCLE CONTEXT"
+    string positionDetail = ""
+    color positionBg = color.new(color.gray, 80)
+    color positionTextCol = tc
+    if timeoutEvent
+        positionText := "CYCLE TIMED OUT"
+        positionDetail := "Price exit not evaluated"
+        positionBg := color.new(#d50000, 20)
+        positionTextCol := color.white
+    else if failureEvent
+        positionText := "ORIGIN REVISITED"
+        positionDetail := "Price exit not evaluated"
+        positionBg := color.new(#d50000, 20)
+        positionTextCol := color.white
+    else if successEvent
+        positionText := "TARGET REACHED"
+        positionDetail := "Price exit not evaluated"
+        positionBg := color.new(#ff6f00, 15)
+        positionTextCol := color.white
+    else if hasActiveCycle
+        positionText :=
+             cycleStage == "LATE" ? "TARGET AREA NEAR" :
+             cycleStage == "MATURE" ? "CYCLE MATURE" : "CYCLE DEVELOPING"
+        positionDetail := cycleDirection
+    bool originPriceEvidence =
+         not na(medMedianMfe) or not na(medMedianFailedMfe)
+    string evidenceLimitText =
+         originPriceEvidence ? "ORIGIN-BASED ONLY" : "PRICE SAMPLE THIN"
+    string evidenceLimitDetail =
+         "No entry/exit model · Cal n " + str.tostring(decisionCalibN)
+    color evidenceLimitBg = color.new(#ff6f00, 15)
+    color evidenceLimitTextCol = color.white
+    string compactOverall =
+         overallText == overallDetail ?
+         overallText : overallText + " · " + overallDetail
+    if dashboardMode == "Visual"
+        // The chart itself (cycle lines, target, live probability label)
+        // carries the read. This is a one-cell confirmation tag, not a
+        // second source of truth.
+        f_cellTinyHeader(dashboard, 0, 0, "OCS")
+        f_cellTinyStatus(
+             dashboard,
+             1,
+             0,
+             compactOverall,
+             overallBg,
+             overallTextCol
+         )
+    else if dashboardMode == "Compact"
+        string compactEvidence =
+             f_fmtPct(medCondProb) + " · n " + str.tostring(medCondTotal)
+        if not sampleMinimumMet
+            compactEvidence := compactEvidence + " · LOW N"
+        string compactProgress =
+             hasActiveCycle ?
+             f_fmtPct(currentProgress * 100.0) + " · " +
+             str.tostring(cycleAge) + " bars" : "n/a"
+        string compactBase =
+             f_fmtPct(downBaseProb) + " / " + f_fmtPct(upBaseProb) +
+             " · n " + str.tostring(downBaseTotal) + " / " +
+             str.tostring(upBaseTotal)
+        f_cellTinyHeader(dashboard, 0, 0, "OCS")
+        f_cellTinyStatus(
+             dashboard,
+             1,
+             0,
+             compactOverall,
+             overallBg,
+             overallTextCol
+         )
+        f_cellTiny(dashboard, 0, 1, "Completion")
+        f_cellTinyStatus(
+             dashboard,
+             1,
+             1,
+             compactEvidence,
+             cycleEvidenceBg,
+             cycleEvidenceTextCol
+         )
+        f_cellTiny(dashboard, 0, 2, "Fresh Entry")
+        f_cellTinyStatus(
+             dashboard,
+             1,
+             2,
+             freshEntryText,
+             freshEntryBg,
+             freshEntryTextCol
+         )
+        f_cellTiny(dashboard, 0, 3, "Progress")
+        f_cellTiny(dashboard, 1, 3, compactProgress)
+        f_cellTiny(dashboard, 0, 4, "Base D / U")
+        f_cellTiny(dashboard, 1, 4, compactBase)
+        f_cellTiny(dashboard, 0, 5, "Won MFE / MAE")
+        f_cellTiny(
+             dashboard,
+             1,
+             5,
+             f_fmtAtr(medMedianMfe) + " / " + f_fmtAtr(medMedianMae)
+         )
+        f_cellTiny(dashboard, 0, 6, "Failed MFE / MAE")
+        f_cellTiny(
+             dashboard,
+             1,
+             6,
+             f_fmtAtr(medMedianFailedMfe) + " / " +
+             f_fmtAtr(medMedianFailedMae)
+         )
+        f_cellTiny(dashboard, 0, 7, "Limit")
+        f_cellTinyStatus(
+             dashboard,
+             1,
+             7,
+             "ORIGIN ONLY · NO ENTRY MODEL",
+             evidenceLimitBg,
+             evidenceLimitTextCol
+         )
+    else
+        // Full research dashboard.
+        f_cellHeader(dashboard, 0, 0, "Oscillator Cycle Statistics")
+        f_cellHeader(dashboard, 1, 0, "Value")
+        f_cellHeader(dashboard, 2, 0, "Detail")
+        f_cell(dashboard, 0, 1, "Overall")
+        f_cellStatus(dashboard, 1, 1, overallText, overallBg, overallTextCol)
+        f_cell(dashboard, 2, 1, overallDetail)
+        f_cell(dashboard, 0, 2, "Cycle Evidence")
+        f_cellStatus(dashboard, 1, 2, cycleEvidenceText, cycleEvidenceBg, cycleEvidenceTextCol)
+        f_cell(dashboard, 2, 2, cycleEvidenceDetail)
+        f_cell(dashboard, 0, 3, "Fresh Entry")
+        f_cellStatus(dashboard, 1, 3, freshEntryText, freshEntryBg, freshEntryTextCol)
+        f_cell(dashboard, 2, 3, freshEntryDetail)
+        f_cell(dashboard, 0, 4, "If in Position")
+        f_cellStatus(dashboard, 1, 4, positionText, positionBg, positionTextCol)
+        f_cell(dashboard, 2, 4, positionDetail)
+        f_cell(dashboard, 0, 5, "Evidence Limits")
+        f_cellStatus(dashboard, 1, 5, evidenceLimitText, evidenceLimitBg, evidenceLimitTextCol)
+        f_cell(dashboard, 2, 5, evidenceLimitDetail)
+        f_cell(dashboard, 0, 6, oscType)
+        f_cell(dashboard, 1, 6, str.tostring(osc, "#.0"))
+        f_cell(dashboard, 2, 6, f_stateName(f_state(osc)))
+        f_cell(dashboard, 0, 7, "Current Cycle")
+        f_cell(dashboard, 1, 7, f_directionName(activeDirection))
+        f_cell(dashboard, 2, 7, activeDirection != 0 ? (cycleArmed ? "Armed" : "Origin") : "")
+        f_cell(dashboard, 0, 8, "Progress")
+        f_cell(dashboard, 1, 8, activeDirection != 0 ? f_fmtPct(currentProgress * 100.0) : "n/a")
+        f_cell(dashboard, 2, 8, activeDirection != 0 ? "max " + f_fmtPct(progressForStats * 100.0) + " · " + str.tostring(cycleAge) + " bars" : "")
+        f_cell(dashboard, 0, 9, "Conditional")
+        f_cell(dashboard, 1, 9, f_fmtPct(medCondProb))
+        f_cellStatus(dashboard, 2, 9, "n " + str.tostring(medCondTotal) + " · " + ciText, sampleBg, sampleTextCol)
+        f_cell(dashboard, 0, 10, "Lookbacks R / M / L")
+        f_cell(dashboard, 1, 10, f_fmtPct(recProb) + " / " + f_fmtPct(medProb) + " / " + f_fmtPct(longProb))
+        f_cell(dashboard, 2, 10, "n " + str.tostring(recTotal) + " / " + str.tostring(medTotal) + " / " + str.tostring(longTotal))
+        f_cell(dashboard, 0, 11, "Base Down / Up")
+        f_cell(dashboard, 1, 11, f_fmtPct(downBaseProb) + " / " + f_fmtPct(upBaseProb))
+        f_cell(dashboard, 2, 11, "n " + str.tostring(downBaseTotal) + " / " + str.tostring(upBaseTotal))
+        string regimeLabel = "Regime (" + f_regimeName(regimeForStats) + ")"
+        f_cell(dashboard, 0, 12, regimeLabel)
+        f_cell(dashboard, 1, 12, useRegimeStats ? f_fmtPct(regCondProb) : "Off")
+        f_cell(dashboard, 2, 12, useRegimeStats ? "n " + str.tostring(regCondTotal) : "")
+        f_cell(dashboard, 0, 13, "Completion")
+        f_cell(dashboard, 1, 13, f_fmtBars(medMedianDuration))
+        f_cell(dashboard, 2, 13, na(estimatedRemaining) ? "n/a" : str.tostring(estimatedRemaining, "#.0") + " rem")
+        f_cell(dashboard, 0, 14, "MFE / MAE (won)")
+        f_cell(dashboard, 1, 14, f_fmtAtr(medMedianMfe))
+        f_cell(dashboard, 2, 14, f_fmtAtr(medMedianMae))
+        f_cell(dashboard, 0, 15, "MFE / MAE (failed)")
+        f_cell(dashboard, 1, 15, f_fmtAtr(medMedianFailedMfe))
+        f_cell(dashboard, 2, 15, f_fmtAtr(medMedianFailedMae))
+// ============================================================================
+// RELIABILITY TABLE
+// ============================================================================
+// Walk-forward reliability check. Only forecasts resolved within the current
+// Medium lookback participate, keeping the forecast assessment aligned with
+// the population used by the live Conditional statistic. Regime and base
+// Brier scores are compared only where both forecasts existed for the same
+// cycle; comparing scores from different observations would be misleading.
+if barstate.islast and showCalibration
+    int calibN = array.size(calibPredicted)
+    array<int> bucketTotal = array.new<int>(4, 0)
+    array<int> bucketSuccess = array.new<int>(4, 0)
+    array<float> bucketForecastSum = array.new<float>(4, 0.0)
+    float baseSquaredError = 0.0
+    int baseBrierN = 0
+    float pairedBaseSquaredError = 0.0
+    float pairedRegimeSquaredError = 0.0
+    int pairedBrierN = 0
+    // Naive reference forecast: the constant, direction-specific base rate
+    // AS IT WAS AT THE TIME THIS FORECAST WAS CAPTURED (calibNaivePredicted),
+    // not today's base rate applied retroactively — that would let the naive
+    // benchmark see 700 bars of hindsight the live model never had. The
+    // Brier Skill Score below answers "does the conditioned model actually
+    // beat just knowing the direction's long-run completion rate at the
+    // time?" rather than showing a raw Brier number with no yardstick.
+    float naiveSquaredError = 0.0
+    int naiveBrierN = 0
+    if calibN > 0
+        for i = 0 to calibN - 1
+            int endingBar = array.get(calibEndBar, i)
+            bool inLookback = bar_index - endingBar <= mediumLookback
+            if inLookback
+                float pred = array.get(calibPredicted, i)
+                float regimePred = array.get(calibRegimePredicted, i)
+                int outcome = array.get(calibOutcome, i)
+                int idx = 0
+                if pred >= 80
+                    idx := 3
+                else if pred >= 60
+                    idx := 2
+                else if pred >= 40
+                    idx := 1
+                array.set(bucketTotal, idx, array.get(bucketTotal, idx) + 1)
+                array.set(bucketSuccess, idx, array.get(bucketSuccess, idx) + outcome)
+                array.set(bucketForecastSum, idx, array.get(bucketForecastSum, idx) + pred)
+                float baseError = pred / 100.0 - outcome
+                baseSquaredError += baseError * baseError
+                baseBrierN += 1
+                if not na(regimePred)
+                    float regimeError = regimePred / 100.0 - outcome
+                    pairedBaseSquaredError += baseError * baseError
+                    pairedRegimeSquaredError += regimeError * regimeError
+                    pairedBrierN += 1
+                float naiveP = array.get(calibNaivePredicted, i)
+                if not na(naiveP)
+                    float naiveError = naiveP / 100.0 - outcome
+                    naiveSquaredError += naiveError * naiveError
+                    naiveBrierN += 1
+    float baseBrier =
+         baseBrierN > 0 ? baseSquaredError / baseBrierN : na
+    float pairedBaseBrier =
+         pairedBrierN > 0 ? pairedBaseSquaredError / pairedBrierN : na
+    float pairedRegimeBrier =
+         pairedBrierN > 0 ? pairedRegimeSquaredError / pairedBrierN : na
+    float pairedImprovement =
+         pairedBrierN >= minConditionalSamples and
+         not na(pairedBaseBrier) and pairedBaseBrier > 0 ?
+         100.0 * (pairedBaseBrier - pairedRegimeBrier) / pairedBaseBrier : na
+    string improvementText = "thin n"
+    if not na(pairedImprovement)
+        string improvementSign = pairedImprovement > 0 ? "+" : ""
+        improvementText := improvementSign + str.tostring(pairedImprovement, "#.0") + "%"
+    float naiveBrier =
+         naiveBrierN > 0 ? naiveSquaredError / naiveBrierN : na
+    float brierSkillScore =
+         naiveBrierN >= minConditionalSamples and baseBrierN >= minConditionalSamples and
+         not na(naiveBrier) and naiveBrier > 0 ?
+         100.0 * (1.0 - baseBrier / naiveBrier) : na
+    string skillScoreText = "thin n"
+    if not na(brierSkillScore)
+        string skillSign = brierSkillScore > 0 ? "+" : ""
+        skillScoreText := skillSign + str.tostring(brierSkillScore, "#.0") + "%"
+    if baseBrierN < minConditionalSamples
+        f_cellTinyHeader(calibTable, 0, 0, "Reliability")
+        f_cellTiny(
+             calibTable,
+             1,
+             0,
+             "Collecting · n " + str.tostring(baseBrierN) + " / " +
+             str.tostring(minConditionalSamples)
+         )
+    else
+        f_cellTinyHeader(calibTable, 0, 0, "Reliability")
+        f_cellTinyHeader(calibTable, 1, 0, "Avg Fcst")
+        f_cellTinyHeader(calibTable, 2, 0, "Observed")
+        f_cellTinyHeader(calibTable, 3, 0, "Error")
+        f_cellTinyHeader(calibTable, 4, 0, "n")
+        for bucket = 0 to 3
+            int bucketN = array.get(bucketTotal, bucket)
+            float avgForecast =
+                 bucketN > 0 ? array.get(bucketForecastSum, bucket) / bucketN : na
+            float observed = f_pct(
+                 array.get(bucketSuccess, bucket),
+                 bucketN
+             )
+            string bucketLabel =
+                 bucket == 0 ? "<40%" :
+                 bucket == 1 ? "40–60%" :
+                 bucket == 2 ? "60–80%" : "≥80%"
+            f_cellTiny(calibTable, 0, bucket + 1, bucketLabel)
+            f_cellTiny(calibTable, 1, bucket + 1, f_fmtPct(avgForecast))
+            f_cellTiny(calibTable, 2, bucket + 1, f_fmtPct(observed))
+            f_cellTiny(calibTable, 3, bucket + 1, f_fmtSignedPp(observed - avgForecast))
+            f_cellTiny(calibTable, 4, bucket + 1, str.tostring(bucketN))
+        f_cellTiny(calibTable, 0, 5, "Base Brier")
+        f_cellTiny(calibTable, 1, 5, f_fmtBrier(baseBrier))
+        f_cellTiny(calibTable, 2, 5, "Medium")
+        f_cellTiny(calibTable, 3, 5, "")
+        f_cellTiny(calibTable, 4, 5, str.tostring(baseBrierN))
+        f_cellTiny(calibTable, 0, 6, "Paired Base")
+        f_cellTiny(calibTable, 1, 6, f_fmtBrier(pairedBaseBrier))
+        f_cellTiny(calibTable, 2, 6, "same cases")
+        f_cellTiny(calibTable, 3, 6, "")
+        f_cellTiny(calibTable, 4, 6, str.tostring(pairedBrierN))
+        f_cellTiny(calibTable, 0, 7, "Paired Regime")
+        f_cellTiny(calibTable, 1, 7, f_fmtBrier(pairedRegimeBrier))
+        f_cellTiny(calibTable, 2, 7, "vs base")
+        f_cellTiny(calibTable, 3, 7, improvementText)
+        f_cellTiny(calibTable, 4, 7, str.tostring(pairedBrierN))
+        f_cellTiny(calibTable, 0, 8, "Naive Brier")
+        f_cellTiny(calibTable, 1, 8, f_fmtBrier(naiveBrier))
+        f_cellTiny(calibTable, 2, 8, "Direction rate")
+        f_cellTiny(calibTable, 3, 8, "")
+        f_cellTiny(calibTable, 4, 8, str.tostring(naiveBrierN))
+        f_cellTiny(calibTable, 0, 9, "Skill Score")
+        f_cellTiny(calibTable, 1, 9, skillScoreText)
+        f_cellTiny(calibTable, 2, 9, "vs naive")
+        f_cellTiny(calibTable, 3, 9, "")
+        f_cellTiny(calibTable, 4, 9, str.tostring(naiveBrierN))
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(
+     successEvent,
+     "Oscillator Cycle Success",
+     "Oscillator Cycle Statistics: opposite extreme reached."
+ )
+alertcondition(
+     failureEvent and not timeoutEvent,
+     "Oscillator Cycle Failure",
+     "Oscillator Cycle Statistics: source extreme revisited before completion."
+ )
+alertcondition(
+     timeoutEvent,
+     "Oscillator Cycle Timeout",
+     "Oscillator Cycle Statistics: cycle exceeded maximum duration."
+ )

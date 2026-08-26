@@ -125,13 +125,55 @@ color hd = color.new(color.gray, 90)   // header row background (very light gray
 ### Cell rules
 
 - **Header row**: `text_color=tc`, `bgcolor=hd`, `text_size=size.small`
-- **Data labels** (left column): `text_color=tc`, no explicit bgcolor, `text_size=size.small` or `size.tiny`
-- **Data values**: `text_color=tc` (or accent color like `#00c853`, `#d50000`), no explicit bgcolor
+- **Data labels** (left column): `text_color=tc`, no explicit bgcolor, `text_size=size.small`
+- **Data values**: `text_color=tc` (or accent color like `#00c853`, `#d50000`), no explicit bgcolor, `text_size=size.small`
 - **Status cells with state**: dynamic `bgcolor` (colored when active, `color.new(color.gray, 80)` when inactive), `text_color=color.white` when colored, `tc` when inactive
 - **Separator rows**: `bgcolor=color.new(color.gray, 80)`, empty text, one cell per column (no merge)
 - **Accent colors**: bullish `#00c853`, bearish `#d50000`, warning `#ff6f00`, alert `#ffd600`
 - No `merge_cells` for separator rows — set each cell individually
 - No dark-theme backgrounds (`#131722` etc.) — the light table works on both TradingView themes
+- Never use `size.tiny` for persistent dashboard or table text. It is not sufficiently readable on MacBook Pro Retina displays; `size.small` is the minimum unless the user explicitly requests otherwise.
+
+## No performance claims in user-facing text
+
+Backtest numbers are a **calibration tool**, not a selling point. They exist to improve
+quality, and they belong only where their context (instrument, timeframe, sample size,
+dataset) travels with them.
+
+**Never** put performance figures or quality claims into user-facing surfaces:
+
+- input `tooltip=` strings
+- the `indicator()` / `strategy()` title and description
+- `README.md`, `DESCRIPTION_TV.bbcode`, `CHANGELOG.md`
+- chart labels, dashboard cells, alert messages
+
+That means no win rates, no profit factors, no drawdown or R figures, and no quality
+superlatives derived from them — "highest-quality signal", "the actual edge source",
+"best in repo", "empirically validated", "data-driven default".
+
+A tooltip explains **what a setting does and why it exists** ("filters persists that fire
+without a real wave-reversal origin"). It never argues the setting is profitable.
+
+**Allowed** — real statistics, in the internal calibration record:
+
+- `strategies/<name>_strategy_assessment.md`, `APPROACH.md`, `todo.md`
+- `testdata/`, analysis scripts and their reports
+- `CATALOG.md` / root `README.md` status columns (status tracking, not promotion)
+- `.claude/` working context
+
+There, every figure carries instrument, timeframe, sample size, and the dataset it came
+from (`test92`). Code comments may point at that record (`calibrated on test1`) but must
+not repeat the numbers as proof of quality.
+
+Unpublished research strategies under `strategies/` count as part of that record — their
+tooltips may carry test-run figures while they are being tuned. The moment a script is
+published, those figures come out.
+
+Two hard limits that apply **everywhere**, including internal notes:
+
+- Never state a "100% win rate" — it is a statement about the sample, not the signal.
+- Never generalise from a small sample (n < 30) into a claim about a signal, a filter, or
+  an instrument. Report `n` next to the figure or drop the figure.
 
 ## When adding a new indicator
 

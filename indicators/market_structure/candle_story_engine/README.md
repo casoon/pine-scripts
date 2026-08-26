@@ -16,6 +16,7 @@ Interprets candle behaviour as a weighted multi-candle sequence instead of relyi
 - Follow-through and Signal Failure detection on the candle immediately after a signal
 - Classic candlestick patterns (Engulfing, Hammer, Shooting Star, Morning/Evening Star) as supporting evidence only, not standalone triggers
 - Doji are explicitly separated from Hammer/Shooting-Star detection and exported to the data window
+- Liquidity Sweep detection — a wick pierces a recent N-bar high/low and closes back inside it; informational only, not a BUY/SELL input
 - Data-window outputs (Bull/Bear Evidence, Pressure, Dominance, Exhaustion, Compression, Trend Context, Range/ATR, Relative Volume) for downstream research/backtesting
 
 ## Scoring
@@ -53,6 +54,10 @@ These are intended as raw material for later research into which signal properti
 ## Compression Breakout Attempts
 
 A bullish/bearish breakout-attempt flag requires three things on a confirmed bar: compression was active on the prior bar, the current range exceeds the configured ATR expansion threshold, and the close breaks the prior `Compression Short Window` high/low while finishing in the corresponding 40% of its range. It is intentionally not added to `bullEvidence`/`bearEvidence`: whether this feature improves outcomes needs validation before it earns score weight.
+
+## Liquidity Sweep
+
+A bullish sweep requires, on a confirmed bar, that the low pierces the prior `Sweep Lookback` N-bar low, the close recovers back above that level, the lower wick makes up at least `Sweep: Minimum Wick / Range` of the candle's range, and the close finishes in at least `Sweep: Minimum Close-Back Position` of the range (the bearish sweep mirrors this against the prior N-bar high). The referenced high/low is a rolling window, not a confirmed swing pivot — pivots in this codebase are a control/reference overlay only and never feed a trigger. Like the Compression Breakout Attempt, this is intentionally not added to `bullEvidence`/`bearEvidence`: it needs outcome validation before it earns score weight.
 
 ## Candle Roles
 

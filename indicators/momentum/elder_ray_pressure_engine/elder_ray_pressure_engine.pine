@@ -1,0 +1,418 @@
+//@version=6
+// ============================================================================
+// Elder Ray Pressure Engine [WavesUnchained]
+// Version: 1.0.1
+// Author: WavesUnchained
+// Build: 2026-08-26 23:03:01
+// ============================================================================
+// Derives Bull/Bear pressure from Alexander Elder's Bull Power / Bear Power
+// concept, but keeps price excursion, pressure, dominance, exhaustion, and
+// divergence as separate readouts instead of blending them into one score.
+//
+// Features:
+//   ✓ Four pressure engines: Classic Elder, Directional Elder, True Range Elder, Close-Weighted Elder
+//   ✓ Selectable consensus (EMA/RMA/SMA/WMA/HMA/VWMA) and source
+//   ✓ Normalization by ATR, Average Range, Percent of consensus, or RMS
+//   ✓ Net pressure, gross pressure, and dominance (-1..+1)
+//   ✓ Pressure impulse / acceleration
+//   ✓ Percentile-based extremes, kept separate from exhaustion
+//   ✓ Exhaustion detection (extreme pressure fading while price still pushes)
+//   ✓ Confirmed pivot divergences between price and pressure
+//   ✓ Whole-bar position relative to consensus (info lost by directional engines)
+//
+// ============================================================================
+
+indicator("Elder Ray Pressure Engine [WavesUnchained]", shorttitle="ER Pressure", overlay=false)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Core
+// ----------------------------------------------------------------------------
+var string groupCore = "01 · Pressure Engine"
+string engine = input.string("Classic Elder", "Calculation Model", options=["Classic Elder", "Directional Elder", "True Range Elder", "Close-Weighted Elder"], group=groupCore)
+int length = input.int(13, "Consensus Length", minval=2, group=groupCore)
+string maType = input.string("EMA", "Consensus Type", options=["EMA", "RMA", "SMA", "WMA", "HMA", "VWMA"], group=groupCore)
+float basisSource = input.source(close, "Consensus Source", group=groupCore)
+
+// ----------------------------------------------------------------------------
+// Normalization
+// ----------------------------------------------------------------------------
+var string groupNorm = "02 · Normalization"
+string normalization = input.string("ATR", "Normalization", options=["Raw", "ATR", "Average Range", "Percent", "RMS"], group=groupNorm)
+int normLength = input.int(14, "Normalization Length", minval=2, group=groupNorm)
+
+// ----------------------------------------------------------------------------
+// Signal processing
+// ----------------------------------------------------------------------------
+var string groupSignal = "03 · Signal Processing"
+int smoothLength = input.int(3, "Pressure Smoothing", minval=1, group=groupSignal)
+string smoothType = input.string("EMA", "Smoothing Type", options=["EMA", "RMA", "SMA"], group=groupSignal)
+int impulseLength = input.int(3, "Impulse Lookback", minval=1, group=groupSignal)
+
+// ----------------------------------------------------------------------------
+// Extreme / Exhaustion
+// ----------------------------------------------------------------------------
+var string groupExhaust = "04 · Exhaustion"
+int extremeLookback = input.int(200, "Extreme Lookback", minval=20, group=groupExhaust)
+float extremeThreshold = input.float(90.0, "Extreme Percentile", minval=50.0, maxval=99.0, step=1.0, group=groupExhaust)
+int extremeRecencyBars = input.int(3, "Extreme Recency Bars", minval=1, maxval=10, group=groupExhaust, tooltip="Number of bars, including the current bar, during which an extreme remains relevant for exhaustion.")
+int pricePushLookback = input.int(3, "Price Push Lookback", minval=1, maxval=10, group=groupExhaust, tooltip="Number of preceding bars used to decide whether price is still pushing to a new high or low.")
+
+// ----------------------------------------------------------------------------
+// Divergence
+// ----------------------------------------------------------------------------
+var string groupDiv = "05 · Divergence"
+bool showDivergence = input.bool(true, "Show Divergences", group=groupDiv)
+int pivotLeft = input.int(5, "Pivot Left", minval=1, group=groupDiv)
+int pivotRight = input.int(5, "Pivot Right", minval=1, group=groupDiv)
+
+// ----------------------------------------------------------------------------
+// Display
+// ----------------------------------------------------------------------------
+var string groupDisplay = "06 · Display"
+bool showBullBear = input.bool(true, "Bull / Bear Pressure", group=groupDisplay)
+bool showNet = input.bool(true, "Net Pressure", group=groupDisplay)
+bool showImpulse = input.bool(false, "Pressure Impulse", group=groupDisplay)
+bool showAcceleration = input.bool(false, "Pressure Acceleration", group=groupDisplay)
+bool showExtremeBands = input.bool(true, "Extreme Zones", group=groupDisplay)
+bool showDashboard = input.bool(true, "Dashboard", group=groupDisplay)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+f_ma(float src, int len, string kind) =>
+    switch kind
+        "EMA" => ta.ema(src, len)
+        "RMA" => ta.rma(src, len)
+        "SMA" => ta.sma(src, len)
+        "WMA" => ta.wma(src, len)
+        "HMA" => ta.hma(src, len)
+        "VWMA" => ta.vwma(src, len)
+        => ta.ema(src, len)
+
+f_smooth(float src, int len, string kind) =>
+    if len <= 1
+        src
+    else
+        switch kind
+            "EMA" => ta.ema(src, len)
+            "RMA" => ta.rma(src, len)
+            "SMA" => ta.sma(src, len)
+            => ta.ema(src, len)
+
+f_normalize(float value, float atrVal, float avgRangeVal, float basisVal, float rmsVal, string mode) =>
+    switch mode
+        "Raw" => value
+        "ATR" => na(atrVal) ? na : atrVal != 0 ? value / atrVal : 0.0
+        "Average Range" => na(avgRangeVal) ? na : avgRangeVal != 0 ? value / avgRangeVal : 0.0
+        "Percent" => na(basisVal) ? na : basisVal != 0 ? 100.0 * value / math.abs(basisVal) : 0.0
+        "RMS" => na(rmsVal) ? na : rmsVal != 0 ? value / rmsVal : 0.0
+        => value
+
+// ============================================================================
+// CONSENSUS
+// ============================================================================
+
+float basis = f_ma(basisSource, length, maType)
+
+// ============================================================================
+// RAW ELDER COMPONENTS
+// ============================================================================
+
+float classicBull = high - basis
+float classicBear = low - basis
+
+// True-range extremes include the previous close so overnight/session gaps
+// are not lost from the pressure measurement.
+float trueHigh = math.max(high, nz(close[1], high))
+float trueLow = math.min(low, nz(close[1], low))
+float trBull = trueHigh - basis
+float trBear = trueLow - basis
+
+// Closing Location Value: -1 = close at low, +1 = close at high.
+float barRange = high - low
+float clv = barRange > 0 ? (2.0 * close - high - low) / barRange : 0.0
+float bullCloseWeight = (clv + 1.0) * 0.5
+float bearCloseWeight = (1.0 - clv) * 0.5
+
+// ============================================================================
+// PRESSURE MODEL
+// ============================================================================
+
+float bullRaw = na
+float bearRaw = na
+
+switch engine
+    // Original Elder model. Both values may be positive when the entire bar
+    // trades above consensus, and both may be negative when it trades below.
+    "Classic Elder" =>
+        bullRaw := classicBull
+        bearRaw := classicBear
+    // Strict directional excursion — bull pressure can never be negative,
+    // bear pressure can never be positive. Removes "location" from pressure.
+    "Directional Elder" =>
+        bullRaw := math.max(classicBull, 0.0)
+        bearRaw := math.min(classicBear, 0.0)
+    // Gap-aware variation using true-range extremes.
+    "True Range Elder" =>
+        bullRaw := trBull
+        bearRaw := trBear
+    // Directional excursion weighted by where the bar eventually closed.
+    "Close-Weighted Elder" =>
+        bullRaw := math.max(classicBull, 0.0) * bullCloseWeight
+        bearRaw := math.min(classicBear, 0.0) * bearCloseWeight
+
+// ============================================================================
+// NORMALIZATION
+// ============================================================================
+
+float atr = ta.atr(normLength)
+float avgRange = ta.ema(high - low, normLength)
+float rawMagnitude = math.sqrt((bullRaw * bullRaw + bearRaw * bearRaw) / 2.0)
+float rmsScale = math.sqrt(ta.sma(rawMagnitude * rawMagnitude, normLength))
+
+float bullBase = f_normalize(bullRaw, atr, avgRange, basis, rmsScale, normalization)
+float bearBase = f_normalize(bearRaw, atr, avgRange, basis, rmsScale, normalization)
+
+float bull = f_smooth(bullBase, smoothLength, smoothType)
+float bear = f_smooth(bearBase, smoothLength, smoothType)
+
+// ============================================================================
+// NET / GROSS PRESSURE
+// ============================================================================
+
+float net = bull + bear
+float grossPressure = math.abs(bull) + math.abs(bear)
+
+// Signed share of net in gross pressure. This remains consistent when Classic
+// and True Range Elder place both components on the same side of zero.
+// -1..+1, +1 = purely bullish pressure, -1 = purely bearish pressure.
+float dominance = na(grossPressure) ? na : grossPressure > 0 ? net / grossPressure : 0.0
+
+// ============================================================================
+// PRESSURE IMPULSE / ACCELERATION
+// ============================================================================
+
+float impulse = net - nz(net[impulseLength], net)
+float acceleration = impulse - nz(impulse[1], impulse)
+
+// ============================================================================
+// CONSENSUS TREND
+// ============================================================================
+
+bool basisUp = basis > basis[1]
+bool basisDown = basis < basis[1]
+
+// ============================================================================
+// BAR LOCATION RELATIVE TO CONSENSUS
+//
+// Restores information that Directional/Close-Weighted Elder deliberately
+// removes from bull/bear pressure: whether the whole bar traded on one side.
+// ============================================================================
+
+bool entireBarAbove = low > basis
+bool entireBarBelow = high < basis
+string barPosition = entireBarAbove ? "Above" : entireBarBelow ? "Below" : "Straddle"
+
+// ============================================================================
+// PERCENTILE EXTREMES
+// ============================================================================
+
+float bullRank = ta.percentrank(bull, extremeLookback)
+float bearSeverity = -bear
+float bearRank = ta.percentrank(bearSeverity, extremeLookback)
+bool bullExtreme = bullRank >= extremeThreshold
+bool bearExtreme = bearRank >= extremeThreshold
+
+// ============================================================================
+// EXHAUSTION
+//
+// Extreme pressure alone is not exhaustion. Exhaustion requires recent
+// extreme pressure, price still attempting the move, and the corresponding
+// pressure no longer confirming it.
+// ============================================================================
+
+bool recentBullExtreme = ta.barssince(bullExtreme) < extremeRecencyBars
+bool recentBearExtreme = ta.barssince(bearExtreme) < extremeRecencyBars
+bool bullPressureFalling = bull < bull[1]
+bool bearPressureRecovering = bear > bear[1]
+bool priceStillPushingHigh = high >= ta.highest(high, pricePushLookback)[1]
+bool priceStillPushingLow = low <= ta.lowest(low, pricePushLookback)[1]
+
+bool bullExhaustionCandidate = recentBullExtreme and bullPressureFalling and priceStillPushingHigh
+bool bearExhaustionCandidate = recentBearExtreme and bearPressureRecovering and priceStillPushingLow
+bool dualExhaustion = barstate.isconfirmed and bullExhaustionCandidate and bearExhaustionCandidate
+bool bullExhaustion = barstate.isconfirmed and bullExhaustionCandidate and not bearExhaustionCandidate
+bool bearExhaustion = barstate.isconfirmed and bearExhaustionCandidate and not bullExhaustionCandidate
+
+// ============================================================================
+// PRESSURE STATE
+// ============================================================================
+
+string pressureState = ""
+if dualExhaustion
+    pressureState := "Dual Exhaustion"
+else if bullExhaustion
+    pressureState := "Bull Exhaustion"
+else if bearExhaustion
+    pressureState := "Bear Exhaustion"
+else if net > 0 and impulse > 0
+    pressureState := "Bull Expansion"
+else if net > 0 and impulse < 0
+    pressureState := "Bull Deceleration"
+else if net < 0 and impulse < 0
+    pressureState := "Bear Expansion"
+else if net < 0 and impulse > 0
+    pressureState := "Bear Deceleration"
+else
+    pressureState := "Balanced"
+
+// ============================================================================
+// TREND + PRESSURE REGIME
+// ============================================================================
+
+string regime = ""
+if basisUp and net > 0
+    regime := "Bull Confirmed"
+else if basisUp and net < 0
+    regime := "Bull Pullback"
+else if basisDown and net < 0
+    regime := "Bear Confirmed"
+else if basisDown and net > 0
+    regime := "Bear Rally"
+else
+    regime := "Neutral"
+
+// ============================================================================
+// DIVERGENCE
+//
+// Bearish: price higher high, Bull Power lower high.
+// Bullish: price lower low, Bear Power higher low.
+// Pivots confirm after pivotRight bars. Signals are gated to the close of the
+// confirmation bar and plotted there, never backdated to the pivot bar.
+// ============================================================================
+
+float pricePivotHigh = ta.pivothigh(high, pivotLeft, pivotRight)
+float pricePivotLow = ta.pivotlow(low, pivotLeft, pivotRight)
+
+float bullAtHighPivot = not na(pricePivotHigh) ? bull[pivotRight] : na
+float bearAtLowPivot = not na(pricePivotLow) ? bear[pivotRight] : na
+
+float previousPriceHigh = ta.valuewhen(not na(pricePivotHigh), pricePivotHigh, 1)
+float previousBullHigh = ta.valuewhen(not na(pricePivotHigh), bull[pivotRight], 1)
+float previousPriceLow = ta.valuewhen(not na(pricePivotLow), pricePivotLow, 1)
+float previousBearLow = ta.valuewhen(not na(pricePivotLow), bear[pivotRight], 1)
+
+bool bearishDivergence = showDivergence and barstate.isconfirmed and not na(pricePivotHigh) and not na(previousPriceHigh) and pricePivotHigh > previousPriceHigh and bullAtHighPivot < previousBullHigh
+bool bullishDivergence = showDivergence and barstate.isconfirmed and not na(pricePivotLow) and not na(previousPriceLow) and pricePivotLow < previousPriceLow and bearAtLowPivot > previousBearLow
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+
+hline(0, "Zero", color=color.new(color.gray, 65))
+
+plot(showBullBear ? bull : na, "Bull Pressure", color=color.new(color.lime, 5), linewidth=2)
+plot(showBullBear ? bear : na, "Bear Pressure", color=color.new(color.red, 5), linewidth=2)
+
+color netColor = net >= 0 ? color.new(color.teal, 15) : color.new(color.orange, 15)
+plot(showNet ? net : na, "Net Pressure", style=plot.style_columns, color=netColor)
+
+color impulseColor = impulse >= 0 ? color.new(color.aqua, 15) : color.new(color.fuchsia, 15)
+plot(showImpulse ? impulse : na, "Pressure Impulse", color=impulseColor, linewidth=1)
+
+color accelerationColor = acceleration >= 0 ? color.new(color.blue, 15) : color.new(color.purple, 15)
+plot(showAcceleration ? acceleration : na, "Pressure Acceleration", color=accelerationColor, linewidth=1)
+
+bgcolor(showExtremeBands and bullExtreme ? color.new(#00c853, 85) : na)
+bgcolor(showExtremeBands and bearExtreme ? color.new(#d50000, 85) : na)
+
+// ============================================================================
+// EXHAUSTION MARKERS
+// ============================================================================
+
+plotshape(bullExhaustion, title="Bull Exhaustion", style=shape.triangledown, location=location.top, color=color.orange, size=size.tiny)
+plotshape(bearExhaustion, title="Bear Exhaustion", style=shape.triangleup, location=location.bottom, color=color.aqua, size=size.tiny)
+plotshape(dualExhaustion, title="Dual Exhaustion", style=shape.diamond, location=location.top, color=#ff6f00, size=size.small, text="DUAL")
+
+// ============================================================================
+// DIVERGENCE MARKERS
+// ============================================================================
+
+plotshape(bearishDivergence, title="Bearish Pressure Divergence", style=shape.triangledown, location=location.top, color=color.red, size=size.small, text="DIV")
+plotshape(bullishDivergence, title="Bullish Pressure Divergence", style=shape.triangleup, location=location.bottom, color=color.lime, size=size.small, text="DIV")
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+var table dash = table.new(position.top_right, 2, 11,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "ER Pressure", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dash, 1, 0, engine, text_color=tc, bgcolor=hd, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Regime", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, regime, text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Position", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, barPosition, text_color=tc, text_size=size.small)
+
+    color stateBg = color.new(color.gray, 80)
+    color stateTx = tc
+    if pressureState == "Dual Exhaustion" or pressureState == "Bull Exhaustion" or pressureState == "Bear Exhaustion"
+        stateBg := color.new(#ff6f00, 10)
+        stateTx := color.white
+    else if pressureState == "Bull Expansion"
+        stateBg := color.new(#00c853, 10)
+        stateTx := color.white
+    else if pressureState == "Bear Expansion"
+        stateBg := color.new(#d50000, 10)
+        stateTx := color.white
+
+    table.cell(dash, 0, 3, "State", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, pressureState, text_color=stateTx, bgcolor=stateBg, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Bull", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(bull, "#.###"), text_color=#00c853, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Bear", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(bear, "#.###"), text_color=#d50000, text_size=size.small)
+
+    color netTx = net >= 0 ? #00c853 : #d50000
+    table.cell(dash, 0, 6, "Net", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(net, "#.###"), text_color=netTx, text_size=size.small)
+
+    table.cell(dash, 0, 7, "Gross", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(grossPressure, "#.###"), text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 8, "Dominance", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 8, str.tostring(dominance * 100.0, "#.0") + "%", text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 9, "Bull Rank", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 9, str.tostring(bullRank, "#.0") + "%", text_color=tc, text_size=size.small)
+
+    table.cell(dash, 0, 10, "Bear Rank", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 10, str.tostring(bearRank, "#.0") + "%", text_color=tc, text_size=size.small)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(bullExhaustion, "Bull Pressure Exhaustion", "Bull pressure exhaustion detected.")
+alertcondition(bearExhaustion, "Bear Pressure Exhaustion", "Bear pressure exhaustion detected.")
+alertcondition(dualExhaustion, "Dual Pressure Exhaustion", "Bull and bear pressure exhaustion detected on the same bar.")
+alertcondition(bearishDivergence, "Bearish Pressure Divergence", "Price has formed a higher high while Bull Pressure formed a lower high.")
+alertcondition(bullishDivergence, "Bullish Pressure Divergence", "Price has formed a lower low while Bear Pressure formed a higher low.")

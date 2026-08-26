@@ -1,0 +1,1102 @@
+//@version=6
+// ============================================================================
+// Klinger Volume Force Map [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2026-08-26
+// ============================================================================
+// Volume-force analysis based on Stephen J. Klinger's original 1997 concept.
+//
+// Features:
+//   ✓ Original 1997 Volume Force formula as default
+//   ✓ Alternative formula variants for research/comparison
+//   ✓ Raw KVO remains the source of all zero/signal-cross logic
+//   ✓ Zero-preserving normalization for readable cross-market visualization
+//   ✓ Momentum histogram (KVO - Signal) with acceleration/deceleration states
+//   ✓ Hysteretic Bull / Neutral / Bear regime engine
+//   ✓ Strong Bull / Strong Bear expansion states
+//   ✓ Confirmed regular + hidden divergence on confirmed PRICE pivots
+//   ✓ Divergence quality filter using ATR displacement, KVO displacement, separation
+//   ✓ Bull/Bear Flow Rejection continuation events
+//   ✓ Flow-confirmed structural breakouts
+//   ✓ Clean / Analysis / Research visual modes
+//   ✓ Optional price-chart divergence overlay via force_overlay
+//   ✓ Compact current-state dashboard + research diagnostics
+//
+// ============================================================================
+
+indicator(
+     "Klinger Volume Force Map [WavesUnchained]",
+     shorttitle = "KVO Force Map",
+     overlay = false,
+     max_lines_count = 500,
+     max_labels_count = 500,
+     precision = 3)
+
+// ============================================================================
+// GROUPS
+// ============================================================================
+string G_CALC     = "01 · Calculation"
+string G_NORM     = "02 · Normalization"
+string G_DYN      = "03 · Dynamics"
+string G_REGIME   = "04 · Regime Engine"
+string G_DIV      = "05 · Divergence"
+string G_EVENTS   = "06 · Events"
+string G_VIS      = "07 · Visual"
+string G_RESEARCH = "08 · Research"
+
+// ============================================================================
+// INPUTS — CALCULATION
+// ============================================================================
+string formulaMode = input.string(
+     "Original 1997",
+     "Volume Force formula",
+     options = ["Original 1997", "TradingView Documentation", "Signed Volume Simplified"],
+     group = G_CALC,
+     tooltip =
+       "Original 1997: V × abs(2×DM/CM − 1) × Trend × 100.\n" +
+       "TradingView Documentation: V × [2×(DM/CM − 1)] × Trend × 100.\n" +
+       "Signed Volume Simplified: V × Trend × 100. Research baseline only.")
+
+int fastLen = input.int(34, "Fast EMA", minval = 1, group = G_CALC)
+int slowLen = input.int(55, "Slow EMA", minval = 2, group = G_CALC)
+int sigLen  = input.int(13, "Signal EMA", minval = 1, group = G_CALC)
+
+// ============================================================================
+// INPUTS — NORMALIZATION
+// ============================================================================
+string normMode = input.string(
+     "Relative Force",
+     "Display normalization",
+     options = ["Relative Force", "StdDev Scale", "Raw"],
+     group = G_NORM)
+
+int normLen = input.int(
+     100, "Normalization lookback", minval = 20, maxval = 1000, group = G_NORM)
+
+float normFloor = input.float(
+     1e-10, "Denominator floor", minval = 1e-12, step = 1e-10, group = G_NORM,
+     tooltip = "Numerical guard only. Normally leave unchanged.")
+
+// ============================================================================
+// INPUTS — DYNAMICS
+// ============================================================================
+int slopeSmoothLen = input.int(
+     3, "KVO slope smoothing", minval = 1, maxval = 50, group = G_DYN)
+
+int histSmoothLen = input.int(
+     1, "Histogram smoothing", minval = 1, maxval = 20, group = G_DYN,
+     tooltip = "1 = no additional smoothing.")
+
+// ============================================================================
+// INPUTS — REGIME
+// ============================================================================
+float regimeEnter = input.float(
+     0.35, "Regime enter threshold", minval = 0.01, step = 0.05, group = G_REGIME,
+     tooltip = "Applied to Relative Force regardless of display normalization.")
+
+float regimeExit = input.float(
+     0.20, "Regime exit threshold", minval = 0.0, step = 0.05, group = G_REGIME,
+     tooltip = "Hysteresis threshold. Must normally be below enter threshold.")
+
+int regimeConfirmBars = input.int(
+     1, "Regime confirmation bars", minval = 1, maxval = 20, group = G_REGIME)
+
+bool strongNeedsHistogram = input.bool(
+     true, "Strong regime requires histogram agreement", group = G_REGIME)
+
+bool strongNeedsSlope = input.bool(
+     true, "Strong regime requires KVO slope agreement", group = G_REGIME)
+
+// ============================================================================
+// INPUTS — DIVERGENCE
+// ============================================================================
+bool divRegular = input.bool(true, "Regular divergence", group = G_DIV)
+bool divHidden  = input.bool(true, "Hidden divergence", group = G_DIV)
+
+int pivotLeft  = input.int(5, "Pivot left bars", minval = 1, maxval = 50, group = G_DIV)
+int pivotRight = input.int(5, "Pivot right bars", minval = 1, maxval = 50, group = G_DIV)
+
+int divMinBars = input.int(
+     5, "Minimum pivot separation", minval = 1, maxval = 200, group = G_DIV)
+
+int divMaxBars = input.int(
+     80, "Maximum pivot separation", minval = 2, maxval = 500, group = G_DIV)
+
+string divQualityFilter = input.string(
+     "Moderate",
+     "Quality filter",
+     options = ["All", "Moderate", "Strong"],
+     group = G_DIV)
+
+float divPriceAtrMin = input.float(
+     0.35, "Price displacement · ATR min", minval = 0.0, step = 0.05, group = G_DIV)
+
+float divKvoNormMin = input.float(
+     0.15, "KVO displacement · relative min", minval = 0.0, step = 0.05, group = G_DIV)
+
+int divStrongSep = input.int(
+     12, "Strong separation bars", minval = 2, maxval = 200, group = G_DIV)
+
+bool divRequireRegimeContext = input.bool(
+     false, "Strong quality requires regime context", group = G_DIV,
+     tooltip =
+       "Bearish: previous/current KVO shows positive context.\n" +
+       "Bullish: previous/current KVO shows negative context.")
+
+// ============================================================================
+// INPUTS — EVENTS
+// ============================================================================
+bool showSignalCrosses = input.bool(false, "Show signal crosses", group = G_EVENTS)
+bool showZeroCrosses   = input.bool(false, "Show zero crosses", group = G_EVENTS)
+
+bool showRejections = input.bool(true, "Flow Rejections", group = G_EVENTS)
+int rejectionContextBars = input.int(
+     35, "Rejection context bars", minval = 5, maxval = 300, group = G_EVENTS)
+
+int rejectionWindow = input.int(
+     20, "Rejection completion window", minval = 2, maxval = 100, group = G_EVENTS)
+
+float rejectionTouch = input.float(
+     0.10, "Rejection touch threshold", minval = 0.0, step = 0.05, group = G_EVENTS,
+     tooltip =
+       "Bull setup arms when Relative Force falls to <= this level after recent bull context.\n" +
+       "Bear setup is mirrored.")
+
+bool rejectionRequireHistTurn = input.bool(
+     true, "Rejection requires histogram turn", group = G_EVENTS)
+
+bool showFlowConfirm = input.bool(true, "Flow-confirmed structure breaks", group = G_EVENTS)
+bool flowConfirmStrongOnly = input.bool(
+     false, "Structure break requires Strong regime", group = G_EVENTS)
+
+// ============================================================================
+// INPUTS — VISUAL
+// ============================================================================
+string visualMode = input.string(
+     "Analysis",
+     "Visual mode",
+     options = ["Clean", "Analysis", "Research"],
+     group = G_VIS)
+
+bool showDashboard = input.bool(true, "Dashboard", group = G_VIS)
+bool showRegimeRibbon = input.bool(true, "Regime ribbon", group = G_VIS)
+bool showCompression = input.bool(true, "Compression zone", group = G_VIS)
+
+bool showPriceDivOverlay = input.bool(
+     false, "Divergence lines on price chart", group = G_VIS,
+     tooltip = "Uses force_overlay. Confirmed divergence only.")
+
+bool showPriceEventOverlay = input.bool(
+     false, "Flow event markers on price chart", group = G_VIS)
+
+float ribbonLevel = input.float(
+     -2.8, "Ribbon vertical level", step = 0.1, group = G_VIS,
+     tooltip = "Only affects normalized displays. Move lower if it overlaps the oscillator.")
+
+// ============================================================================
+// INPUTS — RESEARCH
+// ============================================================================
+int correlationLen = input.int(
+     200, "Formula correlation lookback", minval = 30, maxval = 2000, group = G_RESEARCH)
+
+bool researchPlotAlternatives = input.bool(
+     false, "Plot alternative KVO formulas", group = G_RESEARCH)
+
+// ============================================================================
+// COLORS
+// ============================================================================
+color C_BULL_STRONG = color.rgb(0, 175, 120)
+color C_BULL        = color.rgb(65, 175, 130)
+color C_BULL_FADE   = color.new(C_BULL, 55)
+
+color C_BEAR_STRONG = color.rgb(220, 75, 85)
+color C_BEAR        = color.rgb(190, 85, 95)
+color C_BEAR_FADE   = color.new(C_BEAR, 55)
+
+color C_NEUTRAL     = color.rgb(125, 130, 140)
+color C_SIGNAL      = color.rgb(210, 165, 60)
+color C_KVO         = color.rgb(85, 145, 225)
+
+color C_HIDDEN_BULL = color.rgb(60, 155, 120)
+color C_HIDDEN_BEAR = color.rgb(180, 95, 110)
+
+color C_ZONE        = color.new(C_NEUTRAL, 92)
+color C_ZERO        = color.new(C_NEUTRAL, 35)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+f_safe_div(float numerator, float denominator) =>
+    math.abs(denominator) > normFloor ? numerator / denominator : 0.0
+
+f_quality_name(int q) =>
+    q >= 3 ? "Strong" : q >= 2 ? "Moderate" : "Weak"
+
+f_quality_allowed(int q) =>
+    divQualityFilter == "All" ? q >= 1 :
+     divQualityFilter == "Moderate" ? q >= 2 :
+     q >= 3
+
+f_regime_name(int state) =>
+    state == 2 ? "Strong Bull" :
+     state == 1 ? "Bull" :
+     state == -1 ? "Bear" :
+     state == -2 ? "Strong Bear" :
+     "Transition"
+
+f_regime_color(int state) =>
+    state == 2 ? C_BULL_STRONG :
+     state == 1 ? C_BULL :
+     state == -1 ? C_BEAR :
+     state == -2 ? C_BEAR_STRONG :
+     C_NEUTRAL
+
+f_force_name(float r, float slope, float hist, float histDelta) =>
+    r > 0 and slope > 0 and hist > 0 and histDelta > 0 ? "Bull expanding" :
+     r > 0 and (slope < 0 or histDelta < 0) ? "Bull fading" :
+     r < 0 and slope < 0 and hist < 0 and histDelta < 0 ? "Bear expanding" :
+     r < 0 and (slope > 0 or histDelta > 0) ? "Bear fading" :
+     "Mixed"
+
+f_hist_color(float hist, float delta) =>
+    hist >= 0 ?
+         (delta >= 0 ? C_BULL_STRONG : C_BULL_FADE) :
+         (delta <= 0 ? C_BEAR_STRONG : C_BEAR_FADE)
+
+// ============================================================================
+// CORE — KLINGER TREND, DM, CM
+// ============================================================================
+float sumHLC = high + low + close
+float dm = math.max(high - low, 0.0)
+
+var int kTrend = 1
+if bar_index == 0
+    kTrend := 1
+else
+    kTrend := sumHLC > sumHLC[1] ? 1 :
+         sumHLC < sumHLC[1] ? -1 :
+         nz(kTrend[1], 1)
+
+var float cm = na
+if bar_index == 0
+    cm := dm
+else
+    cm := kTrend == nz(kTrend[1], kTrend) ?
+         nz(cm[1], dm) + dm :
+         nz(dm[1], dm) + dm
+
+float ratio = f_safe_div(dm, cm)
+float vol = nz(volume, 0.0)
+
+// Original Stephen J. Klinger formulation.
+float vfOriginal = vol * math.abs(2.0 * ratio - 1.0) * kTrend * 100.0
+
+// Current TradingView documentation formulation kept solely for comparison.
+float vfTVDocs = vol * (2.0 * (ratio - 1.0)) * kTrend * 100.0
+
+// Deliberately simple research baseline.
+float vfSigned = vol * kTrend * 100.0
+
+float vf = formulaMode == "Original 1997" ? vfOriginal :
+     formulaMode == "TradingView Documentation" ? vfTVDocs :
+     vfSigned
+
+// ============================================================================
+// CORE — KVO / SIGNAL FOR ALL FORMULA MODES
+// ============================================================================
+float kvoOriginal = ta.ema(vfOriginal, fastLen) - ta.ema(vfOriginal, slowLen)
+float sigOriginal = ta.ema(kvoOriginal, sigLen)
+
+float kvoTVDocs = ta.ema(vfTVDocs, fastLen) - ta.ema(vfTVDocs, slowLen)
+float sigTVDocs = ta.ema(kvoTVDocs, sigLen)
+
+float kvoSigned = ta.ema(vfSigned, fastLen) - ta.ema(vfSigned, slowLen)
+float sigSigned = ta.ema(kvoSigned, sigLen)
+
+float kvoRaw = formulaMode == "Original 1997" ? kvoOriginal :
+     formulaMode == "TradingView Documentation" ? kvoTVDocs :
+     kvoSigned
+
+float signalRaw = formulaMode == "Original 1997" ? sigOriginal :
+     formulaMode == "TradingView Documentation" ? sigTVDocs :
+     sigSigned
+
+float histRawUnsmoothed = kvoRaw - signalRaw
+float histRaw = histSmoothLen <= 1 ? histRawUnsmoothed : ta.ema(histRawUnsmoothed, histSmoothLen)
+
+// ============================================================================
+// NORMALIZATION
+//
+// Default normalization is:
+//      RelativeForce = KVO / EMA(abs(KVO), N)
+// Signal and histogram are divided by the SAME denominator. This preserves
+// zero crossings and KVO/Signal crossings while making the pane far easier
+// to compare across instruments.
+//
+// Research note: "StdDev scale" intentionally uses KVO / stdev(KVO), NOT a
+// mean-subtracted Z-score. A classical Z-score would move the semantic KVO
+// zero line.
+// ============================================================================
+// Relative Force is also the canonical regime metric regardless of display mode.
+float relativeDen = math.max(ta.ema(math.abs(kvoRaw), normLen), normFloor)
+float relativeKvo = kvoRaw / relativeDen
+float relativeSignal = signalRaw / relativeDen
+float relativeHist = histRaw / relativeDen
+
+float stdDen = math.max(nz(ta.stdev(kvoRaw, normLen), 0.0), normFloor)
+float stdKvo = kvoRaw / stdDen
+float stdSignal = signalRaw / stdDen
+float stdHist = histRaw / stdDen
+
+float kvoDisplay = normMode == "Relative Force" ? relativeKvo :
+     normMode == "StdDev Scale" ? stdKvo :
+     kvoRaw
+
+float signalDisplay = normMode == "Relative Force" ? relativeSignal :
+     normMode == "StdDev Scale" ? stdSignal :
+     signalRaw
+
+float histDisplay = normMode == "Relative Force" ? relativeHist :
+     normMode == "StdDev Scale" ? stdHist :
+     histRaw
+
+// ============================================================================
+// DYNAMICS
+// ============================================================================
+float kvoSlopeRaw = kvoRaw - kvoRaw[1]
+float kvoSlope = slopeSmoothLen <= 1 ? kvoSlopeRaw : ta.ema(kvoSlopeRaw, slopeSmoothLen)
+
+float histDeltaRaw = histRaw - histRaw[1]
+float histDeltaRelative = relativeHist - relativeHist[1]
+
+bool bullExpansion =
+     relativeKvo > 0 and kvoRaw > signalRaw and
+     (not strongNeedsSlope or kvoSlope > 0) and
+     (not strongNeedsHistogram or (histRaw > 0 and histDeltaRaw >= 0))
+
+bool bearExpansion =
+     relativeKvo < 0 and kvoRaw < signalRaw and
+     (not strongNeedsSlope or kvoSlope < 0) and
+     (not strongNeedsHistogram or (histRaw < 0 and histDeltaRaw <= 0))
+
+// ============================================================================
+// REGIME ENGINE — HYSTERESIS + OPTIONAL CONFIRMATION
+// ============================================================================
+float enterThreshold = math.max(regimeEnter, regimeExit + 0.000001)
+float exitThreshold = math.min(regimeExit, enterThreshold - 0.000001)
+
+bool bullEnterRaw = relativeKvo >= enterThreshold
+bool bearEnterRaw = relativeKvo <= -enterThreshold
+
+bool bullEnterConfirmed = math.sum(bullEnterRaw ? 1.0 : 0.0, regimeConfirmBars) >= regimeConfirmBars
+bool bearEnterConfirmed = math.sum(bearEnterRaw ? 1.0 : 0.0, regimeConfirmBars) >= regimeConfirmBars
+
+var int baseRegime = 0
+
+if baseRegime == 1
+    if relativeKvo < exitThreshold
+        baseRegime := bearEnterConfirmed ? -1 : 0
+else if baseRegime == -1
+    if relativeKvo > -exitThreshold
+        baseRegime := bullEnterConfirmed ? 1 : 0
+else
+    if bullEnterConfirmed
+        baseRegime := 1
+    else if bearEnterConfirmed
+        baseRegime := -1
+
+int regimeState = baseRegime == 1 ? (bullExpansion ? 2 : 1) :
+     baseRegime == -1 ? (bearExpansion ? -2 : -1) :
+     0
+
+bool compression = math.abs(relativeKvo) < enterThreshold
+
+// ============================================================================
+// PRICE STRUCTURE PIVOTS
+// ============================================================================
+float pricePH = ta.pivothigh(high, pivotLeft, pivotRight)
+float pricePL = ta.pivotlow(low, pivotLeft, pivotRight)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+
+if not na(pricePH)
+    lastSwingHigh := pricePH
+
+if not na(pricePL)
+    lastSwingLow := pricePL
+
+// ============================================================================
+// DIVERGENCE ENGINE
+//
+// Design choice:
+// We anchor divergence comparison to CONFIRMED PRICE pivots, then sample the
+// KVO at exactly those pivot bars. This gives a stable price-structure question:
+// "Did Volume Force confirm the new price swing?"
+//
+// IMPORTANT: a divergence is therefore emitted only after `Pivot right bars`
+// have elapsed. This avoids repainting a still-forming pivot at the cost of
+// confirmation delay.
+// ============================================================================
+var int prevHighIndex = na
+var float prevHighPrice = na
+var float prevHighKvoRaw = na
+var float prevHighKvoDisplay = na
+var float prevHighKvoRelative = na
+
+var int prevLowIndex = na
+var float prevLowPrice = na
+var float prevLowKvoRaw = na
+var float prevLowKvoDisplay = na
+var float prevLowKvoRelative = na
+
+bool regularBearDiv = false
+bool hiddenBearDiv = false
+bool regularBullDiv = false
+bool hiddenBullDiv = false
+
+int bearDivQuality = 0
+int bullDivQuality = 0
+
+if not na(pricePH)
+    int currIndex = bar_index - pivotRight
+    float currPrice = pricePH
+    float currKvoRaw = kvoRaw[pivotRight]
+    float currKvoDisplay = kvoDisplay[pivotRight]
+    float currKvoRelative = relativeKvo[pivotRight]
+    float atrAtPivot = math.max(nz(ta.atr(14)[pivotRight], syminfo.mintick), syminfo.mintick)
+
+    if not na(prevHighIndex)
+        int sep = currIndex - prevHighIndex
+        bool validSep = sep >= divMinBars and sep <= divMaxBars
+
+        bool reg = validSep and currPrice > prevHighPrice and currKvoRaw < prevHighKvoRaw
+        bool hid = validSep and currPrice < prevHighPrice and currKvoRaw > prevHighKvoRaw
+
+        float priceDisp = math.abs(currPrice - prevHighPrice) / atrAtPivot
+        float kvoDisp = math.abs(currKvoRelative - prevHighKvoRelative)
+
+        int quality = (priceDisp >= divPriceAtrMin ? 1 : 0) +
+             (kvoDisp >= divKvoNormMin ? 1 : 0) +
+             (sep >= divStrongSep ? 1 : 0)
+
+        bool regimeContext = math.max(currKvoRelative, prevHighKvoRelative) > 0
+        if divRequireRegimeContext and not regimeContext
+            quality := math.max(quality - 1, 0)
+
+        bearDivQuality := quality
+
+        if divRegular and reg and f_quality_allowed(quality)
+            regularBearDiv := true
+            color divColor = quality >= 3 ? C_BEAR_STRONG : C_BEAR
+            int divWidth = quality >= 3 ? 3 : 2
+
+            line.new(
+                 prevHighIndex, prevHighKvoDisplay,
+                 currIndex, currKvoDisplay,
+                 xloc = xloc.bar_index,
+                 color = divColor,
+                 width = divWidth)
+
+            label.new(
+                 currIndex, currKvoDisplay,
+                 quality >= 3 ? "RD− Strong" : "RD−",
+                 xloc = xloc.bar_index,
+                 style = label.style_label_down,
+                 textcolor = color.white,
+                 color = color.new(divColor, 15),
+                 size = size.tiny)
+
+            if showPriceDivOverlay
+                line.new(
+                     prevHighIndex, prevHighPrice,
+                     currIndex, currPrice,
+                     xloc = xloc.bar_index,
+                     color = divColor,
+                     width = divWidth,
+                     force_overlay = true)
+
+        if divHidden and hid and f_quality_allowed(quality)
+            hiddenBearDiv := true
+            color divColor = quality >= 3 ? C_BEAR_STRONG : C_HIDDEN_BEAR
+            int divWidth = quality >= 3 ? 3 : 1
+
+            line.new(
+                 prevHighIndex, prevHighKvoDisplay,
+                 currIndex, currKvoDisplay,
+                 xloc = xloc.bar_index,
+                 color = divColor,
+                 width = divWidth,
+                 style = line.style_dashed)
+
+            label.new(
+                 currIndex, currKvoDisplay,
+                 quality >= 3 ? "HD− Strong" : "HD−",
+                 xloc = xloc.bar_index,
+                 style = label.style_label_down,
+                 textcolor = color.white,
+                 color = color.new(divColor, 25),
+                 size = size.tiny)
+
+            if showPriceDivOverlay
+                line.new(
+                     prevHighIndex, prevHighPrice,
+                     currIndex, currPrice,
+                     xloc = xloc.bar_index,
+                     color = divColor,
+                     width = divWidth,
+                     style = line.style_dashed,
+                     force_overlay = true)
+
+    prevHighIndex := currIndex
+    prevHighPrice := currPrice
+    prevHighKvoRaw := currKvoRaw
+    prevHighKvoDisplay := currKvoDisplay
+    prevHighKvoRelative := currKvoRelative
+
+if not na(pricePL)
+    int currIndex = bar_index - pivotRight
+    float currPrice = pricePL
+    float currKvoRaw = kvoRaw[pivotRight]
+    float currKvoDisplay = kvoDisplay[pivotRight]
+    float currKvoRelative = relativeKvo[pivotRight]
+    float atrAtPivot = math.max(nz(ta.atr(14)[pivotRight], syminfo.mintick), syminfo.mintick)
+
+    if not na(prevLowIndex)
+        int sep = currIndex - prevLowIndex
+        bool validSep = sep >= divMinBars and sep <= divMaxBars
+
+        bool reg = validSep and currPrice < prevLowPrice and currKvoRaw > prevLowKvoRaw
+        bool hid = validSep and currPrice > prevLowPrice and currKvoRaw < prevLowKvoRaw
+
+        float priceDisp = math.abs(currPrice - prevLowPrice) / atrAtPivot
+        float kvoDisp = math.abs(currKvoRelative - prevLowKvoRelative)
+
+        int quality = (priceDisp >= divPriceAtrMin ? 1 : 0) +
+             (kvoDisp >= divKvoNormMin ? 1 : 0) +
+             (sep >= divStrongSep ? 1 : 0)
+
+        bool regimeContext = math.min(currKvoRelative, prevLowKvoRelative) < 0
+        if divRequireRegimeContext and not regimeContext
+            quality := math.max(quality - 1, 0)
+
+        bullDivQuality := quality
+
+        if divRegular and reg and f_quality_allowed(quality)
+            regularBullDiv := true
+            color divColor = quality >= 3 ? C_BULL_STRONG : C_BULL
+            int divWidth = quality >= 3 ? 3 : 2
+
+            line.new(
+                 prevLowIndex, prevLowKvoDisplay,
+                 currIndex, currKvoDisplay,
+                 xloc = xloc.bar_index,
+                 color = divColor,
+                 width = divWidth)
+
+            label.new(
+                 currIndex, currKvoDisplay,
+                 quality >= 3 ? "RD+ Strong" : "RD+",
+                 xloc = xloc.bar_index,
+                 style = label.style_label_up,
+                 textcolor = color.white,
+                 color = color.new(divColor, 15),
+                 size = size.tiny)
+
+            if showPriceDivOverlay
+                line.new(
+                     prevLowIndex, prevLowPrice,
+                     currIndex, currPrice,
+                     xloc = xloc.bar_index,
+                     color = divColor,
+                     width = divWidth,
+                     force_overlay = true)
+
+        if divHidden and hid and f_quality_allowed(quality)
+            hiddenBullDiv := true
+            color divColor = quality >= 3 ? C_BULL_STRONG : C_HIDDEN_BULL
+            int divWidth = quality >= 3 ? 3 : 1
+
+            line.new(
+                 prevLowIndex, prevLowKvoDisplay,
+                 currIndex, currKvoDisplay,
+                 xloc = xloc.bar_index,
+                 color = divColor,
+                 width = divWidth,
+                 style = line.style_dashed)
+
+            label.new(
+                 currIndex, currKvoDisplay,
+                 quality >= 3 ? "HD+ Strong" : "HD+",
+                 xloc = xloc.bar_index,
+                 style = label.style_label_up,
+                 textcolor = color.white,
+                 color = color.new(divColor, 25),
+                 size = size.tiny)
+
+            if showPriceDivOverlay
+                line.new(
+                     prevLowIndex, prevLowPrice,
+                     currIndex, currPrice,
+                     xloc = xloc.bar_index,
+                     color = divColor,
+                     width = divWidth,
+                     style = line.style_dashed,
+                     force_overlay = true)
+
+    prevLowIndex := currIndex
+    prevLowPrice := currPrice
+    prevLowKvoRaw := currKvoRaw
+    prevLowKvoDisplay := currKvoDisplay
+    prevLowKvoRelative := currKvoRelative
+
+// ============================================================================
+// EVENT ENGINE — BASIC CROSSES
+// ============================================================================
+bool bullSignalCross = ta.crossover(kvoRaw, signalRaw)
+bool bearSignalCross = ta.crossunder(kvoRaw, signalRaw)
+
+bool bullZeroCross = ta.crossover(kvoRaw, 0.0)
+bool bearZeroCross = ta.crossunder(kvoRaw, 0.0)
+
+// ============================================================================
+// EVENT ENGINE — FLOW REJECTION
+//
+// Bull sequence:
+//   recent positive context -> Relative Force touches near/under zero ->
+//   KVO re-crosses Signal with positive slope (+ optional histogram turn).
+//
+// Bear sequence is mirrored.
+// ============================================================================
+bool recentBullContext = ta.highest(relativeKvo, rejectionContextBars) >= enterThreshold
+bool recentBearContext = ta.lowest(relativeKvo, rejectionContextBars) <= -enterThreshold
+
+var int bullRejectArmBar = na
+var int bearRejectArmBar = na
+
+bool bullTouch = recentBullContext and relativeKvo <= rejectionTouch
+bool bearTouch = recentBearContext and relativeKvo >= -rejectionTouch
+
+if bullTouch and not recentBearContext
+    bullRejectArmBar := bar_index
+
+if bearTouch and not recentBullContext
+    bearRejectArmBar := bar_index
+
+if not na(bullRejectArmBar) and bar_index - bullRejectArmBar > rejectionWindow
+    bullRejectArmBar := na
+
+if not na(bearRejectArmBar) and bar_index - bearRejectArmBar > rejectionWindow
+    bearRejectArmBar := na
+
+bool bullHistTurnOk = not rejectionRequireHistTurn or histDeltaRaw > 0
+bool bearHistTurnOk = not rejectionRequireHistTurn or histDeltaRaw < 0
+
+bool bullFlowRejection =
+     showRejections and not na(bullRejectArmBar) and
+     bullSignalCross and kvoSlope > 0 and bullHistTurnOk and
+     relativeKvo > -enterThreshold
+
+bool bearFlowRejection =
+     showRejections and not na(bearRejectArmBar) and
+     bearSignalCross and kvoSlope < 0 and bearHistTurnOk and
+     relativeKvo < enterThreshold
+
+if bullFlowRejection
+    bullRejectArmBar := na
+    bearRejectArmBar := na
+
+if bearFlowRejection
+    bearRejectArmBar := na
+    bullRejectArmBar := na
+
+// ============================================================================
+// EVENT ENGINE — FLOW-CONFIRMED STRUCTURE BREAK
+// ============================================================================
+bool bullStructureBreak = not na(lastSwingHigh[1]) and ta.crossover(close, lastSwingHigh[1])
+bool bearStructureBreak = not na(lastSwingLow[1]) and ta.crossunder(close, lastSwingLow[1])
+
+bool bullRegimeOk = flowConfirmStrongOnly ? regimeState == 2 : regimeState > 0
+bool bearRegimeOk = flowConfirmStrongOnly ? regimeState == -2 : regimeState < 0
+
+bool bullFlowConfirm =
+     showFlowConfirm and bullStructureBreak and bullRegimeOk and
+     kvoRaw > signalRaw and kvoSlope > 0 and histRaw > 0
+
+bool bearFlowConfirm =
+     showFlowConfirm and bearStructureBreak and bearRegimeOk and
+     kvoRaw < signalRaw and kvoSlope < 0 and histRaw < 0
+
+// ============================================================================
+// LAST EVENT STATE
+// ============================================================================
+var string lastEvent = "None"
+
+if regularBullDiv
+    lastEvent := "Regular Bull Div"
+else if regularBearDiv
+    lastEvent := "Regular Bear Div"
+else if hiddenBullDiv
+    lastEvent := "Hidden Bull Div"
+else if hiddenBearDiv
+    lastEvent := "Hidden Bear Div"
+else if bullFlowRejection
+    lastEvent := "Bull Flow Rejection"
+else if bearFlowRejection
+    lastEvent := "Bear Flow Rejection"
+else if bullFlowConfirm
+    lastEvent := "Bull Flow Confirm"
+else if bearFlowConfirm
+    lastEvent := "Bear Flow Confirm"
+else if showZeroCrosses and bullZeroCross
+    lastEvent := "Bull Zero Cross"
+else if showZeroCrosses and bearZeroCross
+    lastEvent := "Bear Zero Cross"
+else if showSignalCrosses and bullSignalCross
+    lastEvent := "Bull Signal Cross"
+else if showSignalCrosses and bearSignalCross
+    lastEvent := "Bear Signal Cross"
+
+// ============================================================================
+// VISUAL MODE FLAGS
+// ============================================================================
+bool modeAnalysis = visualMode == "Analysis" or visualMode == "Research"
+bool modeResearch = visualMode == "Research"
+
+bool normalizedDisplay = normMode != "Raw"
+bool relativeDisplay = normMode == "Relative Force"
+
+// ============================================================================
+// MAIN PLOTS
+// ============================================================================
+color histogramColor = f_hist_color(histRaw, histDeltaRaw)
+
+plot(
+     histDisplay,
+     "KVO − Signal",
+     color = histogramColor,
+     linewidth = 2,
+     style = plot.style_histogram,
+     histbase = 0)
+
+plot(
+     kvoDisplay,
+     "KVO",
+     color = C_KVO,
+     linewidth = 2)
+
+plot(
+     signalDisplay,
+     "Signal",
+     color = C_SIGNAL,
+     linewidth = 1)
+
+plot(
+     0.0,
+     "Zero",
+     color = C_ZERO,
+     linewidth = 1)
+
+// Compression / regime reference thresholds are exact only in Relative Force mode.
+float upperZone = modeAnalysis and showCompression and relativeDisplay ? enterThreshold : na
+float lowerZone = modeAnalysis and showCompression and relativeDisplay ? -enterThreshold : na
+
+pUpper = plot(
+     upperZone,
+     "Bull regime threshold",
+     color = color.new(C_BULL, 75),
+     linewidth = 1,
+     style = plot.style_line)
+
+pLower = plot(
+     lowerZone,
+     "Bear regime threshold",
+     color = color.new(C_BEAR, 75),
+     linewidth = 1,
+     style = plot.style_line)
+
+pZeroFill = plot(
+     modeAnalysis and showCompression and relativeDisplay ? 0.0 : na,
+     "Compression center",
+     color = color.new(C_NEUTRAL, 100),
+     display = display.none)
+
+fill(pUpper, pLower, color = modeAnalysis and showCompression and relativeDisplay ? C_ZONE : na, title = "Compression zone")
+
+// Regime ribbon: intentionally independent of KVO plot color.
+float ribbonSeries =
+     modeAnalysis and showRegimeRibbon and normalizedDisplay ? ribbonLevel : na
+
+plot(
+     ribbonSeries,
+     "Flow Regime",
+     color = f_regime_color(regimeState),
+     linewidth = 6,
+     style = plot.style_line)
+
+// ============================================================================
+// EVENT MARKERS — OSCILLATOR PANE
+// ============================================================================
+plotshape(
+     showSignalCrosses and bullSignalCross ? kvoDisplay : na,
+     title = "Bull Signal Cross",
+     style = shape.circle,
+     location = location.absolute,
+     color = C_BULL,
+     size = size.tiny)
+
+plotshape(
+     showSignalCrosses and bearSignalCross ? kvoDisplay : na,
+     title = "Bear Signal Cross",
+     style = shape.circle,
+     location = location.absolute,
+     color = C_BEAR,
+     size = size.tiny)
+
+plotshape(
+     showZeroCrosses and bullZeroCross ? 0.0 : na,
+     title = "Bull Zero Cross",
+     style = shape.circle,
+     location = location.absolute,
+     color = C_BULL_STRONG,
+     size = size.tiny)
+
+plotshape(
+     showZeroCrosses and bearZeroCross ? 0.0 : na,
+     title = "Bear Zero Cross",
+     style = shape.circle,
+     location = location.absolute,
+     color = C_BEAR_STRONG,
+     size = size.tiny)
+
+plotshape(
+     modeAnalysis and bullFlowRejection ? kvoDisplay : na,
+     title = "Bull Flow Rejection",
+     text = "BFR",
+     textcolor = color.white,
+     style = shape.labelup,
+     location = location.absolute,
+     color = C_BULL_STRONG,
+     size = size.tiny)
+
+plotshape(
+     modeAnalysis and bearFlowRejection ? kvoDisplay : na,
+     title = "Bear Flow Rejection",
+     text = "BFR",
+     textcolor = color.white,
+     style = shape.labeldown,
+     location = location.absolute,
+     color = C_BEAR_STRONG,
+     size = size.tiny)
+
+plotshape(
+     modeAnalysis and bullFlowConfirm ? kvoDisplay : na,
+     title = "Bull Flow Confirm",
+     text = "FC",
+     textcolor = color.white,
+     style = shape.labelup,
+     location = location.absolute,
+     color = C_BULL,
+     size = size.tiny)
+
+plotshape(
+     modeAnalysis and bearFlowConfirm ? kvoDisplay : na,
+     title = "Bear Flow Confirm",
+     text = "FC",
+     textcolor = color.white,
+     style = shape.labeldown,
+     location = location.absolute,
+     color = C_BEAR,
+     size = size.tiny)
+
+// ============================================================================
+// OPTIONAL PRICE-CHART EVENT MARKERS
+// ============================================================================
+plotshape(
+     showPriceEventOverlay and bullFlowRejection,
+     title = "Bull Flow Rejection · Price",
+     text = "BFR",
+     style = shape.labelup,
+     location = location.belowbar,
+     color = C_BULL_STRONG,
+     textcolor = color.white,
+     size = size.tiny,
+     force_overlay = true)
+
+plotshape(
+     showPriceEventOverlay and bearFlowRejection,
+     title = "Bear Flow Rejection · Price",
+     text = "BFR",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = C_BEAR_STRONG,
+     textcolor = color.white,
+     size = size.tiny,
+     force_overlay = true)
+
+plotshape(
+     showPriceEventOverlay and bullFlowConfirm,
+     title = "Bull Flow Confirm · Price",
+     text = "FC",
+     style = shape.triangleup,
+     location = location.belowbar,
+     color = C_BULL,
+     size = size.tiny,
+     force_overlay = true)
+
+plotshape(
+     showPriceEventOverlay and bearFlowConfirm,
+     title = "Bear Flow Confirm · Price",
+     text = "FC",
+     style = shape.triangledown,
+     location = location.abovebar,
+     color = C_BEAR,
+     size = size.tiny,
+     force_overlay = true)
+
+// ============================================================================
+// RESEARCH — ALTERNATIVE FORMULAS
+// ============================================================================
+float altOriginalDisplay = normMode == "Raw" ?
+     kvoOriginal :
+     kvoOriginal / math.max(ta.ema(math.abs(kvoOriginal), normLen), normFloor)
+
+float altTVDisplay = normMode == "Raw" ?
+     kvoTVDocs :
+     kvoTVDocs / math.max(ta.ema(math.abs(kvoTVDocs), normLen), normFloor)
+
+float altSignedDisplay = normMode == "Raw" ?
+     kvoSigned :
+     kvoSigned / math.max(ta.ema(math.abs(kvoSigned), normLen), normFloor)
+
+plot(
+     modeResearch and researchPlotAlternatives ? altOriginalDisplay : na,
+     "Research · Original 1997",
+     color = color.new(C_BULL_STRONG, 25),
+     linewidth = 1)
+
+plot(
+     modeResearch and researchPlotAlternatives ? altTVDisplay : na,
+     "Research · TV Documentation",
+     color = color.new(C_BEAR_STRONG, 25),
+     linewidth = 1)
+
+plot(
+     modeResearch and researchPlotAlternatives ? altSignedDisplay : na,
+     "Research · Signed Volume",
+     color = color.new(C_SIGNAL, 30),
+     linewidth = 1)
+
+// ============================================================================
+// RESEARCH DIAGNOSTICS
+// ============================================================================
+float corrOrigTV = ta.correlation(kvoOriginal, kvoTVDocs, correlationLen)
+float corrOrigSigned = ta.correlation(kvoOriginal, kvoSigned, correlationLen)
+
+float disagreementDen = math.max(
+     ta.ema(math.abs(kvoOriginal), normLen) + ta.ema(math.abs(kvoTVDocs), normLen),
+     normFloor)
+
+float formulaDisagreement =
+     math.abs(kvoOriginal - kvoTVDocs) / disagreementDen
+
+string disagreementName =
+     formulaDisagreement >= 0.75 ? "High" :
+     formulaDisagreement >= 0.35 ? "Moderate" :
+     "Low"
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+var table dash = table.new(
+     position.top_right,
+     2, 11,
+     border_width = 1,
+     frame_color = color.new(C_NEUTRAL, 60),
+     border_color = color.new(C_NEUTRAL, 75))
+
+if barstate.islast
+    if showDashboard
+        color regimeColor = f_regime_color(regimeState)
+        string forceState = f_force_name(relativeKvo, kvoSlope, histRaw, histDeltaRaw)
+
+        string impulseState = histRaw > 0 ?
+             (histDeltaRaw > 0 ? "Positive ↑" : "Positive ↓") :
+             histRaw < 0 ?
+             (histDeltaRaw < 0 ? "Negative ↓" : "Negative ↑") :
+             "Flat"
+
+        string structureState =
+             bullFlowConfirm ? "Bull confirmed" :
+             bearFlowConfirm ? "Bear confirmed" :
+             regularBullDiv or hiddenBullDiv ? "Bull divergence" :
+             regularBearDiv or hiddenBearDiv ? "Bear divergence" :
+             "No event"
+
+        table.cell(dash, 0, 0, "FLOW", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 65))
+        table.cell(dash, 1, 0, f_regime_name(regimeState), text_color = color.white, bgcolor = regimeColor)
+
+        table.cell(dash, 0, 1, "FORCE", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+        table.cell(dash, 1, 1, forceState, text_color = color.white)
+
+        table.cell(dash, 0, 2, "IMPULSE", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+        table.cell(dash, 1, 2, impulseState, text_color = color.white)
+
+        table.cell(dash, 0, 3, "STRUCTURE", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+        table.cell(dash, 1, 3, structureState, text_color = color.white)
+
+        table.cell(dash, 0, 4, "EVENT", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+        table.cell(dash, 1, 4, lastEvent, text_color = color.white)
+
+        table.cell(dash, 0, 5, "Rel KVO", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+        table.cell(dash, 1, 5, str.tostring(relativeKvo, "#.###"), text_color = color.white)
+
+        table.cell(dash, 0, 6, "Histogram", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+        table.cell(dash, 1, 6, str.tostring(relativeHist, "#.###"), text_color = color.white)
+
+        if modeResearch
+            table.cell(dash, 0, 7, "FORMULA", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 65))
+            table.cell(dash, 1, 7, formulaMode, text_color = color.white)
+
+            table.cell(dash, 0, 8, "Orig↔TV corr", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+            table.cell(dash, 1, 8, str.tostring(corrOrigTV, "#.###"), text_color = color.white)
+
+            table.cell(dash, 0, 9, "Orig↔Signed", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+            table.cell(dash, 1, 9, str.tostring(corrOrigSigned, "#.###"), text_color = color.white)
+
+            table.cell(dash, 0, 10, "Disagreement", text_color = color.white, bgcolor = color.new(C_NEUTRAL, 80))
+            table.cell(dash, 1, 10, disagreementName + " · " + str.tostring(formulaDisagreement, "#.###"), text_color = color.white)
+        else
+            for row = 7 to 10
+                table.cell(dash, 0, row, "", bgcolor = color.new(color.black, 100))
+                table.cell(dash, 1, row, "", bgcolor = color.new(color.black, 100))
+    else
+        table.clear(dash, 0, 0, 1, 10)
+
+// ============================================================================
+// DATA WINDOW — RAW DIAGNOSTICS
+// ============================================================================
+plot(kvoRaw, "Raw KVO", display = display.data_window)
+plot(signalRaw, "Raw Signal", display = display.data_window)
+plot(vf, "Raw Volume Force", display = display.data_window)
+plot(relativeKvo, "Relative KVO", display = display.data_window)
+plot(kvoSlope, "KVO Slope", display = display.data_window)
+plot(histDeltaRelative, "Histogram Δ Relative", display = display.data_window)
+
+// ============================================================================
+// ALERT CONDITIONS
+// ============================================================================
+alertcondition(regularBullDiv, "KVO Regular Bullish Divergence", "Confirmed regular bullish KVO divergence.")
+alertcondition(regularBearDiv, "KVO Regular Bearish Divergence", "Confirmed regular bearish KVO divergence.")
+alertcondition(hiddenBullDiv, "KVO Hidden Bullish Divergence", "Confirmed hidden bullish KVO divergence.")
+alertcondition(hiddenBearDiv, "KVO Hidden Bearish Divergence", "Confirmed hidden bearish KVO divergence.")
+
+alertcondition(bullFlowRejection, "KVO Bull Flow Rejection", "Bullish KVO Flow Rejection completed.")
+alertcondition(bearFlowRejection, "KVO Bear Flow Rejection", "Bearish KVO Flow Rejection completed.")
+
+alertcondition(bullFlowConfirm, "KVO Bull Flow Confirmation", "Price structure break confirmed by bullish KVO flow.")
+alertcondition(bearFlowConfirm, "KVO Bear Flow Confirmation", "Price structure break confirmed by bearish KVO flow.")
+
+alertcondition(regimeState == 2 and regimeState[1] != 2, "KVO Strong Bull Regime", "KVO entered Strong Bull regime.")
+alertcondition(regimeState == -2 and regimeState[1] != -2, "KVO Strong Bear Regime", "KVO entered Strong Bear regime.")

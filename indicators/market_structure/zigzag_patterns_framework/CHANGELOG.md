@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.0 — 2026-08-17
+- Added 1-2-3 Reversal (Sperandeo) detection: Point 1 (trend extreme) → Point 2 (retracement pivot) → Point 3 (failed continuation, does not exceed Point 1), gated by a mandatory prior-trend precondition (2 same-direction HH/HL-style legs into Point 1) so it doesn't fire on every alternating swing
+- The reversal trigger is a later close-through of Point 2's level, evaluated every confirmed bar (not just on new pivots) with a quality score (0–100) from retracement depth, Point-3 failure clarity, and ATR-normalized break strength
+- New "1-2-3 Reversal (Sperandeo)" toggle in the Patterns group; new `1-2-3 Long` / `1-2-3 Short` alerts
+
 ## v1.0.4 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

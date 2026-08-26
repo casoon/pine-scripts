@@ -63,7 +63,12 @@ reference leg, not two separate detectors:
 - **Trigger** — an explicit state machine (`UNTRIGGERED → BROKEN → CONFIRMED → ACCEPTED`) driven by
   either a same-bar rejection-at-extreme or a micro-swing structure break, armed for
   `triggerValidityBarsInput` bars, resetting on a stale reference leg or an opposite confirmed
-  trigger, and gated so it can't fire while a same-direction trade is already open.
+  trigger, and gated so it can't fire while a same-direction trade is already open. Two price-chart
+  markers (`force_overlay`, bounded rolling history like the Position Health markers below): a small
+  `▵`/`▿` on `newLongSetup`/`newShortSetup` (a permission phase beginning), and a small `◇` when a
+  side enters BROKEN (an attempt happened, without claiming it held - BROKEN reverts to
+  `UNTRIGGERED` often enough in normal price action that it's marked as a discrete event, not a
+  persisting state).
 - **Confirmation** = weighted(Trigger state score, Acceptance).
 - **Active Permission** = `Permission × confirmation factor × CRV feasibility factor × decay
   factor`. CRV targets T1 until T1 is hit, then switches to T2 if tracked.
@@ -71,32 +76,21 @@ reference leg, not two separate detectors:
   (`force_overlay`): T1 via a real recent-pivot search (falls back to an ATR projection only if none
   qualify), scenario-aware T2/Invalidation, same-bar ambiguity resolved conservatively
   (invalidation checked first), opposite-trigger cancellation.
-- **Display** — no table (standing preference for this lineage): color-coded histogram (light =
-  Permission, solid = Active Permission), a thicker Permission line over the histogram, a thin
-  ×5-scaled velocity line (Δ Active Permission, clamped to ±60 - unclamped, a single sharp jump
-  could stretch the whole pane's autoscale and compress everything else into an unreadable thin
-  band), and a confidence-band background (`highlightRegimesInput`, default on) shading the pane
-  green/red when the dominant side's Permission is rising and gray when it's falling — no shading
-  while it's merely stagnant, since Permission's floored-multiplicative gates saturate once a
-  trend is established and stagnant is the common case, not the exception; shading it too would
-  read as a constant colored wash instead of a signal — replacing the old "confirmed trigger"
-  background (the trigger moment stays visible via the price-chart labels/lines instead). The
-  histogram, Permission line, Directional Balance line, and
-  Permission's own threshold lines are all stretched by `permissionDisplayStretchInput` (default
-  1.6x, clamped back to ±100) before plotting - Permission's floored-multiplicative gate design
-  keeps it naturally compressed into a small sub-range (rarely much above ~40), and sharing one
-  pane axis with Position Health (which uses the full 0-100 range) squashed it into an unreadably
-  thin band. Display only - every non-plot use of Permission (Trigger eligibility, CRV, alerts,
-  data-window diagnostics) still reads the real, unstretched 0-100 value. The Permission bars'
-  fill also fades toward full color as the dominant side's live move extends further
-  (`extensionShadingInput`, default on) - distance since the last opposite pivot in ATR terms,
-  normalized against the existing "Impulse overextension threshold (ATR)" input and mapped through
-  a `norm^0.6` curve (not linear) so the first ATR or so of movement already shows a clear color
-  step instead of the change bunching up near the threshold, where bars rarely reach. Permission's
-  own floored-multiplicative gates saturate once a trend is established, so bar *height* alone can
-  look flat while price keeps running; this gives the pane a second, purely visual read of ongoing
-  move intensity without changing Permission's value or anything downstream of it. Every per-role score, including Live Trend Quality and the
-  decay factors, is in the data window for debugging.
+- **Display** (no table, standing preference for this lineage): plain value curves - `longPermission`/
+  `shortPermission` as a mirrored 0–100 line pair, `permissionThresholdInput` drawn as a reference
+  line against it, and Position Health (only the side `healthDisplayModeInput` selects - see
+  `## Position Health` below) as a second, `style_circles` curve so it stays visually distinct from
+  the Permission line while sharing the axis. Entry gets a lean circle marker (`shape.circle`, not
+  a directional triangle - a triangle's apex-vs-base asymmetry visibly sat off the curve at
+  `location.absolute` even with a correctly-centered anchor) at the actual entry event
+  (`newLongTrigger`/`newShortTrigger`, fires once) placed directly on the Permission curve, not a
+  separate series. v1.2.0/v1.2.1 tried a "Decision Timeline" pane instead - three fixed-height
+  lanes (Market/Entry/Health) where height carried no information, only lane/side/color transparency
+  did, matching the engine's situation → entry → position sequence on paper. Real chart feedback
+  after the state-lifecycle bugs in that version were fixed was clear: flat bands at a constant
+  height aren't interpretable the way a moving curve is ("mit den Kurven konnte ich was anfangen,
+  hiermit nicht") - reverted to curves in v1.3.0. Every other raw score (Active Permission, Live
+  Trend Quality, the decay factors, etc.) is in the data window.
 - **Alerts**: Setup, Trigger, Signal (Trigger + Permission threshold), T1/T2 hit, Invalidation hit,
   Cancelled — per side.
 
@@ -155,42 +149,27 @@ action, since its underlying efficiency measure - net move / path length - is ra
 this looks like a genuine property of real market data, not a formula defect). The original
 85/65/40 thresholds made HOLD literally unreachable across the entire backtest.
 
-Displayed as two additional circles-style series in the same pane (no second pane possible —
-`overlay=false` gives exactly one). Hue encodes side - green for Long, red for Short, this file's
-existing convention (same as the Permission histogram/lines and the downgrade markers) - not
-state; an earlier version colored both lines by state alone (blue/purple/orange/fuchsia), which
-made Long indistinguishable from Short by color, only by upper/lower position. Brightness encodes
-state instead: vivid/opaque when healthy, fading toward gray-transparent as it weakens toward
-EXIT - the same "fading = weakening" language the Position Health background (below) also uses.
-`style_circles` keeps the shape visually distinct from the solid Permission line, which also uses
-green/red. Six dotted threshold reference lines (HOLD/PROTECT/REDUCE boundaries, mirrored for
-Short) mark exactly where each state starts - color/brightness alone answers "which side, how
-healthy" but not "where does PROTECT actually begin" the way Permission's own threshold lines
-already do for Permission. Drawn once via `line.new(..., extend=extend.right)` rather than
-`plot()`/`hline()` - neither counts against the output cap below, so this is free. Neither the
-sub-components nor the state codes are individually plotted to
-the data window — this script's `plot()`/`alertcondition()` combined were already close to Pine's
-64-output cap before Position Health, so the Long/Short Position Health values are only exposed via
-the pane series themselves (which also surface in the data window automatically), and the state
-boundary is readable directly as that series' color. A "Debug: log Position Health components"
-toggle (off by default) logs all six sub-components plus the final score/state per bar via
-`log.info()` instead - this does not count against the same output cap, so it's available for
-debugging without touching the plot budget; read it in TradingView's Pine Logs panel. Only a
-PROTECT-entry alert is added per side — the state
-this feature actually closes a gap on; HOLD/REDUCE/EXIT stay visible via the line color instead of
-a dedicated alert, to stay within the same output budget.
+Displayed as the pane's Position Health curve - a single `style_circles` series, not two.
+`healthDisplayModeInput` (Auto/Long/Short/Off, default Auto) picks which side to show: Auto follows
+whichever side has a TPE-tracked trade open (empty when neither does), Long/Short shows that side
+unconditionally (e.g. to watch a manually-entered position TPE itself never triggered). Showing both
+Long and Short Position Health at once answered a question nobody has ("what's the hypothetical
+health of a position I'm not in"); only the side actually held matters. Hue still encodes side
+(green = Long, red = Short, this file's existing convention); brightness encodes state on top of the
+curve's own height - vivid/opaque at HOLD, fading toward gray-transparent toward EXIT. Sub-components
+aren't individually plotted to the data window - this script's `plot()`/`alertcondition()` combined
+were already close to Pine's 64-output cap before Position Health, so they're only exposed via
+`longPositionHealth`/`shortPositionHealth`'s own value (both the pane curve and the data window). A
+"Debug: log Position Health components" toggle (off by default) logs all six sub-components plus the
+final score/state per bar via `log.info()` instead - this does not count against the same output cap,
+so it's available for debugging without touching the plot budget; read it in TradingView's Pine Logs
+panel. Only a PROTECT-entry alert is added per side — the state this feature actually closes a gap
+on; HOLD/REDUCE/EXIT stay visible via the curve color instead of a dedicated alert, to stay within
+the same output budget.
 
-Two further additions address transitions and early weakness across a wide chart, not just the
-dot color at a single bar:
+Further additions address transitions and early weakness across a wide chart, not just the
+curve color at a single bar:
 
-- **Position Health background** — a second background band, independent of the existing
-  Permission confidence band (both can be on at once; they blend). Grays the pane whenever the
-  currently-healthier side's (Long/Short) Position Health is falling (smoothed 3-bar velocity below
-  -0.3), regardless of which state it's still nominally in - no shading otherwise (dropped the
-  earlier per-side state-color tint for the non-falling case, which painted almost every bar and
-  read as a constant wash rather than a signal). This is the "sign of weakness" signal: a
-  still-HOLD reading that's fading toward PROTECT shows gray before it ever crosses the threshold,
-  not only after; the dominant side itself stays visible via the Position Health lines' own color.
 - **Position Health downgrade markers** — a small `●` text glyph (`label.style_none`, no
   background bubble - `label.style_circle` renders a fixed-size disc regardless of `size=`, too
   large on a busy chart), offset half an ATR from the wick so it doesn't sit on the candle, drawn
@@ -198,7 +177,7 @@ dot color at a single bar:
   a side that spends most of its time in REDUCE/EXIT (e.g. Short during a sustained uptrend)
   constantly flickers across that boundary, and marking every one of those is noise rather than a
   real "this was fine, now it's not" event. Colored by the side it concerns - green for long, red
-  for short, this file's existing convention (Permission histogram/lines) rather than a flat
+  for short, this file's existing convention (Permission/Position Health curves) rather than a flat
   warning color - with brightness scaling by severity: a mild HOLD→PROTECT slip is faint, a drop
   into EXIT is much more visible. The hover `tooltip` is deliberately a single short action clause
   ("Short position weak - consider a smaller position") - earlier versions spelling out old/new

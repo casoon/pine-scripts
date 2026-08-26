@@ -134,6 +134,8 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`market_pressure_scale.pine`](indicators/momentum/market_pressure_scale/market_pressure_scale.pine) | Dual-component oscillator — Setup Pressure (coiling) vs Impulse Pressure (expansion), Range Chop Filter, Move Strength gauge, DMI-free Reversal signal, phase labels and Action-readout dashboard |
 | [`mtf_stochrsi_pair_score.pine`](indicators/momentum/mtf_stochrsi_pair_score/mtf_stochrsi_pair_score.pine) | Multi-timeframe StochRSI confluence scorer — pair-weighted with sync bonus and conflict penalty, weighted total, Bias/Quality/Timing state-engine readout, signal markers |
 | [`pivot_momentum_structure.pine`](indicators/momentum/pivot_momentum_structure/pivot_momentum_structure.pine) | RSI/WaveTrend/Stochastic RSI/CCI/Fisher/TSI/Williams %R/CMO — HH/HL/LH/LL structure on price and momentum, best-of-window divergence/alignment anchor search, structure presets, ATR-tolerant labels — [published on TradingView](https://de.tradingview.com/script/eWSJ4MNi/) |
+| [`oscillator_cycle_statistics.pine`](indicators/mean_reversion/oscillator_cycle_statistics/oscillator_cycle_statistics.pine) | Statistics engine, not a signal — OB→OS/OS→OB cycle state machine, time-consistent progress-/age-conditioning, reliability/Brier evaluation, directional base rates, and origin-based MFE/MAE with explicit trade-evidence limits |
+| [`elder_ray_pressure_engine.pine`](indicators/momentum/elder_ray_pressure_engine/elder_ray_pressure_engine.pine) | Elder Ray research framework — four pressure engines (Classic/Directional/True Range/Close-Weighted), selectable consensus and normalization, dominance, exhaustion (separated from raw extremes), pivot divergence, no composite score |
 
 ### Liquidity & Order Flow
 
@@ -152,7 +154,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | Script | What it does |
 |--------|--------------|
 | [`zigzag_core.pine`](indicators/market_structure/zigzag_core/zigzag_core.pine) | Configurable ZigZag engine — separated Depth/Backstep/Deviation/Alternation filters, Percent/ATR/Hybrid reversal modes, true higher-timeframe pivot projection, non-repainting-distinct developing last leg |
-| [`zigzag_patterns_framework.pine`](indicators/market_structure/zigzag_patterns_framework/zigzag_patterns_framework.pine) | ZigZag-based pattern detection — ABC, triangles, Wolfe waves |
+| [`zigzag_patterns_framework.pine`](indicators/market_structure/zigzag_patterns_framework/zigzag_patterns_framework.pine) | ZigZag-based pattern detection — ABC, triangles, Wolfe waves, 1-2-3 reversal (Sperandeo) |
 | [`zigzag_fibo_pullback_map.pine`](indicators/market_structure/zigzag_fibo_pullback_map/zigzag_fibo_pullback_map.pine) | Confirmed ZigZag pivots with pullback-to-Fibonacci labeling and active fib fan |
 | [`elliott_wave_radar.pine`](indicators/market_structure/elliott_wave_radar/elliott_wave_radar.pine) | Rule-validated Elliott Wave counting — labels impulses/ABC only when hard EW rules hold, Fib-scored, with target projections and invalidation watch |
 | [`wolfe_wave_scanner_pro.pine`](indicators/market_structure/wolfe_wave_scanner_pro/wolfe_wave_scanner_pro.pine) | Dedicated 5-point Wolfe Wave scanner — best-of-window swing search, weighted 0-100 score, EPA target from the true 1-3/2-4 apex, multi-pattern tracking, live invalidation tracking, score-breakdown debug table |

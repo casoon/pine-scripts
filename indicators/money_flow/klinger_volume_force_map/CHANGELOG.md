@@ -1,0 +1,2 @@
+## v1.0.0 — 2026-08-26
+- Initial release: Klinger Volume Oscillator with selectable Volume Force formula (Original 1997 / TradingView documentation / signed-volume baseline), zero-preserving normalization (Relative Force / StdDev / Raw), hysteretic regime engine (Bull/Neutral/Bear + Strong states), confirmed-pivot regular/hidden divergence with quality filter, Flow Rejection and Flow-Confirmed structure-break events, Clean/Analysis/Research visual modes, dashboard, and research diagnostics

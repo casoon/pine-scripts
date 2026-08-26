@@ -1,13 +1,13 @@
 # WaveTrend [WavesUnchained]
 
-WaveTrend momentum oscillator with configurable cross signals, divergence detection, intermarket comparison, and a price-chart overlay. Four optional extensions address overextension, signal quality, wave persistence, and wave anatomy.
+WaveTrend momentum oscillator with configurable cross signals, divergence detection, and an optional price-chart overlay. Four optional extensions address overextension, signal quality, wave persistence, and wave anatomy.
 
 ## Features
 
 - Configurable cross signals: Strong (extreme zones only), All, or None
 - Divergence detection — regular and hidden, bullish and bearish
-- Compare symbol mode for intermarket correlation (e.g. BTC vs ALT)
-- Price-chart overlay with Top / Middle / Bottom placement and three color themes
+- Optional price-chart overlay with Top / Middle / Bottom placement (off by default)
+- Optional Compare Symbol — intermarket WaveTrend zone as a dashboard row (off by default)
 - Analytics dashboard with composite bias score
 - Extension A — Overextension duration
 - Extension B — Slope quality filter
@@ -64,6 +64,24 @@ Three metrics that describe where a wave is in its lifecycle, independent of tim
 
 Only valid when the last trough preceded the last peak (a complete trough → peak cycle has formed). Shows `—` otherwise.
 
+## Chart Overlay (optional)
+
+Projects `wtOsc`, `wtSig`, and the histogram directly onto the price panel — the classic on-chart WaveTrend visual, ported and bug-fixed rather than just documented. Off by default; purely cosmetic, reads the same `wtOsc`/`wtSig` series used for signals but has no effect on them.
+
+- **Placement** — Top (above price), Middle (overlaps price), Bottom (below price)
+- **Height** — vertical size of the projection relative to the visible price range
+- **Vertical Offset** — Top/Bottom only, distance from price
+- **Display Length** — bars drawn (capped at 200, not the source's 250, to leave headroom under the shared 500-line budget alongside divergence lines)
+- **Highlight** — fills the area between oscillator and signal lines with the leading-side color
+
+Redrawn only on `barstate.islast` via a delete-and-rebuild array pattern (`line`/`box`/`linefill`), matching the source's performance approach.
+
+## Compare Symbol (optional)
+
+Reports the WaveTrend zone (OB / OS / Bull / Bear) of a second symbol (default `BINANCE:BTCUSDT`) as a dashboard row. Off by default, informational only — does not gate or filter signals.
+
+Deliberately not a port of the source's "Compare Symbol" feature: that duplicates the full WT engine and draws a second, parallel set of cross labels on the chart. This reuses the existing `f_getWtOscHTF` helper (already built for the HTF Trend Filter, computing wtOsc only) against a different symbol instead of a different timeframe, and surfaces the result as one dashboard cell — no duplicated engine, no extra chart clutter.
+
 ## Dashboard
 
 | Row | Description |
@@ -83,11 +101,12 @@ Only valid when the last trough preceded the last peak (a complete trough → pe
 | Wave | Extension D: peak/trough structure (accelerating / fading) |
 | Correction | Extension D: pullback depth as % of last wave amplitude |
 | Bias | Composite score across all dimensions (with confidence %) |
+| Compare | Optional: WaveTrend zone of a second symbol (OB / OS / Bull / Bear) |
 
 ## Bug Fixes vs. Source
 
 - `crossState` and `divState` moved to top-level scope so `[1]` references carry correctly across real-time bars (were previously inside `if barstate.islast`, resetting each bar)
 - `divState` changed to `float` so the `× 0.8` decay actually reduces the value (integer `math.round` was freezing at 2)
-- Histogram in **Middle** overlay mode now uses `midLevel` as its baseline instead of `priceLowest`, aligning histogram bars with the zero line
-- Removed unnecessary `f_drawOnlyLabelX` wrapper function
-- Renamed `oscHight` input to `oscHeight`
+- Histogram in **Middle** overlay mode now uses the zero-line level as its baseline instead of the bottom price edge, aligning histogram bars with the projected oscillator instead of floating disconnected from it
+- Dropped the source's unused `f_drawOnlyLabelX` wrapper and its three color themes — this file's own cross-signal label styling and `colorOsc`/`colorSignal` palette already cover that, so the overlay just reuses them instead of adding a second, redundant color system
+- Overlay inputs use an `overlay*` prefix (`overlayPlacement`, `overlayHeight`, ...) instead of the source's bare `osc*`/`color*` names, which collided with this file's own `wtOsc`/`colorOsc` engine variables

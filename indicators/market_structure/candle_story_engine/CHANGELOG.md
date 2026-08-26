@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.10.0 — 2026-08-17
+- Added Liquidity Sweep detection: a wick that pierces a recent N-bar high/low and closes back inside it (possible stop-hunt/liquidity grab). Marker, alert and data-window export only — deliberately not added to BUY/SELL evidence until validated, matching the existing Compression Breakout Attempt
+
 ## v1.9.1 — 2026-08-12
 - Corrected Body Dominance: directional body participation is now measured against every candle in the sequence, including Doji. A single small bullish/bearish body can no longer receive an artificial 60-point body-dominance share simply because there are no opposite-colour bodies.
 - Collapsed the correlated Sequence Pressure, Dominance and Close Persistence inputs into one 55% sequence role; the current candle is the separate 45% trigger role. The score no longer presents these overlapping OHLC measures as four independent votes.
