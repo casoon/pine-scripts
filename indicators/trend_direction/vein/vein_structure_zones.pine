@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Vein Structure & Zones 4H [WavesUnchained]
-// Version: 0.2.2
+// Version: 0.3.0
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-09-05
 // ============================================================================
 // Combined structural event detection and automatic zone management.
 // Merges structure_events and levels_zones into a single overlay.
@@ -18,6 +18,13 @@
 //   ✓ Zone lifecycle: Fresh → Tested → Confirmed → Broken → Flipped
 //   ✓ Priority-based zone rendering
 //   ✓ Light / Debug / Research display modes
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — MFI/POC/EVR/climax degrade to neutral
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 //
 // ============================================================================
 indicator("Vein: Structure & Zones 4H [WavesUnchained]", "Vein S&Z", overlay=true, max_labels_count=500, max_lines_count=200, max_boxes_count=200)
@@ -106,8 +113,12 @@ bool showPOC        = input.bool(true, "Show POC Level", group=gDisplay, tooltip
 // ============================================================================
 
 float atrValue = ta.atr(atrLen)
-float avgVol   = ta.sma(volume, volAvgLen)
-float relVol   = avgVol > 0 ? volume / avgVol : 1.0
+
+// Echtes Handelsvolumen? tick/n/a zählt nicht.
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and not na(volume)
+
+float avgVol   = volumeIsReal ? ta.sma(volume, volAvgLen) : na
+float relVol   = volumeIsReal and avgVol > 0 ? volume / avgVol : 1.0
 float candleRange = high - low
 float bodySize    = math.abs(close - open)
 float bodyToRange = candleRange > 0 ? bodySize / candleRange : 0.0
@@ -121,7 +132,7 @@ float candleATR = atrValue > 0 ? candleRange / atrValue : 0.0
 float ema20 = ta.ema(close, 20)
 float ema50 = ta.ema(close, 50)
 float rsi14 = ta.rsi(close, 14)
-float mfi14 = ta.mfi(hlc3, 14)
+float mfi14 = volumeIsReal ? ta.mfi(hlc3, 14) : na
 float priceChange10 = math.abs(close - close[10])
 float pathLength10  = math.sum(math.abs(close - close[1]), 10)
 float effRatio      = pathLength10 > 0 ? priceChange10 / pathLength10 : 0.0
@@ -239,7 +250,10 @@ if newMajorSL
     prevMajorSL    := majorPivotLo
     prevMajorSLBar := bar_index - majorRightBars
 
-if vpTrigger
+// Volume Profile / POC has no price-only equivalent (Class C data) — the
+// whole recompute is skipped when volume is not real, so pocLevel/vaHigh/
+// vaLow stay `na` instead of profiling tick-count noise as if it were size.
+if vpTrigger and volumeIsReal
     int legStart = na
     int legEnd   = na
     if newMajorSH and not na(prevMajorSLBar)
@@ -444,7 +458,10 @@ int bearRejQuality = f_eventQuality(isBearRejection, upperWickRatio, candleATR, 
 // MODULE: climax candle + sequence state machine
 // ============================================================================
 
-bool isClimaxCandle = candleATR >= climaxRangeATR and avgVol > 0 and volume >= climaxVolFactor * avgVol
+// Climax detection — volume confirmation degrades to pass-through (range-only
+// extreme bar) when volume is not real, so the Spring/UT/CLX cascade keeps
+// functioning on price data alone instead of losing the confirmation layer.
+bool isClimaxCandle = candleATR >= climaxRangeATR and (volumeIsReal ? avgVol > 0 and volume >= climaxVolFactor * avgVol : true)
 bool isSellingClimax = isClimaxCandle and close < open
 bool isBuyingClimax  = isClimaxCandle and close > open
 
@@ -495,7 +512,7 @@ if hasActiveClx and clxState == 2
         clxState := 3
 
 if hasActiveClx and clxState == 3
-    bool isTestBar = not na(clxRange) and not na(clxVolume) and candleRange <= clxRange * testRangeFactor and volume <= clxVolume * testVolFactor and candleRange > 0
+    bool isTestBar = not na(clxRange) and candleRange <= clxRange * testRangeFactor and candleRange > 0 and (volumeIsReal ? not na(clxVolume) and volume <= clxVolume * testVolFactor : true)
     bool inZone = not na(clxClose) and atrValue > 0 and math.abs(close - clxClose) <= 1.5 * atrValue
     if isTestBar and inZone
         clxState   := 4
@@ -535,7 +552,9 @@ float evrAvg = ta.sma(evr, 14)
 float evrNorm = evrAvg > 0 ? evr / evrAvg : 1.0
 
 bool evrFalling = evrNorm < nz(evrNorm[1]) and nz(evrNorm[1]) < nz(evrNorm[2]) and nz(evrNorm[2]) < nz(evrNorm[3])
-bool absCondition = evrFalling and relVol > 1.2
+// Effort-vs-Result (evr = volume/range) has no price-only equivalent — fails
+// closed (no absorption boost) when volume is not real.
+bool absCondition = volumeIsReal and evrFalling and relVol > 1.2
 
 // Absorption near Spring or Upthrust — quality boost
 bool absNearSpring   = absCondition and (isSpring or isMajorSpring)
@@ -1108,6 +1127,18 @@ if barstate.islast and array.size(zones) > 0
             array.set(zones, bestIdx, z)
 
 // ============================================================================
+// MODULE: volume validity notice
+// ============================================================================
+
+var label volNoticeLabel = na
+if barstate.islast
+    if not na(volNoticeLabel)
+        label.delete(volNoticeLabel)
+    if not volumeIsReal
+        volNoticeLabel := label.new(bar_index, high, "Volume: " + syminfo.volumetype + " — POC/MFI/EVR/climax-volume inactive",
+             style=label.style_label_down, color=color.new(color.orange, 20), textcolor=color.white, size=size.small)
+
+// ============================================================================
 // MODULE: data window
 // ============================================================================
 
@@ -1311,21 +1342,21 @@ f_approachQ(Zone z) =>
     float recentRange = high - low
     if z.direction == 1
         aq += recentRange < avgRange * 0.8 ? 15.0 : 0.0
-        aq += volume < avgVol * 0.9 and close < close[1] ? 10.0 : 0.0
+        aq += volumeIsReal and volume < avgVol * 0.9 and close < close[1] ? 10.0 : 0.0
         aq += lowerWickRatio > 0.3 and lowerWickRatio > lowerWickRatio[1] ? 10.0 : 0.0
         aq += rsi14 < 35 ? 10.0 : 0.0
-        aq += mfi14 < 30 ? 8.0 : 0.0
+        aq += volumeIsReal and mfi14 < 30 ? 8.0 : 0.0
         aq -= recentRange > avgRange * 1.2 and close < open ? 15.0 : 0.0
-        aq -= volume > avgVol * 1.3 and close < open ? 12.0 : 0.0
+        aq -= volumeIsReal and volume > avgVol * 1.3 and close < open ? 12.0 : 0.0
         aq -= majorBearBOS ? 18.0 : 0.0
     else
         aq += recentRange < avgRange * 0.8 ? 15.0 : 0.0
-        aq += volume < avgVol * 0.9 and close > close[1] ? 10.0 : 0.0
+        aq += volumeIsReal and volume < avgVol * 0.9 and close > close[1] ? 10.0 : 0.0
         aq += upperWickRatio > 0.3 and upperWickRatio > upperWickRatio[1] ? 10.0 : 0.0
         aq += rsi14 > 65 ? 10.0 : 0.0
-        aq += mfi14 > 70 ? 8.0 : 0.0
+        aq += volumeIsReal and mfi14 > 70 ? 8.0 : 0.0
         aq -= recentRange > avgRange * 1.2 and close > open ? 15.0 : 0.0
-        aq -= volume > avgVol * 1.3 and close > open ? 12.0 : 0.0
+        aq -= volumeIsReal and volume > avgVol * 1.3 and close > open ? 12.0 : 0.0
         aq -= majorBullBOS ? 18.0 : 0.0
     math.max(-100.0, math.min(100.0, aq))
 
@@ -1410,10 +1441,12 @@ if (showAssessLabels or showAssessTable) and nearSupIdx >= 0 and nearSupIdx < ar
     // OB proximity bonus (scaled by confluence score)
     if obNearSupport
         supHold := math.min(100.0, supHold + obSupConfScore * 0.1)
-    // POC proximity bonus — zone near highest volume level
-    if atrValue > 0 and math.abs(z.mid - pocLevel) / atrValue < 1.0
+    // POC proximity bonus — zone near highest volume level. No price-only
+    // equivalent (Class C data); pocLevel/vaHigh/vaLow stay na without real
+    // volume, so the bonus is unreachable rather than comparing against na.
+    if not na(pocLevel) and atrValue > 0 and math.abs(z.mid - pocLevel) / atrValue < 1.0
         supHold := math.min(100.0, supHold + 7.0)
-    else if z.mid >= vaLowLevel and z.mid <= vaHighLevel
+    else if not na(vaLowLevel) and not na(vaHighLevel) and z.mid >= vaLowLevel and z.mid <= vaHighLevel
         supHold := math.min(100.0, supHold + 3.0)
     supBreak  := f_breakL(supHold, supAQ, z)
     supState  := f_stateCalc(supHold, supBreak, supAQ, z)
@@ -1436,10 +1469,12 @@ if (showAssessLabels or showAssessTable) and nearResIdx >= 0 and nearResIdx < ar
     // OB proximity bonus (scaled by confluence score)
     if obNearResistance
         resHold := math.min(100.0, resHold + obResConfScore * 0.1)
-    // POC proximity bonus — zone near highest volume level
-    if atrValue > 0 and math.abs(z.mid - pocLevel) / atrValue < 1.0
+    // POC proximity bonus — zone near highest volume level. No price-only
+    // equivalent (Class C data); pocLevel/vaHigh/vaLow stay na without real
+    // volume, so the bonus is unreachable rather than comparing against na.
+    if not na(pocLevel) and atrValue > 0 and math.abs(z.mid - pocLevel) / atrValue < 1.0
         resHold := math.min(100.0, resHold + 7.0)
-    else if z.mid >= vaLowLevel and z.mid <= vaHighLevel
+    else if not na(vaLowLevel) and not na(vaHighLevel) and z.mid >= vaLowLevel and z.mid <= vaHighLevel
         resHold := math.min(100.0, resHold + 3.0)
     resBreak  := f_breakL(resHold, resAQ, z)
     resState  := f_stateCalc(resHold, resBreak, resAQ, z)

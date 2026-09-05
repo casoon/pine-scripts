@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Vein Reversal Score 4H [WavesUnchained]
-// Version: 0.1.4
+// Version: 0.2.0
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-09-05
 // ============================================================================
 // Two-layer reversal scoring for 4H NatGas.
 //
@@ -25,6 +25,13 @@
 //   ✓ Traffic light background
 //   ✓ Light / Debug / Research display modes
 //   ✓ Alert conditions
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — MFI/climax/relVol degrade to neutral
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 //
 // ============================================================================
 indicator("Vein: Reversal Score 4H [WavesUnchained]", "Vein Score", overlay=false, max_labels_count=200)
@@ -119,9 +126,12 @@ float stochRsiDVal = ta.sma(stochRsiKVal, stochD)
 [macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
 
 // Volume
-float mfi14 = ta.mfi(hlc3, mfiLen)
-float avgVol = ta.sma(volume, volAvgLen)
-float relVol = avgVol > 0 ? volume / avgVol : 1.0
+// Echtes Handelsvolumen? tick/n/a zählt nicht.
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and not na(volume)
+
+float mfi14 = volumeIsReal ? ta.mfi(hlc3, mfiLen) : na
+float avgVol = volumeIsReal ? ta.sma(volume, volAvgLen) : na
+float relVol = volumeIsReal and avgVol > 0 ? volume / avgVol : 1.0
 
 // Bollinger
 float bbBasis = ta.sma(close, bbLen)
@@ -300,8 +310,10 @@ bool isUpthrust = fakeBreakout and upperWickRatio >= minWickRatio and candleATR 
 bool isMajorSpring   = majorFakeBreakdown and lowerWickRatio >= minWickRatio and candleATR >= minCandleATR
 bool isMajorUpthrust = majorFakeBreakout and upperWickRatio >= minWickRatio and candleATR >= minCandleATR
 
-// Climax detection
-bool isClimaxCandle = candleATR >= climaxRangeATR and avgVol > 0 and volume >= climaxVolFact * avgVol
+// Climax detection — volume confirmation degrades to pass-through (range-only
+// extreme bar) when volume is not real, so the Spring/UT/CLX cascade keeps
+// functioning on price data alone instead of losing the confirmation layer.
+bool isClimaxCandle = candleATR >= climaxRangeATR and (volumeIsReal ? avgVol > 0 and volume >= climaxVolFact * avgVol : true)
 bool isSellingClimax = isClimaxCandle and close < open
 bool isBuyingClimax  = isClimaxCandle and close > open
 
@@ -344,7 +356,7 @@ if hasActiveClx and clxState == 2
         clxState := 3
 
 if hasActiveClx and clxState == 3
-    bool isTestBar = not na(clxRange) and not na(clxVolume) and candleRange <= clxRange * 0.6 and volume <= clxVolume * 0.7 and candleRange > 0
+    bool isTestBar = not na(clxRange) and candleRange <= clxRange * 0.6 and candleRange > 0 and (volumeIsReal ? not na(clxVolume) and volume <= clxVolume * 0.7 : true)
     bool inZone = not na(clxClose) and atr14 > 0 and math.abs(close - clxClose) <= 1.5 * atr14
     if isTestBar and inZone
         clxState   := 4
@@ -380,10 +392,16 @@ if rsi14 < rsiBullThresh + 10 and rsi14 > rsi14[1]
     bullSetup += 0.5
 
 // MFI in oversold zone
-if mfi14 < mfiBullThresh
+if volumeIsReal and mfi14 < mfiBullThresh
     bullSetup += 1.0
 // MFI turning up
-if mfi14 > mfi14[1] and mfi14[1] < mfiBullThresh + 10
+if volumeIsReal and mfi14 > mfi14[1] and mfi14[1] < mfiBullThresh + 10
+    bullSetup += 0.5
+// MFI weight reassigned to RSI when volume is not real — keeps the setup
+// ceiling identical instead of quietly shrinking it on tick-volume symbols.
+if not volumeIsReal and rsi14 < rsiBullThresh
+    bullSetup += 1.0
+if not volumeIsReal and rsi14 < rsiBullThresh + 10 and rsi14 > rsi14[1]
     bullSetup += 0.5
 
 // Stoch RSI in low zone (only in variant B/C)
@@ -533,9 +551,15 @@ if rsi14 > rsiBearThresh - 10 and rsi14 < rsi14[1]
     bearSetup += 0.5
 
 // MFI in overbought zone
-if mfi14 > mfiBearThresh
+if volumeIsReal and mfi14 > mfiBearThresh
     bearSetup += 1.0
-if mfi14 < mfi14[1] and mfi14[1] > mfiBearThresh - 10
+if volumeIsReal and mfi14 < mfi14[1] and mfi14[1] > mfiBearThresh - 10
+    bearSetup += 0.5
+// MFI weight reassigned to RSI when volume is not real — keeps the setup
+// ceiling identical instead of quietly shrinking it on tick-volume symbols.
+if not volumeIsReal and rsi14 > rsiBearThresh
+    bearSetup += 1.0
+if not volumeIsReal and rsi14 > rsiBearThresh - 10 and rsi14 < rsi14[1]
     bearSetup += 0.5
 
 // Stoch RSI in high zone (only in variant B/C)
@@ -826,8 +850,10 @@ float bearScore = wSetupRole * bearSetup + wConfRole * bearConf
 // Data-driven quality modifier on top of scores. 50 = baseline.
 // Used to gate ACTION alerts and shown in table tooltip.
 
-// Absorption: high volume but small candle range (supply/demand absorbed)
-bool isAbsorption = relVol >= 1.5 and candleATR < 0.7
+// Absorption: high volume but small candle range (supply/demand absorbed).
+// No price-only equivalent — fails closed (quality bonus unavailable) when
+// volume is not real, rather than reinterpreting a plain small-range bar.
+bool isAbsorption = volumeIsReal and relVol >= 1.5 and candleATR < 0.7
 
 float bullQuality = 50.0
 if effFalling and (bullAtLevel or close < ema20)
@@ -1015,7 +1041,7 @@ else if bullStatus == "WATCH"
 else
     if isTrendDown and rsi14 > 40
         bullShort := "▲ Still bearish"
-    else if rsi14 < 35 and mfi14 < 30
+    else if rsi14 < 35 and volumeIsReal and mfi14 < 30
         bullShort := "▲ Oversold, no confirm"
     else
         bullShort := "▲ Inactive"
@@ -1039,7 +1065,7 @@ else if bearStatus == "WATCH"
 else
     if isTrendUp and rsi14 < 60
         bearShort := "▼ Still bullish"
-    else if rsi14 > 65 and mfi14 > 70
+    else if rsi14 > 65 and volumeIsReal and mfi14 > 70
         bearShort := "▼ Overbought, no confirm"
     else
         bearShort := "▼ Inactive"
@@ -1065,7 +1091,7 @@ else
 // ── Render combined table ──
 // Created once (var) with the row count for the active display mode —
 // re-creating the table on every realtime tick would stack abandoned table objects.
-int scoreTableRows = isDebug ? 28 : 4
+int scoreTableRows = isDebug ? 29 : 5
 var table scoreTable = table.new(position.top_right, 3, scoreTableRows, bgcolor=color.new(color.white, 100), border_color=color.new(color.gray, 80), border_width=0, frame_color=color.new(color.gray, 80), frame_width=0)
 if barstate.islast
     // Interpretation rows (always visible)
@@ -1074,8 +1100,8 @@ if barstate.islast
 
     // ── Tooltip texts ──
     string headerTip = "Vein Reversal Score\n────────────────\nTwo-layer scoring system:\n\nSetup (S): Momentum + overextension + candle + volume\n• RSI, MFI, StochRSI, Price/EMA, Wick, BB, Level\n\nConfirmation (C): Structure events\n• BOS (micro/major), Spring/Upthrust\n• Fake Break, Climax→Test sequence\n\nStatus levels:\n• WATCH: early signs (S≥3, C<2)\n• SETUP: overextended (S≥5, C<2)\n• ALERT: structure w/o setup (C≥2, S<3)\n• CANDIDATE: confirmed (S≥3, C≥2, FT)\n• CONFLICTED: both sides active\n• FAILED: no follow-through"
-    string bullTip = "Bull Score\n────────────────\nSetup: " + str.tostring(bullSetup, "#.0") + " / Confirm: " + str.tostring(bullConf, "#.0") + "\nQuality: " + str.tostring(bullQuality, "#") + "%\nStatus: " + bullStatus + "\n\nSetup components:\n• RSI " + str.tostring(rsi14, "#") + (rsi14 < rsiBullThresh ? " ✓" : "") + "\n• MFI " + str.tostring(mfi14, "#") + (mfi14 < mfiBullThresh ? " ✓" : "") + "\n• StochK " + str.tostring(stochRsiKVal, "#") + (stochRsiKVal < stochExtLow ? " ✓" : "") + "\n• Price/EMA " + str.tostring(priceToEma20ATR, "#.1") + (priceToEma20ATR < -priceEmaATRThresh ? " ✓" : "") + "\n• At Level: " + (bullAtLevel ? "yes" : "no") + "\n• Eff Falling: " + (effFalling and close < ema20 ? "✓ +" + str.tostring(effFallBonus, "#.1") : "no") + "\n• Shock: " + (isShockBar ? "✓ -" + str.tostring(shockPenalty, "#.1") : "no") + "\n\nConfirm components:\n• Spring: " + (isSpring ? "yes" : "no") + "\n• Bull BOS: " + (majorBullBOS ? "major" : microBullBOS ? "micro" : "no") + "\n• CLX Seq: " + (clxBullSequence ? clxStateStr : "no") + "\n\nQuality breakdown:\n• Base: 50" + (effFalling and (bullAtLevel or close < ema20) ? "\n• Eff falling near support: +15" : "") + (lowerWickRatio > 0.4 ? "\n• Strong lower wick: +10" : "") + (isAbsorption ? "\n• Absorption: +15" : "") + (isShockBar ? "\n• Shock bar: -20" : "") + (bullSetup >= setupStrong and bullConf < confRequired ? "\n• Momentum only: -15" : "") + (bullDecay < 0.3 and bullEventAge < 999 ? "\n• Event too old: -10" : "")
-    string bearTip = "Bear Score\n────────────────\nSetup: " + str.tostring(bearSetup, "#.0") + " / Confirm: " + str.tostring(bearConf, "#.0") + "\nQuality: " + str.tostring(bearQuality, "#") + "%\nStatus: " + bearStatus + "\n\nSetup components:\n• RSI " + str.tostring(rsi14, "#") + (rsi14 > rsiBearThresh ? " ✓" : "") + "\n• MFI " + str.tostring(mfi14, "#") + (mfi14 > mfiBearThresh ? " ✓" : "") + "\n• StochK " + str.tostring(stochRsiKVal, "#") + (stochRsiKVal > stochExtHigh ? " ✓" : "") + "\n• Price/EMA " + str.tostring(priceToEma20ATR, "#.1") + (priceToEma20ATR > priceEmaATRThresh ? " ✓" : "") + "\n• At Level: " + (bearAtLevel ? "yes" : "no") + "\n• Eff Falling: " + (effFalling and close > ema20 ? "✓ +" + str.tostring(effFallBonus, "#.1") : "no") + "\n• Shock: " + (isShockBar ? "✓ -" + str.tostring(shockPenalty, "#.1") : "no") + "\n\nConfirm components:\n• Upthrust: " + (isUpthrust ? "yes" : "no") + "\n• Bear BOS: " + (majorBearBOS ? "major" : microBearBOS ? "micro" : "no") + "\n• CLX Seq: " + (clxBearSequence ? clxStateStr : "no") + "\n\nQuality breakdown:\n• Base: 50" + (effFalling and (bearAtLevel or close > ema20) ? "\n• Eff falling near resistance: +15" : "") + (upperWickRatio > 0.4 ? "\n• Strong upper wick: +10" : "") + (isAbsorption ? "\n• Absorption: +15" : "") + (isShockBar ? "\n• Shock bar: -20" : "") + (bearSetup >= setupStrong and bearConf < confRequired ? "\n• Momentum only: -15" : "") + (bearDecay < 0.3 and bearEventAge < 999 ? "\n• Event too old: -10" : "")
+    string bullTip = "Bull Score\n────────────────\nSetup: " + str.tostring(bullSetup, "#.0") + " / Confirm: " + str.tostring(bullConf, "#.0") + "\nQuality: " + str.tostring(bullQuality, "#") + "%\nStatus: " + bullStatus + "\n\nSetup components:\n• RSI " + str.tostring(rsi14, "#") + (rsi14 < rsiBullThresh ? " ✓" : "") + "\n• MFI " + (volumeIsReal ? str.tostring(mfi14, "#") + (mfi14 < mfiBullThresh ? " ✓" : "") : "n/a") + "\n• StochK " + str.tostring(stochRsiKVal, "#") + (stochRsiKVal < stochExtLow ? " ✓" : "") + "\n• Price/EMA " + str.tostring(priceToEma20ATR, "#.1") + (priceToEma20ATR < -priceEmaATRThresh ? " ✓" : "") + "\n• At Level: " + (bullAtLevel ? "yes" : "no") + "\n• Eff Falling: " + (effFalling and close < ema20 ? "✓ +" + str.tostring(effFallBonus, "#.1") : "no") + "\n• Shock: " + (isShockBar ? "✓ -" + str.tostring(shockPenalty, "#.1") : "no") + "\n\nConfirm components:\n• Spring: " + (isSpring ? "yes" : "no") + "\n• Bull BOS: " + (majorBullBOS ? "major" : microBullBOS ? "micro" : "no") + "\n• CLX Seq: " + (clxBullSequence ? clxStateStr : "no") + "\n\nQuality breakdown:\n• Base: 50" + (effFalling and (bullAtLevel or close < ema20) ? "\n• Eff falling near support: +15" : "") + (lowerWickRatio > 0.4 ? "\n• Strong lower wick: +10" : "") + (isAbsorption ? "\n• Absorption: +15" : "") + (isShockBar ? "\n• Shock bar: -20" : "") + (bullSetup >= setupStrong and bullConf < confRequired ? "\n• Momentum only: -15" : "") + (bullDecay < 0.3 and bullEventAge < 999 ? "\n• Event too old: -10" : "")
+    string bearTip = "Bear Score\n────────────────\nSetup: " + str.tostring(bearSetup, "#.0") + " / Confirm: " + str.tostring(bearConf, "#.0") + "\nQuality: " + str.tostring(bearQuality, "#") + "%\nStatus: " + bearStatus + "\n\nSetup components:\n• RSI " + str.tostring(rsi14, "#") + (rsi14 > rsiBearThresh ? " ✓" : "") + "\n• MFI " + (volumeIsReal ? str.tostring(mfi14, "#") + (mfi14 > mfiBearThresh ? " ✓" : "") : "n/a") + "\n• StochK " + str.tostring(stochRsiKVal, "#") + (stochRsiKVal > stochExtHigh ? " ✓" : "") + "\n• Price/EMA " + str.tostring(priceToEma20ATR, "#.1") + (priceToEma20ATR > priceEmaATRThresh ? " ✓" : "") + "\n• At Level: " + (bearAtLevel ? "yes" : "no") + "\n• Eff Falling: " + (effFalling and close > ema20 ? "✓ +" + str.tostring(effFallBonus, "#.1") : "no") + "\n• Shock: " + (isShockBar ? "✓ -" + str.tostring(shockPenalty, "#.1") : "no") + "\n\nConfirm components:\n• Upthrust: " + (isUpthrust ? "yes" : "no") + "\n• Bear BOS: " + (majorBearBOS ? "major" : microBearBOS ? "micro" : "no") + "\n• CLX Seq: " + (clxBearSequence ? clxStateStr : "no") + "\n\nQuality breakdown:\n• Base: 50" + (effFalling and (bearAtLevel or close > ema20) ? "\n• Eff falling near resistance: +15" : "") + (upperWickRatio > 0.4 ? "\n• Strong upper wick: +10" : "") + (isAbsorption ? "\n• Absorption: +15" : "") + (isShockBar ? "\n• Shock bar: -20" : "") + (bearSetup >= setupStrong and bearConf < confRequired ? "\n• Momentum only: -15" : "") + (bearDecay < 0.3 and bearEventAge < 999 ? "\n• Event too old: -10" : "")
     string ctxTip = "Market Context\n────────────────\nRegime: " + (isTrendUp ? "Uptrend" : isTrendDown ? "Downtrend" : "Range") + "\nVolatility: " + (isHighVol ? "High" : isLowVol ? "Low" : "Normal") + "\nSetup multiplier: " + str.tostring(setupMultiplier, "#.1") + "x\nConfirm multiplier: " + str.tostring(confMultiplier * volBonus, "#.1") + "x\n\nConflict: " + (isConflict ? "YES (" + conflictSeverity + ")" : "none") + "\nBull trend conflict: " + (bullTrendConflict ? "yes" : "no") + "\nBear trend conflict: " + (bearTrendConflict ? "yes" : "no")
     string ftTip = "Follow-Through\n────────────────\nBull: " + (bullFTAchieved ? "✓ achieved" : bullFailed ? "✗ failed" : bullEventActive ? "waiting..." : "inactive") + "\nBear: " + (bearFTAchieved ? "✓ achieved" : bearFailed ? "✗ failed" : bearEventActive ? "waiting..." : "inactive") + "\n\nBull event age: " + (bullEventAge < 999 ? str.tostring(bullEventAge) + " bars" : "—") + "\nBull decay: " + (bullEventAge < 999 ? str.tostring(bullDecay * 100, "#") + "%" : "—") + "\nBear event age: " + (bearEventAge < 999 ? str.tostring(bearEventAge) + " bars" : "—") + "\nBear decay: " + (bearEventAge < 999 ? str.tostring(bearDecay * 100, "#") + "%" : "—") + "\n\nEvents expire after " + str.tostring(decayFull) + " bars"
 
@@ -1112,9 +1138,9 @@ if barstate.islast
         table.cell(scoreTable, 1, 5, rsi14 < rsiBullThresh ? "✓" : "·", text_color=rsi14 < rsiBullThresh ? #00e676 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
         table.cell(scoreTable, 2, 5, rsi14 > rsiBearThresh ? "✓" : "·", text_color=rsi14 > rsiBearThresh ? #ff1744 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
 
-        table.cell(scoreTable, 0, 6, "MFI " + str.tostring(mfi14, "#.0"), text_color=chart.fg_color, text_size=size.normal)
-        table.cell(scoreTable, 1, 6, mfi14 < mfiBullThresh ? "✓" : "·", text_color=mfi14 < mfiBullThresh ? #00e676 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
-        table.cell(scoreTable, 2, 6, mfi14 > mfiBearThresh ? "✓" : "·", text_color=mfi14 > mfiBearThresh ? #ff1744 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+        table.cell(scoreTable, 0, 6, volumeIsReal ? "MFI " + str.tostring(mfi14, "#.0") : "MFI n/a", text_color=chart.fg_color, text_size=size.normal)
+        table.cell(scoreTable, 1, 6, volumeIsReal and mfi14 < mfiBullThresh ? "✓" : "·", text_color=volumeIsReal and mfi14 < mfiBullThresh ? #00e676 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
+        table.cell(scoreTable, 2, 6, volumeIsReal and mfi14 > mfiBearThresh ? "✓" : "·", text_color=volumeIsReal and mfi14 > mfiBearThresh ? #ff1744 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
 
         table.cell(scoreTable, 0, 7, "StochK " + str.tostring(stochRsiKVal, "#.0"), text_color=chart.fg_color, text_size=size.normal)
         table.cell(scoreTable, 1, 7, stochRsiKVal < stochExtLow ? "✓" : "·", text_color=stochRsiKVal < stochExtLow ? #00e676 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
@@ -1210,6 +1236,14 @@ if barstate.islast
         table.cell(scoreTable, 0, 27, "P/D Zone", text_color=color.new(chart.fg_color, 30), text_size=size.normal)
         table.cell(scoreTable, 1, 27, priceZoneStr, text_color=pdCol, text_size=size.normal, text_halign=text.align_right)
         table.cell(scoreTable, 2, 27, not na(pdRange) ? str.tostring(pdRange, "#.##") : "—", text_color=color.new(chart.fg_color, 40), text_size=size.normal, text_halign=text.align_right)
+
+    // Volume validity — MFI/climax/relVol degrade to neutral when not real
+    int volRow = isDebug ? 28 : 4
+    string volValidStr = volumeIsReal ? "real" : syminfo.volumetype + " — degraded"
+    color  volValidCol = volumeIsReal ? color.new(chart.fg_color, 40) : #ff6f00
+    table.cell(scoreTable, 0, volRow, "Volume", text_color=color.new(chart.fg_color, 30), text_size=size.normal)
+    table.cell(scoreTable, 1, volRow, volValidStr, text_color=volValidCol, text_size=size.normal, text_halign=text.align_right)
+    table.cell(scoreTable, 2, volRow, "", text_size=size.normal)
 
 // ============================================================================
 // MODULE: alerts

@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Vein Exhaustion [WavesUnchained]
-// Version: 0.2.3
+// Version: 0.3.0
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-09-05
 // ============================================================================
 // Detects when a directional move is exhausted — before structure confirms it.
 // Complements vein_trend (which detects reversals from structure events) by
@@ -20,6 +20,13 @@
 //   ▲ score  Bear Exhaustion  — downward move overextended, potential bottom
 //   ●        Absorption       — heavy selling/buying absorbed (cyan/orange)
 //   ★        Capitulation     — panic low, potential exhaustion bottom (yellow)
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — Orderflow Proxy layer degrades to 0
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 //
 // ============================================================================
 indicator("Vein: Exhaustion [WavesUnchained]", "Vein Exhaust", overlay=true, max_labels_count=300)
@@ -79,11 +86,15 @@ int   effEmaLen = autoTF ? (tfSec >= 86400 ? 50 : tfSec >= 14400 ? 34 : tfSec >=
 
 float ema20   = ta.ema(close, effEmaLen)
 float rsi14   = ta.rsi(close, rsiLen)
-float mfi14   = ta.mfi(hlc3, mfiLen)
 float atr14   = ta.atr(atrLen)
 float atrSma  = ta.sma(atr14, atrSmaLen)
-float volAvg  = ta.sma(volume, volLen)
 float range_  = high - low
+
+// Echtes Handelsvolumen? tick/n/a zählt nicht.
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and not na(volume)
+
+float mfi14   = volumeIsReal ? ta.mfi(hlc3, mfiLen) : na
+float volAvg  = volumeIsReal ? ta.sma(volume, volLen) : na
 
 // EMA distance in ATR units (signed: positive = above, negative = below)
 float emaDist = atr14 > 0 ? (close - ema20) / atr14 : 0.0
@@ -142,43 +153,50 @@ else if consBear >= consWarn
 // ============================================================================
 
 // Bull overextension: price far above EMA
+// MFI weight is reassigned to RSI when volume is not real — keeps the 3.0
+// ceiling reachable instead of quietly shrinking it on tick-volume symbols.
 float bullEmaScore = emaDist >= emaDistHigh ? 2.0 : emaDist >= emaDistMed ? 1.0 : 0.0
-float bullRsiScore = rsi14 >= rsiExtreme ? 0.5 : 0.0
-float bullMfiScore = mfi14 >= mfiExtreme ? 0.5 : 0.0
+float bullRsiScore = rsi14 >= rsiExtreme ? (volumeIsReal ? 0.5 : 1.0) : 0.0
+float bullMfiScore = volumeIsReal and mfi14 >= mfiExtreme ? 0.5 : 0.0
 float bullOverextScore = math.min(bullEmaScore + bullRsiScore + bullMfiScore, 3.0)
 
 // Bear overextension: price far below EMA
 float bearEmaScore = emaDist <= -emaDistHigh ? 2.0 : emaDist <= -emaDistMed ? 1.0 : 0.0
-float bearRsiScore = rsi14 <= (100 - rsiExtreme) ? 0.5 : 0.0
-float bearMfiScore = mfi14 <= (100 - mfiExtreme) ? 0.5 : 0.0
+float bearRsiScore = rsi14 <= (100 - rsiExtreme) ? (volumeIsReal ? 0.5 : 1.0) : 0.0
+float bearMfiScore = volumeIsReal and mfi14 <= (100 - mfiExtreme) ? 0.5 : 0.0
 float bearOverextScore = math.min(bearEmaScore + bearRsiScore + bearMfiScore, 3.0)
 
 // ============================================================================
 // C — ORDERFLOW PROXY
 // ============================================================================
 
+// Orderflow Proxy (absorption/capitulation/distribution) has no price-only
+// substitute — it is defined BY the volume spike, not merely confirmed by it.
+// All four conditions fail closed (never fire) when volume is not real,
+// rather than reinterpreting a plain range/wick pattern as an orderflow event.
+
 // Bear-side absorption: heavy selling is being absorbed
 // → bearish bar + high volume + small range = buyers stepping in at lows
-bool isBearAbsorption = isBearBar and
+bool isBearAbsorption = volumeIsReal and isBearBar and
      volume >= volAvg * absVolMult and
      range_ <= atr14 * absRangeMult
 
 // Bull-side absorption: heavy buying being absorbed at tops
 // → bullish bar + high volume + small range = sellers stepping in at highs
-bool isBullAbsorption = isBullBar and
+bool isBullAbsorption = volumeIsReal and isBullBar and
      volume >= volAvg * absVolMult and
      range_ <= atr14 * absRangeMult
 
 // Capitulation / Panic selling: aggressive selling exhausts sellers
 // → bearish bar + very high volume + large range + closes near low
-bool isCapitulation = isBearBar and
+bool isCapitulation = volumeIsReal and isBearBar and
      volume >= volAvg * capVolMult and
      range_ >= atr14 * capRangeMult and
      lowerWick <= 0.2
 
 // Distribution bar at top: price pushed up but sellers dominate the close
 // → bearish bar + upper wick dominates + high volume + overextended
-bool isBullExhaustionBar = isBearBar and
+bool isBullExhaustionBar = volumeIsReal and isBearBar and
      upperWick >= 0.4 and
      volume >= volAvg * 1.5 and
      emaDist >= emaDistMed
@@ -200,8 +218,11 @@ float bullFlowFinal   = math.min(bullDistScore + bullAbsorbScore, 2.0)
 // ATR spike is only relevant in the direction of the exhausted move
 bool isAtrSpike = atr14 >= atrSma * atrSpikeMult
 
-bool isBullClimaxBar = range_ >= atr14 * climaxRange and volume >= volAvg * climaxVol and isBullBar
-bool isBearClimaxBar = range_ >= atr14 * climaxRange and volume >= volAvg * climaxVol and isBearBar
+// Climax bar's volume confirmation degrades to pass-through (range-only
+// extreme bar) when volume is not real, so the Volatility layer keeps
+// functioning on price data alone instead of losing its climax component.
+bool isBullClimaxBar = range_ >= atr14 * climaxRange and (volumeIsReal ? volume >= volAvg * climaxVol : true) and isBullBar
+bool isBearClimaxBar = range_ >= atr14 * climaxRange and (volumeIsReal ? volume >= volAvg * climaxVol : true) and isBearBar
 
 // Bull exhaustion volatility: spike/climax in an upward move
 float bullVolScore = (isAtrSpike and isBullBar ? 1.0 : 0.0) + (isBullClimaxBar ? 1.0 : 0.0)
@@ -213,8 +234,17 @@ float bearVolScore = (isAtrSpike and isBearBar ? 1.0 : 0.0) + (isBearClimaxBar ?
 // COMPOSITE SCORES
 // ============================================================================
 
-float bullExhaustScore = bullTimeScore + bullOverextScore + bullFlowFinal + bullVolScore
-float bearExhaustScore = bearTimeScore + bearOverextScore + bearFlowScore + bearVolScore
+// Orderflow Proxy (max 2.0) has no price-only substitute and fails closed
+// without real volume — rescale onto the reduced max so the 0-10 scale (and
+// scoreThresh) stays comparable instead of the composite silently sinking.
+float bullExhaustMax = 3.0 + 3.0 + (volumeIsReal ? 2.0 : 0.0) + 2.0
+float bearExhaustMax = 3.0 + 3.0 + (volumeIsReal ? 2.0 : 0.0) + 2.0
+
+float bullExhaustRaw = bullTimeScore + bullOverextScore + bullFlowFinal + bullVolScore
+float bearExhaustRaw = bearTimeScore + bearOverextScore + bearFlowScore + bearVolScore
+
+float bullExhaustScore = bullExhaustMax > 0 ? bullExhaustRaw / bullExhaustMax * 10.0 : 0.0
+float bearExhaustScore = bearExhaustMax > 0 ? bearExhaustRaw / bearExhaustMax * 10.0 : 0.0
 
 // Cap at 10
 bullExhaustScore := math.min(bullExhaustScore, 10.0)
@@ -308,7 +338,7 @@ if showTable and barstate.islast
     color tc = color.new(color.gray, 10)
     color lc = color.new(color.gray, 20)
 
-    var table t = table.new(tablePos, 3, 8,
+    var table t = table.new(tablePos, 3, 9,
          bgcolor=color.new(color.white, 5),
          border_color=color.new(color.gray, 60),
          border_width=1,
@@ -362,6 +392,14 @@ if showTable and barstate.islast
     table.cell(t, 0, 7, "Event",     text_color=lc,          text_size=size.small)
     table.cell(t, 1, 7, ofBullStr,   text_color=ofBullTextCol, text_size=size.small, bgcolor=ofBullBg)
     table.cell(t, 2, 7, ofBearStr,   text_color=ofBearTextCol, text_size=size.small, bgcolor=ofBearBg)
+
+    // Volume validity — Orderflow Proxy layer degrades to 0 when not real
+    string volValidStr = volumeIsReal ? "real" : syminfo.volumetype + " — degraded"
+    color  volValidBg   = volumeIsReal ? color.new(color.gray, 80) : color.new(#ff6f00, 70)
+    color  volValidTc   = volumeIsReal ? lc : color.white
+    table.cell(t, 0, 8, "Volume",    text_color=lc,        text_size=size.small)
+    table.cell(t, 1, 8, volValidStr, text_color=volValidTc, bgcolor=volValidBg, text_size=size.small)
+    table.cell(t, 2, 8, "",          text_color=volValidTc, bgcolor=volValidBg, text_size=size.small)
 
 // ============================================================================
 // ALERTS
