@@ -1,24 +1,34 @@
 //@version=6
 // ============================================================================
 // CVD Bias [WavesUnchained]
-// Version: 1.1.2
+// Version: 1.1.3
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-09-05
 // ============================================================================
-// Estimates Cumulative Volume Delta over a rolling window: buying volume
-// (close near high × bar volume) minus selling volume (close near low × bar
-// volume), accumulated as a running total rather than an EMA. CVD reveals
-// whether buyers or sellers have been dominant and whether that dominance is
-// building or fading — a different layer from momentum oscillators.
+// Estimates a price-weighted volume balance over a rolling window. This is
+// NOT real Cumulative Volume Delta — OHLCV data carries no aggressor-side
+// trade classification, so "buying" and "selling" volume are inferred only
+// from where price closed within the bar's range, never from actual trade
+// direction. Real Delta/CVD requires request.footprint() (out of scope
+// here). Within that heuristic, the per-bar signed-volume proxy is
+// accumulated as a running total rather than smoothed into an EMA, showing
+// whether the price-weighted balance has been persistently skewed bullish or
+// bearish and whether that skew is building or fading.
 //
 // Features:
-//   ✓ Per-bar delta: (2 × close_location − 1) × volume
-//   ✓ Rolling CVD: sum over configurable window, normalized to −1..+1
-//   ✓ CVD rate of change: acceleration of accumulation/distribution
-//   ✓ Price/CVD divergence: price new N-bar extreme while CVD rate opposes
-//   ✓ Dashboard: CVD level, rate, divergence state
-//   ✓ Alerts: bull/bear divergence, CVD zero cross
+//   ✓ Per-bar signed-volume proxy: (2 × close_location − 1) × volume (heuristic, not real CVD)
+//   ✓ Rolling sum: accumulated over configurable window, normalized to −1..+1
+//   ✓ Rate of change: acceleration of the volume-balance proxy
+//   ✓ Price/proxy divergence: price new N-bar extreme while proxy rate opposes
+//   ✓ Dashboard: proxy level, rate, divergence state
+//   ✓ Alerts: bull/bear divergence, zero cross
 //
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    REQUIRED   real trade volume only — indicator is non-functional without it
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   Exchange-only
 // ============================================================================
 
 indicator("CVD Bias [WavesUnchained]", "CVD [WU]", overlay=false)
@@ -27,7 +37,7 @@ indicator("CVD Bias [WavesUnchained]", "CVD [WU]", overlay=false)
 
 grCVD      = "CVD Settings"
 cvdLen     = input.int(50,  "Accumulation Window",    minval=10, maxval=500,  group=grCVD,
-     tooltip="Bars over which volume delta is summed. Longer = smoother, slower to react.")
+     tooltip="Bars over which the signed-volume proxy is summed. Longer = smoother, slower to react.")
 normLen    = input.int(200, "Normalization Lookback",  minval=20, maxval=1000, group=grCVD,
      tooltip="Lookback for finding recent CVD amplitude. Used to keep the oscillator on a −1..+1 scale.")
 rocLen     = input.int(5,   "Rate of Change Length",  minval=1,  maxval=30,   group=grCVD)
@@ -41,19 +51,25 @@ pivRight   = input.int(5, "Swing Right Bars", minval=1, group=grDiv,
 grD        = "Display"
 showDash   = input.bool(true, "Show Dashboard", group=grD)
 
-// ─── Per-bar volume delta ─────────────────────────────────────────────────────
-// closeLoc = 0: closed at low (full bear bar), 1: closed at high (full bull bar)
-// delta = net buy/sell volume estimate per bar
+// Echtes Handelsvolumen? tick/n/a zählt nicht.
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote")
+                    and not na(volume)
+float vol = volumeIsReal ? volume : na
 
-hl       = high - low
-closeLoc = hl > 0 ? (close - low) / hl : 0.5
-delta    = (2.0 * closeLoc - 1.0) * nz(volume)
+// ─── Per-bar signed-volume proxy ──────────────────────────────────────────────
+// closeLoc = 0: closed at low (full bear bar), 1: closed at high (full bull bar)
+// signedVolumeProxy: price-location-weighted volume — a heuristic, NOT real
+// trade delta. OHLCV has no aggressor-side classification.
+
+hl                = high - low
+closeLoc          = hl > 0 ? (close - low) / hl : 0.5
+signedVolumeProxy = (2.0 * closeLoc - 1.0) * vol
 
 // ─── Rolling CVD + normalization ─────────────────────────────────────────────
 
-cvdRaw  = math.sum(delta, cvdLen)
+cvdRaw  = math.sum(signedVolumeProxy, cvdLen)
 cvdAmp  = ta.highest(math.abs(cvdRaw), normLen)
-cvdNorm = cvdAmp > 0 ? cvdRaw / cvdAmp : 0.0
+cvdNorm = not volumeIsReal ? na : cvdAmp > 0 ? cvdRaw / cvdAmp : 0.0
 
 // Rate of change: how fast is the balance shifting
 cvdRoc = cvdNorm - nz(cvdNorm[rocLen])
@@ -104,7 +120,7 @@ var table t = table.new(position.top_right, 2, 5,
      border_color=color.new(color.gray, 60), border_width=1,
      frame_color=color.new(color.gray, 40), frame_width=1)
 
-if showDash and barstate.islast
+if showDash and barstate.islast and volumeIsReal
     table.cell(t, 0, 0, "CVD Bias",   text_color=tc, bgcolor=hd, text_size=size.small)
     table.cell(t, 1, 0, "Value",      text_color=tc, bgcolor=hd, text_size=size.small)
 
@@ -133,6 +149,11 @@ if showDash and barstate.islast
     divC     = bearDiv ? bearC : bullDiv ? bullC : tc
     table.cell(t, 0, 4, "Divergence", text_color=tc,   text_size=size.small)
     table.cell(t, 1, 4, divState,     text_color=divC, text_size=size.small)
+
+if barstate.islast and not volumeIsReal
+    label.new(bar_index, high, "benötigt echtes Handelsvolumen — aktuell: " + syminfo.volumetype,
+              style=label.style_label_down, color=color.new(color.orange, 20),
+              textcolor=color.white, size=size.small)
 
 // ─── Alerts ───────────────────────────────────────────────────────────────────
 

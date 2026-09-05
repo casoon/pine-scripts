@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.3 — 2026-09-05
+- Hard Exchange-only gate: indicator now requires real trade volume (`syminfo.volumetype` `base`/`quote`); on `tick`/`n/a` instruments (all CFDs incl. `CAPITALCOM:NATURALGAS`, Forex, most Indices) it plots nothing and shows a one-time "needs real trade volume" label instead of computing on tick volume
+- Data Contract added to header (`Verdict: Exchange-only`)
+- Renamed `delta` → `signedVolumeProxy`; header, README, and tooltips now explicitly disclaim this is a price-weighted volume heuristic, not real Cumulative Volume Delta (no aggressor-side classification, real Delta/CVD requires `request.footprint()`)
+
 ## v1.1.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

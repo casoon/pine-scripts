@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.1 — 2026-09-05
+- Data validity: added a hard Exchange-only gate — `volumeIsReal` checks `syminfo.volumetype` (`base`/`quote` only) and every volume/typical-price-flow reference now runs on a gated `vol` value that is `na` on invalid instruments, instead of `nz(volume, 0.0)`
+- Removed the neutral-50 no-volume fallback — MFI, signal, histogram, context line, and all signal/alert conditions go blank (`na`) on instruments without real trade volume instead of pinning to a neutral midline value
+- Added a Data Contract header block (`Verdict: Exchange-only`)
+- Added a one-time "benötigt echtes Handelsvolumen" warning label on the last bar when volume is not real, showing the detected `syminfo.volumetype`
+
 ## v1.3 — 2026-07-09
 - Fixed Sentiment Bar color: it used `score > 0 ? colBull : colBear`, coloring the overbought side (positive score) bull and the oversold side (negative score) bear — backwards from every other color cue in the panel (gradient line, Bull/Bear Extreme triangles), where `colBull` marks the oversold/bullish-reversal side and `colBear` the overbought/bearish-reversal side. Swapped to match.
 

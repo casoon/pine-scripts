@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.7.1 — 2026-09-05
+- Data Contract added to the header: `Verdict: Exchange-only` — the MIDAS curve is volume-weighted at its core and has no valid reading without real trade volume
+- Hard `volumeIsReal` gate (`syminfo.volumetype` = `base`/`quote`) added ahead of all volume-weighted computation: on CFDs, Forex, and most indices, the curve, bands, topfinder/bottomfinder, context markers, live badge, and dashboard now render nothing instead of a degraded or fabricated read
+- Removed the silent equal-weight/per-bar-fallback substitute for instruments without real volume — Per-bar fallback and Equal weight remain valid choices only on an exchange feed with occasional missing/zero individual bars, never as a stand-in for a `tick`/`n/a` instrument
+- Added a one-time warning label on the last bar ("benötigt echtes Handelsvolumen — aktuell: …") when the chart instrument does not carry real trade volume
+- README: new **Instrumente** section documenting valid/invalid instrument types and why a naive reference-market volume borrow is not recommended for this indicator
+
 ## v2.7.0 — 2026-07-15
 - Manual Time no longer creates a hidden pre-anchor MIDAS episode; a timestamp before loaded history starts honestly on the first available bar
 - Reconstructed backpainted cumulative states are now the canonical episode statistics, allowing valid early TBF fits without reading immutable values from a previous episode

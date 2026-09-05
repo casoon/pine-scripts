@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.0.1 — 2026-09-05
+- Hard Exchange-only gate: the entire profile (computation + all drawing) now only runs when `syminfo.volumetype` is `base`/`quote` and `volume` is not `na`; on tick/n/a volume (CFDs incl. `CAPITALCOM:NATURALGAS`, Forex, most Indices) it draws nothing but a "needs real trade volume" warning label instead
+- Intrabar delta path (`useIntrabar`) additionally gated on real volume, since it runs on every bar via `request.security_lower_tf`, not just on the last bar
+- Renamed `sgnVol` → `signedVolumeProxy` and clarified in comments/README that the intrabar bull/bear split is a price-direction-signed volume proxy from OHLCV, not real trade-classified delta
+- Added Data Contract header block (Verdict: Exchange-only)
+
 ## v2.0 — 2026-06-11
 - Intrabar delta (optional, off by default): the bull/bear split per bar can now come from real lower-timeframe volume direction (`request.security_lower_tf`, chart TF ÷ granularity, clamped to 1 minute) instead of the close-location approximation — falls back automatically on 1-minute/seconds charts or missing LTF data
 - Absorption profile (optional): wick-volume per price row — flow at prices the bar visited but closed away from — drawn as a mirror profile left of the anchor line

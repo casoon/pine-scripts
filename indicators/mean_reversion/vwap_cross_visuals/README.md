@@ -20,6 +20,17 @@ VWAP cross detection at its core, with optional advanced layers. Session VWAP an
 - **Alerts** — granular `alertcondition`s plus dynamic `alert()` messages, including multi-system confluence alerts
 - **Hidden export plots** — signals, VWAP levels, zone/volume/HTF metrics for use in other scripts (`display.none`)
 
+## Instrumente
+
+Jede Berechnung in diesem Skript — Session-VWAP, beide Anchored-VWAPs, das Zone-Management-Bias-Band, die Zone-Zielwerte und das Volume-Profile-Modul — ist volumengewichtet. Ob `volume` auf dem Chart-Symbol echtes gehandeltes Volumen ist, entscheidet `syminfo.volumetype` zur Laufzeit:
+
+- **Gültig:** Futures, Aktien, Krypto-Börsen — echtes Handelsvolumen über `syminfo.volumetype` = `base`/`quote`
+- **Ungültig:** CFDs (u. a. `CAPITALCOM:NATURALGAS`), Forex, die meisten Indizes — `volumetype` = `tick`/`n/a`, `volume` ist reine Tick-Zahl ohne ökonomische Aussage
+
+Auf einem ungültigen Instrument liefert das Skript **keinen VWAP-, Zonen- oder Volume-Profile-Output** — keine Linien, keine Bänder, keine Zonen-Boxen, keine Signale. Ein Warnlabel ("benötigt echtes Handelsvolumen") erscheint stattdessen auf der letzten Bar.
+
+Ein Referenzmarkt-Workaround (z. B. `NYMEX:NG1!` statt der Capital.com-CFD-Notierung) wurde für dieses Skript geprüft, aber bewusst nicht implementiert: Ein Intraday-VWAP über `request.security()` auf einem anderen Symbol würde die Preisbewegung des Chart-Symbols mit dem volumengewichteten Durchschnitt eines *anderen* Marktes überlagern. Beide Feeds haben unterschiedliche Preisniveaus (Spread-/Feed-Offset), sodass ein roh übernommener Referenzmarkt-VWAP-Preis auf dem Chart irreführend wäre, wenn er nicht sorgfältig normalisiert wird. Von einer naiven Implementierung wird abgeraten. Falls ein Referenzmarkt-VWAP je verfolgt wird, gehört er gemäß der Vertrauensrangfolge in `DATA_VALIDITY.md` §4.1 in ein einziges gemeinsames Daily-Kontext-Modul, nicht in diesen Einzelindikator.
+
 ## Signal markers
 
 | Marker | Meaning |

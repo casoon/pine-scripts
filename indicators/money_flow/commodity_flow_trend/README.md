@@ -13,6 +13,15 @@ MFI + CCI composite oscillator designed for commodity markets. Combines directio
 - **Midline confirmation dots** — MFI crosses the 50 midline with aligned CCI direction
 - **Alerts** — bull/bear signal + bull/bear midline confirmation
 
+## Instrumente
+
+**Valid:** Futures, stocks, crypto exchanges — real trade volume via `syminfo.volumetype` (`base`/`quote`).
+**Invalid:** CFDs (including the repo's reference instrument `CAPITALCOM:NATURALGAS`), Forex, most Indices — `tick`/`n/a` volume.
+
+On invalid instruments the indicator shows a "benötigt echtes Handelsvolumen" (needs real trade volume) label on the last bar; the MFI line, histogram, and all MFI-based signals plot nothing. The CCI line and its turn markers are pure price statistics and stay visible on any instrument.
+
+A reference-market volume for the MFI calculation would not help: MFI weights the chart symbol's own price (`src`) by volume — applying another market's volume to the CFD's price would link two unrelated feeds without a sound basis, and per `DATA_VALIDITY.md` §4.1 it would force a price comparison between the CFD and the future that the framework deliberately avoids outside a dedicated context module. Degradation remains the right answer here.
+
 ## Flow State Definitions
 
 | State | MFI | CCI | MFI direction |

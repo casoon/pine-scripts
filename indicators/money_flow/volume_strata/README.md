@@ -19,6 +19,16 @@ Fixed-range volume profile anchored to the right edge of the lookback window, sh
 - **Expanded info table** — levels, VA width, range, POC strength, up-vol %, total volume, profile shape, VA state, Virgin POC, developing POC, POC distance
 - **Alerts** — POC cross, VA entry/exit, VAH/VAL touch
 
+## Instrumente
+
+**Valid:** Futures, stocks, crypto exchanges — anywhere `syminfo.volumetype` reports `base` or `quote` (real trade volume).
+
+**Invalid:** CFDs (incl. `CAPITALCOM:NATURALGAS`), Forex, most Indices — these report `syminfo.volumetype` as `tick` or `n/a`.
+
+On an invalid instrument the indicator draws nothing; instead it shows a "benötigt echtes Handelsvolumen" (needs real trade volume) warning label on the last bar.
+
+**Reference-market variant:** deliberately not implemented. A volume profile maps the chart symbol's own price axis. Substituting a cross-symbol volume request (e.g. `NYMEX:NG1!` instead of `CAPITALCOM:NATURALGAS`) would overlay a *different* market's volume distribution onto the chart instrument's price rows. CFD and future prices are not identical (spread/feed offset), so the price buckets would be misaligned against the volume that actually traded there — the profile, POC, and value area would mark the wrong rows, not just imprecisely but structurally. For a volume profile, degradation (no output) is the correct choice, not a reference-market substitute.
+
 ## Inputs
 
 | Input | Default | Description |

@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.1.3 — 2026-09-05
+- **Exchange-only data contract**: added a hard `syminfo.volumetype`-based guard (`volumeIsReal`). Session VWAP, both anchored VWAPs, the Zone Management bias/target/confluence layer, and the Volume Profile module now all null out / stop processing on instruments without real trade volume (CFDs incl. `CAPITALCOM:NATURALGAS`, Forex, most Indices) — no VWAP lines, bias bands, zone boxes, target lines, or volume-profile output on those symbols.
+- A warning label ("benötigt echtes Handelsvolumen — aktuell: ...") now appears on the last bar when volume isn't real.
+- Added the `Data Contract` header block (`Verdict: Exchange-only`).
+
 ## v2.1.2 — 2026-06-30
 - Alerts: added VWAP cross alerts (price cross up/down, structure cross up/down) with a bar-close confirmation toggle — `VXV · EVENT · {{ticker}} {{interval}}`
 

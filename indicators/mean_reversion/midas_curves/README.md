@@ -20,6 +20,39 @@ It is the exhaustion-aware sibling of [`anchored_vwap`](../anchored_vwap/): wher
 - **Active / Full visual modes** — the complete current anchor episode by default, or every historical episode for diagnostic review
 - Light-theme dashboard, alerts (de-directionalised wording), optional debug log
 
+## Instrumente
+
+**Data Contract verdict: `Exchange-only`.** The MIDAS curve is a cumulative *volume*-weighted
+average price — volume is not an add-on filter here, it is the weighting term in the curve's
+own formula, and the same applies to the topfinder/bottomfinder fit and the Reclaim Quality
+Score's volume component. On an instrument without real trade volume there is no valid MIDAS
+curve to compute; a script that produced one anyway would just be publishing a mislabeled
+close-price average.
+
+- **Valid:** Futures, exchange-listed stocks, crypto exchanges — anywhere `syminfo.volumetype`
+  reports `"base"` or `"quote"` (real traded volume/quote volume).
+- **Invalid:** CFDs (including this repo's reference instrument `CAPITALCOM:NATURALGAS`),
+  Forex, and most CFD indices — these report `"tick"` or `"n/a"` volume, which counts price
+  updates, not traded size.
+- The script checks `syminfo.volumetype` at runtime (`volumeIsReal`). When it is not `"base"`
+  or `"quote"`, every volume-weighted computation is forced to `na` — no curve, no bands, no
+  topfinder/bottomfinder, no context markers, no dashboard, no live badge. A single warning
+  label ("benötigt echtes Handelsvolumen — aktuell: …") appears on the last bar instead. There
+  is no equal-weight or fallback substitute in this state — that would just recreate the same
+  problem under a different name.
+
+**On a reference-market variant (documented only, not implemented):** MIDAS is a
+*price-level* indicator — the curve is plotted directly on the chart as an S/R level, not a
+normalized oscillator. Borrowing a reference market's volume (e.g. `NYMEX:NG1!` for a NatGas
+CFD) while still anchoring to the CFD's own price would weight one feed's price by another
+feed's volume — two different markets contributing to a single number, which is not what
+volume-weighting is supposed to represent. Using the reference market's own price instead
+would fix that mismatch, but at that point the chart would be showing `NYMEX:NG1!`'s price
+level on a `CAPITALCOM:NATURALGAS` chart, which runs into the settlement/back-adjustment
+mismatch documented in `DATA_VALIDITY.md` §9.1. A naive reference-market implementation is
+therefore not recommended for this indicator; the plain Exchange-only gate above is the safer
+choice.
+
 ## Roles (design skill §1)
 
 | Role | What provides it |
@@ -121,7 +154,7 @@ When enabled, the default **Compact** dashboard mirrors the live context with Tr
 
 - Auto-anchor modes re-anchor on the most recent **significant** swing (the `Anchor Swing` degree, default 20) — the origin of the current leg. A larger anchor degree keeps the curve on the current move rather than resetting on every minor wiggle (and avoids pinning it to the all-time extreme). The topfinder fits to the *smaller* `Fit Swing` pullbacks within that leg.
 - The running sums are re-seeded from the actual pivot bar (`Anchor Swing Right` back) only in **Backpainted** anchor display mode; the pivot only sets the **anchor origin** — it is not a trigger, grade gate, or dedup key (design skill §8). In **Confirmed** mode the curve instead starts flat at the bar the pivot is actually confirmed, so the anchor is never drawn earlier than it was live-knowable — at the cost of a less clean historical look.
-- **Volume missing/zero** (`na` or `≤ 0`, e.g. some CFD/forex feeds) uses weight `1.0` only on the affected bar in the default **Per-bar fallback** mode. The hover and detailed dashboard report availability across the complete anchor episode and name mixed weighting explicitly. **Equal weight** deliberately uses weight `1.0` for every bar when reported volume is not meaningful.
+- **Volume missing/zero on an occasional bar of an otherwise valid exchange feed** (`na` or `≤ 0`) uses weight `1.0` only on the affected bar in the default **Per-bar fallback** mode. The hover and detailed dashboard report availability across the complete anchor episode and name mixed weighting explicitly. **Equal weight** deliberately uses weight `1.0` for every bar when reported volume is not meaningful. Neither mode is a substitute for real volume at the instrument level — see [Instrumente](#instrumente): when `syminfo.volumetype` itself is `tick`/`n/a` (CFDs, Forex, most indices), the whole curve is forced to `na` instead of falling back to either weighting mode.
 - **Reclaim Quality Score** (0–5): counts prior stretch, close location within the full candle range, volume, structure break, and only a direction-coherent TBF bonus (Bottomfinder for bullish reclaim, Topfinder for bearish reclaim). EMA bias classifies the reclaim but no longer blocks it.
 - **Auto EMA bias** only flips once price has closed on the new side of the EMA for `Auto EMA: min hold bars` consecutive bars (default 3), which reduces marker whipsaw in choppy phases; set it to 1 to restore the old immediate-flip behaviour.
 - MIDAS, bands, and TBF use a one-bar visual break at each re-anchor so independent launch episodes are never joined by a misleading diagonal connector.

@@ -5,7 +5,7 @@ MFI Advanced ports the CCI Advanced context view onto a Money Flow Index core. I
 ## Features
 
 - **MFI core:** manual MFI calculation → averaged main line → signal line via the shared smoothing kernel
-- **No-volume fallback:** symbols with no usable volume return a neutral 50 MFI and suppress signal/alert conditions instead of crashing or producing false crosses
+- **Exchange-only volume gate:** symbols without real trade volume (`syminfo.volumetype` is not `base`/`quote`) get no MFI output at all — no neutral placeholder, no fallback computation
 - **Bounded scale:** fixed 0-100 panel with 50 midline and configurable 80/20 OB/OS levels
 - **Signals on raw bounded values:** crossover detection uses MFI and its signal directly, so display toggles never affect signal logic
 - **4-state histogram:** rising/falling × positive/negative drives four opacity states
@@ -24,9 +24,16 @@ MFI Advanced ports the CCI Advanced context view onto a Money Flow Index core. I
 
 The optional extreme filter requires the MFI line to have visited the oversold or overbought zone within the last N bars before a signal-line cross qualifies as a signal. This keeps mid-range noise out of the main triangle markers.
 
-## Volume Handling
+## Instrumente
 
-MFI requires volume. On instruments where `volume` is missing or zero across the MFI lookback, the indicator pins the raw MFI calculation to a neutral 50 and disables signal/alert conditions until volume becomes available. The panel remains usable as a visual placeholder, but no money-flow signal should be interpreted on no-volume symbols. The Sentiment Bar naturally reads 0 (balanced) in this state, since a neutral 50 MFI sits exactly on the midline.
+MFI is inherently volume-weighted (typical-price × volume flow ratio) — there is no meaningful MFI without real trade volume.
+
+- **Valid:** Futures, stocks, and crypto exchanges — instruments where `syminfo.volumetype` reports `base` or `quote` (real trade volume)
+- **Invalid:** CFDs (including `CAPITALCOM:NATURALGAS`), Forex, and most Indices — these report `tick`/`n/a` volume, which is not a real flow measure
+
+On an invalid instrument the indicator produces no MFI line, no signal/alert conditions, and no scores — every volume-dependent value gates to `na` and the panel goes blank except for a one-time "benötigt echtes Handelsvolumen" warning label on the last bar showing the detected `syminfo.volumetype`.
+
+**Reference-market variant (documented, not implemented):** MFI is a pure oscillator with no absolute price level, so a reference-market MFI (e.g. computed from `NYMEX:NG1!` volume while charting `CAPITALCOM:NATURALGAS`) would at least avoid the price-mixing problem that an anchored VWAP would have. But per `DATA_VALIDITY.md` §4.1, a cross-symbol `request.security()` call inside a single indicator is the exception, not the default — the added latency, session-mismatch, and request-budget cost of a per-indicator reference request isn't justified when the framework's own guidance is to route any reference-market context through one shared context module rather than duplicating it per script. Not implemented here.
 
 ## Stall / Absorption
 

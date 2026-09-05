@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.3 — 2026-09-05
+- Data validity: added a hard Exchange-only gate — `volumeIsReal` checks `syminfo.volumetype` (`base`/`quote` only) and the running VWAP/σ accumulation now runs on a gated `vol` value that is `na` on invalid instruments, instead of raw `volume`
+- On instruments without real trade volume, the AVWAP line, σ bands, anchor markers, stretched markers, and dashboard now go fully blank instead of silently accumulating on tick/n/a volume
+- Added a Data Contract header block (`Verdict: Exchange-only`)
+- Added a one-time "benötigt echtes Handelsvolumen" warning label on the last bar when volume is not real, showing the detected `syminfo.volumetype`
+
 ## v1.0.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

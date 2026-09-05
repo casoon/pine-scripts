@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // VWAP Cross Visuals [WavesUnchained]
-// Version: 2.1.2
+// Version: 2.1.3
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-09-05
 // ============================================================================
 // Advanced VWAP cross detection with multi-timeframe zone management, bias context, and ranked confluence zones.
 //
@@ -18,6 +18,13 @@
 //   ✓ Three display modes: Smart / Price Only / Cluster Only
 //   ✓ Optimized for TradingView plot limits (max 3 plots)
 //   ✓ Combines with other indicators
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    REQUIRED   real trade volume only — indicator is non-functional without it
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   Exchange-only
 //
 // ============================================================================
 indicator("VWAP Cross Visuals [WavesUnchained]",
@@ -174,17 +181,17 @@ getPreviousSessionVwap(float sessionVwap) =>
 
 // === ANCHORED VWAP FUNCTIONS ===
 
-updateVwapAnchors(VwapAnchors anchors, VwapConfig config) =>
+updateVwapAnchors(VwapAnchors anchors, VwapConfig config, float vol) =>
     // Update cumulative volume-price data
-    anchors.cumulativePV += close * volume
-    anchors.cumulativeV += volume
+    anchors.cumulativePV += close * vol
+    anchors.cumulativeV += vol
 
     // Cumulative values as of the pivot bar (pivotRightBars ago).
     // NOTE: history-referencing the anchors object (anchors[n]) would return the
     // CURRENT field values because the same object is mutated in place — so the
     // window sums are subtracted instead. Computed unconditionally (ta consistency).
-    float pvAtPivot = anchors.cumulativePV - math.sum(close * volume, config.pivotRightBars)
-    float vAtPivot  = anchors.cumulativeV - math.sum(volume, config.pivotRightBars)
+    float pvAtPivot = anchors.cumulativePV - math.sum(close * vol, config.pivotRightBars)
+    float vAtPivot  = anchors.cumulativeV - math.sum(vol, config.pivotRightBars)
 
     // Detect new pivot points
     float pivotHigh = ta.pivothigh(high, config.pivotLeftBars, config.pivotRightBars)
@@ -329,12 +336,14 @@ analyzeVwapTrend(float sessionVwap) =>
 
 // === MAIN VWAP PROCESSING FUNCTION ===
 
-processVwapDetection(VwapAnchors anchors, VwapConfig config) =>
+processVwapDetection(VwapAnchors anchors, VwapConfig config, float vol) =>
     // Update anchors first
-    updatedAnchors = updateVwapAnchors(anchors, config)
+    updatedAnchors = updateVwapAnchors(anchors, config, vol)
 
-    // Calculate VWAPs
-    sessionVwap = calcSessionVwap()
+    // Calculate VWAPs — session VWAP is nulled outright when volume isn't real
+    // (na(vol) == not volumeIsReal); ta.vwap() has no external volume input, so
+    // this is the only way to keep it from computing on tick-count volume.
+    sessionVwap = na(vol) ? na : calcSessionVwap()
     sessionVwapPrev = getPreviousSessionVwap(sessionVwap)
     anchoredHigh = calcAnchoredVwap(updatedAnchors, true)
     anchoredLow = calcAnchoredVwap(updatedAnchors, false)
@@ -2223,6 +2232,17 @@ htfStackThreshold = input.float(0.7, "Stack Alignment Threshold", minval=0.5, ma
 showChoppiness = input.bool(true, "Show Choppiness Index", group=groupHTFStack, tooltip="Display current market choppiness level")
 
 // ============================================================================
+// DATA VALIDITY GUARD — VWAP is fundamentally volume-weighted. tick/n/a volume
+// (CFDs, Forex, most Indices) carries no economic weighting, so the whole
+// VWAP/zone/volume-profile stack is gated off rather than computed on fake data.
+// ============================================================================
+
+// Echtes Handelsvolumen? tick/n/a zählt nicht.
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote")
+                    and not na(volume)
+float vol = volumeIsReal ? volume : na
+
+// ============================================================================
 
 
 // ============================================================================
@@ -2309,7 +2329,7 @@ if useHTFStack
 // ============================================================================
 
 // Process all VWAP detection using WUC Engine
-[vwapState, updatedAnchors] = processVwapDetection(vwapAnchors, vwapConfig)
+[vwapState, updatedAnchors] = processVwapDetection(vwapAnchors, vwapConfig, vol)
 vwapAnchors := updatedAnchors
 
 // Generate VWAP signals
@@ -2326,7 +2346,10 @@ vwapSignals = generateVwapSignals(vwapState)
 float vwapZoneConfluence = 0.0
 
 // Process Zone Management (Pro Feature - Enhanced)
-if useZoneManagement
+// Gated on volumeIsReal too: bias/regime (calculateBias) and several zone
+// creation paths (cluster, HTF, FVG-VWAP) are anchored to VWAP levels — without
+// real volume the whole zone/bias/confluence layer has nothing valid to anchor to.
+if useZoneManagement and volumeIsReal
     // Multi-source zone creation with VWAP integration
     if barstate.isconfirmed
         // Method 1: Zone source (Orderblock-like vs Pivot-based)
@@ -2466,8 +2489,9 @@ if useZoneManagement
     if not na(zoneState.biasScore)
         zoneState.biasScore := zoneState.biasScore + vwapZoneConfluence
 
-// Process Volume Profile (Pro Feature)
-if useVolumeProfile
+// Process Volume Profile (Pro Feature) — literally a histogram of `volume`;
+// gated on volumeIsReal since tick-count volume produces a fabricated profile.
+if useVolumeProfile and volumeIsReal
     volumeState := processVolumeProfile(volumeState, volumeConfig)
 
 // Process HTF Stack Panel (Pro Feature)
@@ -2658,11 +2682,11 @@ plot(showVWAPLines and vwapState.hasAnchoredLow ? vwapState.anchoredVwapLow : na
 biasBandColor = zoneState.biasRegime == "BULL" ? color.new(color.green, 60) : zoneState.biasRegime == "BEAR" ? color.new(color.red, 60) : color.new(color.blue, 70)
 biasLineColor = zoneState.biasRegime == "BULL" ? color.new(color.green, 0) : zoneState.biasRegime == "BEAR" ? color.new(color.red, 0) : color.new(color.blue, 0)
 
-plot(useZoneManagement ? zoneState.bandUpper : na, title="Bias Upper", color=biasBandColor, linewidth=1)
-plot(useZoneManagement ? zoneState.bandLower : na, title="Bias Lower", color=biasBandColor, linewidth=1)
-plot(useZoneManagement ? zoneState.vwapLevel : na, title="VWAP Bias", color=biasLineColor, linewidth=2)
+plot(useZoneManagement and volumeIsReal ? zoneState.bandUpper : na, title="Bias Upper", color=biasBandColor, linewidth=1)
+plot(useZoneManagement and volumeIsReal ? zoneState.bandLower : na, title="Bias Lower", color=biasBandColor, linewidth=1)
+plot(useZoneManagement and volumeIsReal ? zoneState.vwapLevel : na, title="VWAP Bias", color=biasLineColor, linewidth=2)
 
-if useZoneManagement
+if useZoneManagement and volumeIsReal
     // Dynamic target levels (lines, no plot-in-loop)
     if not na(zoneState.nearestBullZone) and zoneState.nearestBullZone.isActive
         bullTargetBase = zoneState.nearestBullZone.top
@@ -2683,15 +2707,15 @@ if useZoneManagement
         f_updateTargetLines(bearTargetLines, array.new_float(), color.red)
 
 // Zone strength visualization background
-zoneStrengthColor = useZoneManagement and zoneState.avgZoneScore > 5.0 ? color.new(color.yellow, 97) : useZoneManagement and zoneState.avgZoneScore > 3.0 ? color.new(color.orange, 98) : na
+zoneStrengthColor = useZoneManagement and volumeIsReal and zoneState.avgZoneScore > 5.0 ? color.new(color.yellow, 97) : useZoneManagement and volumeIsReal and zoneState.avgZoneScore > 3.0 ? color.new(color.orange, 98) : na
 bgcolor(zoneStrengthColor, title="Zone Strength Background")
 
 // Plot Volume Profile levels (Pro Feature)
-plot(useVolumeProfile ? volumeState.currentProfile.pocPrice : na, title="POC",
+plot(useVolumeProfile and volumeIsReal ? volumeState.currentProfile.pocPrice : na, title="POC",
      color=color.new(color.purple, 0), linewidth=3)
-plot(useVolumeProfile ? volumeState.currentProfile.valueAreaHigh : na, title="VAH",
+plot(useVolumeProfile and volumeIsReal ? volumeState.currentProfile.valueAreaHigh : na, title="VAH",
      color=color.new(color.gray, 50), linewidth=1)
-plot(useVolumeProfile ? volumeState.currentProfile.valueAreaLow : na, title="VAL",
+plot(useVolumeProfile and volumeIsReal ? volumeState.currentProfile.valueAreaLow : na, title="VAL",
      color=color.new(color.gray, 50), linewidth=1)
 
 // Signal scope: core (VWAP cross only) vs. all systems. Aggregated long/short
@@ -2725,16 +2749,16 @@ plotshape(allSig and showStructureCrossDown, title="VWAP Structure Down", style=
 plotshape(allSig and showCluster, title="VWAP Cluster", style=shape.circle, location=location.absolute, color=getSignalColor(vwapState.clusterStrength, true), size=size.small, text="C")
 
 // ZONE SIGNALS (Pro)
-plotshape(allSig and useZoneManagement and showZoneLong,  title="Zone Long",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="ZL")
-plotshape(allSig and useZoneManagement and showZoneShort, title="Zone Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny, text="ZS")
+plotshape(allSig and useZoneManagement and volumeIsReal and showZoneLong,  title="Zone Long",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="ZL")
+plotshape(allSig and useZoneManagement and volumeIsReal and showZoneShort, title="Zone Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny, text="ZS")
 
 // ENTRY SIGNALS (Context + Setup)
 plotshape(allSig and entryLong,  title="Entry Long",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="L")
 plotshape(allSig and entryShort, title="Entry Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny, text="S")
 
 // VOLUME PROFILE SIGNALS (Pro)
-plotshape(allSig and useVolumeProfile and showVolumeLong,  title="Volume Long",  style=shape.arrowup,   location=location.belowbar, color=color.new(color.purple, 0), size=size.tiny, text="VL")
-plotshape(allSig and useVolumeProfile and showVolumeShort, title="Volume Short", style=shape.arrowdown, location=location.abovebar, color=color.new(color.purple, 0), size=size.tiny, text="VS")
+plotshape(allSig and useVolumeProfile and volumeIsReal and showVolumeLong,  title="Volume Long",  style=shape.arrowup,   location=location.belowbar, color=color.new(color.purple, 0), size=size.tiny, text="VL")
+plotshape(allSig and useVolumeProfile and volumeIsReal and showVolumeShort, title="Volume Short", style=shape.arrowdown, location=location.abovebar, color=color.new(color.purple, 0), size=size.tiny, text="VS")
 
 // HTF STACK SIGNALS (Pro)
 plotshape(allSig and useHTFStack and showHTFLong,  title="HTF Stack Long",  style=shape.labelup,   location=location.belowbar, color=color.new(color.blue, 0),   size=size.small, text="HTF↑")
@@ -2751,9 +2775,9 @@ bgcolor(vwapState.vwapsInCluster ? color.new(color.yellow, 93) : na,
 
 if showLegend and barstate.islast
     tableRows = 8
-    if useZoneManagement
+    if useZoneManagement and volumeIsReal
         tableRows += 4
-    if useVolumeProfile
+    if useVolumeProfile and volumeIsReal
         tableRows += 4
     if useHTFStack
         tableRows += 5
@@ -2818,8 +2842,9 @@ if showLegend and barstate.islast
     // per-branch declarations were invisible to the following blocks (compile error)
     int nextRow = 8
 
-    // Zone Management Info (Pro)
-    if useZoneManagement
+    // Zone Management Info (Pro) — must match the tableRows gate above exactly,
+    // otherwise table.cell() would address rows the table wasn't sized for.
+    if useZoneManagement and volumeIsReal
         // Zone Bias
         biasColor = zoneState.biasRegime == "BULL" ? color.green : zoneState.biasRegime == "BEAR" ? color.red : color.gray
         table.cell(legend, 0, 8, "Zone Bias:",
@@ -2849,8 +2874,9 @@ if showLegend and barstate.islast
                    text_color=tcLegend)
         nextRow += 1
 
-    // Volume Profile Info (Pro)
-    if useVolumeProfile
+    // Volume Profile Info (Pro) — must match the tableRows gate above exactly,
+    // otherwise table.cell() would address rows the table wasn't sized for.
+    if useVolumeProfile and volumeIsReal
         // POC Price
         table.cell(legend, 0, nextRow, "POC:",
                    text_color=tcLegend)
@@ -2950,4 +2976,12 @@ alertcondition(alertOk and vwapState.priceCrossUp,       title="VXV Price Cross 
 alertcondition(alertOk and vwapState.priceCrossDown,     title="VXV Price Cross Down",     message="VXV · CROSS DOWN · {{ticker}} {{interval}}")
 alertcondition(alertOk and vwapState.structureCrossUp,   title="VXV Structure Cross Up",   message="VXV · STRUCTURE CROSS UP · {{ticker}} {{interval}}")
 alertcondition(alertOk and vwapState.structureCrossDown, title="VXV Structure Cross Down", message="VXV · STRUCTURE CROSS DOWN · {{ticker}} {{interval}}")
+
+// ============================================================================
+// DATA VALIDITY WARNING
+// ============================================================================
+if barstate.islast and not volumeIsReal
+    label.new(bar_index, high, "benötigt echtes Handelsvolumen — aktuell: " + syminfo.volumetype,
+              style=label.style_label_down, color=color.new(color.orange, 20),
+              textcolor=color.white, size=size.small)
 

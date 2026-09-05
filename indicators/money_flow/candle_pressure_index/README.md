@@ -12,6 +12,15 @@ Measures buying vs. selling pressure purely from candle microstructure — no de
 - **Dashboard**: state (Strong Bull / Bull / Neutral / Bear / Strong Bear), CPI value, momentum direction, raw bar pressure
 - **Alerts**: long/short zero-cross, initiation/absorption spike
 
+## Instrumente
+
+**Valid:** Futures, stocks, crypto exchanges — real trade volume via `syminfo.volumetype` (`base`/`quote`).
+**Invalid:** CFDs (including the repo's reference instrument `CAPITALCOM:NATURALGAS`), Forex, most Indices — `tick`/`n/a` volume.
+
+On invalid instruments the indicator shows a "benötigt echtes Handelsvolumen" (needs real trade volume) label on the last bar and plots nothing, instead of falling back to a neutral `volume_rank` of 0.5.
+
+A reference-market volume would not save the core idea here: `volume_rank` is meant to measure the relative trading intensity of the exact same candle whose geometry (`close_location`, `body_ratio`) also comes from the chart symbol. Applying another market's volume to the CFD's price geometry would attribute activity that happened on that market to candles that formed on a different one — and per `DATA_VALIDITY.md` §4.1 it would additionally force a price comparison between the CFD and the future that the framework deliberately avoids outside a dedicated context module. Degradation (label + no output) is the right answer, not a reference-market request.
+
 ## Settings
 
 | Group | Setting | Default | Purpose |

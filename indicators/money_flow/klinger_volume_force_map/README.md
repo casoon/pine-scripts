@@ -17,9 +17,16 @@ Volume-force analysis based on Stephen J. Klinger's original 1997 concept. It ac
 - Optional price-chart divergence and event overlays
 - Compact current-state dashboard plus research diagnostics (formula correlation/disagreement)
 
+## Instrumente
+
+- **Gültig:** Futures, Aktien, Krypto-Börsen — überall dort, wo `syminfo.volumetype` `"base"` oder `"quote"` liefert, also echtes Handelsvolumen.
+- **Ungültig:** CFDs (inkl. `CAPITALCOM:NATURALGAS`, dem Repo-Referenzinstrument), Forex, die meisten Indizes — dort liefert `syminfo.volumetype` `"tick"` oder `"n/a"`, d.h. nur die Zahl der Preis-Updates, kein Handelsvolumen.
+- Der Indikator prüft das zur Laufzeit über einen `volumetype`-Guard. Ist kein echtes Volumen vorhanden, bleiben Oszillator, Signal-Linie, Histogramm, Regime-Engine und Divergenzerkennung leer (kein Plot, keine Fehlinterpretation) und ein einmaliges Warn-Label ("benötigt echtes Handelsvolumen — aktuell: …") erscheint im Panel.
+- **Referenzmarkt-Variante (z.B. `NYMEX:NG1!`) — bewusst nicht implementiert:** Die Klinger Volume Force ist ein reiner Oszillator ohne absoluten Preislevel, ein Cross-Symbol-Wert würde also anders als bei VWAP keine Preisniveaus mischen. Das ändert aber nichts daran, dass ein `request.security()`-Aufruf auf ein Fremdsymbol laut `DATA_VALIDITY.md` §4.1 die Ausnahme bleibt, nicht der Standard: Latenz, Settlement-Unklarheit, Session-Versatz, Request-Budget, Repaint-Risiko und Symbol-Mapping sind sechs zusätzliche Fehlerquellen, die ein Einzelindikator nicht tragen sollte. Diese Abwägung ist hier dokumentiert, aber nicht umgesetzt — der Indikator degradiert stattdessen hart auf `Exchange-only`.
+
 ## Notes
 
 - Divergences use confirmed price pivots — a divergence is only emitted after `Pivot right bars` have elapsed. This avoids repainting a still-forming pivot at the cost of confirmation delay.
 - The default normalization divides KVO, Signal, and the histogram by the same denominator (`EMA(abs(KVO), N)`), which preserves zero crossings and KVO/Signal crossings while making the pane comparable across instruments.
 - "StdDev scale" intentionally uses `KVO / stdev(KVO)`, not a mean-subtracted Z-score, so the semantic KVO zero line doesn't move.
-- Needs real volume data; on zero-volume feeds the Volume Force term collapses toward zero.
+- Requires real trade volume (`syminfo.volumetype` `base`/`quote`). On CFDs, Forex, and most indices the indicator produces no output — see Instrumente above.

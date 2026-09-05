@@ -19,9 +19,19 @@ A directional volume/money flow profile. Every price row shows two bars anchored
 - **Bull% label** — buying share shown inside each significant row
 - **Source** — Money Flow (volume × mid-price) or raw Volume
 - **Polarity method** — Bar Polarity (close > open) or Close Location (proportional)
-- **Intrabar Delta (optional)** — bull/bear split per bar from real lower-timeframe volume direction instead of the close-location approximation (chart TF ÷ granularity, clamped to 1 minute; automatic fallback when no LTF data is available)
+- **Intrabar Delta (optional)** — bull/bear split per bar from a lower-timeframe, price-direction-signed volume proxy instead of the close-location approximation (chart TF ÷ granularity, clamped to 1 minute; automatic fallback when no LTF data is available). This is not real trade-classified delta — OHLCV carries no aggressor-side data, so "up-bar volume" is a heuristic derived from bar direction, not a buy/sell classification.
 - **Absorption Profile (optional)** — wick-volume per price row drawn as a mirror profile left of the anchor: flow at prices the bar visited but closed away from (rejection)
 - **Absorption Peak Zones (optional)** — local absorption maxima (≥ both neighbors and ≥ 50% of the absorption max) projected as S/R zones across the lookback window
+
+## Instrumente
+
+**Valid:** Futures, stocks, crypto exchanges — anywhere `syminfo.volumetype` reports `base` or `quote` (real trade volume).
+
+**Invalid:** CFDs (incl. `CAPITALCOM:NATURALGAS`), Forex, most Indices — these report `syminfo.volumetype` as `tick` or `n/a`.
+
+On an invalid instrument the indicator draws nothing; instead it shows a "benötigt echtes Handelsvolumen" (needs real trade volume) warning label on the last bar.
+
+**Reference-market variant:** deliberately not implemented. A volume profile maps the chart symbol's own price axis. Substituting a cross-symbol volume request (e.g. `NYMEX:NG1!` instead of `CAPITALCOM:NATURALGAS`) would overlay a *different* market's volume distribution onto the chart instrument's price rows. CFD and future prices are not identical (spread/feed offset), so the price buckets would be misaligned against the volume that actually traded there — the profile would mark the wrong rows, not just imprecisely but structurally. For a volume profile, degradation (no output) is the correct choice, not a reference-market substitute.
 
 ## How to read it
 
