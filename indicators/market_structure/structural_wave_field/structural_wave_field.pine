@@ -1,0 +1,1248 @@
+//@version=6
+// ============================================================================
+// Structural Wave Field [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2026-08-28
+// ============================================================================
+// A chart-native market-structure visualization. It does NOT draw a classical
+// oscillator. Instead, it converts structural flow, internal wave energy,
+// correction pressure, maturity, re-synchronization and exhaustion into an
+// adaptive aligned/counter gradient field on a shared axis below price.
+//
+// Features:
+//   ✓ Multi-horizon Structural Flow Engine with hysteresis
+//   ✓ Internal Wave Engine: momentum / velocity / acceleration
+//   ✓ Non-overlapping wave segmentation with complete metric memory
+//   ✓ Structural-leg archive for timeframe-adaptive normalization
+//   ✓ Counter Pressure + Structural Integrity
+//   ✓ Directional Maturity, progressive Re-Sync, Exhaustion, Failed Expansion
+//   ✓ Elliott-context sequence recognition without hard 1-5 wave claims
+//   ✓ Price-scaled Gradient Wave Field on a shared Flow Axis
+//   ✓ Compact hover labels and bar-close-confirmed events
+//
+// ============================================================================
+
+indicator("Structural Wave Field [WavesUnchained]", shorttitle = "Structural Wave Field", overlay = true, max_bars_back = 2000, max_labels_count = 200)
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+f_clamp(float x, float lo, float hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_safe_div(float num, float den, float fallback = 0.0) =>
+    math.abs(den) > 1e-10 ? num / den : fallback
+
+// Smooth bounded transform in [-1, +1] without relying on extreme clipping.
+f_squash(float x) =>
+    x / (1.0 + math.abs(x))
+
+f_push_float(array<float> a, float v, int maxSize) =>
+    array.push(a, v)
+    if array.size(a) > maxSize
+        array.shift(a)
+
+f_push_int(array<int> a, int v, int maxSize) =>
+    array.push(a, v)
+    if array.size(a) > maxSize
+        array.shift(a)
+
+f_median_or(array<float> a, float fallback) =>
+    array.size(a) > 0 ? nz(array.median(a), fallback) : fallback
+
+f_recent_mean(array<float> a, int count, float fallback) =>
+    int sz = array.size(a)
+    float result = fallback
+    if count > 0 and sz >= count
+        float total = 0.0
+        for offset = 0 to count - 1
+            total += array.get(a, sz - 1 - offset)
+        result := total / count
+    result
+
+f_decay(float current, float reference, float floor) =>
+    f_clamp(1.0 - f_safe_div(current, math.max(reference, floor), 1.0), 0.0, 1.0)
+
+// Returns the nth most recent value in metric[] whose matching polarity equals target.
+// nth = 0 => most recent match, nth = 1 => previous match, etc.
+f_metric_for_pol(array<int> pols, array<float> metric, int target, int nth, float fallback = na) =>
+    float result = fallback
+    int found = 0
+    int sz = array.size(pols)
+    if sz > 0
+        for j = 0 to sz - 1
+            int idx = sz - 1 - j
+            if array.get(pols, idx) == target
+                if found == nth
+                    result := array.get(metric, idx)
+                    break
+                found += 1
+    result
+
+f_max_metric_for_pol(array<int> pols, array<float> metric, int target, float fallback = na) =>
+    float result = fallback
+    int sz = array.size(pols)
+    if sz > 0
+        for idx = 0 to sz - 1
+            if array.get(pols, idx) == target
+                float value = array.get(metric, idx)
+                result := na(result) ? value : math.max(result, value)
+    result
+
+f_last_pattern5(array<int> pols) =>
+    bool ok = false
+    int sz = array.size(pols)
+    if sz >= 5
+        ok := array.get(pols, sz - 5) == 1 and array.get(pols, sz - 4) == -1 and array.get(pols, sz - 3) == 1 and array.get(pols, sz - 2) == -1 and array.get(pols, sz - 1) == 1
+    ok
+
+f_last_pattern3_correction(array<int> pols) =>
+    bool ok = false
+    int sz = array.size(pols)
+    if sz >= 3
+        ok := array.get(pols, sz - 3) == -1 and array.get(pols, sz - 2) == 1 and array.get(pols, sz - 1) == -1
+    ok
+
+f_phase_name(int phase) =>
+    switch phase
+        1 => "Initiation"
+        2 => "Acceleration"
+        3 => "Expansion"
+        4 => "Correction"
+        5 => "Compression"
+        6 => "Re-Sync"
+        7 => "Late Expansion"
+        8 => "Exhaustion"
+        9 => "Flow Flip"
+        => "Transition"
+
+f_strength_name(float x) =>
+    x >= 0.78 ? "Very strong" : x >= 0.60 ? "Strong" : x >= 0.40 ? "Moderate" : x >= 0.22 ? "Weak" : "Very weak"
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+const string GRP_MODE      = "00 · Mode"
+const string GRP_STRUCTURE = "01 · Structural Flow"
+const string GRP_WAVE      = "02 · Internal Wave"
+const string GRP_SEGMENT   = "03 · Wave Segmentation"
+const string GRP_MATURITY  = "04 · Maturity / Memory"
+const string GRP_RESYNC    = "05 · Re-Synchronization"
+const string GRP_EXHAUST   = "06 · Exhaustion"
+const string GRP_PART      = "07 · Participation"
+const string GRP_VIS       = "08 · Visual Field"
+const string GRP_UI        = "09 · Dashboard / Event Labels"
+
+bool advancedCalibration = input.bool(false, "Enable advanced calibration", group = GRP_MODE, tooltip = "Unlocks structural, wave and score parameters. Leave disabled to use the balanced defaults.")
+string sensitivityMode = input.string("Balanced", "Sensitivity", options = ["Fast", "Balanced", "Structural"], group = GRP_MODE, active = not advancedCalibration, tooltip = "Fast shows more internal waves, Balanced is the default, and Structural favors fewer, larger wave segments. Enable advanced calibration for manual parameters.")
+
+int atrLen = input.int(14, "ATR normalization", minval = 5, maxval = 500, group = GRP_STRUCTURE, active = advancedCalibration)
+int structBase = input.int(24, "Base structure length", minval = 8, maxval = 400, group = GRP_STRUCTURE, active = advancedCalibration)
+float mediumRatio = input.float(2.0, "Medium horizon ratio", minval = 1.2, maxval = 4.0, step = 0.1, group = GRP_STRUCTURE, active = advancedCalibration)
+float slowRatio = input.float(4.0, "Slow horizon ratio", minval = 2.0, maxval = 5.0, step = 0.25, group = GRP_STRUCTURE, active = advancedCalibration)
+float structEntry = input.float(0.34, "Direction entry threshold", minval = 0.05, maxval = 0.90, step = 0.01, group = GRP_STRUCTURE, active = advancedCalibration)
+float structHold = input.float(0.14, "Direction hold threshold", minval = 0.01, maxval = 0.80, step = 0.01, group = GRP_STRUCTURE, active = advancedCalibration)
+float structFlip = input.float(0.42, "Opposite-direction flip threshold", minval = 0.10, maxval = 0.95, step = 0.01, group = GRP_STRUCTURE, active = advancedCalibration)
+float dispTarget = input.float(3.0, "Displacement saturation (ATR)", minval = 0.5, maxval = 20.0, step = 0.25, group = GRP_STRUCTURE, active = advancedCalibration)
+
+int waveLen = input.int(10, "Momentum length", minval = 3, maxval = 500, group = GRP_WAVE, active = advancedCalibration)
+int waveSmooth = input.int(5, "Momentum smoothing", minval = 1, maxval = 100, group = GRP_WAVE, active = advancedCalibration)
+int velocityLag = input.int(2, "Velocity lag", minval = 1, maxval = 50, group = GRP_WAVE, active = advancedCalibration)
+int accelLag = input.int(2, "Acceleration lag", minval = 1, maxval = 50, group = GRP_WAVE, active = advancedCalibration)
+int qualityLen = input.int(12, "Wave quality length", minval = 4, maxval = 500, group = GRP_WAVE, active = advancedCalibration)
+float wMomentum = input.float(0.55, "Momentum weight", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_WAVE, inline = "w1", active = advancedCalibration)
+float wVelocity = input.float(0.28, "Velocity", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_WAVE, inline = "w1", active = advancedCalibration)
+float wAccel = input.float(0.17, "Acceleration", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_WAVE, inline = "w1", active = advancedCalibration)
+
+float waveStartThreshold = input.float(0.18, "Segment start threshold", minval = 0.03, maxval = 0.80, step = 0.01, group = GRP_SEGMENT, active = advancedCalibration)
+float waveEndThreshold = input.float(0.08, "Segment end threshold", minval = 0.01, maxval = 0.60, step = 0.01, group = GRP_SEGMENT, active = advancedCalibration)
+int minWaveBars = input.int(2, "Minimum segment bars", minval = 1, maxval = 100, group = GRP_SEGMENT, active = advancedCalibration)
+int waveMemorySize = input.int(30, "Wave memory", minval = 8, maxval = 100, group = GRP_SEGMENT, active = advancedCalibration)
+float contextMinScore = input.float(0.44, "Minimum Elliott-context score", minval = 0.20, maxval = 0.90, step = 0.01, group = GRP_SEGMENT, active = advancedCalibration)
+
+int legArchiveSize = input.int(30, "Structural leg archive", minval = 8, maxval = 100, group = GRP_MATURITY, active = advancedCalibration)
+float matAgeW = input.float(0.20, "Age", minval = 0, maxval = 1, step = 0.05, group = GRP_MATURITY, inline = "mat1", active = advancedCalibration)
+float matExtW = input.float(0.25, "Extension", minval = 0, maxval = 1, step = 0.05, group = GRP_MATURITY, inline = "mat1", active = advancedCalibration)
+float matCycleW = input.float(0.15, "Cycles", minval = 0, maxval = 1, step = 0.05, group = GRP_MATURITY, inline = "mat2", active = advancedCalibration)
+float matDecayW = input.float(0.20, "Wave decay", minval = 0, maxval = 1, step = 0.05, group = GRP_MATURITY, inline = "mat2", active = advancedCalibration)
+float matEffW = input.float(0.10, "Efficiency loss", minval = 0, maxval = 1, step = 0.05, group = GRP_MATURITY, inline = "mat3", active = advancedCalibration)
+float matMismatchW = input.float(0.10, "Price/pressure mismatch", minval = 0, maxval = 1, step = 0.05, group = GRP_MATURITY, inline = "mat3", active = advancedCalibration)
+
+int recoveryLen = input.int(8, "Recovery length", minval = 2, maxval = 500, group = GRP_RESYNC, active = advancedCalibration)
+float resyncConfirm = input.float(0.16, "Confirmed aligned energy", minval = 0.03, maxval = 0.70, step = 0.01, group = GRP_RESYNC, active = advancedCalibration)
+int resyncMinCorrectionBars = input.int(3, "Minimum correction bars", minval = 1, maxval = 50, group = GRP_RESYNC, active = advancedCalibration)
+float resyncMinCounterPeak = input.float(0.24, "Minimum counter-pressure peak", minval = 0.05, maxval = 0.80, step = 0.01, group = GRP_RESYNC, active = advancedCalibration)
+float resyncMinQuality = input.float(0.38, "Minimum Re-Sync quality", minval = 0.10, maxval = 0.90, step = 0.01, group = GRP_RESYNC, active = advancedCalibration)
+int resyncCooldownBars = input.int(15, "Re-Sync cooldown bars", minval = 1, maxval = 100, group = GRP_RESYNC, active = advancedCalibration)
+float rsCounterW = input.float(0.30, "Counter decay", minval = 0, maxval = 1, step = 0.05, group = GRP_RESYNC, inline = "rs1", active = advancedCalibration)
+float rsAccelW = input.float(0.30, "Trend acceleration", minval = 0, maxval = 1, step = 0.05, group = GRP_RESYNC, inline = "rs1", active = advancedCalibration)
+float rsRecoveryW = input.float(0.20, "Price recovery", minval = 0, maxval = 1, step = 0.05, group = GRP_RESYNC, inline = "rs2", active = advancedCalibration)
+float rsIntegrityW = input.float(0.20, "Integrity", minval = 0, maxval = 1, step = 0.05, group = GRP_RESYNC, inline = "rs2", active = advancedCalibration)
+
+float exhaustionMaturityMin = input.float(0.58, "Minimum maturity", minval = 0.2, maxval = 0.95, step = 0.01, group = GRP_EXHAUST, active = advancedCalibration)
+float failedPeakRatio = input.float(0.62, "Failed expansion: peak ratio", minval = 0.2, maxval = 0.95, step = 0.01, group = GRP_EXHAUST, active = advancedCalibration)
+float failedDispRatio = input.float(0.70, "Failed expansion: displacement ratio", minval = 0.2, maxval = 1.2, step = 0.05, group = GRP_EXHAUST, active = advancedCalibration)
+
+string participationMode = input.string("Relative Volume", "Participation", options = ["Off", "Volume", "Relative Volume", "Money Flow"], group = GRP_PART)
+int volumeLen = input.int(20, "Volume reference length", minval = 5, maxval = 500, group = GRP_PART, active = advancedCalibration and participationMode != "Off")
+float participationWeight = input.float(0.10, "Exhaustion participation weight", minval = 0, maxval = 0.30, step = 0.01, group = GRP_PART, active = advancedCalibration and participationMode != "Off")
+
+int fieldAnchorLen = input.int(18, "Price envelope length", minval = 5, maxval = 200, group = GRP_VIS)
+int fieldAnchorSmooth = input.int(3, "Flow-axis smoothing", minval = 1, maxval = 50, group = GRP_VIS)
+float fieldGapATR = input.float(0.20, "Clearance below price (ATR)", minval = 0.05, maxval = 3.0, step = 0.05, group = GRP_VIS)
+float fieldScale = input.float(0.90, "Maximum aligned height (ATR)", minval = 0.20, maxval = 3.0, step = 0.05, group = GRP_VIS)
+float counterScale = input.float(0.85, "Counter-wave thickness", minval = 0.2, maxval = 2.0, step = 0.05, group = GRP_VIS)
+bool showBackbone = input.bool(true, "Structural backbone", group = GRP_VIS)
+bool showCounter = input.bool(true, "Counter-wave body", group = GRP_VIS)
+int transitionMemoryBars = input.int(12, "Transition memory bars", minval = 2, maxval = 100, group = GRP_VIS, active = advancedCalibration, tooltip = "Manual transition-memory duration when advanced calibration is enabled. Presets otherwise scale the duration from the internal-wave length.")
+color bullColor = input.color(color.rgb(30, 180, 120), "Bull structural color", group = GRP_VIS, inline = "clr")
+color bearColor = input.color(color.rgb(220, 70, 85), "Bear structural color", group = GRP_VIS, inline = "clr")
+
+bool showEventLabels = input.bool(true, "Event labels", group = GRP_UI)
+bool showElliottLabels = input.bool(true, "Elliott-context labels", group = GRP_UI, active = showEventLabels, tooltip = "Shows quality-gated I5 and C3 events on completed, non-overlapping segment windows. These labels describe sequence context, not a formal Elliott count.")
+float eventLabelGapATR = input.float(0.35, "Event-label distance (ATR)", minval = 0.30, maxval = 1.50, step = 0.05, group = GRP_UI, active = showEventLabels, tooltip = "Distance between the wave-body contour and event labels. Multiple events on the same bar automatically use separate lanes.")
+bool showDashboard = input.bool(true, "Dashboard", group = GRP_UI)
+bool showElliottContext = input.bool(true, "Elliott-context row", group = GRP_UI)
+bool eventsOnBarClose = input.bool(true, "Labels and alerts only on bar close", group = GRP_UI, tooltip = "Prevents named event labels and alerts from appearing and disappearing while the realtime bar is still open. The field and dashboard remain live.")
+
+int effectiveStructBase = advancedCalibration ? structBase : sensitivityMode == "Fast" ? 16 : sensitivityMode == "Structural" ? 36 : 24
+float effectiveMediumRatio = advancedCalibration ? mediumRatio : sensitivityMode == "Fast" ? 1.75 : sensitivityMode == "Structural" ? 2.25 : 2.0
+float effectiveSlowRatio = advancedCalibration ? slowRatio : sensitivityMode == "Fast" ? 3.0 : sensitivityMode == "Structural" ? 4.5 : 4.0
+float effectiveStructEntry = advancedCalibration ? structEntry : sensitivityMode == "Fast" ? 0.30 : sensitivityMode == "Structural" ? 0.38 : 0.34
+float effectiveStructHold = advancedCalibration ? structHold : sensitivityMode == "Fast" ? 0.11 : sensitivityMode == "Structural" ? 0.17 : 0.14
+float effectiveStructFlip = advancedCalibration ? structFlip : sensitivityMode == "Fast" ? 0.38 : sensitivityMode == "Structural" ? 0.48 : 0.42
+float effectiveDispTarget = advancedCalibration ? dispTarget : sensitivityMode == "Fast" ? 2.5 : sensitivityMode == "Structural" ? 3.5 : 3.0
+int effectiveWaveLen = advancedCalibration ? waveLen : sensitivityMode == "Fast" ? 7 : sensitivityMode == "Structural" ? 14 : 10
+int effectiveWaveSmooth = advancedCalibration ? waveSmooth : sensitivityMode == "Fast" ? 3 : sensitivityMode == "Structural" ? 7 : 5
+int effectiveVelocityLag = advancedCalibration ? velocityLag : sensitivityMode == "Fast" ? 1 : sensitivityMode == "Structural" ? 3 : 2
+int effectiveAccelLag = advancedCalibration ? accelLag : sensitivityMode == "Fast" ? 1 : sensitivityMode == "Structural" ? 3 : 2
+int effectiveQualityLen = advancedCalibration ? qualityLen : sensitivityMode == "Fast" ? 9 : sensitivityMode == "Structural" ? 18 : 12
+float effectiveWaveStart = advancedCalibration ? waveStartThreshold : sensitivityMode == "Fast" ? 0.14 : sensitivityMode == "Structural" ? 0.22 : 0.18
+float effectiveWaveEnd = advancedCalibration ? waveEndThreshold : sensitivityMode == "Fast" ? 0.06 : sensitivityMode == "Structural" ? 0.10 : 0.08
+int effectiveMinWaveBars = advancedCalibration ? minWaveBars : sensitivityMode == "Fast" ? 1 : sensitivityMode == "Structural" ? 3 : 2
+int effectiveRecoveryLen = advancedCalibration ? recoveryLen : sensitivityMode == "Fast" ? 6 : sensitivityMode == "Structural" ? 12 : 8
+float effectiveContextMinScore = advancedCalibration ? contextMinScore : sensitivityMode == "Fast" ? 0.38 : sensitivityMode == "Structural" ? 0.50 : 0.44
+int effectiveResyncMinCorrectionBars = advancedCalibration ? resyncMinCorrectionBars : sensitivityMode == "Fast" ? 2 : sensitivityMode == "Structural" ? 4 : 3
+float effectiveResyncMinCounterPeak = advancedCalibration ? resyncMinCounterPeak : sensitivityMode == "Fast" ? 0.19 : sensitivityMode == "Structural" ? 0.29 : 0.24
+float effectiveResyncMinRetracement = sensitivityMode == "Fast" and not advancedCalibration ? 0.07 : sensitivityMode == "Structural" and not advancedCalibration ? 0.14 : 0.10
+float effectiveResyncMinQuality = advancedCalibration ? resyncMinQuality : sensitivityMode == "Fast" ? 0.32 : sensitivityMode == "Structural" ? 0.45 : 0.38
+int effectiveResyncCooldownBars = advancedCalibration ? resyncCooldownBars : int(math.round(effectiveWaveLen * (sensitivityMode == "Fast" ? 1.0 : sensitivityMode == "Structural" ? 1.8 : 1.5)))
+int effectiveTransitionMemoryBars = advancedCalibration ? transitionMemoryBars : int(math.round(effectiveWaveLen * (sensitivityMode == "Fast" ? 1.0 : sensitivityMode == "Structural" ? 1.5 : 1.2)))
+
+if barstate.isfirst
+    if effectiveMediumRatio >= effectiveSlowRatio
+        runtime.error("Medium horizon ratio must be smaller than Slow horizon ratio.")
+    if effectiveStructHold >= effectiveStructEntry
+        runtime.error("Direction hold threshold must be smaller than Direction entry threshold.")
+    if effectiveStructFlip <= effectiveStructEntry
+        runtime.error("Opposite-direction flip threshold must be greater than Direction entry threshold.")
+    if effectiveWaveEnd >= effectiveWaveStart
+        runtime.error("Segment end threshold must be smaller than Segment start threshold.")
+
+// ============================================================================
+// Core normalization
+// ============================================================================
+
+float atr = math.max(ta.atr(atrLen), syminfo.mintick)
+
+int lenFast = effectiveStructBase
+int lenMedium = int(math.round(effectiveStructBase * effectiveMediumRatio))
+int lenSlow = int(math.round(effectiveStructBase * effectiveSlowRatio))
+
+f_horizon_score(int len) =>
+    float d = close - close[len]
+    float path = math.sum(math.abs(ta.change(close)), len)
+    float eff = f_safe_div(math.abs(d), path, 0.0)
+    float signedEff = math.sign(d) * eff
+    float disp = f_squash(f_safe_div(d, atr * effectiveDispTarget, 0.0))
+    float direction = math.sign(d)
+    float directionalPath = math.sum(math.max(ta.change(close) * direction, 0.0), len)
+    float persistence = f_safe_div(directionalPath, path, 0.0) * direction
+    float emaRef = ta.ema(close, len)
+    float location = f_squash(f_safe_div(close - emaRef, atr, 0.0))
+    0.35 * disp + 0.30 * signedEff + 0.20 * persistence + 0.15 * location
+
+float hFast = f_horizon_score(lenFast)
+float hMedium = f_horizon_score(lenMedium)
+float hSlow = f_horizon_score(lenSlow)
+
+float rawStructuralDrive = 0.20 * hFast + 0.35 * hMedium + 0.45 * hSlow
+
+int sFast = hFast > 0.05 ? 1 : hFast < -0.05 ? -1 : 0
+int sMed = hMedium > 0.05 ? 1 : hMedium < -0.05 ? -1 : 0
+int sSlow = hSlow > 0.05 ? 1 : hSlow < -0.05 ? -1 : 0
+float signAgreement = (sFast == sMed and sMed == sSlow) ? 1.0 : (sFast == sMed or sFast == sSlow or sMed == sSlow) ? 0.68 : 0.34
+float horizonSpread = (math.abs(hFast - hMedium) + math.abs(hMedium - hSlow) + math.abs(hFast - hSlow)) / 3.0
+float structuralConfidence = f_clamp(signAgreement * (1.0 - 0.65 * horizonSpread), 0.0, 1.0)
+float structuralDrive = rawStructuralDrive * (0.72 + 0.28 * signAgreement)
+float structuralStrength = f_clamp(math.abs(structuralDrive), 0.0, 1.0)
+
+// Structural hysteresis: hold the active direction through ordinary corrections.
+var int structDir = 0
+int prevStructDir = structDir
+if structDir == 0
+    if structuralDrive > effectiveStructEntry
+        structDir := 1
+    else if structuralDrive < -effectiveStructEntry
+        structDir := -1
+else if structDir == 1
+    if structuralDrive < -effectiveStructFlip
+        structDir := -1
+    else if structuralDrive < effectiveStructHold
+        structDir := 0
+else if structDir == -1
+    if structuralDrive > effectiveStructFlip
+        structDir := 1
+    else if structuralDrive > -effectiveStructHold
+        structDir := 0
+
+bool structuralFlip = prevStructDir != 0 and structDir != 0 and structDir != prevStructDir
+bool structuralExit = prevStructDir != 0 and structDir == 0
+bool structuralInitiated = prevStructDir == 0 and structDir != 0
+bool structuralReset = structuralFlip or structuralExit
+
+// ============================================================================
+// Structural leg state + archive
+// ============================================================================
+
+var array<float> legDurArchive = array.new_float()
+var array<float> legDispArchive = array.new_float()
+var array<float> legCyclesArchive = array.new_float()
+
+var int legStartBar = na
+var float legStartPrice = na
+var float legExtreme = na
+var float legAtrSum = 0.0
+var int legAtrBars = 0
+var int legAlignedCount = 0
+var int legCorrectionCount = 0
+
+if structuralInitiated or (structDir != 0 and na(legStartBar))
+    legStartBar := bar_index
+    legStartPrice := close
+    legExtreme := close
+    legAtrSum := 0.0
+    legAtrBars := 0
+    legAlignedCount := 0
+    legCorrectionCount := 0
+
+// Archive the completed structural leg before resetting it.
+if structuralReset and not na(legStartBar) and not na(legStartPrice) and not na(legExtreme)
+    float oldLegDur = math.max(1.0, bar_index - legStartBar)
+    float oldLegAtr = f_safe_div(legAtrSum, math.max(float(legAtrBars), 1.0), atr)
+    float oldLegDisp = math.abs(legExtreme - legStartPrice) / math.max(oldLegAtr, syminfo.mintick)
+    f_push_float(legDurArchive, oldLegDur, legArchiveSize)
+    f_push_float(legDispArchive, oldLegDisp, legArchiveSize)
+    float oldLegCycles = legAlignedCount + 0.5 * legCorrectionCount
+    f_push_float(legCyclesArchive, math.max(1.0, oldLegCycles), legArchiveSize)
+    legStartBar := structuralFlip ? bar_index : na
+    legStartPrice := structuralFlip ? close : na
+    legExtreme := structuralFlip ? close : na
+    legAtrSum := 0.0
+    legAtrBars := 0
+    legAlignedCount := 0
+    legCorrectionCount := 0
+
+if structDir == 1
+    legExtreme := na(legExtreme) ? high : math.max(legExtreme, high)
+else if structDir == -1
+    legExtreme := na(legExtreme) ? low : math.min(legExtreme, low)
+
+if structDir != 0 and not na(legStartBar)
+    legAtrSum += atr
+    legAtrBars += 1
+
+float legRange = math.abs(legExtreme - legStartPrice)
+float retracement = structDir == 1 ? f_safe_div(legExtreme - close, math.max(legRange, atr * 0.25), 0.0) : structDir == -1 ? f_safe_div(close - legExtreme, math.max(legRange, atr * 0.25), 0.0) : 0.0
+retracement := f_clamp(retracement, 0.0, 1.5)
+
+// ============================================================================
+// Internal Wave Engine
+// ============================================================================
+
+float priceMomentum = f_squash(f_safe_div(close - close[effectiveWaveLen], atr * 1.75, 0.0))
+float emaWave = ta.ema(close, effectiveWaveLen)
+float emaSlope = f_squash(f_safe_div((emaWave - emaWave[1]) * effectiveWaveLen, atr * 1.25, 0.0))
+float candleImpulse = f_squash(f_safe_div(ta.ema(close - open, math.max(2, int(math.round(effectiveWaveLen * 0.5)))), atr * 0.65, 0.0))
+float rawMomentum = 0.52 * priceMomentum + 0.30 * emaSlope + 0.18 * candleImpulse
+float momentumCore = ta.ema(rawMomentum, effectiveWaveSmooth)
+float velocity = f_squash((momentumCore - momentumCore[effectiveVelocityLag]) * 3.0)
+float acceleration = f_squash((velocity - velocity[effectiveAccelLag]) * 3.0)
+float waveWeightSum = math.max(wMomentum + wVelocity + wAccel, 0.001)
+float internalWave = f_clamp((wMomentum * momentumCore + wVelocity * velocity + wAccel * acceleration) / waveWeightSum, -1.0, 1.0)
+float waveEnergy = math.abs(internalWave)
+float alignedWave = structDir == 0 ? 0.0 : internalWave * structDir
+float alignedAcceleration = acceleration * structDir
+
+float qPath = math.sum(math.abs(ta.change(close)), effectiveQualityLen)
+float qNet = math.abs(close - close[effectiveQualityLen])
+float qEfficiency = f_clamp(f_safe_div(qNet, qPath, 0.0), 0.0, 1.0)
+float signedMove = ta.change(close) * structDir
+float alignedPath = math.sum(math.max(signedMove, 0.0), effectiveQualityLen)
+float counterPath = math.sum(math.max(-signedMove, 0.0), effectiveQualityLen)
+float pathTotal = math.max(alignedPath + counterPath, syminfo.mintick)
+float qPersistence = f_clamp(math.max(alignedPath, counterPath) / pathTotal, 0.0, 1.0)
+float noise = ta.stdev(ta.change(close), effectiveQualityLen)
+float qSmoothness = f_clamp(1.0 - f_safe_div(noise, atr * 0.90, 1.0), 0.0, 1.0)
+float waveQuality = f_clamp(0.45 * qEfficiency + 0.30 * qPersistence + 0.25 * qSmoothness, 0.0, 1.0)
+
+float counterEnergy = math.max(-alignedWave, 0.0)
+float counterPersistence = f_clamp(counterPath / pathTotal, 0.0, 1.0)
+float counterPressure = counterEnergy * (0.42 + 0.22 * waveQuality + 0.18 * f_clamp(retracement, 0.0, 1.0) + 0.18 * counterPersistence)
+counterPressure := f_clamp(counterPressure, 0.0, 1.0)
+
+float structuralStress = f_clamp(math.max(-structuralDrive * structDir, 0.0) * 2.0, 0.0, 1.0)
+float structuralIntegrity = f_clamp(1.0 - (0.52 * counterPressure + 0.30 * f_clamp(retracement, 0.0, 1.0) + 0.18 * structuralStress), 0.0, 1.0)
+
+// ============================================================================
+// Participation
+// ============================================================================
+
+float volumeValue = nz(volume, 0.0)
+float volBase = ta.sma(volumeValue, volumeLen)
+float relVol = f_safe_div(volumeValue, volBase, 1.0)
+float candleRange = math.max(high - low, syminfo.mintick)
+float signedMoneyFlow = volumeValue * f_safe_div(close - open, candleRange, 0.0) * structDir
+float moneyFlowBase = math.max(ta.ema(volumeValue, volumeLen), 1.0)
+float moneyFlowParticipation = f_clamp(0.5 + 0.5 * f_squash(f_safe_div(ta.ema(signedMoneyFlow, volumeLen), moneyFlowBase, 0.0) * 3.0), 0.0, 1.0)
+float participation = switch participationMode
+    "Volume" => volBase > 0 ? f_clamp(f_safe_div(volumeValue, ta.highest(volumeValue, volumeLen), 0.0), 0.0, 1.0) : 0.50
+    "Relative Volume" => f_clamp((relVol - 0.50) / 1.50, 0.0, 1.0)
+    "Money Flow" => moneyFlowParticipation
+    => 0.50
+float participationLoss = participationMode == "Off" ? 0.0 : f_clamp(ta.ema(participation, 5)[1] - ta.ema(participation, 5), 0.0, 1.0)
+
+// ============================================================================
+// Wave Segmentation + Wave Memory
+// ============================================================================
+
+var array<int> wavePolarityA = array.new_int()
+var array<float> waveDurationA = array.new_float()
+var array<float> waveDisplacementA = array.new_float()
+var array<float> wavePeakA = array.new_float()
+var array<float> waveIntegralA = array.new_float()
+var array<float> waveQualityA = array.new_float()
+var array<float> waveEfficiencyA = array.new_float()
+var array<float> waveParticipationA = array.new_float()
+var array<float> waveRetracementA = array.new_float()
+
+var int segPolarity = 0
+var int segStartBar = na
+var float segStartPrice = na
+var float segPeakEnergy = 0.0
+var float segEnergyIntegral = 0.0
+var float segQualitySum = 0.0
+var float segEfficiencySum = 0.0
+var float segParticipationSum = 0.0
+var float segMaxRetracement = 0.0
+var float segMaxDirectionalMove = 0.0
+var float segLastAtr = na
+
+bool segmentEnded = false
+int endedPolarity = 0
+float endedPeak = na
+float endedDisplacement = na
+float endedIntegral = na
+float endedQuality = na
+float endedEfficiency = na
+float endedParticipation = na
+float endedRetracement = na
+float priorAlignedPeakBeforeEnd = f_metric_for_pol(wavePolarityA, wavePeakA, 1, 0, na)
+float priorAlignedDispBeforeEnd = f_metric_for_pol(wavePolarityA, waveDisplacementA, 1, 0, na)
+
+int desiredPolarity = alignedWave >= effectiveWaveStart ? 1 : alignedWave <= -effectiveWaveStart ? -1 : 0
+
+// A structural flip terminates the old intra-leg wave context. The completed
+// structural leg is already archived above, so old wave segments must not leak
+// into the new leg's Elliott/maturity context.
+if structuralReset
+    segPolarity := 0
+    segStartBar := na
+    segStartPrice := na
+    segPeakEnergy := 0.0
+    segEnergyIntegral := 0.0
+    segQualitySum := 0.0
+    segEfficiencySum := 0.0
+    segParticipationSum := 0.0
+    segMaxRetracement := 0.0
+    segMaxDirectionalMove := 0.0
+    segLastAtr := na
+    array.clear(wavePolarityA)
+    array.clear(waveDurationA)
+    array.clear(waveDisplacementA)
+    array.clear(wavePeakA)
+    array.clear(waveIntegralA)
+    array.clear(waveQualityA)
+    array.clear(waveEfficiencyA)
+    array.clear(waveParticipationA)
+    array.clear(waveRetracementA)
+
+if segPolarity == 0
+    if desiredPolarity != 0
+        segPolarity := desiredPolarity
+        segStartBar := bar_index
+        segStartPrice := close
+        segPeakEnergy := waveEnergy
+        segEnergyIntegral := waveEnergy
+        segQualitySum := waveQuality
+        segEfficiencySum := qEfficiency
+        segParticipationSum := participation
+        segMaxRetracement := retracement
+        segMaxDirectionalMove := 0.0
+        segLastAtr := atr
+else
+    bool oppositeConfirmed = desiredPolarity == -segPolarity
+    bool energyDied = waveEnergy <= effectiveWaveEnd
+    if oppositeConfirmed or energyDied
+        // The transition/death bar does not belong to the completed segment.
+        // On an opposite transition it becomes the first bar of the new segment.
+        int dur = math.max(1, bar_index - segStartBar)
+        if dur >= effectiveMinWaveBars
+            segmentEnded := true
+            endedPolarity := segPolarity
+            endedPeak := segPeakEnergy
+            endedDisplacement := segMaxDirectionalMove / math.max(nz(segLastAtr, atr), syminfo.mintick)
+            endedIntegral := segEnergyIntegral
+            endedQuality := f_safe_div(segQualitySum, dur, waveQuality)
+            endedEfficiency := f_safe_div(segEfficiencySum, dur, qEfficiency)
+            endedParticipation := f_safe_div(segParticipationSum, dur, participation)
+            endedRetracement := segMaxRetracement
+            f_push_int(wavePolarityA, endedPolarity, waveMemorySize)
+            f_push_float(waveDurationA, dur, waveMemorySize)
+            f_push_float(waveDisplacementA, endedDisplacement, waveMemorySize)
+            f_push_float(wavePeakA, endedPeak, waveMemorySize)
+            f_push_float(waveIntegralA, endedIntegral, waveMemorySize)
+            f_push_float(waveQualityA, endedQuality, waveMemorySize)
+            f_push_float(waveEfficiencyA, endedEfficiency, waveMemorySize)
+            f_push_float(waveParticipationA, endedParticipation, waveMemorySize)
+            f_push_float(waveRetracementA, endedRetracement, waveMemorySize)
+
+        if oppositeConfirmed
+            segPolarity := desiredPolarity
+            segStartBar := bar_index
+            segStartPrice := close
+            segPeakEnergy := waveEnergy
+            segEnergyIntegral := waveEnergy
+            segQualitySum := waveQuality
+            segEfficiencySum := qEfficiency
+            segParticipationSum := participation
+            segMaxRetracement := retracement
+            segMaxDirectionalMove := 0.0
+            segLastAtr := atr
+        else
+            segPolarity := 0
+            segStartBar := na
+            segStartPrice := na
+            segPeakEnergy := 0.0
+            segEnergyIntegral := 0.0
+            segQualitySum := 0.0
+            segEfficiencySum := 0.0
+            segParticipationSum := 0.0
+            segMaxRetracement := 0.0
+            segMaxDirectionalMove := 0.0
+            segLastAtr := na
+    else
+        float segmentDirection = structDir * segPolarity
+        segPeakEnergy := math.max(segPeakEnergy, waveEnergy)
+        segEnergyIntegral += waveEnergy
+        segQualitySum += waveQuality
+        segEfficiencySum += qEfficiency
+        segParticipationSum += participation
+        segMaxRetracement := math.max(segMaxRetracement, retracement)
+        segMaxDirectionalMove := math.max(segMaxDirectionalMove, math.max((close - segStartPrice) * segmentDirection, 0.0))
+        segLastAtr := atr
+
+if segmentEnded
+    if endedPolarity == 1
+        legAlignedCount += 1
+    else if endedPolarity == -1
+        legCorrectionCount += 1
+
+// Monotonic ownership id for completed segments inside the active structural leg.
+// Event engines use it to prevent rolling windows from reusing the same waves.
+var int legSegmentSerial = 0
+if structuralReset
+    legSegmentSerial := 0
+else if segmentEnded
+    legSegmentSerial += 1
+
+float lastAlignedPeak = f_metric_for_pol(wavePolarityA, wavePeakA, 1, 0, na)
+float prevAlignedPeak = f_metric_for_pol(wavePolarityA, wavePeakA, 1, 1, na)
+float lastAlignedDisp = f_metric_for_pol(wavePolarityA, waveDisplacementA, 1, 0, na)
+float prevAlignedDisp = f_metric_for_pol(wavePolarityA, waveDisplacementA, 1, 1, na)
+float lastAlignedIntegral = f_metric_for_pol(wavePolarityA, waveIntegralA, 1, 0, na)
+float prevAlignedIntegral = f_metric_for_pol(wavePolarityA, waveIntegralA, 1, 1, na)
+float lastAlignedDuration = f_metric_for_pol(wavePolarityA, waveDurationA, 1, 0, na)
+float prevAlignedDuration = f_metric_for_pol(wavePolarityA, waveDurationA, 1, 1, na)
+float lastAlignedQuality = f_metric_for_pol(wavePolarityA, waveQualityA, 1, 0, na)
+float prevAlignedQuality = f_metric_for_pol(wavePolarityA, waveQualityA, 1, 1, na)
+float lastAlignedEfficiency = f_metric_for_pol(wavePolarityA, waveEfficiencyA, 1, 0, na)
+float prevAlignedEfficiency = f_metric_for_pol(wavePolarityA, waveEfficiencyA, 1, 1, na)
+float lastAlignedParticipation = f_metric_for_pol(wavePolarityA, waveParticipationA, 1, 0, na)
+float prevAlignedParticipation = f_metric_for_pol(wavePolarityA, waveParticipationA, 1, 1, na)
+
+bool alignedSegmentActive = segPolarity == 1
+float liveAlignedBars = alignedSegmentActive ? math.max(1.0, bar_index - segStartBar + 1) : nz(lastAlignedDuration, 1.0)
+float liveAlignedDisp = alignedSegmentActive ? segMaxDirectionalMove / atr : nz(lastAlignedDisp, 0.0)
+float liveAlignedIntegral = alignedSegmentActive ? segEnergyIntegral : nz(lastAlignedIntegral, 0.0)
+float liveAlignedQuality = alignedSegmentActive ? f_safe_div(segQualitySum, liveAlignedBars, waveQuality) : nz(lastAlignedQuality, waveQuality)
+float liveAlignedEfficiency = alignedSegmentActive ? f_safe_div(segEfficiencySum, liveAlignedBars, qEfficiency) : nz(lastAlignedEfficiency, qEfficiency)
+float liveAlignedParticipation = alignedSegmentActive ? f_safe_div(segParticipationSum, liveAlignedBars, participation) : nz(lastAlignedParticipation, participation)
+
+float currentAlignedPeak = alignedSegmentActive ? segPeakEnergy : nz(lastAlignedPeak, math.max(alignedWave, 0.0))
+float referenceAlignedPeak = alignedSegmentActive ? nz(lastAlignedPeak, math.max(currentAlignedPeak, 0.01)) : nz(prevAlignedPeak, nz(lastAlignedPeak, math.max(currentAlignedPeak, 0.01)))
+float referenceAlignedDisp = alignedSegmentActive ? nz(lastAlignedDisp, math.max(liveAlignedDisp, 0.01)) : nz(prevAlignedDisp, nz(lastAlignedDisp, math.max(liveAlignedDisp, 0.01)))
+float referenceAlignedIntegral = alignedSegmentActive ? nz(lastAlignedIntegral, math.max(liveAlignedIntegral, 0.01)) : nz(prevAlignedIntegral, nz(lastAlignedIntegral, math.max(liveAlignedIntegral, 0.01)))
+float referenceAlignedDuration = alignedSegmentActive ? nz(lastAlignedDuration, math.max(liveAlignedBars, 1.0)) : nz(prevAlignedDuration, nz(lastAlignedDuration, math.max(liveAlignedBars, 1.0)))
+float referenceAlignedQuality = alignedSegmentActive ? nz(lastAlignedQuality, math.max(liveAlignedQuality, 0.05)) : nz(prevAlignedQuality, nz(lastAlignedQuality, math.max(liveAlignedQuality, 0.05)))
+float referenceAlignedEfficiency = alignedSegmentActive ? nz(lastAlignedEfficiency, math.max(liveAlignedEfficiency, 0.05)) : nz(prevAlignedEfficiency, nz(lastAlignedEfficiency, math.max(liveAlignedEfficiency, 0.05)))
+float referenceAlignedParticipation = alignedSegmentActive ? nz(lastAlignedParticipation, math.max(liveAlignedParticipation, 0.05)) : nz(prevAlignedParticipation, nz(lastAlignedParticipation, math.max(liveAlignedParticipation, 0.05)))
+float relativeWaveStrength = f_clamp(f_safe_div(currentAlignedPeak, math.max(referenceAlignedPeak, 0.05), 1.0), 0.0, 2.0)
+float peakDecay = f_decay(currentAlignedPeak, referenceAlignedPeak, 0.05)
+float displacementDecay = f_decay(liveAlignedDisp, referenceAlignedDisp, 0.05)
+float integralDecay = f_decay(liveAlignedIntegral, referenceAlignedIntegral, 0.05)
+float durationDecay = f_decay(liveAlignedBars, referenceAlignedDuration, 1.0)
+float qualityDecay = f_decay(liveAlignedQuality, referenceAlignedQuality, 0.05)
+float waveEfficiencyDecay = f_decay(liveAlignedEfficiency, referenceAlignedEfficiency, 0.05)
+float waveParticipationDecay = participationMode == "Off" ? 0.0 : f_decay(liveAlignedParticipation, referenceAlignedParticipation, 0.05)
+float memoryParticipationW = participationMode == "Off" ? 0.0 : 0.05
+float waveDecayWeightSum = 0.95 + memoryParticipationW
+float waveStrengthDecay = f_clamp((0.35 * peakDecay + 0.18 * displacementDecay + 0.17 * integralDecay + 0.08 * durationDecay + 0.10 * qualityDecay + 0.07 * waveEfficiencyDecay + memoryParticipationW * waveParticipationDecay) / waveDecayWeightSum, 0.0, 1.0)
+
+bool failedExpansion = segmentEnded and endedPolarity == 1 and not na(priorAlignedPeakBeforeEnd) and endedPeak < priorAlignedPeakBeforeEnd * failedPeakRatio and (na(priorAlignedDispBeforeEnd) or endedDisplacement < priorAlignedDispBeforeEnd * failedDispRatio)
+
+// ============================================================================
+// Maturity / price-pressure efficiency / compression
+// ============================================================================
+
+float historicalLegBars = f_median_or(legDurArchive, effectiveStructBase * 3.0)
+float historicalLegDisp = f_median_or(legDispArchive, 4.0)
+float historicalCycles = f_median_or(legCyclesArchive, 3.0)
+float currentLegBars = na(legStartBar) ? 0.0 : math.max(1.0, bar_index - legStartBar + 1)
+float currentLegExtension = structDir == 0 ? 0.0 : f_safe_div(math.max((legExtreme - legStartPrice) * structDir, 0.0), atr, 0.0)
+float currentLegProgress = structDir == 0 ? 0.0 : f_safe_div(math.max((close - legStartPrice) * structDir, 0.0), atr, 0.0)
+float currentCycleCount = legAlignedCount + 0.5 * legCorrectionCount + (segPolarity == 1 ? 0.5 : segPolarity == -1 ? 0.25 : 0.0)
+
+float ageScore = f_clamp(f_safe_div(currentLegBars, math.max(historicalLegBars, 1.0), 0.0), 0.0, 1.0)
+float extensionScore = f_clamp(f_safe_div(currentLegExtension, math.max(historicalLegDisp, 0.5), 0.0), 0.0, 1.0)
+float cycleScore = f_clamp(f_safe_div(currentCycleCount, math.max(historicalCycles, 1.0), 0.0), 0.0, 1.0)
+float efficiencyLoss = f_clamp((ta.ema(qEfficiency, 5)[1] - ta.ema(qEfficiency, 5)) * 4.0, 0.0, 1.0)
+float priceProgress = f_clamp(f_safe_div(currentLegProgress, math.max(historicalLegDisp, 0.5), 0.0), 0.0, 1.5)
+float maxAlignedPeak = f_max_metric_for_pol(wavePolarityA, wavePeakA, 1, currentAlignedPeak)
+float pressureProgress = f_clamp(f_safe_div(currentAlignedPeak, math.max(maxAlignedPeak, 0.05), 1.0), 0.0, 1.5)
+float pricePressureMismatch = f_clamp(priceProgress - pressureProgress, 0.0, 1.0)
+
+float maturityWeightSum = math.max(matAgeW + matExtW + matCycleW + matDecayW + matEffW + matMismatchW, 0.001)
+float maturity = f_clamp((matAgeW * ageScore + matExtW * extensionScore + matCycleW * cycleScore + matDecayW * waveStrengthDecay + matEffW * efficiencyLoss + matMismatchW * pricePressureMismatch) / maturityWeightSum, 0.0, 1.0)
+
+float currentSegBars = segPolarity == -1 and not na(segStartBar) ? math.max(1.0, bar_index - segStartBar + 1) : 0.0
+float correctionDurationNorm = f_clamp(f_safe_div(currentSegBars, math.max(historicalLegBars * 0.25, 2.0), 0.0), 0.0, 1.0)
+float compression = segPolarity == -1 ? f_clamp(correctionDurationNorm * structuralStrength * (1.0 - f_clamp(retracement, 0.0, 1.0)) * (1.0 - counterPressure), 0.0, 1.0) : 0.0
+
+// Price/pressure efficiency: price progress produced per unit of aligned energy.
+float pricePressureEfficiency = f_clamp(f_safe_div(math.max(signedMove, 0.0) / atr, math.max(math.max(alignedWave, 0.0), 0.05), 0.0) / 2.0, 0.0, 1.0)
+float ppeLoss = f_clamp(ta.ema(pricePressureEfficiency, 5)[1] - ta.ema(pricePressureEfficiency, 5), 0.0, 1.0)
+
+// ============================================================================
+// Re-Synchronization Engine
+// ============================================================================
+
+var bool correctionSeen = false
+var int resyncStage = 0
+var int resyncHold = 99
+var int correctionContextBars = 0
+var int correctionContextStartBar = na
+var float correctionPeakPressure = 0.0
+var float correctionPeakRetracement = 0.0
+var float lastConfirmedResyncQuality = 0.0
+var int lastResyncBar = na
+var int pendingCorrectionSerial = na
+var int consumedCorrectionSerial = na
+var int pendingCorrectionEndBar = na
+var int pendingCorrectionBars = 0
+var float pendingCounterPeak = 0.0
+var float pendingCorrectionRetracement = 0.0
+if structuralReset
+    correctionSeen := false
+    resyncStage := 0
+    resyncHold := 99
+    correctionContextBars := 0
+    correctionContextStartBar := na
+    correctionPeakPressure := 0.0
+    correctionPeakRetracement := 0.0
+    lastConfirmedResyncQuality := 0.0
+    lastResyncBar := na
+    pendingCorrectionSerial := na
+    consumedCorrectionSerial := na
+    pendingCorrectionEndBar := na
+    pendingCorrectionBars := 0
+    pendingCounterPeak := 0.0
+    pendingCorrectionRetracement := 0.0
+if not correctionSeen
+    resyncStage := 0
+bool counterContextActive = alignedWave <= -effectiveWaveEnd or counterPressure > 0.18
+bool newCounterAfterPending = counterContextActive and not na(pendingCorrectionSerial) and legSegmentSerial > pendingCorrectionSerial
+if newCounterAfterPending
+    correctionSeen := false
+    correctionContextBars := 0
+    correctionContextStartBar := na
+    correctionPeakPressure := 0.0
+    correctionPeakRetracement := 0.0
+    pendingCorrectionSerial := na
+    pendingCorrectionEndBar := na
+if counterContextActive
+    if not correctionSeen
+        resyncHold := 99
+        correctionContextBars := 0
+        correctionContextStartBar := bar_index
+        correctionPeakPressure := 0.0
+        correctionPeakRetracement := 0.0
+    correctionSeen := true
+    correctionContextBars += 1
+    correctionPeakPressure := math.max(correctionPeakPressure, counterPressure)
+    correctionPeakRetracement := math.max(correctionPeakRetracement, retracement)
+
+int resyncMaxContextBars = effectiveWaveLen * 3
+bool correctionContextFresh = correctionSeen and not na(correctionContextStartBar) and (counterContextActive or bar_index - correctionContextStartBar <= resyncMaxContextBars)
+if correctionSeen and not correctionContextFresh
+    correctionSeen := false
+    correctionContextBars := 0
+    correctionContextStartBar := na
+    correctionPeakPressure := 0.0
+    correctionPeakRetracement := 0.0
+
+bool counterSegmentCompleted = segmentEnded and endedPolarity == -1
+if counterSegmentCompleted
+    bool completedCounterQualified = correctionContextBars >= effectiveResyncMinCorrectionBars and (correctionPeakPressure >= effectiveResyncMinCounterPeak or correctionPeakRetracement >= effectiveResyncMinRetracement)
+    if completedCounterQualified
+        pendingCorrectionSerial := legSegmentSerial
+        pendingCorrectionEndBar := bar_index
+        pendingCorrectionBars := correctionContextBars
+        pendingCounterPeak := correctionPeakPressure
+        pendingCorrectionRetracement := correctionPeakRetracement
+    else
+        correctionSeen := false
+        correctionContextBars := 0
+        correctionContextStartBar := na
+        correctionPeakPressure := 0.0
+        correctionPeakRetracement := 0.0
+
+int resyncRecoveryWindow = effectiveWaveLen * 2
+bool pendingCorrectionFresh = not na(pendingCorrectionSerial) and not na(pendingCorrectionEndBar) and bar_index - pendingCorrectionEndBar <= resyncRecoveryWindow
+if not na(pendingCorrectionSerial) and not pendingCorrectionFresh
+    pendingCorrectionSerial := na
+    pendingCorrectionEndBar := na
+    correctionSeen := false
+    correctionContextBars := 0
+    correctionContextStartBar := na
+    correctionPeakPressure := 0.0
+    correctionPeakRetracement := 0.0
+
+float counterDecay = f_clamp((counterPressure[effectiveVelocityLag] - counterPressure) * 3.5, 0.0, 1.0)
+float accelTrend = f_clamp(alignedAcceleration * 1.8, 0.0, 1.0)
+float alignedVelocity = velocity * structDir
+float velocityRecovery = f_clamp(alignedVelocity * 2.0, 0.0, 1.0)
+float fastRecoveryEMA = ta.ema(close, effectiveRecoveryLen)
+float recoveryLocation = structDir == 1 ? (close > fastRecoveryEMA ? 1.0 : 0.0) : structDir == -1 ? (close < fastRecoveryEMA ? 1.0 : 0.0) : 0.0
+float recoveryDisp = structDir == 0 ? 0.0 : f_clamp(f_squash(f_safe_div((close - close[effectiveRecoveryLen]) * structDir, atr, 0.0)) * 1.5, 0.0, 1.0)
+float recoveryScore = 0.45 * recoveryLocation + 0.55 * recoveryDisp
+float recoveryEvidence = 0.55 * recoveryScore + 0.45 * velocityRecovery
+float rsWeightSum = math.max(rsCounterW + rsAccelW + rsRecoveryW + rsIntegrityW, 0.001)
+float resyncRaw = correctionSeen ? (rsCounterW * counterDecay + rsAccelW * accelTrend + rsRecoveryW * recoveryEvidence + rsIntegrityW * structuralIntegrity) / rsWeightSum : 0.0
+float resyncQuality = f_clamp(resyncRaw * (0.72 + 0.28 * structuralStrength) * (1.0 + 0.20 * compression), 0.0, 1.0)
+
+bool resyncCorrectionOwned = pendingCorrectionFresh and (na(consumedCorrectionSerial) or pendingCorrectionSerial != consumedCorrectionSerial)
+bool resyncCooldownReady = na(lastResyncBar) or bar_index - lastResyncBar >= effectiveResyncCooldownBars
+float resyncMinStructure = advancedCalibration ? 0.22 : sensitivityMode == "Fast" ? 0.18 : sensitivityMode == "Structural" ? 0.28 : 0.22
+float resyncMinConfidence = advancedCalibration ? 0.35 : sensitivityMode == "Fast" ? 0.28 : sensitivityMode == "Structural" ? 0.42 : 0.35
+bool resyncConfirmed = not structuralReset and resyncCorrectionOwned and resyncCooldownReady and alignedWave > resyncConfirm and velocityRecovery > 0.08 and structuralIntegrity > 0.50 and structuralStrength > resyncMinStructure and structuralConfidence > resyncMinConfidence and resyncQuality >= effectiveResyncMinQuality
+int confirmedCorrectionBars = pendingCorrectionBars
+float confirmedCounterPeak = pendingCounterPeak
+float confirmedCorrectionRetracement = pendingCorrectionRetracement
+if not correctionSeen
+    resyncStage := 0
+else
+    int detectedStage = counterDecay > 0.20 ? 1 : 0
+    bool correctionContextDeveloped = correctionContextBars >= math.max(1, effectiveResyncMinCorrectionBars - 1) and (correctionPeakPressure >= effectiveResyncMinCounterPeak * 0.75 or correctionPeakRetracement >= effectiveResyncMinRetracement * 0.75)
+    if not correctionContextDeveloped
+        detectedStage := 0
+    if correctionContextDeveloped and math.abs(alignedWave) < effectiveWaveEnd and counterDecay > 0.15
+        detectedStage := 2
+    if correctionContextDeveloped and alignedAcceleration > 0.08 and (velocityRecovery > 0.05 or recoveryScore > 0.25)
+        detectedStage := 3
+    if resyncConfirmed
+        detectedStage := 4
+    resyncStage := math.max(resyncStage, detectedStage)
+
+if resyncConfirmed
+    resyncHold := 0
+    lastConfirmedResyncQuality := resyncQuality
+    lastResyncBar := bar_index
+    consumedCorrectionSerial := pendingCorrectionSerial
+    pendingCorrectionSerial := na
+    pendingCorrectionEndBar := na
+    correctionSeen := false
+    correctionContextBars := 0
+    correctionContextStartBar := na
+    correctionPeakPressure := 0.0
+    correctionPeakRetracement := 0.0
+else if not structuralReset
+    resyncHold := math.min(resyncHold + 1, 99)
+float resyncGlow = resyncHold <= 5 ? 1.0 - resyncHold / 6.0 : 0.0
+
+// ============================================================================
+// Elliott-context / wave-sequence engine
+// ============================================================================
+
+bool impulsePattern = f_last_pattern5(wavePolarityA)
+bool threeLegCorrectionPattern = f_last_pattern3_correction(wavePolarityA)
+float p1 = f_metric_for_pol(wavePolarityA, wavePeakA, 1, 2, na)
+float p2 = f_metric_for_pol(wavePolarityA, wavePeakA, 1, 1, na)
+float p3 = f_metric_for_pol(wavePolarityA, wavePeakA, 1, 0, na)
+float d1 = f_metric_for_pol(wavePolarityA, waveDisplacementA, 1, 2, na)
+float d2 = f_metric_for_pol(wavePolarityA, waveDisplacementA, 1, 1, na)
+float d3 = f_metric_for_pol(wavePolarityA, waveDisplacementA, 1, 0, na)
+float i1 = f_metric_for_pol(wavePolarityA, waveIntegralA, 1, 2, na)
+float i2 = f_metric_for_pol(wavePolarityA, waveIntegralA, 1, 1, na)
+float i3 = f_metric_for_pol(wavePolarityA, waveIntegralA, 1, 0, na)
+float q1 = f_metric_for_pol(wavePolarityA, waveQualityA, 1, 2, na)
+float q2 = f_metric_for_pol(wavePolarityA, waveQualityA, 1, 1, na)
+float q3 = f_metric_for_pol(wavePolarityA, waveQualityA, 1, 0, na)
+float e1 = f_metric_for_pol(wavePolarityA, waveEfficiencyA, 1, 2, na)
+float e2 = f_metric_for_pol(wavePolarityA, waveEfficiencyA, 1, 1, na)
+float e3 = f_metric_for_pol(wavePolarityA, waveEfficiencyA, 1, 0, na)
+float v1 = f_metric_for_pol(wavePolarityA, waveParticipationA, 1, 2, na)
+float v2 = f_metric_for_pol(wavePolarityA, waveParticipationA, 1, 1, na)
+float v3 = f_metric_for_pol(wavePolarityA, waveParticipationA, 1, 0, na)
+float lastCorrectionRetracement = f_metric_for_pol(wavePolarityA, waveRetracementA, -1, 0, na)
+float expansionHierarchy = not na(p1) and not na(p2) and not na(p3) ? f_clamp((p2 / math.max(p1, 0.05) - 0.8) * 0.8 + (1.0 - p3 / math.max(p2, 0.05)) * 0.6, 0.0, 1.0) : 0.0
+float displacementHierarchy = not na(d1) and not na(d2) and not na(d3) ? f_clamp((d2 / math.max(d1, 0.05) - 0.8) * 0.8 + (1.0 - d3 / math.max(d2, 0.05)) * 0.6, 0.0, 1.0) : expansionHierarchy
+float integralHierarchy = not na(i1) and not na(i2) and not na(i3) ? f_clamp((i2 / math.max(i1, 0.05) - 0.8) * 0.8 + (1.0 - i3 / math.max(i2, 0.05)) * 0.6, 0.0, 1.0) : expansionHierarchy
+float sequenceHierarchy = f_clamp(0.50 * expansionHierarchy + 0.25 * displacementHierarchy + 0.25 * integralHierarchy, 0.0, 1.0)
+float qualitySequenceMean = not na(q1) and not na(q2) and not na(q3) ? (q1 + q2 + q3) / 3.0 : waveQuality
+float efficiencySequenceMean = not na(e1) and not na(e2) and not na(e3) ? (e1 + e2 + e3) / 3.0 : qEfficiency
+float participationSequenceMean = not na(v1) and not na(v2) and not na(v3) ? (v1 + v2 + v3) / 3.0 : participation
+float sequenceParticipationW = participationMode == "Off" ? 0.0 : 0.10
+float sequenceQuality = f_clamp((0.72 * qualitySequenceMean + 0.28 * efficiencySequenceMean + sequenceParticipationW * participationSequenceMean) / (1.0 + sequenceParticipationW), 0.0, 1.0)
+float correctionControl = na(lastCorrectionRetracement) ? structuralIntegrity : f_clamp(1.0 - lastCorrectionRetracement, 0.0, 1.0)
+float impulseSequenceScore = impulsePattern ? f_clamp(0.30 * sequenceHierarchy + 0.30 * sequenceQuality + 0.20 * correctionControl + 0.20 * structuralIntegrity, 0.0, 1.0) : 0.0
+float recentImpulseQuality = f_recent_mean(waveQualityA, 5, waveQuality)
+float recentImpulseEfficiency = f_recent_mean(waveEfficiencyA, 5, qEfficiency)
+float impulseContextScore = impulsePattern ? f_clamp(0.55 * impulseSequenceScore + 0.25 * recentImpulseQuality + 0.20 * recentImpulseEfficiency, 0.0, 1.0) : 0.0
+bool impulseContextQualified = impulsePattern and impulseContextScore >= effectiveContextMinScore
+
+float recentCorrectionQuality = f_recent_mean(waveQualityA, 3, waveQuality)
+float recentCorrectionEfficiency = f_recent_mean(waveEfficiencyA, 3, qEfficiency)
+float correctionDepthEvidence = na(lastCorrectionRetracement) ? counterPressure : f_clamp(lastCorrectionRetracement / 0.35, 0.0, 1.0)
+float correctionSequenceScore = threeLegCorrectionPattern ? f_clamp(0.40 * recentCorrectionQuality + 0.25 * recentCorrectionEfficiency + 0.20 * structuralIntegrity + 0.15 * correctionDepthEvidence, 0.0, 1.0) : 0.0
+bool correctionContextQualified = threeLegCorrectionPattern and correctionSequenceScore >= effectiveContextMinScore
+
+var int lastImpulseContextSerial = na
+var int lastCorrectionContextSerial = na
+if structuralReset
+    lastImpulseContextSerial := na
+    lastCorrectionContextSerial := na
+
+float lateImpulseContext = impulseContextQualified ? f_clamp(maturity * (0.45 * waveStrengthDecay + 0.30 * sequenceHierarchy + 0.25 * impulseContextScore), 0.0, 1.0) : 0.0
+string elliottContext = impulseContextQualified ? (lateImpulseContext > 0.55 ? "Late impulse context" : sequenceHierarchy > 0.45 ? "Dominant middle expansion" : "Five-segment impulse context") : correctionContextQualified ? "Three-segment correction context" : legAlignedCount >= 2 ? "Developing wave sequence" : "Unclassified"
+
+// ============================================================================
+// Exhaustion Engine
+// ============================================================================
+
+float repeatedWeakPeaks = not na(p2) and not na(p3) ? f_clamp(1.0 - p3 / math.max(p2, 0.05), 0.0, 1.0) : 0.0
+float decayEvidenceBase = 0.42 * waveStrengthDecay + 0.28 * efficiencyLoss + 0.20 * ppeLoss + participationWeight * participationLoss
+float decayEvidence = f_clamp(decayEvidenceBase / math.max(0.90 + participationWeight, 0.01), 0.0, 1.0)
+float continuationFailure = f_clamp(0.40 * pricePressureMismatch + 0.35 * (failedExpansion ? 1.0 : 0.0) + 0.25 * repeatedWeakPeaks, 0.0, 1.0)
+float exhaustion = maturity >= exhaustionMaturityMin ? f_clamp(maturity * (0.55 * decayEvidence + 0.45 * continuationFailure) * 1.35, 0.0, 1.0) : 0.0
+float deteriorationScore = f_clamp(0.45 * waveStrengthDecay + 0.30 * pricePressureMismatch + 0.25 * continuationFailure, 0.0, 1.0)
+bool weakeningWaveSequenceState = not na(p2) and not na(p3) and p3 < p2 * 0.80 and maturity > 0.45
+bool weakeningWaveSequence = weakeningWaveSequenceState and not weakeningWaveSequenceState[1]
+
+// Preserve the completed leg briefly after a structural exit. This prevents the
+// transition bar from erasing the context that existed immediately before it.
+var int lastLegDir = 0
+var int lastLegExitBar = na
+var float lastLegMaturity = 0.0
+var float lastLegExhaustion = 0.0
+var float lastLegStrength = 0.0
+var float lastLegConfidence = 0.0
+var float lastLegAlignedWave = 0.0
+var float lastLegCounterPressure = 0.0
+var float lastLegWaveQuality = 0.0
+var float lastLegDeterioration = 0.0
+var string lastLegWaveContext = "Unclassified"
+if structuralExit
+    lastLegDir := prevStructDir
+    lastLegExitBar := bar_index
+    lastLegMaturity := nz(maturity[1], 0.0)
+    lastLegExhaustion := nz(exhaustion[1], 0.0)
+    lastLegStrength := nz(structuralStrength[1], 0.0)
+    lastLegConfidence := nz(structuralConfidence[1], 0.0)
+    lastLegAlignedWave := math.max(nz(alignedWave[1], 0.0), 0.0)
+    lastLegCounterPressure := nz(counterPressure[1], 0.0)
+    lastLegWaveQuality := nz(waveQuality[1], 0.0)
+    lastLegDeterioration := nz(deteriorationScore[1], 0.0)
+    lastLegWaveContext := elliottContext[1]
+
+int transitionMemoryAge = na(lastLegExitBar) ? effectiveTransitionMemoryBars + 1 : bar_index - lastLegExitBar
+bool transitionMemoryActive = structDir == 0 and lastLegDir != 0 and transitionMemoryAge <= effectiveTransitionMemoryBars
+float transitionMemoryFade = transitionMemoryActive ? f_clamp(1.0 - transitionMemoryAge / math.max(float(effectiveTransitionMemoryBars), 1.0), 0.0, 1.0) : 0.0
+
+// ============================================================================
+// Phase Engine
+// ============================================================================
+
+bool structuralFlowFlip = structuralFlip
+bool transition = structDir == 0 or structuralStrength < 0.16 or structuralConfidence < 0.18
+bool initiation = not transition and currentLegBars <= math.max(4.0, historicalLegBars * 0.18) and structuralStrength > structuralStrength[1]
+bool accelerationPhase = not transition and alignedWave > 0.08 and alignedAcceleration > 0.10 and waveEnergy > waveEnergy[1]
+bool correctionPhase = not transition and (segPolarity == -1 or counterPressure > 0.22) and structuralIntegrity > 0.28
+bool compressionPhase = correctionPhase and compression > 0.34
+bool resyncPhase = resyncStage >= 2 or resyncGlow > 0.0
+bool lateExpansion = not transition and alignedWave > 0.06 and maturity > 0.56 and (waveStrengthDecay > 0.18 or lateImpulseContext > 0.35)
+bool exhaustionPhase = not transition and exhaustion > 0.42
+bool expansionPhase = not transition and alignedWave > 0.12 and waveQuality > 0.25 and counterPressure < 0.28
+
+int phaseCandidate = 0
+if structuralFlowFlip
+    phaseCandidate := 9
+else if transition
+    phaseCandidate := 0
+else if exhaustionPhase
+    phaseCandidate := 8
+else if resyncPhase
+    phaseCandidate := 6
+else if compressionPhase
+    phaseCandidate := 5
+else if correctionPhase
+    phaseCandidate := 4
+else if lateExpansion
+    phaseCandidate := 7
+else if expansionPhase
+    phaseCandidate := 3
+else if accelerationPhase
+    phaseCandidate := 2
+else if initiation
+    phaseCandidate := 1
+else
+    phaseCandidate := 0
+
+// Persistent phase transitions: structural resets are immediate; ordinary
+// phase changes must persist briefly so one noisy bar cannot relabel the field.
+int phaseConfirmBars = sensitivityMode == "Fast" and not advancedCalibration ? 1 : sensitivityMode == "Structural" and not advancedCalibration ? 3 : 2
+var int phase = 0
+var int pendingPhase = 0
+var int pendingPhaseBars = 0
+if structuralFlowFlip
+    phase := 9
+    pendingPhase := 9
+    pendingPhaseBars := 0
+else if structuralExit or structDir == 0
+    phase := 0
+    pendingPhase := 0
+    pendingPhaseBars := 0
+else if phase == 9
+    phase := phaseCandidate
+    pendingPhase := phaseCandidate
+    pendingPhaseBars := 0
+else if phaseCandidate == phase
+    pendingPhase := phase
+    pendingPhaseBars := 0
+else
+    if phaseCandidate != pendingPhase
+        pendingPhase := phaseCandidate
+        pendingPhaseBars := 1
+    else
+        pendingPhaseBars += 1
+    if pendingPhaseBars >= phaseConfirmBars
+        phase := pendingPhase
+        pendingPhaseBars := 0
+
+// Approximate phase confidence from the dominant evidence behind each phase.
+float phaseConfidence = switch phase
+    1 => f_clamp(0.5 * structuralStrength + 0.5 * (1.0 - ageScore), 0.0, 1.0)
+    2 => f_clamp(0.45 * math.max(alignedWave, 0.0) + 0.35 * accelTrend + 0.20 * waveQuality, 0.0, 1.0)
+    3 => f_clamp(0.35 * structuralStrength + 0.35 * math.max(alignedWave, 0.0) + 0.30 * waveQuality, 0.0, 1.0)
+    4 => f_clamp(0.55 * counterPressure + 0.45 * structuralIntegrity, 0.0, 1.0)
+    5 => compression
+    6 => math.max(resyncQuality, resyncGlow)
+    7 => f_clamp(0.55 * maturity + 0.45 * math.max(alignedWave, 0.0), 0.0, 1.0)
+    8 => exhaustion
+    9 => 1.0
+    => f_clamp(1.0 - structuralConfidence, 0.0, 1.0)
+
+// ============================================================================
+// Visual Wave Field Renderer
+// ============================================================================
+
+// The field uses one invariant aligned/counter axis below price and participates
+// in the chart's price autoscaling so the body cannot fall outside the viewport.
+float rawFieldCeiling = ta.lowest(low, fieldAnchorLen) - atr * fieldGapATR
+float rawFieldBase = rawFieldCeiling - atr * fieldScale
+float smoothedFieldBase = ta.ema(rawFieldBase, fieldAnchorSmooth)
+float safeFieldBase = low - atr * (fieldGapATR + fieldScale)
+float fieldBase = math.min(smoothedFieldBase, safeFieldBase)
+
+int visualStructDir = structDir != 0 ? structDir : transitionMemoryActive ? lastLegDir : 0
+float visualStructuralStrength = transitionMemoryActive ? lastLegStrength * transitionMemoryFade : structuralStrength
+float visualStructuralConfidence = transitionMemoryActive ? lastLegConfidence * transitionMemoryFade : structuralConfidence
+float visualAlignedWave = transitionMemoryActive ? lastLegAlignedWave * transitionMemoryFade : alignedWave
+float visualCounterPressure = transitionMemoryActive ? lastLegCounterPressure * transitionMemoryFade : counterPressure
+float visualWaveQuality = transitionMemoryActive ? lastLegWaveQuality : waveQuality
+float visualMaturity = transitionMemoryActive ? lastLegMaturity : maturity
+float visualExhaustion = transitionMemoryActive ? lastLegExhaustion : exhaustion
+float visualDeterioration = transitionMemoryActive ? lastLegDeterioration : deteriorationScore
+int transitionFadeTransp = transitionMemoryActive ? int(math.round((1.0 - transitionMemoryFade) * 48.0)) : 0
+
+float rawBackboneHeight = visualStructDir == 0 ? 0.0 : atr * fieldScale * (0.10 + 0.16 * visualStructuralStrength)
+float alignedMagnitude = math.sqrt(f_clamp(math.max(visualAlignedWave, 0.0), 0.0, 1.0))
+float counterMagnitude = math.sqrt(f_clamp(visualCounterPressure, 0.0, 1.0))
+float relativeBoost = transitionMemoryActive ? 1.0 : f_clamp(0.82 + 0.18 * math.min(relativeWaveStrength, 1.5), 0.75, 1.10)
+float exhaustionCollapse = 1.0 - 0.58 * visualExhaustion
+float rawAlignedHeight = atr * fieldScale * alignedMagnitude * relativeBoost * exhaustionCollapse
+float rawCounterHeight = atr * fieldScale * counterScale * counterMagnitude
+float backboneHeight = ta.ema(rawBackboneHeight, fieldAnchorSmooth)
+float alignedHeight = math.min(ta.ema(rawAlignedHeight, fieldAnchorSmooth), atr * fieldScale)
+float counterHeight = ta.ema(rawCounterHeight, fieldAnchorSmooth)
+
+float backboneTop = fieldBase + backboneHeight * 0.55
+float backboneBottom = fieldBase - backboneHeight * 0.45
+float alignedTop50 = fieldBase + alignedHeight * 0.50
+float alignedTop100 = fieldBase + alignedHeight
+float counterBottom50 = fieldBase - counterHeight * 0.50
+float counterBottom100 = fieldBase - counterHeight
+
+color structuralColor = visualStructDir == 1 ? bullColor : visualStructDir == -1 ? bearColor : color.rgb(120, 125, 135)
+color opposingColor = visualStructDir == 1 ? bearColor : visualStructDir == -1 ? bullColor : color.rgb(120, 125, 135)
+
+float energyDelta = math.max(visualAlignedWave, 0.0) - math.max(visualAlignedWave[1], 0.0)
+float gradientBoost = f_clamp(energyDelta * 4.0, -1.0, 1.0)
+int qualityTransp = int(math.round(f_clamp(78.0 - visualWaveQuality * 44.0 - visualStructuralConfidence * 10.0 - math.max(gradientBoost, 0.0) * 12.0 + math.max(-gradientBoost, 0.0) * 8.0 + transitionFadeTransp, 10.0, 96.0)))
+int outerTransp = int(math.round(f_clamp(qualityTransp + 15.0 + visualMaturity * 10.0 + visualDeterioration * 10.0 + visualExhaustion * 12.0, 22.0, 98.0)))
+int counterTransp = int(math.round(f_clamp(82.0 - visualWaveQuality * 26.0 - visualCounterPressure * 34.0 + transitionFadeTransp, 24.0, 97.0)))
+int backboneTransp = int(math.round(f_clamp(78.0 - visualStructuralConfidence * 26.0 - visualStructuralStrength * 16.0 + transitionFadeTransp, 34.0, 96.0)))
+
+color cCore = color.new(structuralColor, math.max(qualityTransp - 12, 0))
+color cCoreFade = color.new(structuralColor, math.min(qualityTransp + 26, 97))
+color agedOuterColor = color.from_gradient(visualMaturity, 0.0, 1.0, structuralColor, color.rgb(128, 128, 128))
+color deterioratingOuterColor = color.from_gradient(visualDeterioration, 0.25, 0.75, agedOuterColor, #f9a825)
+color alignedOuterColor = color.from_gradient(visualExhaustion, 0.45, 0.90, deterioratingOuterColor, #ff6f00)
+color cOuter = color.new(alignedOuterColor, outerTransp)
+color cCounterCore = color.new(opposingColor, math.max(counterTransp - 8, 0))
+color cCounterCoreFade = color.new(opposingColor, math.min(counterTransp + 24, 97))
+color cCounterOuter = color.new(opposingColor, math.min(counterTransp + 14, 98))
+color cBackbone = color.new(structuralColor, backboneTransp)
+color cAlignedEdge = color.new(alignedOuterColor, math.min(outerTransp + 5, 96))
+color cCounterEdge = color.new(opposingColor, math.min(counterTransp + 18, 96))
+
+bool fieldBreak = structuralFlip
+pFieldBase = plot(fieldBreak or visualStructDir == 0 ? na : fieldBase, "Price-following field anchor", color = color.new(color.rgb(120, 125, 135), 82), linewidth = 1, style = plot.style_linebr)
+pBackTop = plot(fieldBreak ? na : (showBackbone ? backboneTop : fieldBase), "Backbone top", display = display.none)
+pBackBottom = plot(fieldBreak ? na : (showBackbone ? backboneBottom : fieldBase), "Backbone bottom", display = display.none)
+fill(pBackTop, pBackBottom, showBackbone ? cBackbone : na, title = "Structural backbone")
+
+pA50 = plot(fieldBreak ? na : alignedTop50, "Aligned 50", display = display.none)
+pA100 = plot(fieldBreak ? na : alignedTop100, "Aligned edge", color = alignedMagnitude > 0 ? cAlignedEdge : na, linewidth = 1, style = plot.style_linebr)
+fill(pA100, pFieldBase, alignedTop100, fieldBase, alignedMagnitude > 0 ? cOuter : na, alignedMagnitude > 0 ? cCore : na, title = "Aligned body gradient")
+fill(pA50, pFieldBase, alignedTop50, fieldBase, alignedMagnitude > 0 ? cCoreFade : na, alignedMagnitude > 0 ? cCore : na, title = "Aligned inner glow")
+
+pC50 = plot(fieldBreak ? na : (showCounter ? counterBottom50 : fieldBase), "Counter 50", display = display.none)
+pC100 = plot(fieldBreak ? na : (showCounter ? counterBottom100 : fieldBase), "Counter edge", color = showCounter and counterMagnitude > 0 ? cCounterEdge : na, linewidth = 1, style = plot.style_linebr)
+fill(pFieldBase, pC100, fieldBase, counterBottom100, showCounter and counterMagnitude > 0 ? cCounterCore : na, showCounter and counterMagnitude > 0 ? cCounterOuter : na, title = "Counter body gradient")
+fill(pFieldBase, pC50, fieldBase, counterBottom50, showCounter and counterMagnitude > 0 ? cCounterCore : na, showCounter and counterMagnitude > 0 ? cCounterCoreFade : na, title = "Counter inner glow")
+
+// Re-Sync ignition: a temporary bright core after confirmation.
+float ignitionTop = resyncGlow > 0 ? fieldBase + atr * fieldScale * (0.16 + 0.34 * resyncGlow) : na
+pIgnition = plot(fieldBreak ? na : ignitionTop, "Re-Sync ignition", display = display.none)
+color cIgnitionAxis = color.new(structuralColor, int(54 - 34 * resyncGlow))
+color cIgnitionEdge = color.new(structuralColor, int(86 - 24 * resyncGlow))
+fill(pIgnition, pFieldBase, ignitionTop, fieldBase, resyncGlow > 0 ? cIgnitionEdge : na, resyncGlow > 0 ? cIgnitionAxis : na, title = "Re-Sync ignition gradient")
+
+// ============================================================================
+// Event labels
+// ============================================================================
+
+bool eventOk = not eventsOnBarClose or barstate.isconfirmed
+float upperLabelBase = math.max(alignedTop100, backboneTop) + atr * eventLabelGapATR
+float lowerLabelBase = math.min(counterBottom100, backboneBottom) - atr * eventLabelGapATR
+float eventLabelLaneStep = atr * math.max(eventLabelGapATR * 1.50, 0.32)
+int upperLabelLane = 0
+if showEventLabels and eventOk and resyncConfirmed
+    string resyncTip = (
+        "Confirmed Re-Sync\n" +
+        "Flow: " + (structDir == 1 ? "Bullish" : "Bearish") +
+        "\nRe-Sync quality: " + str.tostring(math.round(resyncQuality * 100)) + "%" +
+        "\nCorrection bars: " + str.tostring(confirmedCorrectionBars) +
+        "\nCounter-pressure peak: " + str.tostring(math.round(confirmedCounterPeak * 100)) + "%" +
+        "\nMaximum retracement: " + str.tostring(math.round(confirmedCorrectionRetracement * 100)) + "%" +
+        "\nStructural integrity: " + str.tostring(math.round(structuralIntegrity * 100)) + "%" +
+        "\nAligned energy: " + str.tostring(alignedWave, "#.00") +
+        "\n\nCounter pressure has faded and the internal wave has re-aligned with structural flow."
+    )
+    float resyncLabelY = upperLabelBase + eventLabelLaneStep * upperLabelLane
+    string resyncLabelText = structDir == 1 ? "RS↑" : "RS↓"
+    label.new(bar_index, resyncLabelY, resyncLabelText, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = color.new(structuralColor, 18), textcolor = color.white, size = size.small, tooltip = resyncTip, force_overlay = true)
+    upperLabelLane := upperLabelLane + 1
+
+if showEventLabels and eventOk and failedExpansion
+    float failedPeakPct = f_safe_div(endedPeak, priorAlignedPeakBeforeEnd, 0.0) * 100.0
+    string failedDispText = na(priorAlignedDispBeforeEnd) ? "n/a" : str.tostring(f_safe_div(endedDisplacement, priorAlignedDispBeforeEnd, 0.0) * 100.0, "#") + "%"
+    string failedTip = (
+        "Failed Expansion\n" +
+        "Flow: " + (structDir == 1 ? "Bullish" : "Bearish") +
+        "\nPeak vs. prior expansion: " + str.tostring(failedPeakPct, "#") + "%" +
+        "\nDisplacement vs. prior: " + failedDispText +
+        "\nMaturity: " + str.tostring(math.round(maturity * 100)) + "%" +
+        "\n\nThe completed aligned wave produced materially less peak energy and displacement than its predecessor."
+    )
+    float failedLabelY = upperLabelBase + eventLabelLaneStep * upperLabelLane
+    label.new(bar_index, failedLabelY, "F", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = color.new(opposingColor, 18), textcolor = color.white, size = size.small, tooltip = failedTip, force_overlay = true)
+    upperLabelLane := upperLabelLane + 1
+
+if showEventLabels and eventOk and weakeningWaveSequence
+    string weakeningTip = (
+        "Weakening Wave Sequence\n" +
+        "Flow: " + (structDir == 1 ? "Bullish" : "Bearish") +
+        "\nLatest aligned peak vs. prior: " + str.tostring(f_safe_div(p3, math.max(p2, 0.05), 0.0) * 100.0, "#") + "%" +
+        "\nWave-strength decay: " + str.tostring(math.round(waveStrengthDecay * 100)) + "%" +
+        "\nDeterioration: " + str.tostring(math.round(deteriorationScore * 100)) + "%" +
+        "\nMaturity: " + str.tostring(math.round(maturity * 100)) + "%" +
+        "\n\nSuccessive aligned waves are weakening inside a mature structural leg. This is deterioration context, not a reversal trigger."
+    )
+    float weakeningLabelY = upperLabelBase + eventLabelLaneStep * upperLabelLane
+    label.new(bar_index, weakeningLabelY, "WK", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = color.new(#f9a825, 12), textcolor = color.rgb(35, 35, 35), size = size.small, tooltip = weakeningTip, force_overlay = true)
+    upperLabelLane := upperLabelLane + 1
+
+bool exhaustionEvent = exhaustion > 0.60 and exhaustion[1] <= 0.60
+if showEventLabels and eventOk and exhaustionEvent
+    string exhaustionTip = (
+        "Exhaustion\n" +
+        "Flow: " + (structDir == 1 ? "Bullish" : "Bearish") +
+        "\nExhaustion: " + str.tostring(math.round(exhaustion * 100)) + "%" +
+        "\nMaturity: " + str.tostring(math.round(maturity * 100)) + "%" +
+        "\nWave decay: " + str.tostring(math.round(waveStrengthDecay * 100)) + "%" +
+        "\nStructural integrity: " + str.tostring(math.round(structuralIntegrity * 100)) + "%" +
+        "\n\nA mature structural leg is losing continuation efficiency. This is context, not a reversal trigger."
+    )
+    float exhaustionLabelY = upperLabelBase + eventLabelLaneStep * upperLabelLane
+    label.new(bar_index, exhaustionLabelY, "EX", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = color.new(#ff6f00, 14), textcolor = color.white, size = size.small, tooltip = exhaustionTip, force_overlay = true)
+    upperLabelLane := upperLabelLane + 1
+
+if showEventLabels and eventOk and structuralFlowFlip
+    string flipTip = (
+        "Structural Flow Flip\n" +
+        "New flow: " + (structDir == 1 ? "Bullish" : "Bearish") +
+        "\nStructural drive: " + str.tostring(structuralDrive, "#.00") +
+        "\nStrength: " + str.tostring(math.round(structuralStrength * 100)) + "%" +
+        "\nConfidence: " + str.tostring(math.round(structuralConfidence * 100)) + "%" +
+        "\n\nThe multi-horizon flow model reversed direction. This does not claim a pivot-based BOS or CHoCH."
+    )
+    float flipLabelY = upperLabelBase + eventLabelLaneStep * upperLabelLane
+    label.new(bar_index, flipLabelY, "FF", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = color.new(structuralColor, 14), textcolor = color.white, size = size.small, tooltip = flipTip, force_overlay = true)
+    upperLabelLane := upperLabelLane + 1
+
+bool impulseContextOwnershipReady = na(lastImpulseContextSerial) or legSegmentSerial - lastImpulseContextSerial >= 5
+bool impulseContextEvent = segmentEnded and impulseContextQualified and impulseContextOwnershipReady
+if eventOk and impulseContextEvent
+    if showEventLabels and showElliottLabels
+        string impulseTip = (
+            "Five-Segment Impulse Context\n" +
+            "Flow: " + (structDir == 1 ? "Bullish" : "Bearish") +
+            "\nContext: " + elliottContext +
+            "\nContext score: " + str.tostring(math.round(impulseContextScore * 100)) + "%" +
+            "\nSequence hierarchy: " + str.tostring(math.round(sequenceHierarchy * 100)) + "%" +
+            "\nSequence quality: " + str.tostring(math.round(sequenceQuality * 100)) + "%" +
+            "\nCorrection control: " + str.tostring(math.round(correctionControl * 100)) + "%" +
+            "\nMaturity: " + str.tostring(math.round(maturity * 100)) + "%" +
+            "\nLate-impulse context: " + str.tostring(math.round(lateImpulseContext * 100)) + "%" +
+            "\n\nThis label owns five completed segments. Those segments cannot produce another I5 label. This remains contextual pattern recognition, not a formal Elliott 1-5 count."
+        )
+        float impulseLabelY = upperLabelBase + eventLabelLaneStep * upperLabelLane
+        label.new(bar_index, impulseLabelY, "I5", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down, color = color.new(#7c4dff, 14), textcolor = color.white, size = size.small, tooltip = impulseTip, force_overlay = true)
+        upperLabelLane := upperLabelLane + 1
+    lastImpulseContextSerial := legSegmentSerial
+
+bool correctionContextOwnershipReady = na(lastCorrectionContextSerial) or legSegmentSerial - lastCorrectionContextSerial >= 3
+bool correctionContextEvent = segmentEnded and correctionContextQualified and correctionContextOwnershipReady
+if eventOk and correctionContextEvent
+    if showEventLabels and showElliottLabels
+        string correctionTip = (
+            "Three-Segment Correction Context\n" +
+            "Flow: " + (structDir == 1 ? "Bullish" : "Bearish") +
+            "\nSequence: counter-aligned-counter" +
+            "\nContext score: " + str.tostring(math.round(correctionSequenceScore * 100)) + "%" +
+            "\nMaximum retracement: " + (na(lastCorrectionRetracement) ? "n/a" : str.tostring(lastCorrectionRetracement * 100, "#") + "%") +
+            "\nCounter pressure: " + str.tostring(math.round(counterPressure * 100)) + "%" +
+            "\nStructural integrity: " + str.tostring(math.round(structuralIntegrity * 100)) + "%" +
+            "\nMaturity: " + str.tostring(math.round(maturity * 100)) + "%" +
+            "\n\nThis label owns three completed segments. Those segments cannot produce another C3 label. It does not assert a formal Elliott ABC count."
+        )
+        label.new(bar_index, lowerLabelBase, "C3", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_up, color = color.new(#ffab00, 14), textcolor = color.rgb(35, 35, 35), size = size.small, tooltip = correctionTip, force_overlay = true)
+    lastCorrectionContextSerial := legSegmentSerial
+
+// ============================================================================
+// Dashboard
+// ============================================================================
+
+var table dash = table.new(position.top_right, 2, 8, bgcolor = color.new(color.white, 5), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+color tc = color.new(color.gray, 20)
+if barstate.islast
+    if showDashboard
+        string priorFlowText = lastLegDir == 1 ? "prior bull" : lastLegDir == -1 ? "prior bear" : ""
+        string flowText = structDir == 1 ? "Bullish" : structDir == -1 ? "Bearish" : transitionMemoryActive ? "Neutral · " + priorFlowText : "Neutral"
+        string waveText = transitionMemoryActive ? "Prior leg fading" : alignedWave > 0.18 ? "Aligned expansion" : alignedWave < -0.18 ? "Counter wave" : "Neutral / turning"
+        string structureText = transitionMemoryActive ? "Transition / prior " + str.tostring(math.round(lastLegConfidence * 100)) + "% conf." : f_strength_name(structuralStrength) + " / " + str.tostring(math.round(structuralConfidence * 100)) + "% conf."
+        string maturityLabel = transitionMemoryActive ? "Last maturity" : "Maturity"
+        string maturityText = str.tostring(math.round((transitionMemoryActive ? lastLegMaturity : maturity) * 100)) + "%"
+        string exhaustionLabel = transitionMemoryActive ? "Last exhaustion" : "Exhaustion"
+        string exhaustionText = str.tostring(math.round((transitionMemoryActive ? lastLegExhaustion : exhaustion) * 100)) + "%"
+        string contextText = transitionMemoryActive ? lastLegWaveContext : elliottContext
+        bool resyncAfterglowActive = resyncGlow > 0.0
+        float dashboardResyncQuality = resyncAfterglowActive ? lastConfirmedResyncQuality : resyncQuality
+        string rsText = resyncStage == 4 ? "Confirmed" : resyncAfterglowActive ? "Confirmed · fading" : resyncStage == 3 ? "Re-engaging" : resyncStage == 2 ? "Neutralizing" : resyncStage == 1 ? "Counter decay" : "—"
+        table.cell(dash, 0, 0, "Flow", text_color = tc, text_size = size.small)
+        table.cell(dash, 1, 0, flowText, text_color = structDir == 0 ? tc : structuralColor, text_size = size.small)
+        table.cell(dash, 0, 1, "Phase", text_color = tc, text_size = size.small)
+        table.cell(dash, 1, 1, f_phase_name(phase) + "  " + str.tostring(math.round(phaseConfidence * 100)) + "%", text_color = tc, text_size = size.small)
+        table.cell(dash, 0, 2, "Structure", text_color = tc, text_size = size.small)
+        table.cell(dash, 1, 2, structureText, text_color = tc, text_size = size.small)
+        table.cell(dash, 0, 3, "Internal", text_color = tc, text_size = size.small)
+        table.cell(dash, 1, 3, waveText, text_color = alignedWave >= 0 ? structuralColor : opposingColor, text_size = size.small)
+        table.cell(dash, 0, 4, maturityLabel, text_color = tc, text_size = size.small)
+        table.cell(dash, 1, 4, maturityText, text_color = tc, text_size = size.small)
+        table.cell(dash, 0, 5, "Re-Sync", text_color = tc, text_size = size.small)
+        table.cell(dash, 1, 5, rsText + (dashboardResyncQuality > 0 ? " / " + str.tostring(math.round(dashboardResyncQuality * 100)) + "%" : ""), text_color = tc, text_size = size.small)
+        table.cell(dash, 0, 6, exhaustionLabel, text_color = tc, text_size = size.small)
+        table.cell(dash, 1, 6, exhaustionText, text_color = tc, text_size = size.small)
+        table.cell(dash, 0, 7, "Wave context", text_color = tc, text_size = size.small)
+        table.cell(dash, 1, 7, showElliottContext ? contextText : "Hidden", text_color = tc, text_size = size.small)
+    else
+        table.clear(dash, 0, 0, 1, 7)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+bool expansionStart = phase == 3 and phase[1] != 3
+bool correctionStart = phase == 4 and phase[1] != 4
+bool compressionStart = phase == 5 and phase[1] != 5
+bool lateExpansionStart = phase == 7 and phase[1] != 7
+bool exhaustionStart = phase == 8 and phase[1] != 8
+bool dominantExpansion = segmentEnded and endedPolarity == 1 and not na(priorAlignedPeakBeforeEnd) and endedPeak > priorAlignedPeakBeforeEnd * 1.20
+alertcondition(eventOk and structuralInitiated, "Structural Flow Initiated", "Structural Wave Field: a new structural flow has been established.")
+alertcondition(eventOk and structuralExit, "Structural Flow Transition", "Structural Wave Field: the active structural flow has weakened into transition.")
+alertcondition(eventOk and structuralFlowFlip, "Structural Flow Flip", "Structural Wave Field: the structural flow direction has flipped.")
+alertcondition(eventOk and expansionStart, "Expansion Start", "Structural Wave Field: aligned expansion has started.")
+alertcondition(eventOk and correctionStart, "Correction Start", "Structural Wave Field: a counter-wave correction has started.")
+alertcondition(eventOk and compressionStart, "Compression", "Structural Wave Field: correction is compressing inside intact structure.")
+alertcondition(eventOk and resyncStage == 1 and resyncStage[1] == 0, "Early Re-Sync", "Structural Wave Field: counter pressure has begun to decay.")
+alertcondition(eventOk and resyncConfirmed, "Confirmed Re-Sync", "Structural Wave Field: internal flow has re-synchronized with structural direction.")
+alertcondition(eventOk and lateExpansionStart, "Late Expansion", "Structural Wave Field: expansion is occurring in a mature structural leg.")
+alertcondition(eventOk and exhaustionStart, "Exhaustion", "Structural Wave Field: mature structure is losing continuation efficiency.")
+alertcondition(eventOk and failedExpansion, "Failed Expansion", "Structural Wave Field: an aligned expansion ended materially weaker than its predecessor.")
+alertcondition(eventOk and dominantExpansion, "Dominant Expansion", "Structural Wave Field: the completed aligned wave materially exceeded the prior expansion.")
+alertcondition(eventOk and weakeningWaveSequence, "Weakening Wave Sequence", "Structural Wave Field: successive aligned wave strength is declining in a mature leg.")

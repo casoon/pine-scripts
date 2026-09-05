@@ -100,6 +100,29 @@ Rules:
 - Features use `✓` prefix (not `-`, `*`, or `•`)
 - No `@description`, `@author`, `@version` JSDoc-style tags — use the structured fields above
 
+## Data source validity
+
+Before any indicator uses `volume`, VWAP, Volume Profile, Open Interest, term structure or a
+cross-symbol `request.security()`, check [`DATA_VALIDITY.md`](DATA_VALIDITY.md) — the matrix of
+which data class carries a real signal on which instrument type. Skill: `instrument-data-validity`.
+
+Core rule: volume validity comes from `syminfo.volumetype` (`base`/`quote` = real, `tick`/`n/a` =
+not), never from the existence of a `volume` series. `nz(volume)` is not a guard.
+
+Every `.pine` file carries a Data Contract block in its header, directly after the `Features:`
+block and before the closing separator:
+
+```pine
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — degrades to neutral
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
+```
+
+`Verdict` is one of `CFD-safe`, `CFD-degraded`, `Reference-required`, `Exchange-only`.
+
 ## Dashboard table style
 
 All indicator dashboards use the same light-theme table style. The reference implementation is `indicators/trend_direction/vein/vein_trend.pine`.

@@ -15,6 +15,14 @@ Scripts marked **`[RTA]`** require the RTA libraries to be published to your Tra
 
 ---
 
+## Data validity
+
+Which data class carries a real signal on which instrument type — volume, VWAP, open interest,
+term structure, cross-symbol requests: [`DATA_VALIDITY.md`](DATA_VALIDITY.md).
+Run `python3 scripts/audit_data_sources.py` to scan all scripts against it.
+
+---
+
 ## Indicators
 
 ### Vein Adaptive Suite
@@ -161,6 +169,7 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 | [`triangle_compression_scanner_pro.pine`](indicators/market_structure/triangle_compression_scanner_pro/triangle_compression_scanner_pro.pine) | Sliding-window triangle scanner (symmetric/ascending/descending) — boundary lines fit to a swing window, weighted 0-100 score, multi-pattern tracking, live breakout resolution |
 | [`broadening_wedge_scanner_pro.pine`](indicators/market_structure/broadening_wedge_scanner_pro/broadening_wedge_scanner_pro.pine) | Sliding-window broadening wedge scanner (descending/ascending/symmetric broadening) — expansion-based sibling to the triangle scanner, weighted 0-100 score, multi-pattern tracking, live breakout resolution |
 | [`candle_story_engine.pine`](indicators/market_structure/candle_story_engine/candle_story_engine.pine) | Multi-candle candle-story engine — recency-weighted sequence pressure, dominance, close persistence, compression and trend exhaustion (decoupled from BUY/SELL), follow-through/failure detection; classic candlestick patterns as supporting evidence only |
+| [`structural_wave_field.pine`](indicators/market_structure/structural_wave_field/structural_wave_field.pine) | Price-scaled gradient field below price — active-only neutral anchor with aligned energy above and counter pressure below; multi-horizon Structural Flow, sensitivity-scaled transition memory, completed-counter-owned `RS↑/RS↓`, non-overlapping quality-gated `I5/C3`, early deterioration and Exhaustion scoring, with compact hover labels and bar-close-confirmed events |
 
 ### Equities & Relative Strength
 
