@@ -137,6 +137,7 @@ Quality columns (★ 1–5):
 |---|---|---|---|---|---|---|
 | [commodity_pulse_matrix](indicators/composite/commodity_pulse_matrix/) | 3.1.2 / 4.0.1 | Stabil | ★★★★★ | ★★★★★ | ★★★★★ | v3 published; v4.0.1 in progress (separate file) |
 | [signal_quality_engine](indicators/composite/signal_quality_engine/) | 3.3 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Range-Fader (eine Logik): fadet Range-Ränder — Long an erschöpften Tiefs, Short an erschöpften Hochs. Exhaustion-Score (Distance+Struktur+Momentum, aus Exhaustion Scanner), Edge→Setup→Watch→Trigger, Candle-Rejection. Für Ranges; im Trend bewusst still. Pivots nur Control-Overlay; ungetestet |
+| [futures_context_module](indicators/composite/futures_context_module/) | 1.0.0 | Draft | ★★★★☆ | ★★★★☆ | ☆☆☆☆☆ | Einziges Referenzmarkt-Kontext-Modul im Repo (`DATA_VALIDITY.md` §4.1): Daily-only, Nicht-Preis-Daten eines explizit konfigurierten Futures-Paars — Open Interest, ΔOI gegen die eigene Preisänderung des Front-Kontrakts (OI×Price-Quadranten), Front/Next-Terminstruktur (Contango/Backwardation, Curve-Trend), Echtvolumen-Validität via `syminfo.volumetype`; explizite Front/Next-`input.symbol()` statt Auto-Mapping, sichtbare „nicht konfiguriert"/„kein Datenfeed"-Zustände, kein Preisvergleich Chart vs. Future, keine Signale/Alerts; ungetestet auf echten Marktdaten |
 
 ## Momentum Intelligence Suite
 

@@ -1,0 +1,220 @@
+//@version=6
+// ============================================================================
+// Futures Context Module [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2026-09-05 00:00:00
+// ============================================================================
+// Daily-only, non-price futures context module: Open Interest, ΔOI read
+// against the front contract's own price change, and front/next term
+// structure (Contango/Backwardation, curve trend) for an explicitly
+// configured futures pair. Pure context display — it never compares the
+// chart symbol's price against the futures price. The front/next spread is
+// two legs of the same futures feed and is therefore internally consistent.
+//
+// Features:
+//   ✓ Explicit Front/Next futures symbol inputs — no auto-mapping guesswork
+//   ✓ Daily-only gate — visible notice on intraday charts, no interpretation
+//   ✓ Open Interest + ΔOI read against the front contract's own price change
+//   ✓ OI × Price quadrant classification (new longs/shorts, covering/liquidation)
+//   ✓ Front/Next term structure — Contango/Backwardation/Flat + curve trend
+//   ✓ Real-volume validity check via syminfo.volumetype on the front contract
+//   ✓ Visible "not configured" / "no data feed" states — never a silent blank
+//   ✓ Light-theme dashboard table, repo-standard style
+//
+// Data Contract:
+//   Price:     NO
+//   Volume:    OPTIONAL   real trade volume of the front contract only — degrades to neutral
+//   OI:        OPTIONAL   na when no OI feed exists for the configured symbol — shown, not hidden
+//   Reference: NYMEX:NG1! / NYMEX:NG2! (Daily)
+//   Verdict:   Reference-required
+// ============================================================================
+
+indicator("Futures Context Module [WavesUnchained]", "Futures Context", overlay=true)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+var gRef = "Futures Reference"
+string frontSymbolInput = input.symbol("NYMEX:NG1!", "Front-Month Futures Symbol", group=gRef, tooltip="Explicit futures contract — no auto-mapping from the chart symbol. Default matches the repo reference instrument (NatGas).")
+string nextSymbolInput  = input.symbol("NYMEX:NG2!", "Next-Month Futures Symbol", group=gRef, tooltip="Second leg for the term-structure spread. Must be the next contract month of the same futures curve as the Front symbol above.")
+
+var gOi = "Open Interest"
+int oiLookback = input.int(1, "ΔOI / Price-Change Lookback (bars)", minval=1, maxval=20, group=gOi, tooltip="Number of Daily bars back for the ΔOI and front-contract price-change comparison.")
+
+var gTerm = "Term Structure"
+int termEmaFast = input.int(5, "Curve EMA Fast", minval=2, group=gTerm)
+int termEmaSlow = input.int(20, "Curve EMA Slow", minval=5, group=gTerm)
+
+var gDisplay = "Display"
+bool   showTable = input.bool(true, "Show Context Table", group=gDisplay)
+string tablePos  = input.string("bottom_left", "Table Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group=gDisplay)
+
+// ============================================================================
+// GATES — Daily-only, explicit configuration
+// ============================================================================
+
+bool isDailyPlus  = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly
+bool isConfigured = frontSymbolInput != "" and nextSymbolInput != "" and frontSymbolInput != nextSymbolInput
+
+// ============================================================================
+// DATA FETCH — request.security() always unconditional, top-level (§4.3 DATA_VALIDITY.md)
+// ============================================================================
+
+[frontClose, frontVolume] = request.security(frontSymbolInput, timeframe.period, [close, volume], lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+string frontVolType       = request.security(frontSymbolInput, timeframe.period, syminfo.volumetype, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+float  nextClose          = request.security(nextSymbolInput, timeframe.period, close, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+float  frontOI            = request.security(frontSymbolInput + "_OI", timeframe.period, close, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+// ============================================================================
+// DATA VALIDITY
+// ============================================================================
+
+bool hasFrontData  = not na(frontClose)
+bool hasNextData   = not na(nextClose)
+bool hasSpreadData = hasFrontData and hasNextData
+bool hasOiData     = not na(frontOI)
+bool hasRealVolume = frontVolType == "base" or frontVolType == "quote"
+bool volumeDataOk  = hasRealVolume and not na(frontVolume)
+
+bool noDataFeed = isConfigured and isDailyPlus and barstate.islast and not hasSpreadData
+
+// ============================================================================
+// TERM STRUCTURE — Front vs. Next, two legs of the same feed
+// ============================================================================
+
+float  spread        = hasSpreadData ? frontClose - nextClose : na
+float  spreadEmaFast  = ta.ema(spread, termEmaFast)
+float  spreadEmaSlow  = ta.ema(spread, termEmaSlow)
+float  spreadSlope    = not na(spreadEmaFast) ? spreadEmaFast - nz(spreadEmaFast[1]) : na
+
+string termStructure = "n/a"
+string curveTrend    = "n/a"
+if isDailyPlus and hasSpreadData
+    termStructure := spread > 0 ? "Backwardation" : spread < 0 ? "Contango" : "Flat"
+    if not na(spreadEmaFast) and not na(spreadEmaSlow) and not na(spreadSlope)
+        if spreadEmaFast > spreadEmaSlow and spreadSlope > 0
+            curveTrend := "rising"
+        else if spreadEmaFast < spreadEmaSlow and spreadSlope < 0
+            curveTrend := "falling"
+        else
+            curveTrend := "flat"
+
+// ============================================================================
+// OPEN INTEREST — ΔOI vs. the front contract's own price change (single feed)
+// ============================================================================
+
+float frontPriceChange = hasFrontData ? frontClose - nz(frontClose[oiLookback]) : na
+float oiChange          = hasOiData ? frontOI - nz(frontOI[oiLookback]) : na
+float oiChangePct       = hasOiData and nz(frontOI[oiLookback]) != 0 ? oiChange / frontOI[oiLookback] * 100 : na
+
+string oiPriceState = "n/a"
+if isDailyPlus and hasOiData and hasFrontData and not na(oiChange) and not na(frontPriceChange)
+    if oiChange > 0 and frontPriceChange > 0
+        oiPriceState := "OI rising + Price rising -> new longs"
+    else if oiChange > 0 and frontPriceChange < 0
+        oiPriceState := "OI rising + Price falling -> new shorts"
+    else if oiChange < 0 and frontPriceChange > 0
+        oiPriceState := "OI falling + Price rising -> short covering"
+    else if oiChange < 0 and frontPriceChange < 0
+        oiPriceState := "OI falling + Price falling -> long liquidation"
+    else
+        oiPriceState := "OI flat"
+
+// ============================================================================
+// VOLUME — real-volume validity of the front contract only
+// ============================================================================
+
+float  frontVolAvg  = ta.sma(frontVolume, 20)
+string volumeState  = "n/a"
+if isDailyPlus
+    if not volumeDataOk
+        volumeState := "not real (" + (na(frontVolType) ? "n/a" : frontVolType) + ")"
+    else if not na(frontVolAvg)
+        volumeState := frontVolume > frontVolAvg ? "above avg" : "below avg"
+
+// ============================================================================
+// VISUALIZATION — Dashboard Table (light theme, repo-standard style)
+// ============================================================================
+
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+color warnCol = #ff6f00
+
+var table t = na
+if showTable and barstate.islast
+    if na(t)
+        t := table.new(tablePos, 2, 10, bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
+
+    // Row 0 — Header + module status
+    string statusText = not isDailyPlus ? "DAILY ONLY" : not isConfigured ? "NOT CONFIGURED" : noDataFeed ? "NO DATA FEED" : "OK"
+    table.cell(t, 0, 0, "Futures Context", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, statusText, text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_right)
+
+    // Row 1 — configured symbols
+    table.cell(t, 0, 1, "Front / Next", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, frontSymbolInput + " / " + nextSymbolInput, text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+    if not isDailyPlus
+        table.cell(t, 0, 2, "Status", text_color=color.white, bgcolor=warnCol, text_size=size.small)
+        table.cell(t, 1, 2, "not valid on this timeframe — switch to Daily or higher", text_color=color.white, bgcolor=warnCol, text_size=size.small, text_halign=text.align_right)
+        for r = 3 to 9
+            table.cell(t, 0, r, "", text_size=size.small)
+            table.cell(t, 1, r, "", text_size=size.small)
+    else if not isConfigured
+        table.cell(t, 0, 2, "Status", text_color=color.white, bgcolor=warnCol, text_size=size.small)
+        table.cell(t, 1, 2, "Front/Next symbol not configured", text_color=color.white, bgcolor=warnCol, text_size=size.small, text_halign=text.align_right)
+        for r = 3 to 9
+            table.cell(t, 0, r, "", text_size=size.small)
+            table.cell(t, 1, r, "", text_size=size.small)
+    else if noDataFeed
+        table.cell(t, 0, 2, "Status", text_color=color.white, bgcolor=warnCol, text_size=size.small)
+        table.cell(t, 1, 2, "no data feed for " + frontSymbolInput + " / " + nextSymbolInput, text_color=color.white, bgcolor=warnCol, text_size=size.small, text_halign=text.align_right)
+        for r = 3 to 9
+            table.cell(t, 0, r, "", text_size=size.small)
+            table.cell(t, 1, r, "", text_size=size.small)
+    else
+        // Row 2 — separator
+        table.cell(t, 0, 2, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+        table.cell(t, 1, 2, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+
+        // Row 3 — Open Interest
+        string oiText = hasOiData ? str.tostring(frontOI, "#") : "no OI feed for " + frontSymbolInput
+        table.cell(t, 0, 3, "Open Interest", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 3, oiText, text_color=hasOiData ? tc : warnCol, text_size=size.small, text_halign=text.align_right)
+
+        // Row 4 — ΔOI
+        string deltaOiText = hasOiData and not na(oiChangePct) ? str.tostring(oiChange, "#") + "  (" + str.tostring(oiChangePct, "#.#") + "%)" : "n/a"
+        table.cell(t, 0, 4, "ΔOI (" + str.tostring(oiLookback) + "d)", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 4, deltaOiText, text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+        // Row 5 — OI x Price
+        table.cell(t, 0, 5, "OI x Price", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 5, oiPriceState, text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+        // Row 6 — separator
+        table.cell(t, 0, 6, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+        table.cell(t, 1, 6, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+
+        // Row 7 — Term Structure
+        string spreadText = not na(spread) ? termStructure + "  (" + str.tostring(spread, format.mintick) + ")" : "n/a"
+        table.cell(t, 0, 7, "Term Structure", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 7, spreadText, text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+        // Row 8 — Curve Trend
+        table.cell(t, 0, 8, "Curve Trend", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 8, curveTrend, text_color=tc, text_size=size.small, text_halign=text.align_right)
+
+        // Row 9 — Volume (front contract only)
+        table.cell(t, 0, 9, "Volume (Front)", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 9, volumeState, text_color=volumeDataOk ? tc : warnCol, text_size=size.small, text_halign=text.align_right)
+
+// ============================================================================
+// DATA WINDOW
+// ============================================================================
+
+plot(frontOI, "Open Interest (Front) [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(oiChange, "ΔOI [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(spread, "Front-Next Spread [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(frontVolume, "Volume (Front) [dw]", display=display.data_window, color=color.new(color.gray, 100))
