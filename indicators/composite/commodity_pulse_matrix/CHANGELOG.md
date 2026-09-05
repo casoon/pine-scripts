@@ -1,5 +1,45 @@
 # Changelog
 
+## v4.1.0 — 2026-09-05
+- Data validity: MFI, OBV, VFI (Flow category), the VWAP component of the Trend
+  category, and MV Confluence now check `syminfo.volumetype` before using
+  volume — on tick/n/a volume (most CFDs) they degrade to neutral instead of
+  scoring on fake data. Flow carries weight 1.2 of 6.2 (~19%) in the default
+  Swing weight profile; on degraded instruments its weight is now excluded and the other 5
+  categories are renormalized to fill the full 100%, instead of silently
+  dragging the total score toward zero.
+- Exhaustion detection's volume criterion (1 of 5) is excluded the same way,
+  with the watch threshold rescaled (3-of-5 → 2-of-4) to keep selectivity.
+- Signal Quality Gate's low-volume block (Rule 1) no longer fires on tick
+  volume — it passes through instead of vetoing every entry.
+- Renamed the internal `vcp` variable to `volumeConfirmedPriceChange` — it is
+  a price-weighted volume heuristic, not orderflow/delta.
+- Added a "Volume" row to the matrix table dashboard (Real — Active / degraded
+  with the detected `syminfo.volumetype`).
+- Added `Data Contract` header block (`Verdict: CFD-degraded`).
+
+## v3.2.0 — 2026-09-05
+- Data validity: MFI, OBV, VFI (Flow category), the VWAP component of the Trend
+  category, the HTF Midline VWAP mode, entry-timing's volume confirmation, and
+  MV Confluence now check `syminfo.volumetype` before using volume — on
+  tick/n/a volume (most CFDs) they degrade to neutral instead of scoring or
+  gating on fake data. Flow carries weight 1.2 of 6.2 (~19%) in the default
+  Swing weight profile; on degraded instruments its weight is now excluded and the other 5
+  categories are renormalized to fill the full 100%, instead of silently
+  dragging the total score toward zero.
+- Exhaustion detection's volume criterion (1 of 5) is excluded the same way,
+  with the watch threshold rescaled (3-of-5 → 2-of-4) to keep selectivity.
+- Signal Quality Gate's low-volume block (Rule 1) and the Entry Timing
+  filter's volume-confirmation requirement no longer fire on tick volume —
+  both pass through instead of vetoing every entry.
+- HTF Midline "VWAP" / "Dynamic + VWAP" modes fall back to OHLC4 on tick/n/a
+  volume instead of plotting a meaningless line.
+- Renamed the internal `vcp` variable to `volumeConfirmedPriceChange` — it is
+  a price-weighted volume heuristic, not orderflow/delta.
+- Added a "Volume" row to the matrix table dashboard (Real — Active / degraded
+  with the detected `syminfo.volumetype`), in both Compact and Full mode.
+- Added `Data Contract` header block (`Verdict: CFD-degraded`).
+
 ## v4.0.4 — 2026-09-05
 - Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
 

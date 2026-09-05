@@ -1,24 +1,32 @@
 //@version=6
 // ============================================================================
 // Commodity Pulse Matrix v4 [WavesUnchained] — Strategy (generated)
-// Version: 4.0.1
+// Version: 4.1.0
 // Author: WavesUnchained
-// Build: 2026-09-05 00:00:00
+// Build: 2026-09-05
 // ============================================================================
-// Strategy-focused multi-timeframe confluence indicator for commodities.
-// Slimmed down from v3 (~7200 lines) to focus on signal generation.
+// Chart-timeframe entry engine with multi-timeframe confluence context.
+// Slimmed down from v3 (~7200 lines) to focus on filtered signal generation.
 //
 // Features:
 //   ✓ 6-Category Multi-Timeframe Scoring (Flow, Mom, Trend, Vol, Struct, Div)
 //   ✓ Heat Score System (setup quality 0-1)
-//   ✓ Entry Engine V2 (finalLong/finalShort signals)
+//   ✓ Chart-TF Entry Engine V2 (finalLong/finalShort signals)
 //   ✓ Signal Quality Gate (ATR + Volume filter)
+//   ✓ Early Reversal Candidates (informational pre-entry layer)
 //   ✓ A-Setup detection (premium signal marker)
 //   ✓ Diamond Zones (support/resistance for SL context)
 //   ✓ Divergence Detection
 //   ✓ Risk Management (ATR-based SL/TP)
 //   ✓ Matrix Table visualization
 //
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only (MFI, OBV, VFI, VWAP, MV
+//              Confluence) — degrades to neutral on tick/n/a volume
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 // ============================================================================
 
 strategy("Commodity Pulse Matrix v4 [WavesUnchained] — Strategy", overlay=true,
@@ -57,7 +65,7 @@ bool usePullbackEntries = input.bool(true, "Enable Pullback Entries", group="Ent
 bool useContinuationEntries = input.bool(true, "Enable Continuation Entries", group="Entry Engine", tooltip="Trigger on trend continuations after mini-pullbacks")
 
 bool allowCounterTrendEntries = input.bool(false, "Allow Counter-Trend Entries", group="Entry Engine", tooltip="Allow entries against trend (requires 1.5x stronger momentum)")
-bool useTrendFilter             = input.bool(true,  "Trend Filter (regime + JMA50)", group="Entry Engine", tooltip="Require trending regime AND price on the correct side of JMA50 for final signals. Strongly reduces counter-trend entries.")
+bool useTrendFilter             = input.bool(false, "Trend Filter (regime + JMA50)", group="Entry Engine", tooltip="Optional trend hard filter. Default OFF: trend context is already represented in entry strength/heat scoring.")
 
 float volStopATRMult = input.float(2.0, "VolStop ATR Multiplier", minval=1.0, maxval=4.0, step=0.1, group="Entry Engine", tooltip="ATR multiplier for volatility stop calculation")
 
@@ -74,10 +82,21 @@ float wt1BoostThreshold = input.float(60.0, "WT1 Extreme Threshold", minval=40.0
 float wt1BoostAmount = input.float(0.10, "WT1 Boost Amount", minval=0.05, maxval=0.25, step=0.01, group="Signal Boost", tooltip="Strength added when WT1 is extreme (0.10 = 10%)")
 
 float strengthThreshold = input.float(0.55, "Strength Threshold", minval=0.20, maxval=0.70, step=0.05, group="Signal Boost", tooltip="Minimum strength required for final signal (lower = more signals)")
-float entryHeatMin       = input.float(0.40, "Entry Heat Filter (min)", minval=0.0, maxval=1.0, step=0.05, group="Signal Boost", tooltip="Final entry only fires when Heat Score is at least this value. Filters out low-quality setups (~50% of raw entries on most charts).")
+float entryHeatMin       = input.float(0.00, "Entry Heat Filter (min)", minval=0.0, maxval=1.0, step=0.05, group="Signal Boost", tooltip="Optional final heat hard filter. Default 0 keeps heat as context instead of a mandatory veto.")
+int   finalMinGate       = input.int(4, "Final Signal Gate (strictness)", minval=2, maxval=5, group="Signal Boost",
+     tooltip="Strictness of the graded confidence gate. The timing trigger (Emit Entry + Entry Direction) is always required; this sets how much supporting evidence (Quality Gate / Trend Alignment / Heat, 0-3) must also confirm. 5=all 3 evidence points, 2=none required (trigger-only).")
+
+// ==== EARLY REVERSAL CANDIDATES ====
+bool showEarlyReversal = input.bool(true, "Show Early Reversal Candidates", group="Early Reversal", tooltip="Shows early reversal candidates before final entries. Informational only, not used by strategy signals.")
+bool earlyRequirePriceReaction = input.bool(true, "Require JMA20 Reclaim/Reject", group="Early Reversal", tooltip="Require price to reclaim JMA20 for long candidates or reject below JMA20 for short candidates.")
+bool earlyUseDivergence = input.bool(true, "Use Divergence Zones", group="Early Reversal", tooltip="Use active RSI/price divergence zones as early reversal evidence.")
+bool earlyUseExhaustion = input.bool(true, "Use Exhaustion", group="Early Reversal", tooltip="Use exhaustion watch/confirmed states as early reversal evidence.")
+bool earlyUseExtreme = input.bool(true, "Use RSI/WT Extremes", group="Early Reversal", tooltip="Use RSI or WaveTrend extreme readings as early reversal evidence.")
+float earlyMinHeat = input.float(0.25, "Early Min Heat", minval=0.0, maxval=1.0, step=0.05, group="Early Reversal", tooltip="Minimum Heat Score for early reversal candidates. Lower than final entry heat by design.")
+int earlyCooldown = input.int(8, "Early Signal Cooldown", minval=1, maxval=50, group="Early Reversal", tooltip="Minimum bars between early reversal candidate markers in the same direction.")
 
 // ==== SIGNAL QUALITY GATE ====
-bool useQualityGate = input.bool(true, "Enable Quality Gate", group="Signal Quality", tooltip="Filter signals based on ATR + Volume conditions")
+bool useQualityGate = input.bool(false, "Enable Quality Gate", group="Signal Quality", tooltip="Optional ATR + Volume quality filter. Default OFF: quality should score/contextualize, not hard-block entries.")
 float qualityATRContractThresh = input.float(0.8, "ATR Contract Threshold", minval=0.5, maxval=1.0, step=0.05, group="Signal Quality", tooltip="Below this = Range market, no trend signals (ATR/ATR_SMA)")
 float qualityATRExpandThresh = input.float(1.2, "ATR Expand Threshold", minval=1.0, maxval=2.0, step=0.05, group="Signal Quality", tooltip="Above this = Expanding volatility, ideal for trends")
 float qualityVolLowThresh = input.float(0.7, "Volume Low Threshold", minval=0.3, maxval=1.0, step=0.05, group="Signal Quality", tooltip="Below this = Low volume, skip entries (Vol/Vol_SMA)")
@@ -94,16 +113,16 @@ float tp1ATRMult = input.float(1.0, "TP1: ATR × (Quick Profit)", minval=0.5, ma
 float tp2ATRMult = input.float(1.5, "TP2: ATR × (Mid)", minval=1.0, maxval=3.0, step=0.1, group="Take-Profit", tooltip="Second target (default: 1.5 ATR)")
 float tp3ATRMult = input.float(2.0, "TP3: ATR × (Extended)", minval=1.0, maxval=4.0, step=0.1, group="Take-Profit", tooltip="Third target - extended move (default: 2.0 ATR)")
 
-// ==== REVERSAL LAYER (confirmed-pivot markers) ====
-bool showReversal      = input.bool(true,  "Show Reversal Markers",     group="Reversal Layer", tooltip="Plots arrows AT confirmed swing highs/lows. Lags by Pivot Right Bars (price must close past the pivot to confirm). For visual analysis — not used as strategy signal.")
-int  revPivLeft         = input.int(10,    "Pivot Left Bars",  minval=2, group="Reversal Layer", tooltip="Bars before pivot used for detection. Larger = only deeper local extrema.")
-int  revPivRight        = input.int(8,     "Pivot Right Bars", minval=1, group="Reversal Layer", tooltip="Bars after pivot used for confirmation. Larger = more confirmation lag but fewer false signals.")
-bool revRequireRegime   = input.bool(false, "Filter by Heat Score",      group="Reversal Layer", tooltip="Only mark a reversal when Heat Score ≥ threshold at the pivot bar.")
-float revHeatMin        = input.float(0.20, "Min Heat at Pivot",         minval=0.0, maxval=1.0, step=0.05, group="Reversal Layer")
-bool revStrictMode      = input.bool(true,  "Strict Pivot Confirmation", group="Reversal Layer", tooltip="Pivot must equal the lowest/highest within the strict window. Eliminates pivots that were confirmed locally but a deeper extreme exists nearby.")
-int  revStrictWindow    = input.int(100,    "Strict Confirmation Window", minval=5, maxval=500, group="Reversal Layer", tooltip="Bars to validate against. Larger = only major swings. 100 = pivot must be the absolute extreme over ~100 bars.")
-bool revUseSwingFilter  = input.bool(true,  "Filter by Swing Magnitude",  group="Reversal Layer", tooltip="Pivot only accepted if subsequent price moved at least N×ATR away. Filters pivots that didn't actually reverse.")
-float revMinSwingATR    = input.float(1.5,  "Min Swing Size (ATR×)", minval=0.1, step=0.1, group="Reversal Layer", tooltip="Minimum post-pivot move in ATR multiples within the lookforward window (revPivRight bars).")
+// ==== CONFIRMED SWING LAYER (visual context only) ====
+bool showReversal      = input.bool(true,  "Show Confirmed Swing Markers", group="Confirmed Swing Layer", tooltip="Plots arrows at confirmed swing highs/lows. Lags by Pivot Right Bars. Visual context only, not an entry or strategy signal.")
+int  revPivLeft         = input.int(10,    "Pivot Left Bars",  minval=2, group="Confirmed Swing Layer", tooltip="Bars before pivot used for detection. Larger = only deeper local extrema.")
+int  revPivRight        = input.int(8,     "Pivot Right Bars", minval=1, group="Confirmed Swing Layer", tooltip="Bars after pivot used for confirmation. Larger = more confirmation lag but fewer false signals.")
+bool revRequireRegime   = input.bool(false, "Filter by Heat Score",      group="Confirmed Swing Layer", tooltip="Only mark a confirmed swing when Heat Score >= threshold at the pivot bar.")
+float revHeatMin        = input.float(0.20, "Min Heat at Pivot",         minval=0.0, maxval=1.0, step=0.05, group="Confirmed Swing Layer")
+bool revStrictMode      = input.bool(true,  "Strict Pivot Confirmation", group="Confirmed Swing Layer", tooltip="Pivot must equal the lowest/highest within the strict window. Eliminates pivots that were confirmed locally but a deeper extreme exists nearby.")
+int  revStrictWindow    = input.int(100,    "Strict Confirmation Window", minval=5, maxval=500, group="Confirmed Swing Layer", tooltip="Bars to validate against. Larger = only major swings. 100 = pivot must be the absolute extreme over ~100 bars.")
+bool revUseSwingFilter  = input.bool(true,  "Filter by Swing Magnitude",  group="Confirmed Swing Layer", tooltip="Pivot only accepted if subsequent price moved at least N×ATR away. Filters pivots that did not produce a meaningful swing.")
+float revMinSwingATR    = input.float(1.5,  "Min Swing Size (ATR×)", minval=0.1, step=0.1, group="Confirmed Swing Layer", tooltip="Minimum post-pivot move in ATR multiples within the lookforward window (revPivRight bars).")
 
 // ==== DEBUG ====
 bool dbgEnabled        = input.bool(false, "Enable Debug Log",          group="Debug", tooltip="Logs detailed signal diagnostics to TradingView's Pine Logs panel. Compare detected pivot vs actual extreme in the lookback window.")
@@ -115,6 +134,7 @@ bool showMatrix = input.bool(true, "Show Matrix Table", group="Visualization", t
 string matrixPos = input.string("Top Right", "Matrix Position", ["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Visualization")
 
 bool showJMAGradient = input.bool(true, "Show JMA Gradient Fill", group="Visualization", tooltip="4-layer JMA gradient background (lower lag than EMA)")
+float jmaNeutralATRBand = input.float(0.10, "JMA Neutral Band (ATR)", minval=0.0, maxval=1.0, step=0.05, group="Visualization", tooltip="Treat small price/JMA differences as neutral gray in the gradient fill. Prevents green/red background during flat or undecided phases.")
 bool showDiamondBoxes = input.bool(true, "Show Diamond Zone Boxes", group="Visualization", tooltip="Display support/resistance zone boxes")
 bool showStopLines = input.bool(true, "Show Stop-Loss/Take-Profit Lines", group="Visualization", tooltip="Display SL/TP lines on chart at signal bars")
 
@@ -124,6 +144,12 @@ color colBullModerate = input.color(#4CAF50, "Bull Moderate", group="Colors")
 color colBearStrong = input.color(#FF1744, "Bear Strong", group="Colors")
 color colBearModerate = input.color(#F44336, "Bear Moderate", group="Colors")
 color colNeutral = input.color(#757575, "Neutral", group="Colors")
+
+// ==== DATA VALIDITY ====
+// Volume-derived components (MFI, OBV, VFI/flow, VWAP, MV Confluence) need
+// real trade volume. On CFDs (syminfo.volumetype = tick/n/a) they degrade to
+// neutral instead of producing a false signal — see DATA_VALIDITY.md.
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and not na(volume)
 
 // MODULE: 02_types
 // ============================================================================
@@ -1138,8 +1164,9 @@ calculateOBVSlope(int obvLen = 20, int slopeLen = 10) =>
 // @param length Average volume period (default 20)
 // @returns Volume ratio
 calculateVolumeRatio(int length = 20) =>
-    avgVol = ta.sma(volume, length)
-    avgVol > 0 ? volume / avgVol : 1.0
+    float volNz = nz(volume)
+    avgVol = ta.sma(volNz, length)
+    avgVol > 0 ? volNz / avgVol : 1.0
 
 // Calculate VFI (Volume Flow Indicator)
 // @param length VFI period (default 130)
@@ -1149,6 +1176,9 @@ calculateVolumeRatio(int length = 20) =>
 calculateVFI(int length = 130, float coef = 0.2, float vCoef = 2.5) =>
     // Typical price
     typical = hlc3
+
+    // Volume (nz-guarded for feeds without volume data)
+    float vol = nz(volume)
 
     // Inter calculation
     inter = math.log(typical) - math.log(typical[1])
@@ -1160,12 +1190,12 @@ calculateVFI(int length = 130, float coef = 0.2, float vCoef = 2.5) =>
     cutoff = coef * vinter * close
 
     // Vave
-    vave = ta.sma(volume, length)[1]
+    vave = ta.sma(vol, length)[1]
 
     // Vc calculation
     vc = switch
-        volume < vave => volume
-        => vave + (volume - vave) * vCoef
+        vol < vave => vol
+        => vave + (vol - vave) * vCoef
 
     // MF calculation
     mf = typical - typical[1]
@@ -1176,8 +1206,8 @@ calculateVFI(int length = 130, float coef = 0.2, float vCoef = 2.5) =>
         mf < -cutoff => -vc
         => 0
 
-    // VFI
-    vfi = ta.sma(vcp, length) / vave
+    // VFI — guard against vave = 0/na (e.g. early bars or no-volume feeds)
+    vfi = vave != 0 and not na(vave) ? ta.sma(vcp, length) / vave : 0.0
     vfi
 
 // ==== VOLATILITY INDICATORS ====
@@ -1414,25 +1444,30 @@ nzmap(float val, float low, float high) =>
 // Weight Distribution: MFI 50%, VFI 30%, OBV 20%
 
 calculateFlowScore(float mfi, float closePrice, float volume, float obvSlope, int zLen = 50) =>
-    // MFI Component (0-100 oscillator)
-    float mfiZ = zLocal(mfi, zLen)
-
+    // MFI, VFI and OBV all need real trade volume (DATA_VALIDITY.md) — mfi/obvSlope
+    // already arrive as na from calculateEssentialIndicators when volume is not real.
     // Volume Flow Indicator (VFI) - Price-weighted volume momentum
     float typical = (high + low + close) / 3.0
     float inter = math.log(typical) - math.log(typical[1])
     float vinter = ta.stdev(inter, 30)
     float cutoff = 0.2 * vinter * close
     float volumeSma = ta.sma(volume, 30)  // Extract ta.sma for consistency
-    float vcp = math.abs(close - close[1]) > cutoff ? volume * (close - close[1]) / (volumeSma * cutoff) : 0.0
-    float vfi = calculateJMA(vcp, 30)  // JMA instead of EMA
-    float vfiZ = zLocal(vfi, zLen)
+    float volumeConfirmedPriceChange = volumeIsReal and math.abs(close - close[1]) > cutoff and volumeSma * cutoff != 0 ? volume * (close - close[1]) / (volumeSma * cutoff) : 0.0
+    float vfi = calculateJMA(volumeConfirmedPriceChange, 30)  // JMA instead of EMA
+    float vfiZ = volumeIsReal ? zLocal(vfi, zLen) : na
 
-    // OBV Slope Component (may be na in MTF mode) - Extract z() for consistency
+    // MFI Component (0-100 oscillator)
+    float mfiZ = volumeIsReal ? zLocal(mfi, zLen) : na
+
+    // OBV Slope Component (may be na in MTF mode, or when volume is not real) - Extract z() for consistency
     float obvZ_raw = zLocal(obvSlope, zLen)
     float obvZ = na(obvSlope) ? 0.0 : obvZ_raw
 
-    // Weighted combination (adjust weights if OBV is disabled)
-    float flowScore = na(obvSlope) ? (mfiZ * 0.625) + (vfiZ * 0.375) : (mfiZ * 0.5) + (vfiZ * 0.3) + (obvZ * 0.2)
+    // Weighted combination (adjust weights if OBV/MFI/VFI are unavailable)
+    // No real volume: MFI, VFI and OBV are all invalid — flow score is neutral
+    // (0.0) and the Flow category weight is excluded/renormalized where this
+    // score feeds the 6-category aggregate (calculateAggregateScore call site).
+    float flowScore = not volumeIsReal ? 0.0 : na(obvSlope) ? (mfiZ * 0.625) + (vfiZ * 0.375) : (mfiZ * 0.5) + (vfiZ * 0.3) + (obvZ * 0.2)
 
     // Clamp to ±3 sigma and normalize to [-1, 1]
     math.max(-3.0, math.min(3.0, flowScore)) / 3.0
@@ -1663,7 +1698,7 @@ calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cc
     // Extract ALL ta.* functions for consistency (always called, never in conditional scope)
     float _rsi_internal = ta.rsi(src, rsiLen)
     float _stochRSI_raw = ta.stoch(_rsi_internal, _rsi_internal, _rsi_internal, 14)
-    float _mfi_raw = ta.mfi(hlc3, mfiLen)
+    float _mfi_raw = volumeIsReal ? ta.mfi(hlc3, mfiLen) : na
     float _cci_raw = ta.cci(src, cciLen)
     float _roc_raw = ta.roc(src, rocLen)
     float _atr_raw = ta.atr(atrLen)
@@ -1672,18 +1707,19 @@ calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cc
     float _jma20_raw = calculateJMA(src, 20)
     float _jma50_raw = calculateJMA(src, 50)
     float _jma200_raw = calculateJMA(src, 200)
-    float _vwap_raw = ta.vwap(hlc3)
+    float _vwap_raw = volumeIsReal ? ta.vwap(hlc3) : na
 
     // ADX - extracted for consistency
     [_diPlus_raw, _diMinus_raw, _adx_raw] = ta.dmi(adxLen, adxLen)
 
-    // Volume - extracted for consistency
-    float _obv_raw = ta.obv
-    float _obvSlope_raw = ta.change(_obv_raw, 5) / 5.0
+    // Volume - extracted for consistency (OBV needs real trade volume, see DATA_VALIDITY.md)
+    float _obv_raw = volumeIsReal ? ta.obv : na
+    float _obvSlope_raw = na(_obv_raw) ? na : ta.change(_obv_raw, 5) / 5.0
+    float _volumeForSet = volumeIsReal ? volume : na
 
     if not shouldCalculate
         // Return neutral dummy data for old bars
-        IndicatorSet.new(50.0, 50.0, 0.0, 0.0, 50.0, 25.0, 25.0, 25.0, na, src, src, na, na, 0, 1.0, 1.0, na, na, volume)
+        IndicatorSet.new(50.0, 50.0, 0.0, 0.0, 50.0, 25.0, 25.0, 25.0, na, src, src, na, na, 0, 1.0, 1.0, na, na, _volumeForSet)
     else
         // Use pre-calculated values
         float _atrPct = (_atr_raw / close) * 100.0
@@ -1692,7 +1728,7 @@ calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cc
         int _jmaStackDir = _jma20_raw > _jma50_raw and _jma50_raw > _jma200_raw ? 1 : _jma20_raw < _jma50_raw and _jma50_raw < _jma200_raw ? -1 : 0
 
         // Return indicator set (ema fields now contain JMA values)
-        IndicatorSet.new(_rsi_internal, _mfi_raw, _cci_raw, _roc_raw, _stochRSI_raw, _adx_raw, _diPlus_raw, _diMinus_raw, na, _jma20_raw, _jma50_raw, _jma200_raw, _vwap_raw, _jmaStackDir, _atr_raw, _atrPct, _obv_raw, _obvSlope_raw, volume)
+        IndicatorSet.new(_rsi_internal, _mfi_raw, _cci_raw, _roc_raw, _stochRSI_raw, _adx_raw, _diPlus_raw, _diMinus_raw, na, _jma20_raw, _jma50_raw, _jma200_raw, _vwap_raw, _jmaStackDir, _atr_raw, _atrPct, _obv_raw, _obvSlope_raw, _volumeForSet)
 
 
 
@@ -2051,7 +2087,7 @@ checkExhaustionCriteria(int rsiLength = 14, int atrLen = 14, int volLength = 20,
     float rsiVal = ta.rsi(close, rsiLength)
     float atrVal = ta.atr(atrLen)
     float atrAvg = ta.sma(atrVal, 20)
-    float volAvg = ta.sma(volume, volLength)
+    float volAvg = ta.sma(nz(volume), volLength)
 
     // Calculate candle metrics
     float bodySize = math.abs(close - open)
@@ -2068,8 +2104,8 @@ checkExhaustionCriteria(int rsiLength = 14, int atrLen = 14, int volLength = 20,
     // 2. Large Range (ATR expansion - volatility spike)
     bool bull2_range = totalRange > (atrAvg * atrMultiplier)
 
-    // 3. High Volume (panic selling)
-    bool bull3_vol = volume > (volAvg * volMultiplier)
+    // 3. High Volume (panic selling) — needs real trade volume
+    bool bull3_vol = volumeIsReal and volume > (volAvg * volMultiplier)
 
     // 4. Asymmetric Wick (lower wick rejection - buyers stepping in)
     bool bull4_wick = lowerWick > (upperWick * wickRatio) and lowerWick > (bodySize * wickBodyRatio)
@@ -2093,8 +2129,8 @@ checkExhaustionCriteria(int rsiLength = 14, int atrLen = 14, int volLength = 20,
     // 2. Large Range (ATR expansion - volatility spike)
     bool bear2_range = totalRange > (atrAvg * atrMultiplier)
 
-    // 3. High Volume (panic buying)
-    bool bear3_vol = volume > (volAvg * volMultiplier)
+    // 3. High Volume (panic buying) — needs real trade volume
+    bool bear3_vol = volumeIsReal and volume > (volAvg * volMultiplier)
 
     // 4. Asymmetric Wick (upper wick rejection - sellers stepping in)
     bool bear4_wick = upperWick > (lowerWick * wickRatio) and upperWick > (bodySize * wickBodyRatio)
@@ -2125,9 +2161,12 @@ detectExhaustion(int confirmBars = 3, int rsiLength = 14, int atrLen = 14, int v
     [bull1, bull2, bull3, bull4, bull5, bullCount,
      bear1, bear2, bear3, bear4, bear5, bearCount] = checkExhaustionCriteria(rsiLength, atrLen, volLength)
 
-    // Watch signals (3+ criteria met)
-    bool bullWatch = bullCount >= 3
-    bool bearWatch = bearCount >= 3
+    // Watch signals (3+ of 5 criteria; without real volume the volume
+    // criterion never fires, so only 4 are available — lower the bar to 2 to
+    // keep roughly the same 60% selectivity instead of silently tightening it)
+    int watchThresh = volumeIsReal ? 3 : 2
+    bool bullWatch = bullCount >= watchThresh
+    bool bearWatch = bearCount >= watchThresh
 
     // Track consecutive watch bars
     var int bullWatchBars = 0
@@ -2170,8 +2209,8 @@ detectStrictExhaustion(int confirmBars = 3, int rsiLength = 14, int atrLen = 14,
     float bodyRatio = rng > 0 ? body / rng : 1.0
 
     // Volume comparison
-    float volMA = ta.sma(volume, volLength)
-    bool bigVol = volume > volMA
+    float volMA = ta.sma(nz(volume), volLength)
+    bool bigVol = nz(volume) > volMA
 
     // Range comparison
     float rngMA = ta.sma(rng, atrLen)
@@ -2353,7 +2392,11 @@ calculateVolumeQualityScore(float volRelative, float volStdDev, int lookback) =>
     float consistencyScore = volAvg > 0 ? 1.0 - math.min(1.0, volStdDev / volAvg) : 0.5
 
     // Combine (70% relative strength, 30% consistency)
-    (relativeScore * 0.7) + (consistencyScore * 0.3)
+    float qualityScore = (relativeScore * 0.7) + (consistencyScore * 0.3)
+
+    // Without real trade volume, relative strength/consistency are meaningless
+    // (tick volume) — neutral quality, no bonus or penalty (DATA_VALIDITY.md).
+    volumeIsReal ? qualityScore : 0.5
 
 // ===========================================================================
 // MOMENTUM-VOLUME ALIGNMENT
@@ -2475,10 +2518,10 @@ interpretMVScore(float mvScore, float momentumDirection, float volRelative, bool
 
 analyzeMVConfluence(float rsiValue, float volumeVal, int lookback = 20) =>
 
-    // Calculate volume statistics
-    float volumeAvg = ta.sma(volume, lookback)
-    float volStdDev = ta.stdev(volume, lookback)
-    float volRelative = calculateVolumeRelative(volumeVal, volumeAvg)
+    // Calculate volume statistics (needs real trade volume, see DATA_VALIDITY.md)
+    float volumeAvg = volumeIsReal ? ta.sma(volume, lookback) : na
+    float volStdDev = volumeIsReal ? ta.stdev(volume, lookback) : na
+    float volRelative = volumeIsReal ? calculateVolumeRelative(volumeVal, volumeAvg) : 1.0
 
     // Calculate MV score with surge detection
     [mvScore, surge, intensity] = calculateMVScoreWithSurge(rsiValue, volumeVal, volumeAvg, volStdDev, lookback)
@@ -3191,7 +3234,7 @@ type DualScore
 
 calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW, float volW, float structW, float divW) =>
 
-    // [TEST] Re-enable request.security() ALONE to test if it's the problem
+    // Fetch timeframe-local indicator context.
     IndicatorSet indicators = request.security(syminfo.tickerid, timeframe, calculateEssentialIndicators(close), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
 
     // Extract all score calculations for consistency (always called)
@@ -3222,8 +3265,14 @@ calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW
     float structureScore = calculateStructureScore(close, _ema20, _ema50, _ema200, high, low)
     float divergenceScore = calculateDivergenceScore(_rsi, 5, 5)
 
+    // Flow score is neutral (0.0) without real volume (MFI/VFI/OBV) — exclude
+    // its weight from the aggregate instead of diluting the total score, and
+    // renormalize the remaining category weights (calculateAggregateScore
+    // divides by the sum of the weights actually passed in).
+    float flowWForAgg = volumeIsReal ? flowW : 0.0
+
     // Calculate weighted total
-    float totalScore = calculateAggregateScore( flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, flowW, momW, trendW, volW, structW, divW)
+    float totalScore = calculateAggregateScore( flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, flowWForAgg, momW, trendW, volW, structW, divW)
 
     // Return score structure (with validity flag)
     TimeframeScores.new(flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, totalScore, flowW, momW, trendW, volW, structW, divW, timeframe, hasIndicators)
@@ -4258,12 +4307,14 @@ updateEntryStateMachine( EntryState state, bool finalLong, bool finalShort, floa
 // @returns MarketQuality object
 analyzeMarketQuality( float atr, float atrSMA, float volume, float volumeSMA, float atrContractThresh, float atrExpandThresh, float volLowThresh, float volHighThresh ) =>
     float atrRatio = atrSMA > 0 ? atr / atrSMA : 0.0
-    float volRatio = volumeSMA > 0 ? volume / volumeSMA : 0.0
+    float volRatio = volumeIsReal and volumeSMA > 0 ? volume / volumeSMA : 0.0
 
     bool atrContracting = atrRatio > 0 and atrRatio < atrContractThresh
     bool atrExpanding = atrRatio >= atrExpandThresh
-    bool volLow = volRatio > 0 and volRatio < volLowThresh
-    bool volHigh = volRatio >= volHighThresh
+    // Without real trade volume, low/high volume can't be assessed — the gate
+    // must not block entries on tick-volume ratios (DATA_VALIDITY.md).
+    bool volLow = volumeIsReal and volRatio > 0 and volRatio < volLowThresh
+    bool volHigh = volumeIsReal and volRatio >= volHighThresh
 
     bool allowEntries = not volLow
     bool allowTrendSignals = not atrContracting
@@ -4676,16 +4727,20 @@ isTakeProfitHit(float currentPrice, float takeProfit, string direction) =>
 // COLOR CODING FUNCTIONS
 // ===========================================================================
 
+const float MATRIX_NEUTRAL_DEADZONE = 0.10
+
 getCellColor(float score, bool isHeader = false) =>
     if isHeader
         color.new(#1976D2, 0)  // Blue for headers
+    else if math.abs(score) < MATRIX_NEUTRAL_DEADZONE
+        color.new(#616161, 0)  // Neutral - Dark Gray for contrast
     else if score > 2.5
         color.new(#00E676, 0)  // Very Strong Bullish - Bright Green
     else if score > 1.5
         color.new(#4CAF50, 0)  // Strong Bullish - Green
     else if score > 0.5
         color.new(#81C784, 0)  // Moderate Bullish - Medium Green
-    else if score > 0
+    else if score >= MATRIX_NEUTRAL_DEADZONE
         color.new(#66BB6A, 0)  // Weak Bullish - Darker Green for readability
     else if score < -2.5
         color.new(#FF1744, 0)  // Very Strong Bearish - Bright Red
@@ -4693,19 +4748,21 @@ getCellColor(float score, bool isHeader = false) =>
         color.new(#F44336, 0)  // Strong Bearish - Red
     else if score < -0.5
         color.new(#E57373, 0)  // Moderate Bearish - Medium Red
-    else if score < 0
+    else if score <= -MATRIX_NEUTRAL_DEADZONE
         color.new(#EF5350, 0)  // Weak Bearish - Darker Red for readability
     else
         color.new(#616161, 0)  // Neutral - Dark Gray for contrast
 
 getScoreSymbol(float score) =>
-    if score > 2.5
+    if math.abs(score) < MATRIX_NEUTRAL_DEADZONE
+        "○"   // Neutral
+    else if score > 2.5
         "▲▲"  // Very strong up
     else if score > 1.5
         "▲"   // Strong up
     else if score > 0.5
         "△"   // Moderate up
-    else if score > 0
+    else if score >= MATRIX_NEUTRAL_DEADZONE
         "·"   // Weak up
     else if score < -2.5
         "▼▼"  // Very strong down
@@ -4713,7 +4770,7 @@ getScoreSymbol(float score) =>
         "▼"   // Strong down
     else if score < -0.5
         "▽"   // Moderate down
-    else if score < 0
+    else if score <= -MATRIX_NEUTRAL_DEADZONE
         "·"   // Weak down
     else
         "○"   // Neutral
@@ -4755,8 +4812,12 @@ drawMatrixTable(MultiTimeframeScores mtfScores, SignalResult signal, HeatScoreBr
 
     // Create table
     int numCols = mtfScores.chartTF.isValid ? 5 : 4  // +1 for labels
-    int numRows = compactMode ? 10 : 17
-    var table mt = table.new(tablePos, numCols, numRows,
+    int numRows = compactMode ? 10 : 18
+    // Allocate at MAX dimensions (5 cols / 18 rows) so a var table created on the
+    // first bar still fits when chartTF.isValid or compactMode change later —
+    // unused cells are simply never filled. numCols/numRows below still drive
+    // table.clear and cell placement.
+    var table mt = table.new(tablePos, 5, 18,
          bgcolor=color.new(color.white, 5),
          border_color=color.new(color.gray, 60),
          border_width=1,
@@ -4887,6 +4948,13 @@ drawMatrixTable(MultiTimeframeScores mtfScores, SignalResult signal, HeatScoreBr
             table.cell(mt, 1, 16, action3, bgcolor=color.new(getCellColor(mtfScores.tf3.totalScore), 10), text_color=color.white, text_size=size.small)
             table.merge_cells(mt, 1, 16, numCols-1, 16)
 
+            // Row 17: Volume validity
+            string volStatusText17 = volumeIsReal ? "Real — Active" : str.upper(syminfo.volumetype) + " — Degraded"
+            color volStatusColor17 = volumeIsReal ? color.new(#00C853, 10) : color.new(color.gray, 80)
+            table.cell(mt, 0, 17, "Volume", bgcolor=hc, text_color=lc, text_size=size.small)
+            table.cell(mt, 1, 17, volStatusText17, bgcolor=volStatusColor17, text_color=color.white, text_size=size.small)
+            table.merge_cells(mt, 1, 17, numCols-1, 17)
+
 
 
 // ===========================================================================
@@ -4931,7 +4999,7 @@ if na(structureState)
 // MAIN CALCULATION PIPELINE
 // ============================================================================
 
-// === STEP 1: CALCULATE MULTI-TIMEFRAME SCORES ===
+// === CALCULATE MULTI-TIMEFRAME SCORES ===
 // Chart TF ENABLED: Now safe with hardcoded TF hierarchy (4 timeframes total)
 // WCM DISABLED: Memory optimization for 2H+ timeframes
 // HARDCODED TFs: Parameters ignored, actual TFs selected via getSmartTF1/2/3() in scoring_engine
@@ -4957,29 +5025,40 @@ float recentLow5 = ta.lowest(low[1], 5)
 float swingHigh20 = ta.highest(high, 20)
 float swingLow20 = ta.lowest(low, 20)
 
-// === STEP 2: DETECT MARKET REGIME (Standalone) ===
+// === DETECT MARKET REGIME (Standalone) ===
 MarketRegime regime = analyzeMarketStructure(structureState, jma20, jma50, jma200, atr)
 
-// === STEP 3: CALCULATE HEAT SCORE ===
-HeatScoreBreakdown heatBreakdown = getHeatScoreBreakdown(mtfScores.tf1.totalScore, mtfScores.tf2.totalScore, mtfScores.tf3.totalScore, mtfScores.chartTF.isValid ? mtfScores.chartTF.totalScore : 0.0, false, "BUILDING SETUP", stochRSI, macdHist, atr, atrSMA, mtfScores.tf1.flowScore, mtfScores.tf1.momentumScore, mtfScores.tf1.trendScore, mtfScores.tf1.volatilityScore, mtfScores.tf1.structureScore, mtfScores.tf1.divergenceScore)
-
-// === STEP 4: CALCULATE MV CONFLUENCE ===
+// === CALCULATE MV CONFLUENCE ===
 // WCM REMOVED: Using RSI-based momentum for MV Confluence
 MVInterpretation mvInterp = analyzeMVConfluence(rsi, volume, 20)
 
-// === STEP 5: DETECT EXHAUSTION ===
+// === DETECT EXHAUSTION ===
 ExhaustionResult exhaust = detectExhaustion(3, 14, 14, 20)
 
-// === STEP 6: DETECT DIAMOND ZONES ===
+// === DETECT DIAMOND ZONES ===
 // proximityThreshold increased to 1.5% for better zone detection by Entry Engine
 DiamondZoneResult zones = detectDiamondZonesWithConfluence(5, 5, 14, 0.3, 0.015, exhaust.bullWatch or exhaust.bullConfirmed, exhaust.bearWatch or exhaust.bearConfirmed, exhaust.bullWatch or exhaust.bullConfirmed, exhaust.bearWatch or exhaust.bearConfirmed)
 
-// === STEP 6.5: DETECT DIVERGENCE ZONES (NEW - Phase 1) ===
+// === DETECT DIVERGENCE ZONES ===
 // RSI-Price Divergence with smaller lookbacks for earlier detection
 // NOTE: Reusing 'rsi' from consolidated TA calculations
 DivergenceZonesResult divZones = analyzeDivergenceZones(rsi, 2, 2, 5, 100, 1.0, color.new(color.lime, 0), color.new(color.red, 0))
 
-// === STEP 6.6: NEW ENTRY ENGINE (Chart-TF Only, No MTF) ===
+string setupContext = "BUILDING SETUP"
+if exhaust.bullConfirmed or exhaust.bearConfirmed
+    setupContext := "STRONG REVERSAL ZONE"
+else if divZones.nearBullZone or divZones.nearBearZone
+    setupContext := "DIVERGENCE CONFIRMED"
+else if regime.isRanging
+    setupContext := "CONSOLIDATION"
+else if regime.isTrending
+    setupContext := "TREND CONTINUATION"
+
+// === CALCULATE HEAT SCORE ===
+bool includeChartInHeat = mtfScores.chartTF.isValid and mtfScores.totalTFs == 4
+HeatScoreBreakdown heatBreakdown = getHeatScoreBreakdown(mtfScores.tf1.totalScore, mtfScores.tf2.totalScore, mtfScores.tf3.totalScore, mtfScores.chartTF.isValid ? mtfScores.chartTF.totalScore : 0.0, includeChartInHeat, setupContext, stochRSI, macdHist, atr, atrSMA, mtfScores.chartTF.flowScore, mtfScores.chartTF.momentumScore, mtfScores.chartTF.trendScore, mtfScores.chartTF.volatilityScore, mtfScores.chartTF.structureScore, mtfScores.chartTF.divergenceScore)
+
+// === NEW ENTRY ENGINE (Chart-TF Only, No MTF) ===
 // Lightweight entry signals using only chart timeframe data
 // NO request.security() calls - memory efficient for all timeframes
 
@@ -5070,7 +5149,7 @@ var EntryState entryState = newEntryState()
 )
 entryState := newEntryState
 
-// === STEP 8: GENERATE SIGNALS (legacy SignalResult, used by Matrix Table only) ===
+// === GENERATE SIGNALS (legacy SignalResult, used by Matrix Table only) ===
 TimeframeScores chartTF = mtfScores.chartTF
 
 float signalOptimizedScore = (chartTF.flowScore * 0.40) + (chartTF.momentumScore * 0.40) + (chartTF.trendScore * 0.10) + (chartTF.volatilityScore * 0.05) + (chartTF.structureScore * 0.05)
@@ -5079,7 +5158,7 @@ MultiTimeframeScores chartOnlyScores = MultiTimeframeScores.new(mtfScores.tf1, m
 
 SignalResult signal = generateSignals(chartOnlyScores, zones, heatBreakdown, mvInterp, exhaust, regime, 0.75, 0.45, true, false, 0.3)
 
-// === STEP 8.6: SIGNAL QUALITY GATE (ATR + Volume) - Filter Entry V2 finals ===
+// === SIGNAL QUALITY GATE (ATR + Volume) - Filter Entry V2 finals ===
 MarketQuality marketQuality = analyzeMarketQuality(atr, atrSMA, volume, volumeSMA, qualityATRContractThresh, qualityATRExpandThresh, qualityVolLowThresh, qualityVolHighThresh)
 
 // Quality Gate: filter entryV2 finalLong/finalShort
@@ -5107,9 +5186,53 @@ bool trendOkShort = not useTrendFilter or (regime.isTrending and close < jma50)
 // Heat filter: setup quality gate
 bool heatOk = heatBreakdown.overall >= entryHeatMin
 
-// Final strategy signals (used for @strategy-config)
-bool finalLong  = qgAllowLong  and entryEvent.emitEntry and entryV2.finalLong  and trendOkLong  and heatOk
-bool finalShort = qgAllowShort and entryEvent.emitEntry and entryV2.finalShort and trendOkShort and heatOk
+// === FINAL GATE: timing trigger (required) + graded evidence confidence ===
+// The genuine timing trigger must ALWAYS hold: the entry engine's directional final
+// (entryV2.finalLong/Short) plus the dedup/cooldown emit (entryEvent.emitEntry). These are
+// the trigger and may not be out-voted by context evidence.
+bool triggerLong  = entryEvent.emitEntry and entryV2.finalLong
+bool triggerShort = entryEvent.emitEntry and entryV2.finalShort
+
+// Hard structural veto (only the genuinely-structural one): dead volatility / illiquid bar.
+// Active only when the Quality Gate is enabled and configured to block low volume.
+bool deadVolVeto = useQualityGate and qualityBlockLowVol and not marketQuality.allowEntries
+
+// Remaining context (quality regime, trend alignment, heat) becomes graded confidence, not a veto.
+// Score range 0..3; finalMinGate (2..5) is clamped into 0..3 so the existing input still tunes strictness.
+int evidenceThreshold = math.max(0, math.min(3, finalMinGate - 2))
+int longEvidence  = (qgAllowLong ? 1 : 0)  + (trendOkLong ? 1 : 0)  + (heatOk ? 1 : 0)
+int shortEvidence = (qgAllowShort ? 1 : 0) + (trendOkShort ? 1 : 0) + (heatOk ? 1 : 0)
+
+bool finalLong  = triggerLong  and not deadVolVeto and longEvidence  >= evidenceThreshold
+bool finalShort = triggerShort and not deadVolVeto and shortEvidence >= evidenceThreshold
+
+// === EARLY REVERSAL CANDIDATES (informational, pre-entry) ===
+bool earlyLongEvidence = (earlyUseDivergence and divZones.nearBullZone) or
+     (earlyUseExhaustion and (exhaust.bullWatch or exhaust.bullConfirmed)) or
+     (earlyUseExtreme and (rsiOversold or wt1Oversold))
+bool earlyShortEvidence = (earlyUseDivergence and divZones.nearBearZone) or
+     (earlyUseExhaustion and (exhaust.bearWatch or exhaust.bearConfirmed)) or
+     (earlyUseExtreme and (rsiOverbought or wt1Overbought))
+
+bool closeCrossedAboveJma20 = ta.crossover(close, jma20)
+bool closeCrossedBelowJma20 = ta.crossunder(close, jma20)
+bool earlyLongReaction = not earlyRequirePriceReaction or closeCrossedAboveJma20 or (close > jma20 and close > close[1])
+bool earlyShortReaction = not earlyRequirePriceReaction or closeCrossedBelowJma20 or (close < jma20 and close < close[1])
+bool earlyLongBiasOk = not regime.isTrending or close < jma50 or regime.isTransitioning
+bool earlyShortBiasOk = not regime.isTrending or close > jma50 or regime.isTransitioning
+
+var int lastEarlyLongBar = na
+var int lastEarlyShortBar = na
+bool earlyLongCooldownOk = na(lastEarlyLongBar) or bar_index - lastEarlyLongBar >= earlyCooldown
+bool earlyShortCooldownOk = na(lastEarlyShortBar) or bar_index - lastEarlyShortBar >= earlyCooldown
+
+bool earlyLongCandidate = showEarlyReversal and not finalLong and earlyLongEvidence and earlyLongReaction and earlyLongBiasOk and heatBreakdown.overall >= earlyMinHeat and earlyLongCooldownOk
+bool earlyShortCandidate = showEarlyReversal and not finalShort and earlyShortEvidence and earlyShortReaction and earlyShortBiasOk and heatBreakdown.overall >= earlyMinHeat and earlyShortCooldownOk
+
+if earlyLongCandidate
+    lastEarlyLongBar := bar_index
+if earlyShortCandidate
+    lastEarlyShortBar := bar_index
 
 // === RISK MANAGEMENT (ATR-Based SL/TP for Strategy) ===
 // Stop Loss
@@ -5124,8 +5247,8 @@ float TP3_lvl = finalLong ? close + (atr * tp3ATRMult) : finalShort ? close - (a
 // A-SETUP DETECTION (Premium Quality Signals - informational, NOT strategy)
 // ============================================================================
 // A-Setups are the highest quality signals - clear trend + high heat + momentum
-bool isASetupLong = entryV2.finalLong and heatBreakdown.overall >= 0.65 and strengthScore.longStrength >= 0.70 and regime.isTrending and close > jma50 and jma20 > jma50
-bool isASetupShort = entryV2.finalShort and heatBreakdown.overall >= 0.65 and strengthScore.shortStrength >= 0.70 and regime.isTrending and close < jma50 and jma20 < jma50
+bool isASetupLong = finalLong and heatBreakdown.overall >= 0.65 and strengthScore.longStrength >= 0.70 and regime.isTrending and close > jma50 and jma20 > jma50
+bool isASetupShort = finalShort and heatBreakdown.overall >= 0.65 and strengthScore.shortStrength >= 0.70 and regime.isTrending and close < jma50 and jma20 < jma50
 
 float flowScoreChart = mtfScores.chartTF.flowScore
 float momScoreChart = mtfScores.chartTF.momentumScore
@@ -5137,7 +5260,7 @@ string regimeLabel = regime.isTrending and flowScoreChart > 0 and momScoreChart 
 
 // === MATRIX TABLE ===
 if showMatrix
-    string matrixStatus = isASetupLong ? "★ A-SETUP LONG" : isASetupShort ? "★ A-SETUP SHORT" : regimeLabel
+    string matrixStatus = isASetupLong ? "★ A-SETUP LONG" : isASetupShort ? "★ A-SETUP SHORT" : finalLong ? "ENTRY LONG" : finalShort ? "ENTRY SHORT" : setupContext
     drawMatrixTable(mtfScores, signal, heatBreakdown, mvInterp, exhaust, matrixStatus, false, matrixPos)
 
 // === A-SETUP MARKERS (Premium Signals) ===
@@ -5163,20 +5286,31 @@ p2 = plot(jma20, display=display.none)
 p3 = plot(jma50, display=display.none)
 p4 = plot(jma100, display=display.none)
 p5 = plot(jma200, display=display.none)
-fill(p1, p2, color=showJMAGradient ? (close > jma20 ? color.new(#00E676, 95) : color.new(#FF1744, 95)) : na, title="Fill: Price/JMA20")
-fill(p2, p3, color=showJMAGradient ? (jma20 > jma50 ? color.new(#4CAF50, 93) : color.new(#F44336, 93)) : na, title="Fill: JMA20/50")
-fill(p3, p4, color=showJMAGradient ? (jma50 > jma100 ? color.new(#81C784, 91) : color.new(#E57373, 91)) : na, title="Fill: JMA50/100")
-fill(p4, p5, color=showJMAGradient ? (jma100 > jma200 ? color.new(#A5D6A7, 90) : color.new(#FFCDD2, 90)) : na, title="Fill: JMA100/200")
+float jmaNeutralBand = atr * jmaNeutralATRBand
+color neutralFill1 = color.new(color.gray, 96)
+color neutralFill2 = color.new(color.gray, 94)
+color neutralFill3 = color.new(color.gray, 93)
+color neutralFill4 = color.new(color.gray, 92)
+color fillPriceJma20 = math.abs(close - jma20) <= jmaNeutralBand ? neutralFill1 : close > jma20 ? color.new(#00E676, 95) : color.new(#FF1744, 95)
+color fillJma20Jma50 = math.abs(jma20 - jma50) <= jmaNeutralBand ? neutralFill2 : jma20 > jma50 ? color.new(#4CAF50, 93) : color.new(#F44336, 93)
+color fillJma50Jma100 = math.abs(jma50 - jma100) <= jmaNeutralBand ? neutralFill3 : jma50 > jma100 ? color.new(#81C784, 91) : color.new(#E57373, 91)
+color fillJma100Jma200 = math.abs(jma100 - jma200) <= jmaNeutralBand ? neutralFill4 : jma100 > jma200 ? color.new(#A5D6A7, 90) : color.new(#FFCDD2, 90)
+fill(p1, p2, color=showJMAGradient ? fillPriceJma20 : na, title="Fill: Price/JMA20")
+fill(p2, p3, color=showJMAGradient ? fillJma20Jma50 : na, title="Fill: JMA20/50")
+fill(p3, p4, color=showJMAGradient ? fillJma50Jma100 : na, title="Fill: JMA50/100")
+fill(p4, p5, color=showJMAGradient ? fillJma100Jma200 : na, title="Fill: JMA100/200")
 
 // === DIAMOND ZONES ===
 if showDiamondBoxes
     plotDiamondZones(zones, true)
 
 // === ENTRY ENGINE V2 SIGNAL SHAPES ===
+plotshape(earlyLongCandidate, "Early Reversal Long Candidate", shape.triangleup, location.belowbar, color.new(#00BFA5, 20), size=size.tiny, text="ER", textcolor=color.white)
+plotshape(earlyShortCandidate, "Early Reversal Short Candidate", shape.triangledown, location.abovebar, color.new(#FF6D00, 20), size=size.tiny, text="ER", textcolor=color.white)
 plotshape(finalLong, "Entry Long", shape.triangleup, location.belowbar, color.new(#00E676, 0), size=size.small, text="L", textcolor=color.white)
 plotshape(finalShort, "Entry Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size=size.small, text="S", textcolor=color.white)
 
-// === REVERSAL LAYER (confirmed pivots — exact swing markers) ===
+// === CONFIRMED SWING LAYER (visual context only) ===
 // Detects price pivots and marks the confirmed extreme. Lags by revPivRight bars.
 float revPL = ta.pivotlow(low,  revPivLeft, revPivRight)
 float revPH = ta.pivothigh(high, revPivLeft, revPivRight)
@@ -5199,8 +5333,8 @@ bool swingLowOk  = not revUseSwingFilter or swingMagLow  >= revMinSwingATR
 bool swingHighOk = not revUseSwingFilter or swingMagHigh >= revMinSwingATR
 bool revLong  = showReversal and foundPL and (not revRequireRegime or heatAtPivot >= revHeatMin) and strictLowOk  and swingLowOk
 bool revShort = showReversal and foundPH and (not revRequireRegime or heatAtPivot >= revHeatMin) and strictHighOk and swingHighOk
-plotshape(revLong  ? low[revPivRight]  : na, "Reversal Low",  shape.arrowup,   location.absolute, color.new(#00C853, 0), size=size.small, offset=-revPivRight)
-plotshape(revShort ? high[revPivRight] : na, "Reversal High", shape.arrowdown, location.absolute, color.new(#D50000, 0), size=size.small, offset=-revPivRight)
+plotshape(revLong  ? low[revPivRight]  : na, "Confirmed Swing Low",  shape.arrowup,   location.absolute, color.new(#00C853, 0), size=size.small, offset=-revPivRight)
+plotshape(revShort ? high[revPivRight] : na, "Confirmed Swing High", shape.arrowdown, location.absolute, color.new(#D50000, 0), size=size.small, offset=-revPivRight)
 
 // === DEBUG: validation dots and log ===
 float dbgActualLow  = ta.lowest(low,  dbgLookback)
@@ -5262,6 +5396,8 @@ if showStopLines and (finalLong or finalShort)
 // ALERTS
 // ============================================================================
 
+bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="Alerts")
+bool alertOk = not alertsOnBarClose or barstate.isconfirmed
 // ============================================================================
 // DEBUG PLOTS (invisible, for alert messages)
 // ============================================================================

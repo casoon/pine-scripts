@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Commodity Pulse Matrix v3 [WavesUnchained]
-// Version: 3.1.4
+// Version: 3.2.0
 // Author: WavesUnchained
-// Build: 2026-06-30 00:00:00
+// Build: 2026-09-05
 // ============================================================================
 // Multi-Timeframe Confluence Indicator for Commodities
 //
@@ -20,6 +20,13 @@
 //   ✓ Matrix Table Visualization
 //   ✓ Mean Reversion System
 //
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only (MFI, OBV, VFI, VWAP, MV
+//              Confluence) — degrades to neutral on tick/n/a volume
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 // ============================================================================
 
 indicator("Commodity Pulse Matrix v3 [WavesUnchained]",
@@ -164,6 +171,12 @@ color colBullModerate = input.color(#4CAF50, "Bull Moderate", group="Colors")
 color colBearStrong = input.color(#FF1744, "Bear Strong", group="Colors")
 color colBearModerate = input.color(#F44336, "Bear Moderate", group="Colors")
 color colNeutral = input.color(#757575, "Neutral", group="Colors")
+
+// ==== DATA VALIDITY ====
+// Volume-derived components (MFI, OBV, VFI/flow, VWAP, MV Confluence) need
+// real trade volume. On CFDs (syminfo.volumetype = tick/n/a) they degrade to
+// neutral instead of producing a false signal — see DATA_VALIDITY.md.
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and not na(volume)
 
 // MODULE: 02_types
 // ============================================================================
@@ -1473,25 +1486,30 @@ nzmap(float val, float low, float high) =>
 // Weight Distribution: MFI 50%, VFI 30%, OBV 20%
 
 calculateFlowScore(float mfi, float closePrice, float volume, float obvSlope, int zLen = 50) =>
-    // MFI Component (0-100 oscillator)
-    float mfiZ = zLocal(mfi, zLen)
-
+    // MFI, VFI and OBV all need real trade volume (DATA_VALIDITY.md) — mfi/obvSlope
+    // already arrive as na from calculateEssentialIndicators when volume is not real.
     // Volume Flow Indicator (VFI) - Price-weighted volume momentum
     float typical = (high + low + close) / 3.0
     float inter = math.log(typical) - math.log(typical[1])
     float vinter = ta.stdev(inter, 30)
     float cutoff = 0.2 * vinter * close
     float volumeSma = ta.sma(volume, 30)  // Extract ta.sma for consistency
-    float vcp = math.abs(close - close[1]) > cutoff ? volume * (close - close[1]) / (volumeSma * cutoff) : 0.0
-    float vfi = calculateJMA(vcp, 30)  // JMA instead of EMA
-    float vfiZ = zLocal(vfi, zLen)
+    float volumeConfirmedPriceChange = volumeIsReal and math.abs(close - close[1]) > cutoff ? volume * (close - close[1]) / (volumeSma * cutoff) : 0.0
+    float vfi = calculateJMA(volumeConfirmedPriceChange, 30)  // JMA instead of EMA
+    float vfiZ = volumeIsReal ? zLocal(vfi, zLen) : na
 
-    // OBV Slope Component (may be na in MTF mode) - Extract z() for consistency
+    // MFI Component (0-100 oscillator)
+    float mfiZ = volumeIsReal ? zLocal(mfi, zLen) : na
+
+    // OBV Slope Component (may be na in MTF mode, or when volume is not real) - Extract z() for consistency
     float obvZ_raw = zLocal(obvSlope, zLen)
     float obvZ = na(obvSlope) ? 0.0 : obvZ_raw
 
-    // Weighted combination (adjust weights if OBV is disabled)
-    float flowScore = na(obvSlope) ? (mfiZ * 0.625) + (vfiZ * 0.375) : (mfiZ * 0.5) + (vfiZ * 0.3) + (obvZ * 0.2)
+    // Weighted combination (adjust weights if OBV/MFI/VFI are unavailable)
+    // No real volume: MFI, VFI and OBV are all invalid — flow score is neutral
+    // (0.0) and the Flow category weight is excluded/renormalized where this
+    // score feeds the 6-category aggregate (calculateAggregateScore call site).
+    float flowScore = not volumeIsReal ? 0.0 : na(obvSlope) ? (mfiZ * 0.625) + (vfiZ * 0.375) : (mfiZ * 0.5) + (vfiZ * 0.3) + (obvZ * 0.2)
 
     // Clamp to ±3 sigma and normalize to [-1, 1]
     math.max(-3.0, math.min(3.0, flowScore)) / 3.0
@@ -1722,7 +1740,7 @@ calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cc
     // Extract ALL ta.* functions for consistency (always called, never in conditional scope)
     float _rsi_internal = ta.rsi(src, rsiLen)
     float _stochRSI_raw = ta.stoch(_rsi_internal, _rsi_internal, _rsi_internal, 14)
-    float _mfi_raw = ta.mfi(hlc3, mfiLen)
+    float _mfi_raw = volumeIsReal ? ta.mfi(hlc3, mfiLen) : na
     float _cci_raw = ta.cci(src, cciLen)
     float _roc_raw = ta.roc(src, rocLen)
     float _atr_raw = ta.atr(atrLen)
@@ -1731,18 +1749,19 @@ calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cc
     float _jma20_raw = calculateJMA(src, 20)
     float _jma50_raw = calculateJMA(src, 50)
     float _jma200_raw = calculateJMA(src, 200)
-    float _vwap_raw = ta.vwap(hlc3)
+    float _vwap_raw = volumeIsReal ? ta.vwap(hlc3) : na
 
     // ADX - extracted for consistency
     [_diPlus_raw, _diMinus_raw, _adx_raw] = ta.dmi(adxLen, adxLen)
 
-    // Volume - extracted for consistency
-    float _obv_raw = ta.obv
-    float _obvSlope_raw = ta.change(_obv_raw, 5) / 5.0
+    // Volume - extracted for consistency (OBV needs real trade volume, see DATA_VALIDITY.md)
+    float _obv_raw = volumeIsReal ? ta.obv : na
+    float _obvSlope_raw = na(_obv_raw) ? na : ta.change(_obv_raw, 5) / 5.0
+    float _volumeForSet = volumeIsReal ? volume : na
 
     if not shouldCalculate
         // Return neutral dummy data for old bars
-        IndicatorSet.new(50.0, 50.0, 0.0, 0.0, 50.0, 25.0, 25.0, 25.0, na, src, src, na, na, 0, 1.0, 1.0, na, na, volume)
+        IndicatorSet.new(50.0, 50.0, 0.0, 0.0, 50.0, 25.0, 25.0, 25.0, na, src, src, na, na, 0, 1.0, 1.0, na, na, _volumeForSet)
     else
         // Use pre-calculated values
         float _atrPct = (_atr_raw / close) * 100.0
@@ -1751,7 +1770,7 @@ calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cc
         int _jmaStackDir = _jma20_raw > _jma50_raw and _jma50_raw > _jma200_raw ? 1 : _jma20_raw < _jma50_raw and _jma50_raw < _jma200_raw ? -1 : 0
 
         // Return indicator set (ema fields now contain JMA values)
-        IndicatorSet.new(_rsi_internal, _mfi_raw, _cci_raw, _roc_raw, _stochRSI_raw, _adx_raw, _diPlus_raw, _diMinus_raw, na, _jma20_raw, _jma50_raw, _jma200_raw, _vwap_raw, _jmaStackDir, _atr_raw, _atrPct, _obv_raw, _obvSlope_raw, volume)
+        IndicatorSet.new(_rsi_internal, _mfi_raw, _cci_raw, _roc_raw, _stochRSI_raw, _adx_raw, _diPlus_raw, _diMinus_raw, na, _jma20_raw, _jma50_raw, _jma200_raw, _vwap_raw, _jmaStackDir, _atr_raw, _atrPct, _obv_raw, _obvSlope_raw, _volumeForSet)
 
 
 
@@ -2127,8 +2146,8 @@ checkExhaustionCriteria(int rsiLength = 14, int atrLen = 14, int volLength = 20,
     // 2. Large Range (ATR expansion - volatility spike)
     bool bull2_range = totalRange > (atrAvg * atrMultiplier)
 
-    // 3. High Volume (panic selling)
-    bool bull3_vol = volume > (volAvg * volMultiplier)
+    // 3. High Volume (panic selling) — needs real trade volume
+    bool bull3_vol = volumeIsReal and volume > (volAvg * volMultiplier)
 
     // 4. Asymmetric Wick (lower wick rejection - buyers stepping in)
     bool bull4_wick = lowerWick > (upperWick * wickRatio) and lowerWick > (bodySize * wickBodyRatio)
@@ -2152,8 +2171,8 @@ checkExhaustionCriteria(int rsiLength = 14, int atrLen = 14, int volLength = 20,
     // 2. Large Range (ATR expansion - volatility spike)
     bool bear2_range = totalRange > (atrAvg * atrMultiplier)
 
-    // 3. High Volume (panic buying)
-    bool bear3_vol = volume > (volAvg * volMultiplier)
+    // 3. High Volume (panic buying) — needs real trade volume
+    bool bear3_vol = volumeIsReal and volume > (volAvg * volMultiplier)
 
     // 4. Asymmetric Wick (upper wick rejection - sellers stepping in)
     bool bear4_wick = upperWick > (lowerWick * wickRatio) and upperWick > (bodySize * wickBodyRatio)
@@ -2184,9 +2203,12 @@ detectExhaustion(int confirmBars = 3, int rsiLength = 14, int atrLen = 14, int v
     [bull1, bull2, bull3, bull4, bull5, bullCount,
      bear1, bear2, bear3, bear4, bear5, bearCount] = checkExhaustionCriteria(rsiLength, atrLen, volLength)
 
-    // Watch signals (3+ criteria met)
-    bool bullWatch = bullCount >= 3
-    bool bearWatch = bearCount >= 3
+    // Watch signals (3+ of 5 criteria; without real volume the volume
+    // criterion never fires, so only 4 are available — lower the bar to 2 to
+    // keep roughly the same 60% selectivity instead of silently tightening it)
+    int watchThresh = volumeIsReal ? 3 : 2
+    bool bullWatch = bullCount >= watchThresh
+    bool bearWatch = bearCount >= watchThresh
 
     // Track consecutive watch bars
     var int bullWatchBars = 0
@@ -2412,7 +2434,11 @@ calculateVolumeQualityScore(float volRelative, float volStdDev, int lookback) =>
     float consistencyScore = volAvg > 0 ? 1.0 - math.min(1.0, volStdDev / volAvg) : 0.5
 
     // Combine (70% relative strength, 30% consistency)
-    (relativeScore * 0.7) + (consistencyScore * 0.3)
+    float qualityScore = (relativeScore * 0.7) + (consistencyScore * 0.3)
+
+    // Without real trade volume, relative strength/consistency are meaningless
+    // (tick volume) — neutral quality, no bonus or penalty (DATA_VALIDITY.md).
+    volumeIsReal ? qualityScore : 0.5
 
 // ===========================================================================
 // MOMENTUM-VOLUME ALIGNMENT
@@ -2534,10 +2560,10 @@ interpretMVScore(float mvScore, float momentumDirection, float volRelative, bool
 
 analyzeMVConfluence(float rsiValue, float volumeVal, int lookback = 20) =>
 
-    // Calculate volume statistics
-    float volumeAvg = ta.sma(volume, lookback)
-    float volStdDev = ta.stdev(volume, lookback)
-    float volRelative = calculateVolumeRelative(volumeVal, volumeAvg)
+    // Calculate volume statistics (needs real trade volume, see DATA_VALIDITY.md)
+    float volumeAvg = volumeIsReal ? ta.sma(volume, lookback) : na
+    float volStdDev = volumeIsReal ? ta.stdev(volume, lookback) : na
+    float volRelative = volumeIsReal ? calculateVolumeRelative(volumeVal, volumeAvg) : 1.0
 
     // Calculate MV score with surge detection
     [mvScore, surge, intensity] = calculateMVScoreWithSurge(rsiValue, volumeVal, volumeAvg, volStdDev, lookback)
@@ -3281,8 +3307,14 @@ calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW
     float structureScore = calculateStructureScore(close, _ema20, _ema50, _ema200, high, low)
     float divergenceScore = calculateDivergenceScore(_rsi, 5, 5)
 
+    // Flow score is neutral (0.0) without real volume (MFI/VFI/OBV) — exclude
+    // its weight from the aggregate instead of diluting the total score, and
+    // renormalize the remaining category weights (calculateAggregateScore
+    // divides by the sum of the weights actually passed in).
+    float flowWForAgg = volumeIsReal ? flowW : 0.0
+
     // Calculate weighted total
-    float totalScore = calculateAggregateScore( flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, flowW, momW, trendW, volW, structW, divW)
+    float totalScore = calculateAggregateScore( flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, flowWForAgg, momW, trendW, volW, structW, divW)
 
     // Return score structure (with validity flag)
     TimeframeScores.new(flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, totalScore, flowW, momW, trendW, volW, structW, divW, timeframe, hasIndicators)
@@ -4464,9 +4496,9 @@ detectShortContinuation(float pullbackHigh, int barsSincePullbackStart) =>
 
     enoughBarsInPullback and pullbackPivotConfirmed and bearishCandle and momentumResuming
 
-// Volume confirmation (precomputed avgVolume passed in)
+// Volume confirmation (precomputed avgVolume passed in) — needs real trade volume
 hasVolumeConfirmation(float avgVolume, float multiplier) =>
-    volume > avgVolume * multiplier
+    volumeIsReal and volume > avgVolume * multiplier
 
 // ==== MAIN ANALYSIS FUNCTION ====
 // All ta.* calculations are done OUTSIDE and passed in as parameters
@@ -4494,7 +4526,7 @@ analyzeEntryTiming(float emaFast, float emaSlow, float atr, float recentHigh, fl
     if state.phase == "NONE"
         // Check for bullish breakout in uptrend
         if state.trendUp and detectBreakoutUp(recentHigh)
-            bool volumeOK = not requireVolumeConfirm or hasVolumeConfirmation(avgVolume, volumeMultiplier)
+            bool volumeOK = not requireVolumeConfirm or not volumeIsReal or hasVolumeConfirmation(avgVolume, volumeMultiplier)
             if volumeOK
                 state.breakoutUp := true
                 state.breakoutDown := false
@@ -4505,7 +4537,7 @@ analyzeEntryTiming(float emaFast, float emaSlow, float atr, float recentHigh, fl
 
         // Check for bearish breakout in downtrend
         else if state.trendDown and detectBreakoutDown(recentLow)
-            bool volumeOK = not requireVolumeConfirm or hasVolumeConfirmation(avgVolume, volumeMultiplier)
+            bool volumeOK = not requireVolumeConfirm or not volumeIsReal or hasVolumeConfirmation(avgVolume, volumeMultiplier)
             if volumeOK
                 state.breakoutDown := true
                 state.breakoutUp := false
@@ -5175,12 +5207,14 @@ calculateMeanReversion( float source, int wtLen1, int wtLen2, int signalLen, int
 // @returns MarketQuality object
 analyzeMarketQuality( float atr, float atrSMA, float volume, float volumeSMA, float atrContractThresh, float atrExpandThresh, float volLowThresh, float volHighThresh ) =>
     float atrRatio = atrSMA > 0 ? atr / atrSMA : 0.0
-    float volRatio = volumeSMA > 0 ? volume / volumeSMA : 0.0
+    float volRatio = volumeIsReal and volumeSMA > 0 ? volume / volumeSMA : 0.0
 
     bool atrContracting = atrRatio > 0 and atrRatio < atrContractThresh
     bool atrExpanding = atrRatio >= atrExpandThresh
-    bool volLow = volRatio > 0 and volRatio < volLowThresh
-    bool volHigh = volRatio >= volHighThresh
+    // Without real trade volume, low/high volume can't be assessed — the gate
+    // must not block entries on tick-volume ratios (DATA_VALIDITY.md).
+    bool volLow = volumeIsReal and volRatio > 0 and volRatio < volLowThresh
+    bool volHigh = volumeIsReal and volRatio >= volHighThresh
 
     bool allowEntries = not volLow
     bool allowTrendSignals = not atrContracting
@@ -5823,7 +5857,7 @@ drawMatrixTable(MultiTimeframeScores mtfScores, SignalResult signal, HeatScoreBr
 
     // Create table
     int numCols = mtfScores.chartTF.isValid ? 5 : 4  // +1 for labels
-    int numRows = compactMode ? 10 : 17
+    int numRows = compactMode ? 11 : 18
     var table mt = table.new(tablePos, numCols, numRows,
          bgcolor=color.new(color.white, 5),
          border_color=color.new(color.gray, 60),
@@ -5915,6 +5949,13 @@ drawMatrixTable(MultiTimeframeScores mtfScores, SignalResult signal, HeatScoreBr
             table.cell(mt, 0, 9, "DECISION", bgcolor=hc, text_color=lc, text_size=size.small)
             table.cell(mt, 1, 9, decisionText, bgcolor=decisionColor, text_color=color.white, text_size=size.normal)
             table.merge_cells(mt, 1, 9, numCols-1, 9)
+
+            // Row 10: Volume validity (merged)
+            string volStatusText10 = volumeIsReal ? "Real — Active" : str.upper(syminfo.volumetype) + " — Degraded"
+            color volStatusColor10 = volumeIsReal ? color.new(#00C853, 10) : color.new(color.gray, 80)
+            table.cell(mt, 0, 10, "Volume", bgcolor=hc, text_color=lc, text_size=size.small)
+            table.cell(mt, 1, 10, volStatusText10, bgcolor=volStatusColor10, text_color=color.white, text_size=size.small)
+            table.merge_cells(mt, 1, 10, numCols-1, 10)
 
         else
             // === FULL MODE (17 rows) ===
@@ -6024,6 +6065,13 @@ drawMatrixTable(MultiTimeframeScores mtfScores, SignalResult signal, HeatScoreBr
             table.cell(mt, 0, 16, mtfScores.tf3.timeframe, bgcolor=hc, text_color=lc, text_size=size.small)
             table.cell(mt, 1, 16, action3, bgcolor=color.new(getCellColor(mtfScores.tf3.totalScore), 10), text_color=color.white, text_size=size.small)
             table.merge_cells(mt, 1, 16, numCols-1, 16)
+
+            // Row 17: Volume validity
+            string volStatusText17 = volumeIsReal ? "Real — Active" : str.upper(syminfo.volumetype) + " — Degraded"
+            color volStatusColor17 = volumeIsReal ? color.new(#00C853, 10) : color.new(color.gray, 80)
+            table.cell(mt, 0, 17, "Volume", bgcolor=hc, text_color=lc, text_size=size.small)
+            table.cell(mt, 1, 17, volStatusText17, bgcolor=volStatusColor17, text_color=color.white, text_size=size.small)
+            table.merge_cells(mt, 1, 17, numCols-1, 17)
 
 
 
@@ -7261,7 +7309,8 @@ if showHTFMidline
     else if htfMidlineMode == "OHLC4" or htfMidlineMode == "Dynamic + OHLC4"
         htfMidline := request.security(syminfo.tickerid, htfToUse, ohlc4, lookahead=barmerge.lookahead_off)
     else if htfMidlineMode == "VWAP" or htfMidlineMode == "Dynamic + VWAP"
-        htfMidline := request.security(syminfo.tickerid, htfToUse, ta.vwap, lookahead=barmerge.lookahead_off)
+        // VWAP needs real trade volume — falls back to OHLC4 on tick/n/a volume
+        htfMidline := request.security(syminfo.tickerid, htfToUse, volumeIsReal ? ta.vwap : ohlc4, lookahead=barmerge.lookahead_off)
 
 // Plot HTF Midline (GLOBAL SCOPE - outside all if blocks)
 plot(htfMidline, title="HTF Midline", color=htfMidlineColor, linewidth=2, style=plot.style_line)
