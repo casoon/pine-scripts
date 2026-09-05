@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.5.1 — 2026-09-05
+- Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
+
 ## v3.5.0 — 2026-07-14
 - Added Trend Strength: baseline-slope magnitude ranked against its own recent history (percentile-rank, same method as Overextension) flags a "strong trend" state — self-adapting, new `Trend Strength` input group (`Lookback`, `Percentile Threshold`, `Highlight Strong Trend`)
 - Optional background tint marks bars where the trend is currently "strong"

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.6.2 — 2026-09-05
+- Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
+
 ## v1.6.1 — 2026-06-30
 - Alerts: messages standardized to `<KÜRZEL> · EVENT · {{ticker}} {{interval}}` for a uniform format across the library (titles unchanged)
 

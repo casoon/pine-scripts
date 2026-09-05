@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.5.1 — 2026-09-05
+- Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
+
 ## v1.5.0 — 2026-07-08
 - Fix: zone break logic now checks the actual zone boundary (level ± half-width) instead of the bare pivot level; the default "full-candle" mode was requiring the entire candle to clear the level (effectively stricter than close-based), so it now breaks on a wick piercing the boundary as intended
 - Fix: retest counter no longer over-counts — a touch is only registered on the bar price re-enters the zone, not on every bar it stays inside; touch check now compares the full candle range against both zone edges symmetrically

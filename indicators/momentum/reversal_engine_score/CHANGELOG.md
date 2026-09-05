@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.7.1 — 2026-09-05
+- Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
+
 ## v1.7.0 — 2026-07-01
 - Gate I — Session-Filter: optionaler Zeitfenster-Gate (default: aus); filtert Signale außerhalb der konfigurierbaren Session (HHMM-HHMM Börsenzeit, Voreinstellung 0700-1200)
 

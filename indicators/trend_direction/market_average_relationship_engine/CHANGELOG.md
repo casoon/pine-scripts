@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.1 — 2026-09-05
+- Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
+
 ## v1.2.0 — 2026-08-01
 - Removed the `text`/`textcolor` labels ("PB", "M", "!", "BR", "D", "T") from every event marker — the hover tooltip already carries the full detail, so markers are now plain colored shapes
 - Changed the Divergence marker from `shape.flag` to `shape.circle` (green bullish / red bearish); stays distinguishable from the always-orange Do Not Chase circle

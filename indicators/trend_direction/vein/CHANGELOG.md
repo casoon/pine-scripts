@@ -1,5 +1,8 @@
 # Changelog
 
+## Chart-type guard — 2026-09-05
+- Added visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there: vein_reversal_labeler v0.1.1→0.1.2
+
 ## Alerts bar-close gate — 2026-06-30
 - Added a "Alerts only on bar close (confirmed)" toggle (default on) to the vein modules; all alert conditions now respect it (prevents intrabar repaint): vein_accumulation_phase v0.1.2→0.1.3, vein_execution v0.1.4→0.1.5, vein_exhaustion v0.2.2→0.2.3, vein_feature_exporter v0.1.2→0.1.3, vein_pullback v0.2.1→0.2.2, vein_reversal_score v0.1.3→0.1.4, vein_spread_context v0.1.2→0.1.3, vein_structure_zones v0.2.1→0.2.2, vein_trend v0.1.2→0.1.3.
 
