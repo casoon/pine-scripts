@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Market State Engine [WavesUnchained]
-// Version: 2.0.0
+// Version: 2.1.0
 // Author: WavesUnchained
-// Build: 2026-07-15 10:26:01
+// Build: 2026-09-05
 // ============================================================================
 // Context engine that classifies market state, value location, structural
 // bias, and energy phase — instead of generating a standalone buy/sell signal.
@@ -26,6 +26,14 @@
 //   ✓ Four-level Long/Short context and reaction-based readiness markers
 //   ✓ Optional context dashboard and bar-close state-change/zone-breakout alerts
 //
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only (Auction Pressure, absorption,
+//              Exhaustion, Box Volume, Box VWAP) — degrades to neutral on
+//              tick/n/a volume, weighted scores renormalize
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 // ============================================================================
 indicator(
      "Market State Engine [WavesUnchained]",
@@ -319,7 +327,7 @@ bool useVolume = input.bool(
      true,
      "Use Volume in Auction Pressure",
      group = GROUP_VOLUME,
-     tooltip = "Controls volume in Auction Pressure, absorption, and Exhaustion calculations. Box Volume and Box VWAP use their separate zone setting."
+     tooltip = "Controls volume in Auction Pressure, absorption, and Exhaustion calculations. Box Volume and Box VWAP use their separate zone setting. Automatically inactive without real trade volume (tick or n/a symbols); affected weights renormalize instead of running the score low."
 )
 float volumeEventZ = input.float(
      1.25,
@@ -488,7 +496,7 @@ bool useZoneVolume = input.bool(
      true,
      "Use Volume in Box Statistics",
      group = GROUP_ZONES,
-     tooltip = "Controls Box Volume, Box VWAP, and volume confirmation in breakout quality independently of the Auction Pressure volume setting."
+     tooltip = "Controls Box Volume, Box VWAP, and volume confirmation in breakout quality independently of the Auction Pressure volume setting. Automatically inactive without real trade volume (tick or n/a symbols); Box Volume/VWAP show as unavailable instead of a misleading value."
 )
 // ─────────────────────────────────────────────────────────────────────────────
 // VISUAL INPUTS
@@ -1042,8 +1050,9 @@ else if htfBear
 // ─────────────────────────────────────────────────────────────────────────────
 float emaValue = ta.ema(hlc3, valueLen)
 float vwmaValue = ta.vwma(hlc3, valueLen)
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and not na(volume)
 bool hasUsableVolume =
-     not na(volume) and
+     volumeIsReal and
      ta.sma(volume, volumeLen) > 0
 float effectiveVwma = hasUsableVolume ? vwmaValue : emaValue
 float fairValue = switch valueMethod
@@ -1186,11 +1195,12 @@ float expansionScore = math.max(bullExpansionScore, bearExpansionScore)
 float volumeAverage = ta.sma(volume, volumeLen)
 float volumeDeviation = ta.stdev(volume, volumeLen)
 bool hasUsableZoneVolume = useZoneVolume and hasUsableVolume
+bool auctionVolumeUsable = useVolume and hasUsableVolume
 float volumeZ = 0.0
 if hasUsableVolume
     volumeZ := f_safeDiv(volume - volumeAverage, volumeDeviation, 0.0)
 float volumeStrength = 0.50
-if useVolume and hasUsableVolume
+if auctionVolumeUsable
     volumeStrength := f_normalize(volumeZ, -0.50, 2.50)
 // Signed close position:
 // +1 means candle closed near its high.
@@ -1204,7 +1214,7 @@ float directionalResult = f_safeDiv(
      0.0
 )
 float effortResultMismatch = 0.0
-if useVolume and hasUsableVolume
+if auctionVolumeUsable
     effortResultMismatch := f_clamp(
          f_normalize(volumeZ, 0.50, 2.50) *
          (1.0 - f_normalize(directionalResult, 0.20, 1.20)),
@@ -1251,11 +1261,18 @@ if rangeLocation < 0.35 and signedClosePosition > 0
 else if rangeLocation > 0.65 and signedClosePosition < 0
     absorptionDirection := -1.0
 float absorptionBias = effortResultMismatch * absorptionDirection
-float directionalBias =
+// Absorption (effort-vs-result) only carries information with real trade volume.
+// Without it, its 0.20 weight is dropped and the remaining weights renormalize
+// so directionalBias does not run structurally low on volume-less symbols.
+float directionalBiasWeightSum = 0.40 + 0.25 + 0.15 + (auctionVolumeUsable ? 0.20 : 0.0)
+float directionalBias = f_safeDiv(
      0.40 * pressureSmoothed +
      0.25 * failedAuctionBias +
-     0.20 * absorptionBias +
-     0.15 * valueResponseBias
+     (auctionVolumeUsable ? 0.20 * absorptionBias : 0.0) +
+     0.15 * valueResponseBias,
+     directionalBiasWeightSum,
+     0.0
+)
 directionalBias := f_clamp(directionalBias, -1.0, 1.0)
 float smoothedDirectionalBias = ta.ema(directionalBias, 3)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1306,12 +1323,19 @@ if efficiencyRatio < efficiencyRatio[5]
          0.0,
          0.25
      )
-float exhaustionScore =
+// The effort-vs-result term only carries information with real trade volume.
+// Without it, its 0.10 weight is dropped and the remaining weights renormalize
+// so exhaustionScore does not run structurally low on volume-less symbols.
+float exhaustionWeightSum = 0.30 + 0.25 + 0.18 + 0.17 + (auctionVolumeUsable ? 0.10 : 0.0)
+float exhaustionScore = f_safeDiv(
      0.30 * directionalExtensionScore +
      0.25 * directionalDeceleration +
      0.18 * ageScore +
      0.17 * failedProgress +
-     0.10 * effortResultMismatch
+     (auctionVolumeUsable ? 0.10 * effortResultMismatch : 0.0),
+     exhaustionWeightSum,
+     0.0
+)
 float directionalExpansionPersistence =
      structuralBull ? bullExpansionScore :
      structuralBear ? bearExpansionScore :
@@ -2827,7 +2851,7 @@ color hd = color.new(color.gray, 90)
 var table dashboard = table.new(
      position.top_right,
      2,
-     13,
+     14,
      bgcolor = color.new(color.white, 5),
      border_color = color.new(color.gray, 60),
      border_width = 1,
@@ -3030,6 +3054,15 @@ if barstate.islast and showDashboard
          12,
          confirmedState == STATE_TRANSITION ? f_transitionReasonName(confirmedTransitionReason) : "—",
          text_color = tc,
+         text_size = size.small
+    )
+    table.cell(dashboard, 0, 13, "Volume Data", text_color = tc, text_size = size.small)
+    table.cell(
+         dashboard,
+         1,
+         13,
+         volumeIsReal ? "Active (" + syminfo.volumetype + ")" : "Inactive (" + syminfo.volumetype + ")",
+         text_color = volumeIsReal ? tc : color.rgb(255, 111, 0),
          text_size = size.small
     )
 // ─────────────────────────────────────────────────────────────────────────────

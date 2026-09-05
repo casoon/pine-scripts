@@ -1,3 +1,11 @@
+## v2.1.0 — 2026-09-05
+- Replaced the `not na(volume)` volume check with the full `syminfo.volumetype` guard (`base`/`quote` only); tick/n-a volume (most CFDs, indices, forex) now degrades every volume-dependent calculation to neutral instead of silently treating no-volume as zero
+- Absorption (effort-vs-result) and the Exhaustion effort-vs-result term now drop out and renormalize their weight in Auction Pressure and Exhaustion Score when real volume is unavailable, instead of quietly running both scores structurally low
+- Box Volume and Box VWAP already degraded to "not available"/`na`; they now key off the same volume-validity guard instead of only `not na(volume)`
+- Added a "Volume Data" dashboard row showing whether the volume module is active and the detected `syminfo.volumetype`
+- Added a Data Contract header block (`Volume: OPTIONAL`, `Verdict: CFD-degraded`)
+- Clarified the `Use Volume in Auction Pressure` and `Use Volume in Box Statistics` tooltips to state they auto-deactivate without real trade volume
+
 ## v2.0.0 — 2026-07-15
 - Replaced fixed `if/else` state priority with complete candidate scores, best/second-best arbitration, a minimum score, and a configurable dominance margin
 - Added orthogonal Structure Regime and Energy Phase axes while retaining the nine familiar visible states; Transition now carries explicit no-data, conflict, trend-forming, structure-break, or chaotic reason codes
