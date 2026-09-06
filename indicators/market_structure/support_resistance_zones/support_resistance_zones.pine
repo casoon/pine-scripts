@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Support & Resistance Zones [WavesUnchained]
-// Version: 0.1.11
+// Version: 0.2.0
 // Author: WavesUnchained
-// Build: 2026-08-12 17:00:00
+// Build: 2026-09-05 17:00:00
 // ============================================================================
 // Detector-driven support/resistance zone engine: independent zone detectors
 // (pivot clusters, multiple tests, base/supply-demand, order blocks, fair
@@ -25,6 +25,13 @@
 //   ✓ Pine Log event logging and a validation statistics table for debugging
 //
 // Scores are heuristic confluence/quality scores, NOT statistical probabilities.
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — VWAP/Relative-Volume confluence degrade, weight redistributed
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 //
 // ============================================================================
 
@@ -214,9 +221,25 @@ debugBars = input.int(250, "Debug Marker Lookback", minval = 20, maxval = 1000, 
 // ============================================================================
 atr = ta.atr(atrLength)
 ema = ta.ema(close, emaLength)
+// Real trade volume only (syminfo.volumetype base/quote) — tick/n/a volume
+// carries no genuine traded-size information, and a CFD feed's ta.vwap() is
+// not a genuine volume-weighted price even when the volume series is "real"
+// in the base/quote sense (DATA_VALIDITY.md §3/§5). Gated for consistency
+// with the rest of the repo's volumetype convention.
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and not na(volume)
 vwapValue = ta.vwap(hlc3)
 volumeAverage = ta.sma(volume, volumeLength)
-relativeVolume = volumeAverage > 0 ? volume / volumeAverage : 0.0
+relativeVolume = volumeIsReal and volumeAverage > 0 ? volume / volumeAverage : na
+// VWAP and Relative Volume are pure confluence-score bonuses (f_applyConfluence)
+// on zones already created by price-structural detectors — never a gate on
+// zone creation. Without real volume their combined weight (weightVWAP +
+// weightVolume) is redistributed onto the remaining EMA/Fib/Psychological
+// confluence weights so the maximum achievable confluence contribution is
+// unchanged instead of silently shrinking the score ceiling on tick-volume
+// instruments.
+float confluenceCeiling = weightEMA + weightVWAP + weightFib + weightPsych + weightVolume
+float activeConfluenceWeight = weightEMA + weightFib + weightPsych
+float confluenceScale = volumeIsReal or activeConfluenceWeight <= 0 ? 1.0 : confluenceCeiling / activeConfluenceWeight
 fibHigh = ta.highest(high, fibLookback)
 fibLow = ta.lowest(low, fibLookback)
 fibRange = fibHigh - fibLow
@@ -362,8 +385,8 @@ f_applyConfluence(Zone z, float currentAtr) =>
     bool emaInside = ema >= z.bottom - tolerance and ema <= z.top + tolerance
     if enableEMA and emaInside and not f_hasSource(z.sources, "MA")
         z.sources := f_addSource(z.sources, "MA")
-        z.score := f_clampScore(z.score + weightEMA)
-    bool vwapInside = not na(vwapValue) and vwapValue >= z.bottom - tolerance and vwapValue <= z.top + tolerance
+        z.score := f_clampScore(z.score + weightEMA * confluenceScale)
+    bool vwapInside = volumeIsReal and not na(vwapValue) and vwapValue >= z.bottom - tolerance and vwapValue <= z.top + tolerance
     if enableVWAP and vwapInside and not f_hasSource(z.sources, "VWAP")
         z.sources := f_addSource(z.sources, "VWAP")
         z.score := f_clampScore(z.score + weightVWAP)
@@ -373,14 +396,14 @@ f_applyConfluence(Zone z, float currentAtr) =>
          (fib618 >= z.bottom and fib618 <= z.top)
     if enableFib and fibInside and not f_hasSource(z.sources, "FIB")
         z.sources := f_addSource(z.sources, "FIB")
-        z.score := f_clampScore(z.score + weightFib)
+        z.score := f_clampScore(z.score + weightFib * confluenceScale)
     float middle = f_zoneMid(z.top, z.bottom)
     float nearestPsych = math.round(middle / psychologicalStep) * psychologicalStep
     bool psychInside = nearestPsych >= z.bottom and nearestPsych <= z.top
     if enablePsychological and psychInside and not f_hasSource(z.sources, "PSY")
         z.sources := f_addSource(z.sources, "PSY")
-        z.score := f_clampScore(z.score + weightPsych)
-    bool highRelativeVolume = relativeVolume >= relativeVolumeThreshold
+        z.score := f_clampScore(z.score + weightPsych * confluenceScale)
+    bool highRelativeVolume = volumeIsReal and relativeVolume >= relativeVolumeThreshold
     if enableVolumeConfluence and highRelativeVolume and not f_hasSource(z.sources, "VOL")
         z.sources := f_addSource(z.sources, "VOL")
         z.score := f_clampScore(z.score + weightVolume)

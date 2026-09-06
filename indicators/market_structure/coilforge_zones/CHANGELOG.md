@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.5 — 2026-09-05
+- Volume data validity: `volumeAvailable` now also requires `syminfo.volumetype` to be `base` or `quote` — tick-volume instruments (most CFDs, forex, many indices) no longer treat their tick-count feed as real trade volume. The Volume Dry-Up score module and `breakoutVolumeOk` already degrade to a neutral/pass-through state when volume is unavailable; this only widens that definition to include tick volume. The dashboard's existing "Volume" row already surfaces "Unavailable" in that case. Data Contract added (`CFD-degraded`).
+
 ## v1.2.4 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

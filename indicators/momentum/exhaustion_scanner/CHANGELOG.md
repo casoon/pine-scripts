@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.2.1 — 2026-09-05
+- Volume data validity: `hasRealVolume` now also requires `syminfo.volumetype` to be `base` or `quote` — tick-volume instruments (most CFDs, forex, many indices) no longer treat their tick-count feed as real trade volume for the Money Flow role. `useFlowFinal` and the exhaustion-score renormalization (0.55/0.25/0.20 with Money Flow vs. 0.70/0.30 without) already handled this degradation correctly; this only widens the definition of "no real volume" to include tick volume. Dashboard gained a "Volume" row. Data Contract added (`CFD-degraded`).
+
 ## v2.2 — 2026-07-09
 - Continuation Risk signals now label in orange instead of red/green, so a countertrend fade against an established trend doesn't visually read as the same signal as a Range Fade / Trend Exhaustion reversal
 - Money Flow now actually auto-disables when the feed has no real volume (`hasRealVolume` check), matching the documented feature — previously the preset toggle alone controlled it

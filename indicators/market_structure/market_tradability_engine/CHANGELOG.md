@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.5.1 — 2026-09-05 (`market_tradability_engine_v2.pine`, Beta)
+- Fix: the volume-confirmation gate on Breakout only checked `na(volume)`, not `syminfo.volumetype` — tick volume on a CFD feed is rarely `na`, so it passed straight through as if it were real trade volume. Added a `volumeIsReal` guard (`base`/`quote` only); `volumeConfirmed` now passes through neutrally (as if `Require Volume Confirmation` were off) whenever volume isn't real, instead of gating on tick-count noise
+- Data Contract header block added (`Volume: OPTIONAL`, `Verdict: CFD-degraded`)
+
+## v1.3.3 — 2026-09-05 (`market_tradability_engine.pine`)
+- Fix: the volume-confirmation gate and Participation score component only checked `na(volume)`, not `syminfo.volumetype` — tick volume on a CFD feed is rarely `na`, so it fed the Participation score and the Breakout volume gate as if it were real trade volume. Added a `volumeIsReal` guard (`base`/`quote` only); Participation now degrades to `na` and its 0.04 weight in Tradability is renormalized across the remaining components instead of silently lowering every CFD score by a fixed amount; the volume gate passes through neutrally when volume isn't real
+- Data Contract header block added (`Volume: OPTIONAL`, `Verdict: CFD-degraded`)
+
 ## v2.5.0 — 2026-07-28 (`market_tradability_engine_v2.pine`, Beta)
 - Added: Boundary Quality — tracks distinct tests of each frozen balance boundary (cooldown-deduplicated, so a multi-bar press against one edge counts as one test) and the rejection quality of each test (how far price rotated back toward the range midpoint). A repeatedly tested boundary with weak rejection (or opposing acceptance pressure) is flagged as boundary stress/fatigue. New `Boundary Quality` input group (touch distance, test cooldown, fresh/stressed test thresholds, weak-rejection threshold, require-stress-for-Ready toggle, failed-breakout detection + re-entry distance)
 - Added: failed-breakout / boundary-sweep detection — a wick excursion beyond an armed boundary that closes back inside the range with opposing bar acceptance resets that side's breakout-acceptance streak, is logged as a `noTradeReason`, surfaces as a dashboard action and a dedicated marker/alert, but does not clear the armed range

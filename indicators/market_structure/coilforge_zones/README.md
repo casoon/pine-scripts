@@ -38,6 +38,10 @@ When a valid zone ends (age ≥ minimum zone bars), the indicator arms a breakou
 
 After a breakout fires — or after the watch window expires — the armed state clears automatically.
 
+## Volume Data Validity
+
+The Volume Dry-Up module only activates when `syminfo.volumetype` reports real trade volume (`base` or `quote`). On tick-volume instruments — most CFDs, forex and many indices — it degrades to the same neutral scoring path as a disabled module, and `breakoutVolumeOk` passes through unconditionally instead of gating on a tick-count series. The info table's "Volume" row already reports this as "Unavailable".
+
 ## Bias
 
 Within an active zone the indicator counts how many bars tested the upper vs. lower boundary. Combined with DI direction and the prior impulse, it classifies the zone bias as: `Up`, `Down`, `Up / Continuation`, `Down / Continuation`, or `Neutral`. The zone box border reflects the current bias.

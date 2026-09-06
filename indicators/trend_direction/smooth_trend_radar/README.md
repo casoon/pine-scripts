@@ -78,6 +78,8 @@ Pivots are not used for signal timing — rejection is detected live, from the c
 
 Rejections fire in **both** ADX regimes — a pullback in an active trend is as valid a signal as one in a range. The regime is not a gate; it's carried as a tooltip tag: **Trend Pullback** when `isTrending` (ADX above threshold), **Range Rejection** when `isSideways`.
 
+The Volume Filter reads `syminfo.volumetype` at runtime (`base`/`quote` = real, `tick`/`n/a` = not). On instruments without real trade volume (most CFDs, including the reference `CAPITALCOM:NATURALGAS`), the filter degrades to pass-through instead of gating on tick-count noise — rejections are then validated by touch/slope/polarity alone. See [`DATA_VALIDITY.md`](../../../DATA_VALIDITY.md) for the full policy.
+
 ## Overextension Detection
 
 Statistical, not threshold-based:

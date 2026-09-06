@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.5.0 — 2026-09-06
+- Volume validity is now decided by `syminfo.volumetype`. Previously, on feeds without real trade volume, the volume gates on reclaims (`>= 1.2`) and stop hunts (`>= 1.5`) could never be met, so both event types silently stopped firing — the indicator looked quiet rather than degraded
+- Both gates now pass through when trade volume is unavailable
+- The volume component of the event score is dropped in that case and the remaining core components are renormalized, so score thresholds stay comparable across instruments
+- The MFI exhaustion bonus is withheld without real volume instead of being awarded on a value derived from price-update counts
+- Dashboard shows `MFI n/a` plus the feed's volume type when degraded
+- Added the Data Contract header block
+
 ## v3.4.1 — 2026-07-31
 - Fixed a runtime crash ("requested historical offset is beyond the historical buffer's limit") on long history: Stop Hunt / Exhaustion labels anchor to bar indices up to 500 bars back, but Pine's auto-sized buffer for resolving those anchors could end up smaller than that on some charts — now explicitly sized via `max_bars_back(time, 500)`
 

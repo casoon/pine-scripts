@@ -199,10 +199,18 @@ if ({long}) and _canLong and _canEntry
 if ({short}) and _canShort and _canEntry
     strategy.entry("Short", strategy.short)
 
+// Break-even integrated into the same exit (single stop level — no exit races)
+_beAtr   = ta.atr(14) * beATRInput
+_beLong  = enableBE and strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
+_beShort = enableBE and strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
+
+_finalLongStop  = _beLong  ? math.max({sl}, strategy.position_avg_price) : {sl}
+_finalShortStop = _beShort ? math.min({sl}, strategy.position_avg_price) : {sl}
+
 if strategy.position_size > 0
-    strategy.exit("Long Exit", "Long", stop={sl})
+    strategy.exit("Long Exit", "Long", stop=_finalLongStop)
 if strategy.position_size < 0
-    strategy.exit("Short Exit", "Short", stop={sl})
+    strategy.exit("Short Exit", "Short", stop=_finalShortStop)
 """
 
 # sl_type: fixed, pre-computed TP1/TP2/TP3
@@ -229,10 +237,18 @@ if _doShort
                exitLvlInput == "TP3" ? {tp3} : na
     strategy.entry("Short", strategy.short)
 
+// Break-even integrated into the same exit (single stop level — no exit races)
+_beAtr   = ta.atr(14) * beATRInput
+_beLong  = enableBE and strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
+_beShort = enableBE and strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
+
+_finalLongStop  = _beLong  ? math.max({sl}, strategy.position_avg_price) : {sl}
+_finalShortStop = _beShort ? math.min({sl}, strategy.position_avg_price) : {sl}
+
 if strategy.position_size > 0
-    strategy.exit("Long Exit", "Long", stop={sl}, limit=_exitTP)
+    strategy.exit("Long Exit", "Long", stop=_finalLongStop, limit=_exitTP)
 if strategy.position_size < 0
-    strategy.exit("Short Exit", "Short", stop={sl}, limit=_exitTP)
+    strategy.exit("Short Exit", "Short", stop=_finalShortStop, limit=_exitTP)
 """
 
 # sl_type: directional_fixed_tp — direction-specific precomputed SL/TP.
@@ -257,10 +273,18 @@ if ({short}) and _canShort and _canEntry
     _shortTP := {tp_short}
     strategy.entry("Short", strategy.short)
 
+// Break-even integrated into the same exit (single stop level — no exit races)
+_beAtr   = ta.atr(14) * beATRInput
+_beLong  = enableBE and strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
+_beShort = enableBE and strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
+
+_finalLongStop  = _beLong  ? math.max(_longSL,  strategy.position_avg_price) : _longSL
+_finalShortStop = _beShort ? math.min(_shortSL, strategy.position_avg_price) : _shortSL
+
 if strategy.position_size > 0
-    strategy.exit("Long Exit", "Long", stop=_longSL, limit=_longTP)
+    strategy.exit("Long Exit", "Long", stop=_finalLongStop, limit=_longTP)
 if strategy.position_size < 0
-    strategy.exit("Short Exit", "Short", stop=_shortSL, limit=_shortTP)
+    strategy.exit("Short Exit", "Short", stop=_finalShortStop, limit=_shortTP)
 """
 
 # Optional indicator-driven close-on-signal block. Appended when @strategy-config
@@ -298,21 +322,18 @@ if ({short}) and _canShort and _canEntry
     _tp    := close - _slDist * tpRRInput
     strategy.entry("Short", strategy.short)
 
+// Break-even integrated into the same exit (single stop level — no exit races)
+_beAtr   = ta.atr(14) * beATRInput
+_beLong  = enableBE and strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
+_beShort = enableBE and strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
+
+_finalLongStop  = _beLong  ? math.max(_sl, strategy.position_avg_price) : _sl
+_finalShortStop = _beShort ? math.min(_sl, strategy.position_avg_price) : _sl
+
 if strategy.position_size > 0
-    strategy.exit("Long Exit", "Long", stop=_sl, limit=_tp)
+    strategy.exit("Long Exit", "Long", stop=_finalLongStop, limit=_tp)
 if strategy.position_size < 0
-    strategy.exit("Short Exit", "Short", stop=_sl, limit=_tp)
-"""
-
-_EXEC_RISK_MANAGEMENT = """\
-
-// ─── Break-even management (generated) ────────────────────────────────────────
-if enableBE
-    _beAtr = ta.atr(14) * beATRInput
-    if strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
-        strategy.exit("Long BE", "Long", stop=strategy.position_avg_price)
-    if strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
-        strategy.exit("Short BE", "Short", stop=strategy.position_avg_price)
+    strategy.exit("Short Exit", "Short", stop=_finalShortStop, limit=_tp)
 """
 
 
@@ -541,10 +562,6 @@ def generate(pine_path: Path) -> tuple[str, str] | None:
     out += _STRATEGY_HEADER
     out += extra_inputs
     out += exec_block
-    # Trailing template integrates BE into the main exit; only fixed/pivot need
-    # the separate BE management block.
-    if sl_type not in ("trailing", "trailing_ratchet"):
-        out += _EXEC_RISK_MANAGEMENT
 
     out_name = pine_path.stem + "_strategy.pine"
     return out_name, out
@@ -573,10 +590,16 @@ def main() -> None:
         if result is None:
             continue
         name, content = result
-        out_path = OUTPUT_DIR / name
+        # Each strategy lives in its own strategies/<name>/ subdirectory (see
+        # CLAUDE.md). Reuse the version-stripped indicator stem so re-running
+        # the generator updates the existing directory instead of dumping a
+        # new flat file into strategies/.
+        subdir = re.sub(r"_v\d+$", "", pine_path.stem)
+        out_path = OUTPUT_DIR / subdir / name
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(content, encoding="utf-8")
         rel = pine_path.relative_to(ROOT)
-        print(f"  ✓  {rel}  →  strategies/{name}")
+        print(f"  ✓  {rel}  →  {out_path.relative_to(ROOT)}")
         generated += 1
 
     if generated == 0:

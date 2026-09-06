@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.1 — 2026-09-05
+- Data validity pass (`wavetrend.pine`): added `volumeIsReal` guard (`syminfo.volumetype == "base"/"quote"` and not na) ahead of the opt-in "Gate: Volume Conviction" (`useVolGate`, default off). Without real trade volume the gate now degrades to pass-through instead of comparing against tick-count noise, so enabling it on a tick-volume symbol can't silently block or pass every signal forever. Noted in the input's tooltip. Data Contract added (`CFD-degraded`)
+- Fix: Compare Symbol dashboard row (`compareText`/`compareColor`) had no `na(compareWtOsc)` branch — the reference symbol has its own session/holidays, so on a bar where it has no data every threshold comparison against `na` evaluates false in Pine and silently fell through to the last branch, showing a fabricated `'Bear'` reading with no data behind it. Added an explicit neutral branch (`'—'`, `colorNeutral`), same as the `not useCompare` case; converted the ternary chain to `if`/`else if` in the process. Data Contract documents the compareSymbol reference as informational-only, no gating
+
 ## v1.3.0 — 2026-08-19
 Consolidation release from an external code review. No default-config behavior
 change on the validated 1H/4H/1D range — see notes on each fix.

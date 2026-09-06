@@ -300,9 +300,11 @@ fn validate_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let input = PathBuf::from(&args[2]);
-    let diagnostics = validate_logs(&input)?;
-    if diagnostics.is_empty() {
-        println!("ok: log format valid");
+    let (checked, diagnostics) = validate_logs(&input)?;
+    if checked == 0 {
+        Err(format!("no {REAL_EXIT_MARKER} rows found under {} — nothing was validated", input.display()).into())
+    } else if diagnostics.is_empty() {
+        println!("ok: log format valid ({checked} {REAL_EXIT_MARKER} row(s) checked)");
         Ok(())
     } else {
         for diagnostic in &diagnostics {
@@ -586,20 +588,22 @@ struct Diagnostic {
     message: String,
 }
 
-fn validate_logs(input: &Path) -> io::Result<Vec<Diagnostic>> {
+fn validate_logs(input: &Path) -> io::Result<(usize, Vec<Diagnostic>)> {
     let files = collect_files(input)?;
     let mut diagnostics = Vec::new();
+    let mut checked = 0usize;
     for file in files {
         let content = fs::read_to_string(&file)?;
         for (idx, line) in content.lines().enumerate() {
             if !line.contains(REAL_EXIT_MARKER) {
                 continue;
             }
+            checked += 1;
             let message = csv_last_field(line);
             diagnostics.extend(validate_message(&message, &file, idx + 1));
         }
     }
-    Ok(diagnostics)
+    Ok((checked, diagnostics))
 }
 
 fn validate_message(message: &str, source: &Path, line: usize) -> Vec<Diagnostic> {

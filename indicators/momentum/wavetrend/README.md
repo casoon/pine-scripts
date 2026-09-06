@@ -82,6 +82,12 @@ Reports the WaveTrend zone (OB / OS / Bull / Bear) of a second symbol (default `
 
 Deliberately not a port of the source's "Compare Symbol" feature: that duplicates the full WT engine and draws a second, parallel set of cross labels on the chart. This reuses the existing `f_getWtOscHTF` helper (already built for the HTF Trend Filter, computing wtOsc only) against a different symbol instead of a different timeframe, and surfaces the result as one dashboard cell — no duplicated engine, no extra chart clutter.
 
+The compare symbol has its own session and holidays, so there are bars where it has no data (`compareWtOsc` is `na`). The dashboard row shows `—` in that case rather than a fabricated OB/OS/Bull/Bear reading.
+
+## Volume Conviction Gate (optional)
+
+The optional "Gate: Volume Conviction" (External Confirmations group, off by default) requires above-average volume on the cross bar. It only has a real effect when the instrument reports actual trade volume (`syminfo.volumetype` = `base`/`quote`) — on tick-volume or `n/a` symbols (most CFDs, forex, many indices) it degrades to pass-through so it can't silently gate on tick-count noise.
+
 ## Dashboard
 
 | Row | Description |

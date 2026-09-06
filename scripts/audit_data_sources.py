@@ -53,6 +53,11 @@ SIGNED_VOLUME = re.compile(
     re.IGNORECASE,
 )
 
+# Zuweisungsziel einer Zeile, um eine Vorzeichen-Volumen-Konstruktion zu benennen
+ASSIGN_TARGET = re.compile(r"(?:float\s+|int\s+|var\s+float\s+)?([A-Za-z_]\w*)\s*(?::=|=)(?!=)")
+# Namen, die die Konstruktion korrekt als Heuristik ausweisen
+PROXY_NAME = re.compile(r"proxy|confirmed|weighted|location|heuristic|clv", re.IGNORECASE)
+
 VOLUME_TOKEN = re.compile(r"(?<![\w.])volume(?![\w])")
 GUARD_REAL = re.compile(r"syminfo\.volumetype")
 GUARD_WEAK = re.compile(r"n[az]\(\s*volume\s*\)")
@@ -182,12 +187,31 @@ def analyse(path: Path, root: Path) -> dict:
         )
         priority = min(priority, 1)
 
-    if signed:
+    # Vorzeichen-Volumen: entscheidend ist, ob die Konstruktion als Orderflow
+    # ausgegeben wird. Ein als Heuristik benannter Proxy ist kein Fund mehr.
+    mislabelled, unlabelled = [], []
+    for n, text in signed:
+        tgt = ASSIGN_TARGET.search(text)
+        name = tgt.group(1) if tgt else ""
+        if ORDERFLOW_NAMES.fullmatch(name) or ORDERFLOW_NAMES.match(name):
+            mislabelled.append((n, name))
+        elif not PROXY_NAME.search(name):
+            unlabelled.append((n, name))
+
+    if mislabelled:
+        n, name = mislabelled[0]
         findings.append(
-            "konstruiertes Vorzeichen-Volumen (Pseudo-Orderflow) — "
-            f"{len(signed)} Stelle(n), z.B. Zeile {signed[0][0]}"
+            f"Vorzeichen-Volumen als Orderflow benannt (`{name}`, Zeile {n}) — "
+            f"{len(mislabelled)} Stelle(n)"
         )
         priority = min(priority, 1)
+    if unlabelled:
+        n, name = unlabelled[0]
+        findings.append(
+            f"Vorzeichen-Volumen ohne klarstellenden Namen (`{name}`, Zeile {n}) — "
+            "der Name muss die Konstruktion als Heuristik ausweisen"
+        )
+        priority = min(priority, 2)
 
     if of_names:
         findings.append(

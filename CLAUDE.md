@@ -205,7 +205,7 @@ Two hard limits that apply **everywhere**, including internal notes:
 3. Write `README.md` following the structure above
 4. Create `CHANGELOG.md` with the initial version entry
 5. Write `DESCRIPTION_TV.bbcode` if the script is intended for TradingView publication
-6. Add an entry to the root `README.md` under the appropriate section with a one-line description
+6. Add an entry to `INDICATORS.md` under the appropriate section with a one-line description
 7. Add an entry to `CATALOG.md` with status and quality ratings
 
 `CATALOG.md` at the root is the operational status overview. Keep it up to date when indicator status or quality changes.

@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Smooth Trend Radar [WavesUnchained] — Strategy
-// Version: 3.4.1
+// Version: 3.4.3
 // Author: WavesUnchained
-// Build: 2026-09-05 00:00:00
+// Build: 2026-09-06 00:00:00
 // ============================================================================
 // Double-smoothed Supertrend baseline for trend direction, with live baseline
 // rejection signals at the baseline, statistical overextension highlighting,
@@ -26,6 +26,13 @@
 //   ✓ Risk/reward fill between entry–SL (red) and entry–TP3 (green)
 //   ✓ Hover tooltips on all signals — price, direction, timestamp
 //   ✓ Direction-aware alerts for flips, rejections, and TP/SL hits
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — pivot-rejection volume filter degrades to pass-through
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 //
 // ============================================================================
 
@@ -82,7 +89,7 @@ slopeLookback  = input.int(5, "Slope Lookback",       minval=1, group=g_rej, dis
 polarityMethod = input.string("Off", "Polarity Filter", options=["Off", "Body", "Pressure"], group=g_rej, display=disp,
      tooltip="Extra filter at the pivot bar. Off: no filter. Body: pivot bar must be bullish/bearish (close > open). Pressure: close must be in the upper/lower half of the bar's range — more robust against doji bars and long wicks (e.g. NatGas).")
 volumeFilter = input.string("Off", "Volume Filter", options=["Off", "Above Average"], group=g_rej, display=disp,
-     tooltip="Extra filter at the pivot bar. Off: no filter. Above Average: bar volume must exceed its SMA (Volume MA Length) — confirms rejections with real participation.")
+     tooltip="Extra filter at the pivot bar. Off: no filter. Above Average: bar volume must exceed its SMA (Volume MA Length) — confirms rejections with real participation. Degrades to pass-through on instruments without real trade volume (syminfo.volumetype tick/n/a).")
 volumeMaLen  = input.int(20, "Volume MA Length", minval=1, group=g_rej, display=disp,
      tooltip="SMA length for the Volume Filter. Ignored when Volume Filter is Off.")
 g_overext = "Overextension"
@@ -207,7 +214,8 @@ for i = 0 to contFactor - 1
 
 bool _polBull = polarityMethod == "Off" or (polarityMethod == "Body" ? close > open : (close - low) > (high - close))
 bool _polBear = polarityMethod == "Off" or (polarityMethod == "Body" ? close < open : (close - low) < (high - close))
-bool _volOk   = volumeFilter == "Off" or volume > ta.sma(volume, volumeMaLen)
+bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and not na(volume)
+bool _volOk   = volumeFilter == "Off" or not volumeIsReal or volume > ta.sma(volume, volumeMaLen)
 
 // Rejections fire in both ADX regimes — a baseline pullback in an active trend
 // is as valid a signal as one in a range. The regime is carried as a label tag
@@ -267,8 +275,59 @@ var float    entryPrice = na
 bullRejRe = rejReentry and slDone and tradeDir == 1  and trend == 1  and rejSignalBull
 bearRejRe = rejReentry and slDone and tradeDir == -1 and trend == -1 and rejSignalBear
 
-if showTargets
-    if longSignal or shortSignal or bullRejRe or bearRejRe
+// SL/TP calc always runs — strategy entries below depend on it regardless of
+// whether the visual targets (showTargets) are switched on.
+if longSignal or shortSignal or bullRejRe or bearRejRe
+    isBull       = longSignal or bullRejRe
+    col          = isBull ? bullCol : bearCol
+    tradeDir    := isBull ? 1 : -1
+    entryPrice  := b.c
+    tp1Done  := false
+    tp2Done  := false
+    tp3Done  := false
+    slDone   := false
+
+    // SL method selection
+    float rawSL = na
+    if slMode == "Baseline"
+        rawSL := isBull ? tL - volatility * slMultiplier : tL + volatility * slMultiplier
+    else if slMode == "Swing"
+        rawSL := isBull ? ta.lowest(low, swingLookback) - volatility * slMultiplier : ta.highest(high, swingLookback) + volatility * slMultiplier
+    else  // "Flip Candle"
+        rawSL := isBull ? b.l - volatility * slMultiplier : b.h + volatility * slMultiplier
+
+    // Clamp SL to the correct side of entry
+    SL := isBull ? math.min(rawSL, b.c - syminfo.mintick) : math.max(rawSL, b.c + syminfo.mintick)
+
+    // TP levels by mode
+    if tpMode == "Pivot"
+        TP1_lvl := isBull ? (pivotFormula == "Classic" ? r1_c : r1_ca) : (pivotFormula == "Classic" ? s1_c : s1_ca)
+        TP2_lvl := isBull ? (pivotFormula == "Classic" ? r2_c : r2_ca) : (pivotFormula == "Classic" ? s2_c : s2_ca)
+        TP3_lvl := isBull ? (pivotFormula == "Classic" ? r3_c : r3_ca) : (pivotFormula == "Classic" ? s3_c : s3_ca)
+        // Pivot levels can land on the wrong side of entry when price has moved far from
+        // the prior session's range (e.g. price below all S levels for a short, or above
+        // all R levels for a long).  Fall back to ATR in that case.
+        if (isBull and TP1_lvl <= close) or (not isBull and TP1_lvl >= close)
+            TP1_lvl := isBull ? close + atr_long * tp1Multiplier : close - atr_long * tp1Multiplier
+            TP2_lvl := isBull ? close + atr_long * tp2Multiplier : close - atr_long * tp2Multiplier
+            TP3_lvl := isBull ? close + atr_long * tp3Multiplier : close - atr_long * tp3Multiplier
+    else if tpMode == "R-Multiple"
+        slDist   = math.abs(close - SL)
+        TP1_lvl := isBull ? close + slDist * tp1Multiplier : close - slDist * tp1Multiplier
+        TP2_lvl := isBull ? close + slDist * tp2Multiplier : close - slDist * tp2Multiplier
+        TP3_lvl := isBull ? close + slDist * tp3Multiplier : close - slDist * tp3Multiplier
+    else if tpMode == "Fibonacci"
+        swing    = isBull ? ta.lowest(low, swingLookback) : ta.highest(high, swingLookback)
+        fibRange = math.abs(close - swing)
+        TP1_lvl := isBull ? close + fibRange * 0.618 : close - fibRange * 0.618
+        TP2_lvl := isBull ? close + fibRange * 1.0   : close - fibRange * 1.0
+        TP3_lvl := isBull ? close + fibRange * 1.618  : close - fibRange * 1.618
+    else  // ATR
+        TP1_lvl := isBull ? close + atr_long * tp1Multiplier : close - atr_long * tp1Multiplier
+        TP2_lvl := isBull ? close + atr_long * tp2Multiplier : close - atr_long * tp2Multiplier
+        TP3_lvl := isBull ? close + atr_long * tp3Multiplier : close - atr_long * tp3Multiplier
+
+    if showTargets
         line.delete(entry_line)
         line.delete(sl_line)
         line.delete(tp1_line)
@@ -281,55 +340,6 @@ if showTargets
         label.delete(tp3_label)
         linefill.delete(lf_risk)
         linefill.delete(lf_reward)
-
-        isBull       = longSignal or bullRejRe
-        col          = isBull ? bullCol : bearCol
-        tradeDir    := isBull ? 1 : -1
-        entryPrice  := b.c
-        tp1Done  := false
-        tp2Done  := false
-        tp3Done  := false
-        slDone   := false
-
-        // SL method selection
-        float rawSL = na
-        if slMode == "Baseline"
-            rawSL := isBull ? tL - volatility * slMultiplier : tL + volatility * slMultiplier
-        else if slMode == "Swing"
-            rawSL := isBull ? ta.lowest(low, swingLookback) - volatility * slMultiplier : ta.highest(high, swingLookback) + volatility * slMultiplier
-        else  // "Flip Candle"
-            rawSL := isBull ? b.l - volatility * slMultiplier : b.h + volatility * slMultiplier
-
-        // Clamp SL to the correct side of entry
-        SL := isBull ? math.min(rawSL, b.c - syminfo.mintick) : math.max(rawSL, b.c + syminfo.mintick)
-
-        // TP levels by mode
-        if tpMode == "Pivot"
-            TP1_lvl := isBull ? (pivotFormula == "Classic" ? r1_c : r1_ca) : (pivotFormula == "Classic" ? s1_c : s1_ca)
-            TP2_lvl := isBull ? (pivotFormula == "Classic" ? r2_c : r2_ca) : (pivotFormula == "Classic" ? s2_c : s2_ca)
-            TP3_lvl := isBull ? (pivotFormula == "Classic" ? r3_c : r3_ca) : (pivotFormula == "Classic" ? s3_c : s3_ca)
-            // Pivot levels can land on the wrong side of entry when price has moved far from
-            // the prior session's range (e.g. price below all S levels for a short, or above
-            // all R levels for a long).  Fall back to ATR in that case.
-            if (isBull and TP1_lvl <= close) or (not isBull and TP1_lvl >= close)
-                TP1_lvl := isBull ? close + atr_long * tp1Multiplier : close - atr_long * tp1Multiplier
-                TP2_lvl := isBull ? close + atr_long * tp2Multiplier : close - atr_long * tp2Multiplier
-                TP3_lvl := isBull ? close + atr_long * tp3Multiplier : close - atr_long * tp3Multiplier
-        else if tpMode == "R-Multiple"
-            slDist   = math.abs(close - SL)
-            TP1_lvl := isBull ? close + slDist * tp1Multiplier : close - slDist * tp1Multiplier
-            TP2_lvl := isBull ? close + slDist * tp2Multiplier : close - slDist * tp2Multiplier
-            TP3_lvl := isBull ? close + slDist * tp3Multiplier : close - slDist * tp3Multiplier
-        else if tpMode == "Fibonacci"
-            swing    = isBull ? ta.lowest(low, swingLookback) : ta.highest(high, swingLookback)
-            fibRange = math.abs(close - swing)
-            TP1_lvl := isBull ? close + fibRange * 0.618 : close - fibRange * 0.618
-            TP2_lvl := isBull ? close + fibRange * 1.0   : close - fibRange * 1.0
-            TP3_lvl := isBull ? close + fibRange * 1.618  : close - fibRange * 1.618
-        else  // ATR
-            TP1_lvl := isBull ? close + atr_long * tp1Multiplier : close - atr_long * tp1Multiplier
-            TP2_lvl := isBull ? close + atr_long * tp2Multiplier : close - atr_long * tp2Multiplier
-            TP3_lvl := isBull ? close + atr_long * tp3Multiplier : close - atr_long * tp3Multiplier
 
         x2 = bar_index + 40
         entry_line  := line.new(bar_index, close,   x2, close,   color=col,                    width=2)
@@ -345,18 +355,18 @@ if showTargets
         lf_risk     := linefill.new(entry_line, sl_line,  color.new(bearCol, 85))
         lf_reward   := linefill.new(entry_line, tp3_line, color.new(bullCol, 85))
 
-    else if not na(entry_line)
-        x2 = bar_index + 40
-        line.set_x2(entry_line,  x2)
-        line.set_x2(sl_line,     x2)
-        line.set_x2(tp1_line,    x2)
-        line.set_x2(tp2_line,    x2)
-        line.set_x2(tp3_line,    x2)
-        label.set_x(entry_label, x2)
-        label.set_x(sl_label,    x2)
-        label.set_x(tp1_label,   x2)
-        label.set_x(tp2_label,   x2)
-        label.set_x(tp3_label,   x2)
+else if showTargets and not na(entry_line)
+    x2 = bar_index + 40
+    line.set_x2(entry_line,  x2)
+    line.set_x2(sl_line,     x2)
+    line.set_x2(tp1_line,    x2)
+    line.set_x2(tp2_line,    x2)
+    line.set_x2(tp3_line,    x2)
+    label.set_x(entry_label, x2)
+    label.set_x(sl_label,    x2)
+    label.set_x(tp1_label,   x2)
+    label.set_x(tp2_label,   x2)
+    label.set_x(tp3_label,   x2)
 
 // ─── Overextension (statistical) ─────────────────────────────────────────────
 // Compares the current distance from the baseline against historical distances
@@ -397,10 +407,10 @@ barcolor(_barCol)
 // ─── Alerts ──────────────────────────────────────────────────────────────────
 await = awaitConfirm ? barstate.isconfirmed : true
 
-tp1Hit = showTargets and not tp1Done and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP1_lvl)  : ta.crossunder(close, TP1_lvl))
-tp2Hit = showTargets and not tp2Done and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP2_lvl)  : ta.crossunder(close, TP2_lvl))
-tp3Hit = showTargets and not tp3Done and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP3_lvl)  : ta.crossunder(close, TP3_lvl))
-slHit  = showTargets and not slDone  and tradeDir != 0 and (tradeDir == 1 ? ta.crossunder(close, SL)      : ta.crossover(close, SL))
+tp1Hit = not tp1Done and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP1_lvl)  : ta.crossunder(close, TP1_lvl))
+tp2Hit = not tp2Done and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP2_lvl)  : ta.crossunder(close, TP2_lvl))
+tp3Hit = not tp3Done and tradeDir != 0 and (tradeDir == 1 ? ta.crossover(close, TP3_lvl)  : ta.crossunder(close, TP3_lvl))
+slHit  = not slDone  and tradeDir != 0 and (tradeDir == 1 ? ta.crossunder(close, SL)      : ta.crossover(close, SL))
 
 if tp1Hit
     tp1Done := true
@@ -510,15 +520,17 @@ if _doShort
                exitLvlInput == "TP3" ? TP3_lvl : na
     strategy.entry("Short", strategy.short)
 
+// ─── Break-even management (merged into the single exit stop below — a second
+// strategy.exit() call on the same entry would otherwise compete for the
+// already-reserved exit quantity) ────────────────────────────────────────────
+if enableBE
+    _beAtr = ta.atr(14) * beATRInput
+    if strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
+        SL := math.max(SL, strategy.position_avg_price)
+    if strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
+        SL := math.min(SL, strategy.position_avg_price)
+
 if strategy.position_size > 0
     strategy.exit("Long Exit", "Long", stop=SL, limit=_exitTP)
 if strategy.position_size < 0
     strategy.exit("Short Exit", "Short", stop=SL, limit=_exitTP)
-
-// ─── Break-even management ─────────────────────────────────────────────────────
-if enableBE
-    _beAtr = ta.atr(14) * beATRInput
-    if strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
-        strategy.exit("Long BE", "Long", stop=strategy.position_avg_price)
-    if strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
-        strategy.exit("Short BE", "Short", stop=strategy.position_avg_price)

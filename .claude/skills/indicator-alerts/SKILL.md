@@ -164,7 +164,7 @@ Kein Emoji ist auch ok — aber nicht mischen (mal mit, mal ohne) innerhalb eine
 
 ## Checkliste (vor dem Commit)
 
-1. **Mechanismus:** `alertcondition()` Default; `alert()` nur mit Grund; nie beide für 1 Event.
+1. **Mechanismus:** `alertcondition()` Default; `alert()` nur mit Grund; nie *stille* Doppel-Definition beider Mechanismen für 1 Event — das dokumentierte Either/Or (§1) ist die einzige erlaubte Ausnahme.
 2. **Scope:** jede `alertcondition()` im globalen Scope, Gating per `and`-Bool.
 3. **Repaint:** `alertOk = not alertsOnBarClose or barstate.isconfirmed` vorgeschaltet
    (bzw. `freq_once_per_bar_close` bei `alert()`).

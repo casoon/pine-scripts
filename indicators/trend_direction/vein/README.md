@@ -17,15 +17,16 @@ The system consists of 6 indicators that work together on a NatGas chart.
 
 ## Data Validity
 
-`vein_structure_zones`, `vein_exhaustion`, `vein_reversal_score`, `vein_trend`, `vein_pullback`
-and `vein_feature_exporter` all read `syminfo.volumetype` at runtime (`base`/`quote` = real,
-`tick`/`n/a` = not). On instruments without real trade volume (most CFDs, including the
-reference `CAPITALCOM:NATURALGAS`), MFI and relative-volume components degrade to neutral —
-their score weight is either reassigned to a same-role price component (RSI) or dropped,
-so the composite thresholds stay comparable instead of silently shrinking. Climax detection
-falls back to a range-only extreme-bar proxy. Dashboard tables show a "Volume" row (or a
-one-time chart label) when running degraded. See [`DATA_VALIDITY.md`](../../../DATA_VALIDITY.md)
-for the full policy.
+`vein_structure_zones`, `vein_exhaustion`, `vein_reversal_score`, `vein_trend`, `vein_pullback`,
+`vein_feature_exporter` and `vein_execution` all read `syminfo.volumetype` at runtime
+(`base`/`quote` = real, `tick`/`n/a` = not). On instruments without real trade volume (most
+CFDs, including the reference `CAPITALCOM:NATURALGAS`), MFI and relative-volume components
+degrade to neutral — their score weight is either reassigned to a same-role price component
+(RSI) or dropped, so the composite thresholds stay comparable instead of silently shrinking.
+Climax detection falls back to a range-only extreme-bar proxy. `vein_execution`'s `relVol`
+degrades to a neutral 1.0, the same treatment as `vein_trend`'s. Dashboard tables show a
+"Volume" row (or a one-time chart label) when running degraded. See
+[`DATA_VALIDITY.md`](../../../DATA_VALIDITY.md) for the full policy.
 
 ---
 

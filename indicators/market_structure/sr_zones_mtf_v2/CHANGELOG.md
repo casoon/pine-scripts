@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.1.3 — 2026-09-06
+- Break volume filter now checks `syminfo.volumetype` and passes breaks through on feeds without real trade volume, instead of filtering against tick-volume noise
+- Added a chart note for the case where the filter is enabled but cannot work
+- Added the Data Contract header block
+
 ## v3.1.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

@@ -55,6 +55,10 @@ Per-market role-weight profiles. Money Flow is folded into the Exhaustion role a
 - **Dashboard** — per-role breakdown (Stretch / Exhaustion / Reaction) for both sides, effective threshold, volatility multiplier, regime + ADX, and the signal reason.
 - **Alerts** — Top Risk, Bottom Risk, Any Risk.
 
+## Volume Data Validity
+
+Money Flow (inside the Exhaustion role) only activates when `syminfo.volumetype` reports real trade volume (`base` or `quote`) — the preset table's "on/off" column already reflects the intended default, but the runtime check now also excludes tick-volume instruments (most CFDs, forex, many indices) even when a preset requests Money Flow. When it degrades, the Exhaustion role reweights from 0.55/0.25/0.20 (Momentum/Flow/Divergence) to 0.70/0.30 (Momentum/Divergence) so the role ceiling is unchanged. The dashboard's "Volume" row shows the detected `syminfo.volumetype` and whether Money Flow is active.
+
 ## Relation to commodity_heat_reversal
 
 Same idea, different mechanics: CHR scores discrete points (0–7) with a trend filter and SL/TP overlay — tuned for commodity 4H mean reversion. The scanner produces a continuous role-attributable score with market presets, a regime frame, and optional reaction confirmation. Use CHR for commodity reversal *entries*, the scanner for cross-market overextension *context*.

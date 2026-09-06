@@ -172,6 +172,13 @@ kein „besseres Volumen für den bestehenden Score", sondern eine eigene Inform
 
 Und diese gehört in **ein einziges Kontext-Modul**, nicht verteilt auf zwanzig Skripte.
 
+Das Modul ist ein **eigenständiger Indikator, keine Library**: Library-Funktionen dürfen kein
+`input.*` enthalten, ihre `request.*`-Aufrufe zählen trotzdem gegen das Budget des
+importierenden Skripts (§9.4), und der erzwungene Versions-Pin macht jedes Update zum
+Breaking Change. Lose Kopplung läuft in Pine über `input.source()` auf
+`display=display.data_window`-Plots — der Konsument wählt den Wert im Settings-Dropdown, beide
+Skripte bleiben eigenständig lauffähig.
+
 ### 4.2 Vertrauensrangfolge
 
 | Stufe | Quelle | Vertrauen |

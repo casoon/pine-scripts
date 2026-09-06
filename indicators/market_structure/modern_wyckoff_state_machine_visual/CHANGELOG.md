@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.4.0 — 2026-09-06
+- Volume validity is now decided by `syminfo.volumetype`, and the two roles volume plays in Wyckoff are degraded differently
+- Confirming conditions (SOS/SOW, Spring/UTAD tests, pivot-confirmed LPS/LPSY) pass through without real volume. Previously `relVol` collapsed to 1.0, which could never satisfy the 0.85 test/LPS factors — those events silently stopped firing
+- Constituting events (Selling/Buying Climax, absorption, the volume branch of Phase A) are withheld without real volume rather than approximated: a climax without volume is just a wide bar
+- The volume-dry cause component no longer scores on feeds that report price-update counts
+- Dashboard gained a Volume row showing the feed type and which event classes are unavailable
+- Added the Data Contract header block
+
 ## v1.3.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

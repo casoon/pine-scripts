@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Liquidity Hunter [WavesUnchained]
-// Version: 3.4.1
+// Version: 3.5.0
 // Author: WavesUnchained
-// Build: 2026-07-31 00:00:00
+// Build: 2026-09-06 00:00:00
 // ============================================================================
 // Focused premium liquidity tool.
 //
@@ -18,6 +18,14 @@
 //   ✓ Reduces chart clutter to the few levels that matter
 //   ✓ Session-aware scoring and tighter alerts
 //   ✓ Momentum Hybrid: qualifies sweeps/hunts with WaveTrend + MFI extremes (Exhaustion Events)
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — volume gates pass through,
+//                         volume score is renormalized, MFI bonus is withheld
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 //
 // ============================================================================
 
@@ -155,6 +163,13 @@ type ExhaustionEvent
 // ============================================================================
 
 atr14        = ta.atr(14)
+// Volume validity. Without real trade volume `volRatio` is a ratio of
+// price-update counts. Left unguarded it would silently kill two core events:
+// reclaims need volRatio >= minVolumeRatio and stop hunts >= huntVolMultiplier,
+// both above 1.0, so neither would ever fire. See DATA_VALIDITY.md.
+bool volumeIsReal =
+     (syminfo.volumetype == "base" or syminfo.volumetype == "quote") and
+     not na(volume)
 avgVol       = ta.sma(volume, 20)
 volRatio     = avgVol > 0 ? volume / avgVol : 1.0
 inSession    = not useSessionFilter or not na(time(timeframe.period, activeSession))
@@ -216,11 +231,16 @@ f_context_bonus(_isBearish, _inPremium, _isTrending, _trendUp, _maxBonus) =>
         bonus += _maxBonus * 0.5
     math.min(_maxBonus, bonus)
 
-f_event_score(_touches, _wickAtr, _closeBackAtr, _volRatio, _sessionBoost, _wtOsc, _mfi, _isBearish, _useMomentum, _structBonus, _ctxBonus) =>
+f_event_score(_touches, _wickAtr, _closeBackAtr, _volRatio, _sessionBoost, _wtOsc, _mfi, _isBearish, _useMomentum, _structBonus, _ctxBonus, _volumeIsReal) =>
     touchScore = math.min(_touches, 5) * 12.0
     wickScore  = math.min(_wickAtr, 1.5) * 18.0
     closeScore = math.min(_closeBackAtr, 1.5) * 24.0
-    volScore   = math.max(0.0, math.min(_volRatio, 3.0) - 1.0) * 12.0
+    // A volScore of 0 is not "unknown", it means volume was at or below
+    // average. Without real volume the component is dropped and the remaining
+    // core components carry its share, so the reachable score range is
+    // unchanged and the event thresholds stay comparable across instruments.
+    volScore   = _volumeIsReal ? math.max(0.0, math.min(_volRatio, 3.0) - 1.0) * 12.0 : 0.0
+    coreScale  = _volumeIsReal ? 1.0 : 147.0 / 123.0
 
     // Optional WaveTrend and MFI exhaustion bonuses — momentum is a quality
     // layer only; it never gates the event and is disabled unless the user
@@ -232,12 +252,15 @@ f_event_score(_touches, _wickAtr, _closeBackAtr, _volRatio, _sessionBoost, _wtOs
             wtBonus := 10.0
         else if not _isBearish and _wtOsc < -lhWtExtThr
             wtBonus := 10.0
-        if _isBearish and _mfi > 80.0
+        // MFI is volume-derived — withhold the bonus rather than award it on a
+        // value computed from price-update counts.
+        if _volumeIsReal and _isBearish and _mfi > 80.0
             mfiBonus := 10.0
-        else if not _isBearish and _mfi < 20.0
+        else if _volumeIsReal and not _isBearish and _mfi < 20.0
             mfiBonus := 10.0
 
-    math.min(100.0, touchScore + wickScore + closeScore + volScore + _sessionBoost + wtBonus + mfiBonus + _structBonus + _ctxBonus)
+    coreScore = (touchScore + wickScore + closeScore + volScore) * coreScale
+    math.min(100.0, coreScore + _sessionBoost + wtBonus + mfiBonus + _structBonus + _ctxBonus)
 
 // ============================================================================
 // LEVEL REGISTRY
@@ -371,20 +394,20 @@ for lvl in bslLevels
                         array.shift(sslLevels)
             else
                 bslSweep := true
-                if enableStopHunts and upperWickRatio >= huntWickRatioMin and closePosition <= huntClosePosMax and volRatio >= huntVolMultiplier
+                if enableStopHunts and upperWickRatio >= huntWickRatioMin and closePosition <= huntClosePosMax and (not volumeIsReal or volRatio >= huntVolMultiplier)
                     bslHunt := true
                     array.unshift(stopHunts, StopHunt.new(bar_index, high, -1, volRatio, lvl.price))
                     if array.size(stopHunts) > maxHuntsDisplay
                         array.pop(stopHunts)
         canReclaim = lvl.swept and not lvl.reclaimed and bar_index <= lvl.sweepBar + reclaimBars
-        if canReclaim and close <= lvl.price - closeBackAbs and volRatio >= minVolumeRatio and high >= lvl.price
+        if canReclaim and close <= lvl.price - closeBackAbs and (not volumeIsReal or volRatio >= minVolumeRatio) and high >= lvl.price
             lvl.reclaimed    := true
             lvl.reclaimDir   := -1
             bearishReclaim   := true
             sessionBoost     = inSession ? 10.0 : 0.0
             structBonus      = close < low[1] ? 10.0 : 0.0
             ctxBonus         = enableRegimeContext ? f_context_bonus(true, inPremiumZone, isTrending, trendUp, contextBonusMax) : 0.0
-            eventScore       = f_event_score(lvl.touches, wickAtr, closeBackAtr, volRatio, sessionBoost, lhWtOsc, lhMfi, true, enableExhaustion, structBonus, ctxBonus)
+            eventScore       = f_event_score(lvl.touches, wickAtr, closeBackAtr, volRatio, sessionBoost, lhWtOsc, lhMfi, true, enableExhaustion, structBonus, ctxBonus, volumeIsReal)
             bearishReclaimScore := math.max(bearishReclaimScore, eventScore)
             array.unshift(recentEvents, LiquidityEvent.new(bar_index, high, -1, eventScore, lvl.price, volRatio))
             if array.size(recentEvents) > maxEventsDisplay
@@ -407,20 +430,20 @@ for lvl in sslLevels
                         array.shift(bslLevels)
             else
                 sslSweep := true
-                if enableStopHunts and lowerWickRatio >= huntWickRatioMin and (1.0 - closePosition) <= huntClosePosMax and volRatio >= huntVolMultiplier
+                if enableStopHunts and lowerWickRatio >= huntWickRatioMin and (1.0 - closePosition) <= huntClosePosMax and (not volumeIsReal or volRatio >= huntVolMultiplier)
                     sslHunt := true
                     array.unshift(stopHunts, StopHunt.new(bar_index, low, 1, volRatio, lvl.price))
                     if array.size(stopHunts) > maxHuntsDisplay
                         array.pop(stopHunts)
         canReclaim = lvl.swept and not lvl.reclaimed and bar_index <= lvl.sweepBar + reclaimBars
-        if canReclaim and close >= lvl.price + closeBackAbs and volRatio >= minVolumeRatio and low <= lvl.price
+        if canReclaim and close >= lvl.price + closeBackAbs and (not volumeIsReal or volRatio >= minVolumeRatio) and low <= lvl.price
             lvl.reclaimed    := true
             lvl.reclaimDir   := 1
             bullishReclaim   := true
             sessionBoost     = inSession ? 10.0 : 0.0
             structBonus      = close > high[1] ? 10.0 : 0.0
             ctxBonus         = enableRegimeContext ? f_context_bonus(false, inPremiumZone, isTrending, trendUp, contextBonusMax) : 0.0
-            eventScore       = f_event_score(lvl.touches, wickAtr, closeBackAtr, volRatio, sessionBoost, lhWtOsc, lhMfi, false, enableExhaustion, structBonus, ctxBonus)
+            eventScore       = f_event_score(lvl.touches, wickAtr, closeBackAtr, volRatio, sessionBoost, lhWtOsc, lhMfi, false, enableExhaustion, structBonus, ctxBonus, volumeIsReal)
             bullishReclaimScore := math.max(bullishReclaimScore, eventScore)
             array.unshift(recentEvents, LiquidityEvent.new(bar_index, low, 1, eventScore, lvl.price, volRatio))
             if array.size(recentEvents) > maxEventsDisplay
@@ -873,7 +896,7 @@ if showDashboard and barstate.islast
         r += 1
         table.cell(dash, 0, r, "WT State", text_color=muted,        text_size=size.small)
         table.cell(dash, 1, r, wtStateText, text_color=color.white, bgcolor=color.new(wtStateColor, 20), text_size=size.small)
-        table.cell(dash, 2, r, str.format("MFI {0}", str.tostring(lhMfi, "#")), text_color=muted, text_size=size.small)
+        table.cell(dash, 2, r, volumeIsReal ? str.format("MFI {0}", str.tostring(lhMfi, "#")) : "MFI n/a · vol " + syminfo.volumetype, text_color=muted, text_size=size.small)
 
         r += 1
         table.cell(dash, 0, r, "Exhaustion", text_color=muted,     text_size=size.small)

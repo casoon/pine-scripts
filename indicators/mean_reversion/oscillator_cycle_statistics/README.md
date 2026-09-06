@@ -6,7 +6,7 @@ Oscillator Cycle Statistics is a statistics engine, not a trading signal. It ans
 
 - RSI, Stochastic RSI, smoothed Stochastic %K, normalized Williams %R, MFI, CCI, WaveTrend, DeMarker, RVI, EOM, Klinger — selectable single oscillator; normalized Williams %R is explicitly identified as equivalent to raw Fast Stochastic %K, and all volume-dependent choices are labeled
 - Oscillator-specific default zones: 80/20 for Stochastic RSI, Stochastic, normalized Williams %R, and MFI; 70/30 for RSI, DeMarker, and reference-normalized oscillators; optional custom zones remain available
-- MFI, EOM, and Klinger are volume-dependent and labeled `(volume)` in the dropdown; on zero-volume CFD/index feeds (Capital.com, FOREX.com, and similar) they sit at a constant neutral 50 — no crash, but no cycles detected either
+- MFI, EOM, and Klinger are volume-dependent and labeled `(volume)` in the dropdown. Validity is decided by `syminfo.volumetype`, not by volume being present: CFD, index and forex feeds (Capital.com, FOREX.com, and similar) report either no volume or *tick* volume, which counts price updates rather than traded quantity. In both cases these three sit at a constant neutral 50 — no crash, no cycles, and the inactive state is shown in the dashboard and as a label on the last bar
 - Explicit OB → OS / OS → OB cycle state machine: origin → armed → success / failure / timeout
 - Progress-conditioned probability — matches the current cycle to historical cycles using time-consistent 10-percentage-point progress buckets
 - Age-conditioned probability — requires a historical cycle to have reached the matching progress bucket by the current age and to have remained unresolved beyond that age

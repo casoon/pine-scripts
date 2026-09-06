@@ -166,15 +166,18 @@ Rollen-Modell (§1):
 | **4. Qualität** | Wie gut ist das Setup? | Quality + Location | BB-Width-Kompression, AVWAP-Distanz, Zonennähe |
 
 **Die Reihenfolge ist die Regel.** Stufe 1 ist ein *Filter/Veto*, kein Trigger — sie
-entscheidet, ob die Erschöpfungs-Logik überhaupt scharf ist. Erschöpfungssignale **ohne**
-vorgeschaltetes Regime-Gate sind genau das wiederkehrende Fehlsignal-Muster im starken Trend
-(`.claude/CLAUDE.md`: Gates blockten 94 % ohne besser zu selektieren — die Ursache war, dass
-gefiltert *statt* regime-gestaffelt wurde).
+moduliert, wie stark eine Erschöpfungsaussage aus Stufe 2 sein muss, um zu einem Signal zu
+werden (Schwellenverschiebung), nicht ob Stufe 2 überhaupt rechnet. Erschöpfungssignale
+**ohne** vorgeschaltete Regime-Einordnung sind genau das wiederkehrende Fehlsignal-Muster im
+starken Trend (`.claude/CLAUDE.md`: Gates blockten 94 % ohne besser zu selektieren — die
+Ursache war dort *hartes* Blocken statt Regime-abhängiges Schwellen-Staffeln).
 
-Aber: das Regime-Veto darf den eigentlichen Reversal-Trigger nicht abwürgen (§3, Memory
-`feedback_er_gates_blocking_reversals`) — es verschiebt die *Schwelle*, killt nicht das
-Signal. Ein Modul deckt **eine** Stufe sauber ab (§0); ein Reversal-Scanner führt die vier
-Stufen-Scores zusammen (§4), statt alles in eine AND-Kette zu pressen (§2).
+Das Regime-Veto darf den eigentlichen Reversal-Trigger nie vollständig abwürgen (§3, Memory
+`feedback_er_gates_blocking_reversals`): in einem ungünstigen Regime braucht ein Trigger eine
+höhere Schwelle, um zu zählen — aber ein hinreichend starkes Signal muss auch im
+ungünstigsten Regime noch durchkommen können. Ein Modul deckt **eine** Stufe sauber ab (§0);
+ein Reversal-Scanner führt die vier Stufen-Scores zusammen (§4), statt alles in eine
+AND-Kette zu pressen (§2).
 
 **Repo-Abdeckung (Stand 2026-06-27):** Stufe 2 (Erschöpfung) und Stufe 3 (Bestätigung) sind
 breit besetzt; **Stufe 1 (Regime-Klassifikator aus FDI/ER/Chop) und Stufe 4 (Anchored VWAP)
@@ -224,8 +227,10 @@ In diesem Repo: `log.info(...)`-Events mit Rollen-Scores + blockendem Gate (Must
 
 ## Mindestanforderung — die sechs Fragen
 
-Ein fertiger Indikator muss diese Fragen jederzeit beantworten. Fehlt eine Antwort, weißt du,
-welche Rolle/Ebene noch fehlt:
+Ein fertiger Indikator muss diese Fragen jederzeit beantworten. Das gilt für den fertigen
+Indikator als Ganzes (die Summe seiner Module) — ein einzelner Rollen-Sensor (§0/§1) muss nur
+seine eigene Frage beantworten, nicht alle sechs. Fehlt beim fertigen Indikator eine Antwort,
+weißt du, welche Rolle/Ebene noch fehlt:
 
 1. **Wo** sind wir? (Location)
 2. In welche **Richtung** arbeitet der Markt? (Trend)

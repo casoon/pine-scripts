@@ -3,14 +3,20 @@ name: indicator-code-audit
 description: >-
   Code-QA-Regelwerk für einzelne Pine-Indikatoren: technische Bugs (Repainting,
   Lookahead, request.security, Performance/Speicher, var-/Serien-Fallen), Konzeptprüfung
-  (behauptet Kommentar/README etwas anderes, als der Code tatsächlich berechnet) und
-  Logikfehler (tote Variablen, unbegrenzte Scores, ungenutzte Parameter). Benutzen bei
-  "Code-Review", "QA", "auditiere diesen Indikator", "prüfe den Code auf Bugs", "macht
-  der Code was der Kommentar behauptet", "finde Auffälligkeiten in diesem Pine-Skript".
-  Output ist immer eine Fundliste ("N Auffälligkeiten"), nie ein Gesamturteil ("der
-  Indikator ist gut"). Nicht für Trading-Logik-Diagnose (Rollen-Architektur, Gate-
-  Wirkung, verpasste Pivots/Signale) — dafür indicator-review; nicht für Neu-/Umbau
-  der Signal-Logik — dafür indicator-design.
+  (behauptet Kommentar/README etwas anderes, als der Code tatsächlich berechnet),
+  Logikfehler (tote Variablen, unbegrenzte Scores, ungenutzte Parameter) sowie
+  Paket-/Doku-Struktur-Konformität nach CLAUDE.md (Verzeichnisstruktur, README/
+  CHANGELOG/DESCRIPTION_TV.bbcode, .pine-Header-Format inkl. Trennzeilen und
+  Data-Contract-Platzierung, CATALOG.md-/root-README-Eintrag, Dashboard-Tabellenstil,
+  Performance-Claims-Guard, Standalone- vs. generierte Strategie-Zuordnung). Benutzen
+  bei "Code-Review", "QA", "auditiere diesen Indikator", "prüfe den Code auf Bugs",
+  "macht der Code was der Kommentar behauptet", "finde Auffälligkeiten in diesem
+  Pine-Skript", "folgt der Header dem Vorgabeformat", "fehlt der CATALOG-Eintrag",
+  "ist die README-/CHANGELOG-Struktur vollständig", "ist das eine standalone
+  Strategie". Output ist immer eine Fundliste ("N Auffälligkeiten"), nie ein
+  Gesamturteil ("der Indikator ist gut"). Nicht für Trading-Logik-Diagnose (Rollen-
+  Architektur, Gate-Wirkung, verpasste Pivots/Signale) — dafür indicator-review;
+  nicht für Neu-/Umbau der Signal-Logik — dafür indicator-design.
 ---
 
 # Indicator Code Audit — Pine-Code-QA
@@ -31,6 +37,7 @@ wird das nicht lobend erwähnt — nur Auffälligkeiten zählen.
 | Warum wurde ein Pivot/Signal verpasst? | `indicator-review` |
 | Wie sollte die Signal-/Score-Logik neu gebaut werden? | `indicator-design` |
 | Trägt die Datenquelle auf diesem Instrument überhaupt eine Aussage (Volumen/VWAP/OI/Orderflow)? | `instrument-data-validity` |
+| Folgt das Verzeichnis der vorgeschriebenen Datei-/Doku-Struktur (README/CHANGELOG/DESCRIPTION_TV/Header/CATALOG)? | **dieser Skill** |
 
 Dieser Skill prüft die **Code- und Konzept-Ebene**, unabhängig davon, ob die
 zugrundeliegende Trading-Idee gut ist. Ein Indikator kann hier sauber durchgehen und
@@ -43,8 +50,8 @@ Jede Kategorie einzeln durchgehen, nicht nur "wirkt beim Überfliegen ok":
 
 | Kategorie | Worauf prüfen |
 |---|---|
-| **Repainting/Lookahead** | `request.security` ohne `barmerge.lookahead_off`; Zugriff auf `close`/High-TF-Werte der noch offenen Bar; Signale, die sich nach `barstate.isconfirmed` noch ändern können |
-| **request.security** | Fehlendes `gaps=barmerge.gaps_off`-Verständnis (Repaint-Risiko bei Gaps-On ohne Grund); wiederholte identische Calls statt einmal cachen; HTF-Wert ohne `[1]`-Offset auf der aktuellen (unfertigen) HTF-Bar |
+| **Repainting/Lookahead** | `request.security` mit `barmerge.lookahead_on` **ohne** `[1]`-Offset auf dem Expression-Argument (liest die laufende, unbestätigte HTF-Bar) — das ist der eigentliche Alarmfall, nicht das bloße Fehlen von `lookahead_off`. Beide dokumentierten TradingView-Muster gegen Repainting sind zulässig: `expression` mit `lookahead_off` ohne Offset, **oder** `expression[1]` mit `lookahead_on` (Offset gleicht das Lookahead aus) — Letzteres nicht fälschlich als Bug markieren. Zusätzlich prüfen: Zugriff auf `close`/High-TF-Werte außerhalb dieser beiden Muster; Signale, die sich nach `barstate.isconfirmed` noch ändern können |
+| **request.security** | Fehlendes `gaps=barmerge.gaps_off`-Verständnis (Repaint-Risiko bei Gaps-On ohne Grund); wiederholte identische Calls statt einmal cachen |
 | **Performance/Speicher** | `for`-Loops mit unnötig hoher `array.size()`-Iteration pro Bar; `label.new`/`line.new` ohne `max_labels_count`/`max_lines_count`-Bewusstsein oder ohne alte Objekte zu löschen; Tabellen-Neuerzeugung in `barstate.islast` ohne `na()`-Guard (Ressourcen-Leak, siehe Memory `reference_pine_v6_pitfalls`) |
 | **var-Verwendung** | `var`-Variable, die eigentlich pro Bar neu berechnet werden sollte (bleibt sonst "eingefroren"); nicht-`var`-Akkumulator, der pro Bar zurückgesetzt wird obwohl State über Bars nötig wäre |
 | **Off-by-one** | `[1]` vs. `[0]` bei Pivot-/Cross-Bestätigung; `ta.barssince()`-Vergleiche mit falschem Bar-Offset; Array-Indizierung bei `array.size()-1` ohne Empty-Guard |
@@ -102,7 +109,49 @@ Weitere typische Mismatch-Muster:
   deklariert, aber der Bullisch/Bärisch-Vergleich nutzt nur zwei davon — die dritte
   ist entweder tot (siehe oben) oder der Vergleich ist unvollständig.
 
-## 4. Ablauf
+## 4. Paket-/Doku-Struktur-Audit — Konformität zu CLAUDE.md
+
+Frage: **Ist die Datei- und Doku-Struktur dieses Indikator-Verzeichnisses vollständig und
+formal korrekt** — unabhängig davon, ob Code oder Trading-Logik stimmen. Die exakte
+Spezifikation steht in `CLAUDE.md` (Repo-Root); dort nachlesen statt aus dem Gedächtnis zu
+urteilen — Details wie Separator-Länge, erlaubte BBCode-Tags oder Farbwerte ändern sich dort,
+nicht hier.
+
+### 4.1 Verzeichnis & Pflichtdateien
+- [ ] Liegt der Indikator unter `indicators/<category>/<name>/` mit einer der neun erlaubten Kategorien?
+- [ ] `README.md` vorhanden, Struktur: Title → TradingView-Link (falls publiziert) → Beschreibung → `## Features` → weitere Abschnitte
+- [ ] `CHANGELOG.md` vorhanden, Format `## vX.Y.Z — YYYY-MM-DD` mit Bullet-Liste
+- [ ] `DESCRIPTION_TV.bbcode` vorhanden, wenn das Skript zur TV-Publikation gedacht ist; nur erlaubte BBCode-Tags (CLAUDE.md-Tabelle), Disclaimer-Absatz am Ende
+- [ ] `screenshots/` (optional) folgt Namenskonvention `<indicatorname>_<context>_<optional-version>.png`
+
+### 4.2 `.pine`-Header
+- [ ] `//@version=6` ist die erste Zeile; Kommentarblock kommt vor `indicator()`/`strategy()`
+- [ ] Trennzeilen exakt `// ` + 76 `=` (79 Zeichen), je einmal vor/nach Version-Block und einmal nach `Features:`
+- [ ] Skriptname endet auf `[WavesUnchained]` (Kommentar UND `indicator()`-Titel), niemals mit „Waves" davor
+- [ ] `Version:` / `Author: WavesUnchained` / `Build: YYYY-MM-DD[ HH:MM:SS]` in genau dieser Reihenfolge; Build-Datum nur bei tatsächlicher Änderung hochgezogen
+- [ ] Beschreibung direkt nach der oberen Trennzeile, keine Leerzeile davor
+- [ ] `// Features:` wörtlich als Heading, Bullets mit `✓`; genau eine leere `//`-Zeile davor und eine danach
+- [ ] `Data Contract`-Block direkt nach `Features:`, vor der schließenden Trennzeile, mit gültigem `Verdict` (`CFD-safe`/`CFD-degraded`/`Reference-required`/`Exchange-only`) — Inhalt sachlich gegen `instrument-data-validity` prüfen, nicht nur Vorhandensein
+- [ ] Keine `@description`/`@author`/`@version`-JSDoc-Tags
+
+### 4.3 Repo-weite Registrierung
+- [ ] Eintrag in root `README.md` (passende Sektion, ein Einzeiler)
+- [ ] Eintrag in `CATALOG.md` mit Status/Qualitäts-Bewertung
+- [ ] Bei Alerts: Kürzel in `indicators/ALERT_KUERZEL.md` registriert (Detail: `indicator-alerts`)
+
+### 4.4 Dashboard-Tabellen-Stil (falls der Indikator ein Dashboard zeichnet)
+- [ ] `table.new(...)` mit den vorgeschriebenen Farbkonstanten (CLAUDE.md „Dashboard table style"), kein Dark-Theme-Hintergrund
+- [ ] Header-/Daten-/Status-/Separatorzeilen nutzen die vorgeschriebene `text_color`/`bgcolor`/`text_size`-Kombination — Referenz bei Zweifel: `indicators/trend_direction/vein/vein_trend.pine`
+- [ ] Kein `size.tiny` für persistente Dashboard-/Tabellentexte
+
+### 4.5 Performance-Claims-Guard
+- [ ] Keine Backtest-Zahlen/Qualitäts-Superlative in `README.md`, `DESCRIPTION_TV.bbcode`, `CHANGELOG.md`, Input-Tooltips, `indicator()`/`strategy()`-Titel, Chart-Labels, Dashboard-Zellen oder Alert-Messages (CLAUDE.md „No performance claims in user-facing text")
+
+### 4.6 Strategy-Infrastruktur (nur falls `@strategy-config`-Block oder zugehörige Strategie existiert)
+- [ ] Bei vorhandenem `@strategy-config`-Block: ist die generierte Strategie unter `strategies/` aktuell (kein manueller Drift ggü. `build_strategies.py`-Output)?
+- [ ] Ohne `@strategy-config`-Block, aber mit zugehöriger Strategie in `strategies/`: diese ist **standalone** und darf nie durch `build_strategies.py` überschrieben werden, auch nicht bei „rebuild all" — ohne explizite Rückfrage beim User
+
+## 5. Ablauf
 
 1. Vollständige `.pine`-Datei(en) lesen (nicht nur einen Ausschnitt) — bei mehreren
    Dateien im Indikator-Verzeichnis (z. B. Suite mit mehreren Modulen) jede einzeln.
@@ -110,7 +159,10 @@ Weitere typische Mismatch-Muster:
 3. Modul 2 (Konzeptprüfung): Behauptungen aus README.md und Inline-Kommentaren gegen
    die Formeln abgleichen.
 4. Modul 3 (Logikfehler) durchgehen.
-5. Ergebnis als Fundliste ausgeben — jeder Fund mit Datei:Zeile, kurzer Behauptung
+5. Modul 4 (Paket-/Doku-Struktur-Audit) durchgehen — bei eigenständig katalogisierten
+   Indikatoren; bei einem Sub-Modul einer Suite ohne eigenes README auf die
+   Suite-Ebene beziehen.
+6. Ergebnis als Fundliste ausgeben — jeder Fund mit Datei:Zeile, kurzer Behauptung
    ("was ist kaputt") und konkretem Szenario ("bei welchem Input/Zustand zeigt sich
    das"). Kein zusammenfassendes Qualitätsurteil am Ende, nur die Zahl der Funde.
 

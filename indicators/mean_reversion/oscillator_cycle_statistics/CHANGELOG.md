@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.3 — 2026-09-05
+- Volume validity is now decided by `syminfo.volumetype` instead of by volume being non-zero: tick-volume feeds count price updates, not traded quantity, and previously let MFI, EOM and Klinger build a plausible-looking oscillator on top of them
+- MFI, EOM and Klinger are held at a neutral 50 on any feed without real trade volume, so the cycle state machine never arms
+- The inactive state is now visible rather than silent — as a dashboard detail cell and, independently of the dashboard setting, as a label on the last bar
+- Added the Data Contract header block
+
 ## v1.5.2 — 2026-08-26
 - Corrected Klinger Volume Force and flat-bar trend handling to match the documented formula; invalid Fast/Slow EMA ordering now stops with an explicit configuration error
 - Marked MFI as volume-dependent and made zero-volume windows explicitly neutral instead of relying on an undefined money-flow ratio
