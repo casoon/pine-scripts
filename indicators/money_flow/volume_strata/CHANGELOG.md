@@ -1,7 +1,7 @@
 # Changelog
 
 ## v1.9.4 — 2026-09-05
-- Hard Exchange-only gate: the entire profile (computation + all drawing) now only runs when `syminfo.volumetype` is `base`/`quote` and `volume` is not `na`; on tick/n/a volume (CFDs incl. `CAPITALCOM:NATURALGAS`, Forex, most Indices) it draws nothing but a "needs real trade volume" warning label instead
+- Hard Exchange-only gate: the entire profile (computation + all drawing) now only runs when `syminfo.volumetype` is `base`/`quote` and `volume` is not `na`; on tick/n/a volume it draws nothing but a "needs real trade volume" warning label instead
 - Added Data Contract header block (Verdict: Exchange-only)
 
 ## v1.9.3 — 2026-07-09

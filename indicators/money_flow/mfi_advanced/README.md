@@ -28,8 +28,9 @@ The optional extreme filter requires the MFI line to have visited the oversold o
 
 MFI is inherently volume-weighted (typical-price × volume flow ratio) — there is no meaningful MFI without real trade volume.
 
-- **Valid:** Futures, stocks, and crypto exchanges — instruments where `syminfo.volumetype` reports `base` or `quote` (real trade volume)
-- **Invalid:** CFDs (including `CAPITALCOM:NATURALGAS`), Forex, and most Indices — these report `tick`/`n/a` volume, which is not a real flow measure
+- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
+- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
 
 On an invalid instrument the indicator produces no MFI line, no signal/alert conditions, and no scores — every volume-dependent value gates to `na` and the panel goes blank except for a one-time "benötigt echtes Handelsvolumen" warning label on the last bar showing the detected `syminfo.volumetype`.
 

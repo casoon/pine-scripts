@@ -6,7 +6,7 @@ Structure-oriented oscillator that uses confirmed price pivots as the authoritat
 
 ## Features
 
-- **Oscillator selector**: RSI (default), WaveTrend, Stochastic RSI, CCI, Fisher Transform, TSI, Williams %R, or CMO — one dropdown
+- **Oscillator selector**: RSI (default), WaveTrend, Stochastic RSI, CCI, Fisher Transform, TSI, Williams %R, CMO, or MFI — one dropdown
 - **HH / HL / LH / LL classification**: price structure uses an ATR tolerance band (so the label and the divergence logic can never disagree); oscillator structure stays an exact comparison
 - **Best-of-window anchor search**: each new pivot is compared against up to the last 8 same-type pivots (subject to Min/Max Pivot Distance); every candidate that clears the price- and oscillator-difference gates is scored (recency, oscillator rate-of-change, extreme-zone context, price distinctness) and the highest-scoring one is used — not just the immediately preceding pivot, and not just the nearest qualifying one either. The HH/HL/LH/LL *label* still always reflects the immediately preceding pivot (standard swing terminology); only the divergence/confirmation math uses the searched anchor.
 - **Optional local-oscillator-extreme anchor**: instead of reading the oscillator exactly on the price-pivot bar (default), optionally use the oscillator's own local high/low within a small radius around it, so oscillator-pane labels/lines land on a real peak/trough. Currently experimental — see the note below and the debug log before relying on it.
@@ -66,12 +66,31 @@ Presets are chart-relative, not timeframe-aware — the same preset detects a sm
 | TSI | 25 | −25 | 0 | uses **Source** input; long/short = TSI Long/Short Length |
 | Williams %R | −20 | −80 | −50 | native −100..0 range; fixed high/low/close |
 | CMO | 50 | −50 | 0 | uses **Source** input; `100 * (SumUp - SumDown) / (SumUp + SumDown)` |
+| MFI | 80 | 20 | 50 | fixed hlc3; **needs real trade volume** — see below |
 
 The **Source** input only affects RSI, Stochastic RSI, TSI, and CMO — the others use their own conventional price inputs regardless of it (matching standard definitions for those oscillators).
 
 ROC was deliberately left out: it is unbounded (no fixed OB/OS), and this indicator has no adaptive-band system like `oscillator_divergence_zones`'s Dynamic Zones — adding it without one would give the extreme-zone plot and the `requireExtremeZone` filter meaningless fixed thresholds.
 
-MFI was also considered and rejected: it needs real volume, and CFD/index feeds (Capital.com, FOREX.com — the exact kind used to test this indicator) report `volume=0` throughout, which produces no signal at all rather than a merely degraded one.
+### MFI and volume validity
+
+MFI is the only source in the dropdown that is not derived from price alone. Whether a feed
+carries real trade volume is decided per symbol by `syminfo.volumetype`: `base`/`quote` is
+traded quantity, `tick` counts price updates, `n/a` means none at all. The script checks this
+at runtime (`volumeIsReal`).
+
+Without real volume the MFI series is `na`. Because every pivot is processed only when an
+oscillator value exists, that means no oscillator structure, no divergence, no alignment and
+no alert — nothing is fabricated from a tick count. A notice label on the last bar names the
+detected `volumetype` and says the source is inactive, so the empty pane is explained rather
+than mysterious. The other eight sources are unaffected.
+
+Where the feed does report `base` but the volume is a single broker's share of the market (a
+CFD feed passing its own traded quantity through), MFI describes that broker's flow, not the
+exchange's — usable as an approximation, not as exchange money flow.
+
+MFI was left out until v2.9.0 on the assumption that CFD feeds report `volume=0` throughout.
+That assumption was wrong (see `DATA_VALIDITY.md` and `plan/19`); the runtime check replaces it.
 
 ## Oscillator Difference Filter
 

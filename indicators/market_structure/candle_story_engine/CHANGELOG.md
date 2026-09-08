@@ -1,7 +1,7 @@
 # Changelog
 
 ## v1.10.1 — 2026-09-05
-- Volume data validity: `hasVolume` now also requires `syminfo.volumetype` to be `base` or `quote` — tick-volume instruments (most CFDs, forex, many indices) no longer treat their tick-count feed as real trade volume. `volumeRatio`/`volumeAdjustment` already degraded to their neutral values (1.0) when volume is unavailable; this only widens the definition of "unavailable" to include tick volume. Added a one-time `barstate.islast` label when the volume adjustment is inactive. Data Contract added (`CFD-degraded`).
+- Volume data validity: `hasVolume` now also requires `syminfo.volumetype` to be `base` or `quote` — tick-volume instruments no longer treat their tick-count feed as real trade volume. `volumeRatio`/`volumeAdjustment` already degraded to their neutral values (1.0) when volume is unavailable; this only widens the definition of "unavailable" to include tick volume. Added a one-time `barstate.islast` label when the volume adjustment is inactive. Data Contract added (`CFD-degraded`).
 
 ## v1.10.0 — 2026-08-17
 - Added Liquidity Sweep detection: a wick that pierces a recent N-bar high/low and closes back inside it (possible stop-hunt/liquidity grab). Marker, alert and data-window export only — deliberately not added to BUY/SELL evidence until validated, matching the existing Compression Breakout Attempt

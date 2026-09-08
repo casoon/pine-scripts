@@ -1,7 +1,7 @@
 # Changelog
 
 ## v1.1.3 — 2026-09-05
-- Fix: Volume Gradient used raw `volume` with no check on `syminfo.volumetype` — on CFD feeds with tick volume, its 20% default weight scored conviction against a meaningless tick count. Added a `volumeIsReal` guard (`base`/`quote` only); the gradient's weight now drops to 0 when volume isn't real, and Speed/Cleanliness renormalize through the existing `totalW` division instead of the score being silently distorted by tick noise
+- Fix: Volume Gradient used raw `volume` with no check on `syminfo.volumetype` — on feeds that report tick volume, its 20% default weight scored conviction against a meaningless tick count. Added a `volumeIsReal` guard (`base`/`quote` only); the gradient's weight now drops to 0 when volume isn't real, and Speed/Cleanliness renormalize through the existing `totalW` division instead of the score being silently distorted by tick noise
 - Data Contract header block added (`Volume: OPTIONAL`, `Verdict: CFD-degraded`)
 
 ## v1.1.2 — 2026-06-30

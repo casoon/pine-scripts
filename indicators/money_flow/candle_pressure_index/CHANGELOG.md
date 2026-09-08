@@ -1,7 +1,7 @@
 # Changelog
 
 ## v1.1.3 — 2026-09-05
-- Hard Exchange-only gate: indicator now requires real trade volume (`syminfo.volumetype` `base`/`quote`); on `tick`/`n/a` instruments (all CFDs incl. `CAPITALCOM:NATURALGAS`, Forex, most Indices) it plots nothing and shows a one-time "needs real trade volume" label instead of falling back to a neutral `volume_rank` of 0.5
+- Hard Exchange-only gate: indicator now requires real trade volume (`syminfo.volumetype` `base`/`quote`); on `tick`/`n/a` instruments it plots nothing and shows a one-time "needs real trade volume" label instead of falling back to a neutral `volume_rank` of 0.5
 - Data Contract added to header (`Verdict: Exchange-only`)
 
 ## v1.1.2 — 2026-06-30

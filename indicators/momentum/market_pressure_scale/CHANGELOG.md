@@ -19,7 +19,7 @@
 - New debug output: whenever Setup or Impulse Pressure is `na`, logs every raw ingredient (atr, volume, volSma, volRel, atrPct, bbWidth, compression, srProximity, volQuiet, rangeExpansion, bodyPressure, volumePressure) to Pine Logs, so a still-broken feed can be diagnosed from evidence instead of another guess
 
 ## v2.2.1 — 2026-07-07
-- Fix: Setup Pressure and Impulse Pressure came back `na` on every single bar on CFD feeds that report zero volume (Capital.com/FOREX.com NATGAS, SPX500, etc.) — `volRel = volume / ta.sma(volume, volLen)` divided by zero, and that `na` fed straight into both pressures with no recovery. `volRel` now falls back to a neutral 1.0 when the volume SMA is 0, instead of letting a single unavailable sensor null out the entire indicator
+- Fix: Setup Pressure and Impulse Pressure came back `na` on every single bar on feeds whose volume series carries no turnover — `volRel = volume / ta.sma(volume, volLen)` divided by zero, and that `na` fed straight into both pressures with no recovery. `volRel` now falls back to a neutral 1.0 when the volume SMA is 0, instead of letting a single unavailable sensor null out the entire indicator
 - Hardened two more unguarded ATR divisions (`nearHigh`/`nearLow` in Setup Pressure, `rangeExpansion` in Impulse Pressure) against the same zero-division risk during flat/zero-range bars, matching the floor already used for `bodyRatio`
 
 ## v2.2.0 — 2026-07-07

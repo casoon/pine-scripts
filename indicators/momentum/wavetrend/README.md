@@ -86,7 +86,7 @@ The compare symbol has its own session and holidays, so there are bars where it 
 
 ## Volume Conviction Gate (optional)
 
-The optional "Gate: Volume Conviction" (External Confirmations group, off by default) requires above-average volume on the cross bar. It only has a real effect when the instrument reports actual trade volume (`syminfo.volumetype` = `base`/`quote`) — on tick-volume or `n/a` symbols (most CFDs, forex, many indices) it degrades to pass-through so it can't silently gate on tick-count noise.
+The optional "Gate: Volume Conviction" (External Confirmations group, off by default) requires above-average volume on the cross bar. It only has a real effect when the instrument reports actual trade volume (`syminfo.volumetype` = `base`/`quote`) — on tick-volume or `n/a` symbols it degrades to pass-through so it can't silently gate on tick-count noise.
 
 ## Dashboard
 

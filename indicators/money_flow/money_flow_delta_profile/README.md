@@ -25,9 +25,9 @@ A directional volume/money flow profile. Every price row shows two bars anchored
 
 ## Instrumente
 
-**Valid:** Futures, stocks, crypto exchanges — anywhere `syminfo.volumetype` reports `base` or `quote` (real trade volume).
-
-**Invalid:** CFDs (incl. `CAPITALCOM:NATURALGAS`), Forex, most Indices — these report `syminfo.volumetype` as `tick` or `n/a`.
+- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
+- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
 
 On an invalid instrument the indicator draws nothing; instead it shows a "benötigt echtes Handelsvolumen" (needs real trade volume) warning label on the last bar.
 

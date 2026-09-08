@@ -1,7 +1,7 @@
 # Changelog
 
 ## v1.0.3 — 2026-09-05
-- Hard Exchange-only gate: MFI (and everything derived from it — line, signal, histogram, flow states, signals) now requires real trade volume (`syminfo.volumetype` `base`/`quote`); on `tick`/`n/a` instruments (all CFDs incl. `CAPITALCOM:NATURALGAS`, Forex, most Indices) MFI plots nothing and a one-time "needs real trade volume" label appears instead. The volume-independent CCI line and turn markers are unaffected and keep plotting on any instrument
+- Hard Exchange-only gate: MFI (and everything derived from it — line, signal, histogram, flow states, signals) now requires real trade volume (`syminfo.volumetype` `base`/`quote`); on `tick`/`n/a` instruments MFI plots nothing and a one-time "needs real trade volume" label appears instead. The volume-independent CCI line and turn markers are unaffected and keep plotting on any instrument
 - Data Contract added to header (`Verdict: Exchange-only`)
 
 ## v1.0.2 — 2026-06-30

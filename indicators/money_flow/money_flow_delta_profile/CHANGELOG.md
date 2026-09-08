@@ -1,7 +1,11 @@
 # Changelog
 
+## v2.0.2 — 2026-09-08
+- Removed the "Synthetic volume if missing" input: it dated from the assumption that CFD feeds report `volume = 0`, and since the Exchange-only gate the profile only computes on feeds with real trade volume at all — bars without turnover are skipped as before, with no substituted weight
+- Reworded the volume notes: validity is decided per symbol by `syminfo.volumetype`, not by instrument class
+
 ## v2.0.1 — 2026-09-05
-- Hard Exchange-only gate: the entire profile (computation + all drawing) now only runs when `syminfo.volumetype` is `base`/`quote` and `volume` is not `na`; on tick/n/a volume (CFDs incl. `CAPITALCOM:NATURALGAS`, Forex, most Indices) it draws nothing but a "needs real trade volume" warning label instead
+- Hard Exchange-only gate: the entire profile (computation + all drawing) now only runs when `syminfo.volumetype` is `base`/`quote` and `volume` is not `na`; on tick/n/a volume it draws nothing but a "needs real trade volume" warning label instead
 - Intrabar delta path (`useIntrabar`) additionally gated on real volume, since it runs on every bar via `request.security_lower_tf`, not just on the last bar
 - Renamed `sgnVol` → `signedVolumeProxy` and clarified in comments/README that the intrabar bull/bear split is a price-direction-signed volume proxy from OHLCV, not real trade-classified delta
 - Added Data Contract header block (Verdict: Exchange-only)

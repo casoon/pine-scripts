@@ -14,8 +14,9 @@ Measures buying vs. selling pressure purely from candle microstructure — no de
 
 ## Instrumente
 
-**Valid:** Futures, stocks, crypto exchanges — real trade volume via `syminfo.volumetype` (`base`/`quote`).
-**Invalid:** CFDs (including the repo's reference instrument `CAPITALCOM:NATURALGAS`), Forex, most Indices — `tick`/`n/a` volume.
+- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
+- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
 
 On invalid instruments the indicator shows a "benötigt echtes Handelsvolumen" (needs real trade volume) label on the last bar and plots nothing, instead of falling back to a neutral `volume_rank` of 0.5.
 

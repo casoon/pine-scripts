@@ -3,7 +3,7 @@
 ## v4.1.0 — 2026-09-05
 - Data validity: MFI, OBV, VFI (Flow category), the VWAP component of the Trend
   category, and MV Confluence now check `syminfo.volumetype` before using
-  volume — on tick/n/a volume (most CFDs) they degrade to neutral instead of
+  volume — on tick/n/a volume they degrade to neutral instead of
   scoring on fake data. Flow carries weight 1.2 of 6.2 (~19%) in the default
   Swing weight profile; on degraded instruments its weight is now excluded and the other 5
   categories are renormalized to fill the full 100%, instead of silently
@@ -22,7 +22,7 @@
 - Data validity: MFI, OBV, VFI (Flow category), the VWAP component of the Trend
   category, the HTF Midline VWAP mode, entry-timing's volume confirmation, and
   MV Confluence now check `syminfo.volumetype` before using volume — on
-  tick/n/a volume (most CFDs) they degrade to neutral instead of scoring or
+  tick/n/a volume they degrade to neutral instead of scoring or
   gating on fake data. Flow carries weight 1.2 of 6.2 (~19%) in the default
   Swing weight profile; on degraded instruments its weight is now excluded and the other 5
   categories are renormalized to fill the full 100%, instead of silently

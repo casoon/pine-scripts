@@ -41,8 +41,9 @@ These feed the *Location* role (skill §1) of a downstream reversal module as ev
 
 VWAP is fundamentally a volume-weighted average price — there is no meaningful VWAP without real trade volume feeding the weighting.
 
-- **Valid:** Futures, stocks, and crypto exchanges — instruments where `syminfo.volumetype` reports `base` or `quote` (real trade volume)
-- **Invalid:** CFDs (including `CAPITALCOM:NATURALGAS`), Forex, and most Indices — these report `tick`/`n/a` volume, which cannot weight a price average
+- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
+- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
 
 On an invalid instrument the running VWAP/σ sums never accumulate real volume, so the AVWAP line, bands, anchor markers, stretched markers, and dashboard all go blank (`na`/`—`), and a one-time "benötigt echtes Handelsvolumen" warning label appears on the last bar showing the detected `syminfo.volumetype`.
 

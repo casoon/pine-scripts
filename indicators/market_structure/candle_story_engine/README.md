@@ -65,7 +65,7 @@ The engine currently distinguishes directional candles, Doji, and the five suppo
 
 ## Volume Data Validity
 
-The optional volume adjustment on Candle Pressure only activates when `syminfo.volumetype` reports real trade volume (`base` or `quote`). On tick-volume instruments — most CFDs, forex and many indices — it degrades to a neutral 1.0 multiplier instead of scaling pressure off a tick-count series, and a one-time chart label flags the instrument as degraded. Every other score in the engine (Candle Pressure's non-volume terms, Quality, Sequence, Trend Context, Exhaustion) is price-only and unaffected.
+The optional volume adjustment on Candle Pressure only activates when `syminfo.volumetype` reports real trade volume (`base` or `quote`). On tick-volume instruments it degrades to a neutral 1.0 multiplier instead of scaling pressure off a tick-count series, and a one-time chart label flags the instrument as degraded. Every other score in the engine (Candle Pressure's non-volume terms, Quality, Sequence, Trend Context, Exhaustion) is price-only and unaffected.
 
 ## Roadmap
 

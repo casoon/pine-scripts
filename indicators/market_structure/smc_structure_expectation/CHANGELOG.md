@@ -1,7 +1,7 @@
 # Changelog
 
 ## v1.1.2 — 2026-09-05
-- Fix: OB volume bonus (relative-volume score tiers) and the optional "Require Volume > SMA(20)" filter used raw `volume` with no check on `syminfo.volumetype` — on CFD feeds with tick volume, this scored/gated order blocks against a meaningless tick count. Added a `volumeIsReal` guard (`base`/`quote` only); the score bonus now degrades to +0 (na) instead of a fabricated tier, and the volume filter passes through neutrally instead of blocking OB creation when volume isn't real
+- Fix: OB volume bonus (relative-volume score tiers) and the optional "Require Volume > SMA(20)" filter used raw `volume` with no check on `syminfo.volumetype` — on feeds that report tick volume, this scored/gated order blocks against a meaningless tick count. Added a `volumeIsReal` guard (`base`/`quote` only); the score bonus now degrades to +0 (na) instead of a fabricated tier, and the volume filter passes through neutrally instead of blocking OB creation when volume isn't real
 - Added a one-time chart label on the last bar when volume isn't real, so the degradation is visible instead of silent
 - Data Contract header block added (`Volume: OPTIONAL`, `Verdict: CFD-degraded`)
 

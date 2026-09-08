@@ -21,7 +21,7 @@
 
 ## v1.5.0 — 2026-08-26
 - Added four oscillator choices: DeMarker (natively 0..100, no reference input needed), RVI (Relative Vigor Index, normalized like CCI/WaveTrend via a configurable reference), EOM (Ease of Movement), and Klinger Volume Oscillator (its own Fast/Slow EMA length inputs, since a meaningful spread needs two genuinely different periods, unlike every other oscillator here)
-- EOM and Klinger are volume-dependent. On zero-volume feeds (Capital.com, FOREX.com, and other CFD/index feeds commonly used for commodities — the exact instruments this indicator has been tested against) both collapse to a constant neutral 50: no crash, no na-cascade, but also no cycles ever detected on that feed. Flagged in the dropdown label and a tooltip, not silently
+- EOM and Klinger are volume-dependent. On feeds without real trade volume both collapse to a constant neutral 50: no crash, no na-cascade, but also no cycles ever detected on that feed. Flagged in the dropdown label and a tooltip, not silently
 
 ## v1.4.2 — 2026-08-26
 - Fixed reverted-failure cycle lines rendering as invisible: a straight `line.new()` from origin back to origin has identical start/end Y, making it perfectly horizontal and camouflaged against the OB/OS gridline it sits exactly on. Reverted failures now draw a 3-point V-shape polyline (origin → deepest point the attempt actually reached, bucket-approximated → back to origin) via `f_cycleFailurePeak()`, which is both visible and more informative than a straight line ever was. Timeout failures keep the simple line — their endpoint is wherever the oscillator actually was, never forced onto the origin rail, so they were never camouflaged

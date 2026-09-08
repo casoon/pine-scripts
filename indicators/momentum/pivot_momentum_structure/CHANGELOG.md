@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.9.0 — 2026-09-08
+- Add MFI (Money Flow Index) as a ninth oscillator source: `ta.mfi(hlc3, MFI Length)`, bounded 0..100, OB/OS 80/20, midline 50, with a configurable `MFI Signal Line` (SMA). Fixed hlc3 like CCI — the shared `Source` input does not apply
+- MFI is guarded by `syminfo.volumetype` (`base`/`quote` only). Without real trade volume the series is `na`, so no oscillator structure, divergence, alignment or alert is produced, and a notice label on the last bar names the detected `volumetype`. The eight price-based sources are unaffected
+- Correction: v2.7.0 recorded MFI as rejected because "CFD/index feeds report `volume=0` throughout". That was an unverified assumption — measurement showed the provider does deliver traded quantity. Validity is a per-symbol runtime question, which is what the guard now asks
+- Added Data Contract header block (Verdict: `CFD-degraded`)
+
 ## v2.8.0 — 2026-07-23
 - Change: `f_findBestAnchor` no longer takes the first ("nearest") qualifying candidate from the same-type pivot history window — it now scores every qualifying candidate and picks the highest-scoring one. Score components: recency (40%, dominant — keeps the result close to the prior nearest-qualifying behavior as a baseline), oscillator rate-of-change per bar relative to its own rolling StDev (30%, not raw magnitude — deliberately avoids reintroducing the v2.4.0 regression where raw oscillator-difference magnitude systematically favored distant pivots), extreme-zone context of the candidate (20%), and price distinctness relative to ATR tolerance (10%, minor tie-breaker). New debug log fields `anchorScore` and `oscStDev` make the score independently verifiable.
 - Add: `scripts/verify_pms_logs.py` Rule 9 now recomputes the same weighted score (mirrored in Python, including the `upperExtreme`/`lowerExtreme` lookup by oscillator type) instead of a plain nearest-qualifying scan, and additionally cross-checks the logged `anchorScore` against the recomputed one.
@@ -7,7 +13,7 @@
 - Docs: README "Anchor Selection" rewritten to describe the scoring model instead of "nearest qualifying"; feature bullets and header comment updated to match.
 
 ## v2.7.0 — 2026-07-17
-- Add CMO (Chande Momentum Oscillator) as an oscillator source: `100 * (SumUp - SumDown) / (SumUp + SumDown)` over `CMO Length`, bounded ±100, OB/OS ±50, midline 0. Uses the shared `Source` input like RSI/Stochastic RSI/TSI. Configurable `CMO Signal Line` (SMA). MFI was considered and rejected — CFD/index feeds (Capital.com, FOREX.com, the exact kind used to test this indicator) report `volume=0` throughout, which would make a volume-weighted oscillator produce no real signal, not just a degraded one.
+- Add CMO (Chande Momentum Oscillator) as an oscillator source: `100 * (SumUp - SumDown) / (SumUp + SumDown)` over `CMO Length`, bounded ±100, OB/OS ±50, midline 0. Uses the shared `Source` input like RSI/Stochastic RSI/TSI. Configurable `CMO Signal Line` (SMA). MFI was considered and rejected at the time on the assumption that the feeds used for testing report `volume=0` throughout — that assumption was later shown to be wrong; MFI was added in v2.9.0 with a runtime volume guard.
 
 ## v2.6.2 — 2026-07-17
 - Verified a second, fresh 6844-row/8-file log export against `scripts/verify_pms_logs.py`'s full rule set (including the new priceStruct/anchor-search re-derivation from raw logged data): 2 discrepancies found, both traced to `priceTolerance` being logged with `format.mintick` — which rounds a continuous computed value (`pivotAtr × Min. Price Difference ATR`) to the instrument's tick size, occasionally making a genuinely-past-tolerance price difference look exactly boundary-equal in the log. Not a calculation bug (confirmed by inspecting the two flagged rows directly). Fixed the log format to 8 decimals so this can't recur; re-verify with a fresh export to confirm 0/6844.

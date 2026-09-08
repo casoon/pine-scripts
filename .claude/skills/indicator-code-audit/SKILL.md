@@ -58,7 +58,7 @@ Jede Kategorie einzeln durchgehen, nicht nur "wirkt beim Überfliegen ok":
 | **Barstate-Fehler** | Logik, die auf `barstate.isrealtime` unterschiedlich läuft als auf historischen Bars, ohne dass das beabsichtigt ist; Alerts/Labels die auf jedem Realtime-Tick statt nur bei Bestätigung feuern |
 | **Session-Probleme** | `session.ismarket`/Zeitzone-Annahmen, die auf dem Symbol/TF des Charts nicht gelten; ungetestete Verhalten auf 24h-Märkten (Crypto, CFD) vs. Session-Märkten (Aktien) |
 | **UDT/Serien-Fallen** | In-Place-Mutation von UDT-Feldern statt echter historischer Serie (`obj[1].field` liefert wegen Referenzsemantik den aktuellen, nicht den historischen Wert) |
-| **na-Propagation** | Division ohne Neutral-Fallback bei Feeds mit `volume=0` (CFD/Index) oder frühen Bars vor Warmup — ein einzelner `na`-Wert darf nicht das gesamte Ergebnis auf `na` ziehen |
+| **na-Propagation** | Division ohne Neutral-Fallback bei Feeds ohne verwertbares Volumen (`volume` 0 oder `na`) oder frühen Bars vor Warmup — ein einzelner `na`-Wert darf nicht das gesamte Ergebnis auf `na` ziehen |
 | **Datenherkunft** | `volume`/`ta.vwap`/`ta.obv`/`ta.mfi`/`ta.vwma` ohne `syminfo.volumetype`-Guard; `nz(volume)` als vermeintlicher Guard (macht fehlendes Volumen zu `0` → Gate blockiert oder passiert still dauerhaft); stille Degradation ohne UI-Hinweis; Cross-Symbol-`request.security` ohne `na`-Zweig. Bewertung nach Skill `instrument-data-validity` + `DATA_VALIDITY.md` |
 
 Bekannte, laufend gepflegte Pine-v6-Syntaxfallen (kein Duplikat hier — Quelle bleibt

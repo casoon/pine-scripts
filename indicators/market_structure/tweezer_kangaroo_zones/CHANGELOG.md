@@ -1,7 +1,7 @@
 # Changelog
 
 ## v3.1.3 — 2026-09-05
-- Fix: Tweezer/Kangaroo pattern detection (`volCheck`) and the confluence score's Relative Volume component used raw `volume` with no check on `syminfo.volumetype` — on CFD feeds with tick volume, both were gating/scoring against a meaningless tick count. Added a `volumeIsReal` guard (`base`/`quote` only); pattern `volCheck` now passes through neutrally instead of blocking detection, and the Relative Volume component drops out of both the score and its max (same as any other disabled component) instead of lowering the achievable confluence score
+- Fix: Tweezer/Kangaroo pattern detection (`volCheck`) and the confluence score's Relative Volume component used raw `volume` with no check on `syminfo.volumetype` — on feeds that report tick volume, both were gating/scoring against a meaningless tick count. Added a `volumeIsReal` guard (`base`/`quote` only); pattern `volCheck` now passes through neutrally instead of blocking detection, and the Relative Volume component drops out of both the score and its max (same as any other disabled component) instead of lowering the achievable confluence score
 - Data Contract header block added (`Volume: OPTIONAL`, `Verdict: CFD-degraded`)
 
 ## v3.1.2 — 2026-06-30

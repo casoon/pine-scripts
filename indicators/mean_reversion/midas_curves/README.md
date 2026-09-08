@@ -29,11 +29,9 @@ Score's volume component. On an instrument without real trade volume there is no
 curve to compute; a script that produced one anyway would just be publishing a mislabeled
 close-price average.
 
-- **Valid:** Futures, exchange-listed stocks, crypto exchanges — anywhere `syminfo.volumetype`
-  reports `"base"` or `"quote"` (real traded volume/quote volume).
-- **Invalid:** CFDs (including this repo's reference instrument `CAPITALCOM:NATURALGAS`),
-  Forex, and most CFD indices — these report `"tick"` or `"n/a"` volume, which counts price
-  updates, not traded size.
+- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
+- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
 - The script checks `syminfo.volumetype` at runtime (`volumeIsReal`). When it is not `"base"`
   or `"quote"`, every volume-weighted computation is forced to `na` — no curve, no bands, no
   topfinder/bottomfinder, no context markers, no dashboard, no live badge. A single warning

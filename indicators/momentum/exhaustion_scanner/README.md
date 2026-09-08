@@ -57,7 +57,7 @@ Per-market role-weight profiles. Money Flow is folded into the Exhaustion role a
 
 ## Volume Data Validity
 
-Money Flow (inside the Exhaustion role) only activates when `syminfo.volumetype` reports real trade volume (`base` or `quote`) — the preset table's "on/off" column already reflects the intended default, but the runtime check now also excludes tick-volume instruments (most CFDs, forex, many indices) even when a preset requests Money Flow. When it degrades, the Exhaustion role reweights from 0.55/0.25/0.20 (Momentum/Flow/Divergence) to 0.70/0.30 (Momentum/Divergence) so the role ceiling is unchanged. The dashboard's "Volume" row shows the detected `syminfo.volumetype` and whether Money Flow is active.
+Money Flow (inside the Exhaustion role) only activates when `syminfo.volumetype` reports real trade volume (`base` or `quote`) — the preset table's "on/off" column already reflects the intended default, but the runtime check now also excludes tick-volume instruments even when a preset requests Money Flow. When it degrades, the Exhaustion role reweights from 0.55/0.25/0.20 (Momentum/Flow/Divergence) to 0.70/0.30 (Momentum/Divergence) so the role ceiling is unchanged. The dashboard's "Volume" row shows the detected `syminfo.volumetype` and whether Money Flow is active.
 
 ## Relation to commodity_heat_reversal
 

@@ -1,5 +1,5 @@
 ## v2.1.0 — 2026-09-05
-- Replaced the `not na(volume)` volume check with the full `syminfo.volumetype` guard (`base`/`quote` only); tick/n-a volume (most CFDs, indices, forex) now degrades every volume-dependent calculation to neutral instead of silently treating no-volume as zero
+- Replaced the `not na(volume)` volume check with the full `syminfo.volumetype` guard (`base`/`quote` only); tick/n-a volume now degrades every volume-dependent calculation to neutral instead of silently treating no-volume as zero
 - Absorption (effort-vs-result) and the Exhaustion effort-vs-result term now drop out and renormalize their weight in Auction Pressure and Exhaustion Score when real volume is unavailable, instead of quietly running both scores structurally low
 - Box Volume and Box VWAP already degraded to "not available"/`na`; they now key off the same volume-validity guard instead of only `not na(volume)`
 - Added a "Volume Data" dashboard row showing whether the volume module is active and the detected `syminfo.volumetype`

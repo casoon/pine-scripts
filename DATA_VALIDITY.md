@@ -48,6 +48,12 @@ Tick-Volumen oder gar nichts. Aus der bloßen Existenz einer `volume`-Serie folg
 dass es sich um börsengehandeltes Volumen des zugrunde liegenden Marktes handelt.
 Tick-Volumen wird u.a. für Indizes, Forex und Krypto-CFDs geliefert.
 
+**Keine Symbol-Erwartungstabelle.** Es wird bewusst nicht gepflegt, welcher Anbieter für welches
+Symbol welchen `volumetype` meldet. Eine solche Tabelle wäre eine Momentaufnahme eines
+Broker-Feeds, veraltete still und verführt dazu, im Code oder in der Doku eine Instrumentklasse
+zu behaupten, statt das Symbol zu fragen. Der Guard fragt das Symbol; Doku und Tooltips
+formulieren entsprechend konditional (Entscheidung 2026-09-08, `plan/19`).
+
 `syminfo.type` (beobachtete Werte: `stock`, `futures`, `index`, `forex`, `crypto`, `fund`,
 `cfd`, `dr`, `bond`, `economic`, `spread`) ist als Enum **nicht garantiert stabil**. Nur für
 grobe Beschriftung verwenden, nie als alleinige Bedingung für Rechenwege — und immer mit
@@ -87,16 +93,24 @@ nie mit exakter Gleichheit.**
 |---|---|---|---|---|---|---|---|
 | `volume` roh | 🔴/🟡¹ | 🔴/🟡¹ | 🔴 → Underlying | 🟡 Tick | 🟢 | 🟢 | 🟢² |
 | Relative Volume / Volume Spike | 🔴/🟡¹ | 🔴/🟡¹ | 🔴 → Underlying | 🟡 | 🟢 | 🟢 | 🟢² |
-| OBV / PVT / A-D / CMF / MFI / Klinger / EOM | 🔴 | 🔴 | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
-| VWMA | 🔴 | 🔴 | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
-| VWAP / Anchored VWAP | 🔴 | 🔴 | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
-| Volume Profile / POC / Value Area | 🔴 | 🔴 | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
-| Effort-vs-Result (Range ÷ Volume) | 🔴 | 🔴 | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
-| Wyckoff-Volumentests (SC, Spring, UT mit Volumenbestätigung) | 🔴 | 🔴 | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
+| OBV / PVT / A-D / CMF / MFI / Klinger / EOM | 🔴/🟡¹ | 🔴/🟡¹ | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
+| VWMA | 🔴/🟡¹ | 🔴/🟡¹ | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
+| VWAP / Anchored VWAP | 🔴/🟡¹ ⁵ | 🔴/🟡¹ ⁵ | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
+| Volume Profile / POC / Value Area | 🔴/🟡¹ ⁵ | 🔴/🟡¹ ⁵ | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
+| Effort-vs-Result (Range ÷ Volume) | 🔴/🟡¹ | 🔴/🟡¹ | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
+| Wyckoff-Volumentests (SC, Spring, UT mit Volumenbestätigung) | 🔴/🟡¹ | 🔴/🟡¹ | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
 
 ¹ Abhängig vom Provider — muss zur Laufzeit über `syminfo.volumetype` entschieden werden.
 Ist es `tick`/`n/a`: 🔴. Ist es `base`: 🟡 (Broker-Volumen ≠ Börsenvolumen, aber immerhin
-gehandelte Menge bei diesem Broker) — Kennzeichnung Pflicht.
+gehandelte Menge bei diesem Broker) — Kennzeichnung Pflicht. **Die ganze Spalte hängt an dieser
+Fußnote**: welche Instrumentklasse welchen `volumetype` liefert, ist eine Eigenschaft des Feeds,
+keine des Instruments, und wird hier bewusst nicht als Tabelle geführt (siehe §2, Schlussabsatz).
+⁵ **Volumen an einem Preis** statt Volumen als Größe. Auch bei `base` ist das Ergebnis nur so
+repräsentativ wie der Ausschnitt des Feeds: ein VWAP oder POC aus Broker-Volumen liegt dort, wo
+*dieser Broker* gehandelt hat, nicht zwingend dort, wo die Börse gehandelt hat — als ungefähres
+Niveau lesbar, nicht als das Level, auf das andere Marktteilnehmer reagieren. Davon zu trennen
+ist ein aus einem **Referenzmarkt** übernommenes Profil: das bleibt 🔴, weil die Preisachsen
+zweier Instrumente nicht dieselben sind (§4.3 Regel 4).
 ² Krypto: Volumen ist echt, aber **börsenspezifisch**. Ein einzelner Exchange ist ein Ausschnitt
 des Gesamtmarktes, und `base` vs. `quote` ändert die Einheit.
 
@@ -278,7 +292,12 @@ Felder:
   - `CFD-safe` — läuft überall, keine Datenannahme jenseits Klasse A
   - `CFD-degraded` — läuft überall, Volumen-/OI-Anteil schaltet sich sichtbar ab
   - `Reference-required` — braucht Referenzmarkt, auf dem CFD allein nicht gültig
-  - `Exchange-only` — nur auf Future/Aktie/Krypto-Börse sinnvoll
+  - `Exchange-only` — braucht echtes Handelsvolumen (`volumetype` `base`/`quote`); meldet der
+    Feed `tick`/`n/a`, schaltet das Skript sichtbar ab, statt zu degradieren
+
+Die vier Verdicts beschreiben die **Datenanforderung**, nicht eine Instrumentklasse. Ob ein
+konkretes Symbol sie erfüllt, entscheidet der Guard zur Laufzeit — ein Data Contract sagt nie,
+dass ein Skript „auf CFDs nicht läuft".
 
 ---
 

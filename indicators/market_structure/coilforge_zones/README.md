@@ -40,7 +40,7 @@ After a breakout fires — or after the watch window expires — the armed state
 
 ## Volume Data Validity
 
-The Volume Dry-Up module only activates when `syminfo.volumetype` reports real trade volume (`base` or `quote`). On tick-volume instruments — most CFDs, forex and many indices — it degrades to the same neutral scoring path as a disabled module, and `breakoutVolumeOk` passes through unconditionally instead of gating on a tick-count series. The info table's "Volume" row already reports this as "Unavailable".
+The Volume Dry-Up module only activates when `syminfo.volumetype` reports real trade volume (`base` or `quote`). On tick-volume instruments it degrades to the same neutral scoring path as a disabled module, and `breakoutVolumeOk` passes through unconditionally instead of gating on a tick-count series. The info table's "Volume" row already reports this as "Unavailable".
 
 ## Bias
 
