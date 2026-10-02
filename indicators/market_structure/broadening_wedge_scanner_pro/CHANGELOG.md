@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.15 — 2026-10-02
+- The swing-path component (20 points) is no longer part of the score: every wedge that passes the `pathOk` gate earned the same 20 points, so it only inflated the score. `pathOk` stays a hard gate; the debug table still shows the component and labels it `(Gate)`
+- The remaining components (80 points) are scaled to 0-100, so the score range and `Mindestqualität` keep their meaning. Because the constant 20 points are gone, a valid wedge now needs more real quality to clear the same `Mindestqualität` (and `Kandidat-Mindestscore (Watch)`)
+
+## v1.14.1 — 2026-10-02
+- Dashboard no longer shows `READY` for a valid candidate that is not being tracked: such a candidate is always stillborn, aged out or already resolved, because a valid, open candidate is tracked the moment it is found. Without an active wedge the status is now `WATCH` (near-miss candidate, same rule as the chart's candidate marker, with its score/type/window) or `SCAN` (no pattern details)
+- Removed the unused "best trackable candidate" state that the dashboard comments claimed to use but never read
+
 ## v1.14 — 2026-07-15
 - Rewrote the score into 8 continuous weighted criteria — swing path (20), traversal (20), realized expansion (15), touch quality (15), line quality (10), anchor span (10), duration (5), relevance (5) — replacing the old 5-criterion binary structure/expansion/touch/lineQuality/duration score
 - `minExpansionRatio` renamed to `projectedExpansionTarget` (now blended into the realized-expansion score instead of gating on its own); added `minTraversalRatio`, `minRealizedExpansionRatio`, `minAnchorSpanRatio`, and `maxBoundaryDriftAtr` inputs backing the new traversal/realized-expansion/anchor-span/drift gates

@@ -6,7 +6,7 @@ Confirmed ZigZag pivots with pullback-to-fibo labeling and a live fib fan on the
 
 - Confirmed ZigZag pivot engine based on symmetric pivot detection (`ta.pivothigh`/`ta.pivotlow`)
 - Pullback labels directly at completed turning points with standard-fibo color coding (0.236 / 0.382 / 0.500 / 0.618 / 0.786)
-- Depth regime (Shallow / Normal / Deep / Extreme), pullback duration, efficiency and reaction tracking (HH/LL, Weak, Break)
+- Depth regime (Shallow / Normal / Deep / Extreme), pullback duration, efficiency and reaction tracking (HH/LL, Weak, Break) — the outcome stays Pending until the next same-type pivot after the pullback exists; Break means that pivot undercut (up impulse) or exceeded (down impulse) the pullback pivot
 - Live active-leg projection with fib fan, current-zone box and live retracement label
 - Pullback zone engine: confluence zone from recent qualified pullbacks plus continuation/failure outlook
 - Zone memory boxes for historical supportive / fragile / risk levels

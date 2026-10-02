@@ -40,7 +40,7 @@ Instead of scoring a single pivot price, the barrier's quality function clusters
 
 ## Rejection / exhaustion evidence
 
-At bars whose high/low actually came within `Rejection Touch Distance ATR` of the barrier during the last `Rejection Lookback Bars`, the engine scores: how much of the bar's range was upper/lower wick beyond the body, how often the close failed to hold beyond the barrier, and how compressed the bodies of those *touching* bars are (exhaustion). This is a same-bar-reactive signal — two weak rejection candles at the barrier visibly shift weight from Direct toward Pullback/Failure, not just the slower-moving impulse/structure/level scores. Close location, engulfing and inside-bar detection are deliberately deferred — see `todo.md`.
+At bars whose high/low actually came within `Rejection Touch Distance ATR` of the barrier during the last `Rejection Lookback Bars`, the engine scores: how much of the bar's range was upper/lower wick beyond the body, how often a bar that probed beyond the barrier failed to close beyond it (a bar that only approached the barrier is not a failed close), and how compressed the bodies of those *touching* bars are (exhaustion). This is a same-bar-reactive signal — two weak rejection candles at the barrier visibly shift weight from Direct toward Pullback/Failure, not just the slower-moving impulse/structure/level scores. Close location, engulfing and inside-bar detection are deliberately deferred — see `todo.md`.
 
 ## Pullback zone
 
@@ -54,6 +54,8 @@ When `Enable Outcome Recorder` is on, every fresh setup (a confirmed bar where `
 - **Pullback** — pullback zone touched at some point, then target reached
 - **Failure** — the failure/invalidation level is touched before the target
 - **Unresolved** — none of the above within `Projection Bars`
+
+For the recorder, the pullback zone's near edge is clamped to at least `0.5 × Fallback Pullback ATR` away from the entry close, so ordinary bar noise right after entry cannot count as a pullback touch. The drawn zone is not clamped.
 
 Within a single bar, if more than one of these could apply at once (Pine has no intrabar sequencing — a bar's high and low happened in some order the OHLC data doesn't reveal), Failure takes priority over a pullback-zone touch, which takes priority over Target. This is a documented pessimistic approximation, not a precise reconstruction.
 

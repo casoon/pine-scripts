@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.15 — 2026-10-02
+- The swing-path component (20 points) is no longer part of the score: every triangle that passes the `pathOk` gate earned the same 20 points, so it only inflated the score. `pathOk` stays a hard gate; the debug table still shows the component and labels it `(Gate)`
+- The remaining components (80 points) are scaled to 0-100, so the score range and `Mindestqualität` keep their meaning. Because the constant 20 points are gone, a valid triangle now needs more real quality to clear the same `Mindestqualität` (and `Kandidat-Mindestscore (Watch)`)
+
+## v1.14.1 — 2026-10-02
+- Dashboard no longer shows `READY` for a valid candidate that is not being tracked: such a candidate is always stillborn, aged out or already resolved, because a valid, open candidate is tracked the moment it is found. Without an active triangle the status is now `WATCH` (near-miss candidate, same rule as the chart's candidate marker, with its score/type/window) or `SCAN` (no pattern details)
+- Removed the unused "best trackable candidate" state that the dashboard comments claimed to use but never read
+
 ## v1.14 — 2026-07-15
 - Score rebuilt from 5 binary criteria (structure/compression/touch/lineQuality/duration, all-or-nothing) to 8 continuous weighted criteria: swing path (20), traversal (20), realized compression (15), boundary proximity (15), line quality (10), boundary/apex (10), duration (5), relevance (5) — each now contributes a graded amount instead of a flat pass/fail
 - New hard gates alongside the existing `structureOk`/`lineQualityOk`/`durationOk`: `pathOk` (alternating swing sequence plus monotonic same-side progression), `traversalOk` (≥3 consecutive legs each traversing ≥`minTraversalRatio` of the local channel width), `realizedCompressionOk` (actual price-leg amplitudes shrink, not just the fitted geometry), `boundaryOk` (anchor span ≥ `minAnchorSpanRatio`, mean residual ≤ `maxMeanResidualAtr`, zero swing violations, contacts spread across the window's early/middle/late thirds, and an extra touch confirming the flat side for ascending/descending), and `apexOk` (the two boundaries' intersection must lie ahead of the window but within `maxApexDistanceMult`× its width)

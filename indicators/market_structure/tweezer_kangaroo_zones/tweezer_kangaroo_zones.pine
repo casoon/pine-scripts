@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Tweezer & Kangaroo Zones [WavesUnchained]
-// Version: 3.1.3
+// Version: 3.2.0
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // Modular pattern detection with zone scoring, structure context, and confluence analysis
 //
@@ -589,6 +589,9 @@ var float[] zImpulse   = array.new<float>()  // Impulse before (0-1)
 var int[]   zTouches   = array.new<int>()    // Touch counter
 var int[]   zLastTouchBar = array.new<int>() // Debounce: last touch bar
 var string[] zPatternType = array.new<string>()  // "T" for Tweezer, "K" for Kangaroo
+var float[] zScoreMult  = array.new<float>()     // Pattern weight (× height factor at creation) kept for score updates
+var float[] zStructPts  = array.new<float>()     // Structure bonus kept for score updates
+var int[]   zPatternBar = array.new<int>()       // Last bar a pattern created/reinforced the zone
 var string[] zZoneType = array.new<string>()     // "R" for Reversal, "C" for Continuation
 var string[] zGrade = array.new<string>()        // "A", "B", "C" Ranking
 var label[] zLabels = array.new<label>()         // Zone labels with tooltips
@@ -651,9 +654,9 @@ f_calc_impulse(_isSupply) =>
     atrNorm = atr * 2
     float moveInto = 0.0
     if _isSupply
-        moveInto := math.max(0.0, nz(high - high[5]))
+        moveInto := math.max(0.0, nz(high[1] - high[6]))
     else
-        moveInto := math.max(0.0, nz(low[5] - low))
+        moveInto := math.max(0.0, nz(low[6] - low[1]))
     math.min(1.0, moveInto / math.max(1e-6, atrNorm))
 
 // Freshness (0-1)
@@ -835,6 +838,9 @@ f_merge_zone(_idx, _newTop, _newBot, _newRejection, _newExtreme, _newImpulse, _p
     baseScore = f_calc_zone_score( array.get(zRejection, _idx), array.get(zExtreme, _idx), array.get(zImpulse, _idx), f_calc_fresh(bornBar), f_calc_clean(touches) )
     newScore = baseScore * patternMult + structScore
     array.set(zScore, _idx, newScore)
+    array.set(zScoreMult, _idx, patternMult)
+    array.set(zStructPts, _idx, structScore)
+    array.set(zPatternBar, _idx, bar_index)
 
     b = array.get(boxes, _idx)
     box.set_top(b, mergedTop)
@@ -916,6 +922,9 @@ f_new_zone(_isSupply, _top, _bot, _patternType, _patternStrength) =>
                 array.push(zTouches, 0)
                 array.push(zLastTouchBar, bar_index)
                 array.push(zPatternType, _patternType)
+                array.push(zScoreMult, patternMult * (0.7 + 0.3 * hScore))
+                array.push(zStructPts, structScore)
+                array.push(zPatternBar, bar_index)
 
                 zType = f_classify_zone_type(_isSupply, extreme, impulse)
                 adjustedScore = zType == "R" ? initScore + reversalBonus : initScore - continuationPenalty
@@ -985,7 +994,10 @@ f_update_zones() =>
                     impulse = array.get(zImpulse, i)
                     fresh = f_calc_fresh(bornBar)
                     clean = f_calc_clean(touches)
-                    baseNewScore = f_calc_zone_score(rejection, extreme, impulse, fresh, clean)
+                    // Same composition as creation/merge: pattern weight (and the
+                    // creation height factor) and the structure bonus are kept,
+                    // only freshness and cleanliness change over time.
+                    baseNewScore = f_calc_zone_score(rejection, extreme, impulse, fresh, clean) * array.get(zScoreMult, i) + array.get(zStructPts, i)
 
                     zType = array.get(zZoneType, i)
                     newScore = zType == "R" ? baseNewScore + reversalBonus : baseNewScore - continuationPenalty
@@ -1206,7 +1218,7 @@ if useMOST
     baseMax += wMOST
 
 // Pattern Strength component
-patternStrength = na(tTopStrength) ? (na(tBotStrength) ? (na(ktBearStrength) ? (na(ktBullStrength) ? 0.0 : ktBullStrength) : ktBearStrength) : tBotStrength) : tTopStrength
+float patternStrength = na(tTopStrength) ? (na(tBotStrength) ? (na(ktBearStrength) ? (na(ktBullStrength) ? na : ktBullStrength) : ktBearStrength) : tBotStrength) : tTopStrength
 if not na(patternStrength)
     baseScore += patternStrength * wPattern
     baseMax += wPattern
@@ -1238,7 +1250,10 @@ if array.size(boxes) > 0
             top_ = array.get(zTop, i)
             bot_ = array.get(zBot, i)
             wasRet = array.get(zRetested, i)
-            inside = high >= bot_ and low <= top_
+            // A zone created or reinforced by this bar's own pattern is not
+            // being retested — the pattern bar always lies inside it.
+            patternBarItself = array.get(zPatternBar, i) == bar_index
+            inside = high >= bot_ and low <= top_ and not patternBarItself
             trendCheckBuy = signalRequireTrend ? trendUp : true
             trendCheckSell = signalRequireTrend ? trendDn : true
             if inside and (not wasRet or not retestOnceOnly) and not hardBlocked and softGate and (inSession or not signalOnlyInSess)
@@ -1248,7 +1263,7 @@ if array.size(boxes) > 0
                     mostPtsBuy = useMOST ? ((mostScope == "Local" ? mostDirLocal > 0 : mostScope == "HTF" ? mostDirHTF > 0 : (mostDirLocal > 0 and mostDirHTF > 0)) ? wMOST : 0) : 0
                     sideAdd = (useStruct ? wStruct : 0) + (useZoneThin ? zoneThinPts(top_, bot_) : 0) + stPtsBuy + mostPtsBuy
                     sc = baseScore + sideAdd
-                    scMax = baseMax + (useStruct ? wStruct : 0) + (useZoneThin ? wZoneThin : 0) + (useST ? wSupertrend : 0) + (useMOST ? wMOST : 0)
+                    scMax = baseMax
                     norm = scMax > 0 ? 10.0 * sc / scMax : na
                     if sc >= minScoreBuy
                         buySig := true
@@ -1260,7 +1275,7 @@ if array.size(boxes) > 0
                     mostPtsSell = useMOST ? ((mostScope == "Local" ? mostDirLocal < 0 : mostScope == "HTF" ? mostDirHTF < 0 : (mostDirLocal < 0 and mostDirHTF < 0)) ? wMOST : 0) : 0
                     sideAdd = (useStruct ? wStruct : 0) + (useZoneThin ? zoneThinPts(top_, bot_) : 0) + stPtsSell + mostPtsSell
                     sc = baseScore + sideAdd
-                    scMax = baseMax + (useStruct ? wStruct : 0) + (useZoneThin ? wZoneThin : 0) + (useST ? wSupertrend : 0) + (useMOST ? wMOST : 0)
+                    scMax = baseMax
                     norm = scMax > 0 ? 10.0 * sc / scMax : na
                     if sc >= minScoreSell
                         sellSig := true

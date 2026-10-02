@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.9 — 2026-10-02
+- Outcome recorder: the near edge of a case's pullback zone is now clamped to at least `0.5 × Fallback Pullback ATR` from the entry close (`close − dir · k · ATR`). A small impulse could place the zone's near edge within bar noise of close, so the first bar after entry "touched" it and a direct move was recorded as `Pullback`. The drawn pullback zone is unchanged
+
+## v0.6.8 — 2026-10-02
+- Fixed the failed-close part of the rejection score: a touching bar now counts as a failed close only if it actually traded beyond the barrier and closed back on the near side. Previously every bar that merely approached the barrier counted, because the barrier always lies beyond the current close — this alone lifted the rejection score to 0.4 without any real rejection
+
 ## v0.6.7 — in progress
 - Do not visually elevate a near-tie: `Minimum Dominance Gap %` (default: 8 pp) now requires a meaningful lead before a scenario branch is thick and opaque; the summary reports `Mixed` or `Clear edge` with the actual gap.
 - Fixed rejection body-compression contamination: only barrier-touch candles now contribute, consistent with wick and failed-close evidence.

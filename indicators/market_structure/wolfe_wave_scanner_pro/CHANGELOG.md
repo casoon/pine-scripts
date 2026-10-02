@@ -1,5 +1,14 @@
 # Changelog
 
+## v4.15 — 2026-10-02
+- The structure component (20 points) is no longer part of the score: every pattern that passes the `structureOk` gate earned the same 20 points, so it only inflated the score. `structureOk` stays a hard gate; the debug table still shows the component and labels it `(Gate)`
+- The remaining components (80 points) are scaled to 0-100, so the score range and `Mindestqualität` keep their meaning. Because the constant 20 points are gone, a valid pattern now needs more real quality to clear the same `Mindestqualität` (and `Kandidat-Mindestscore (Watch)`)
+
+## v4.14.1 — 2026-10-02
+- Added the arrival gates the Triangle and Broadening scanners already use: a valid Wolfe candidate is no longer fired when it is already past its ETA expiry, or when the bar it is found on already invalidates it or reaches its EPA target (logged as `PATTERN SKIPPED (already aged/stillborn)`)
+- One-bar grace period after a pattern is drawn: Invalidated / EPA Target / Partial / Expired can no longer fire on the same bar as the new-pattern signal
+- Dashboard no longer shows `READY` for a valid but untracked candidate (always stillborn, aged or already resolved); without an active pattern the status is `WATCH` (near-miss candidate) or `SCAN`
+
 ## v4.14 — 2026-07-15
 - P5-zone tolerance is now directional instead of one symmetric `p5TolAtr` (1.5 ATR): `p5InsideTolAtr` (default 0.75) caps how far point 5 may sit inside the wedge, `p5OvershootTolAtr` (default 1.0) caps how far it may overshoot the 1-3 line — matches the classic Wolfe definition where inside/outside placement isn't equally valid
 - Boundary-hold tolerance split into `swingBoundaryTolAtr` (default 0.35, for the intermediate-swing check) and `barBoundaryTolAtr` (default 0.25, for the bar-by-bar check); the bar-level 1-3 check now exempts point 5's own bar (already graded by the P5-zone gate), while the 2-4 wall stays enforced on that bar like every other

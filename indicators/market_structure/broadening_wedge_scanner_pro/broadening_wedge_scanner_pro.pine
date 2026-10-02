@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Broadening Wedge Scanner Pro [WavesUnchained]
-// Version: 1.14
+// Version: 1.15
 // Author: WavesUnchained
-// Build: 2026-07-15 12:00:00
+// Build: 2026-10-02 00:00:00
 // ============================================================================
 // Slides a fixed-size window of confirmed swings across the search depth and
 // fits two boundary lines (upper from the window's outer highs, lower from
@@ -18,8 +18,8 @@
 //   ✓ Sliding-window search across consecutive, alternating swing windows
 //   ✓ Tracks multiple simultaneously valid, non-overlapping wedges at once,
 //     each with its own drawings and breakout state
-//   ✓ Weighted 0-100 score: swing path, traversal, realized expansion,
-//     boundary reliability, line quality, duration, and current relevance
+//   ✓ Weighted 0-100 score: traversal, realized expansion, boundary
+//     reliability, line quality, duration, and current relevance
 //   ✓ Live breakout tracking (either direction resolves the pattern) + alert
 //   ✓ Near-miss candidate marker and score-breakdown debug table
 //
@@ -170,13 +170,6 @@ emptyPattern() =>
 // candidate marker. Independent of `trackedPatterns` below, which holds
 // every distinct, non-overlapping VALID wedge found at once.
 var Pattern best = emptyPattern()
-
-// Best candidate that could ACTUALLY be tracked (valid, still open, not
-// already aged out) — this is what the main dashboard row shows. `best`
-// above can be a stillborn or already-aged window-end that will never fire,
-// which made the dashboard show a misleadingly high "Best Score"/Type for a
-// shape that was never going to appear on the chart.
-var Pattern bestTrackable = emptyPattern()
 
 var trackedPatterns = array.new<TrackedPattern>()
 
@@ -641,7 +634,12 @@ f_eval_wedge(int[] pathX, float[] pathY, int[] pathDir, int[] highX, float[] hig
     candidateAge = float(math.max(bar_index - windowEndX, 0))
     relevanceScore = int(math.round(5.0 * (maxRelevantAge > 0 ? 1.0 - f_clamp01(candidateAge / maxRelevantAge) : 0.0)))
 
-    score = pathScore + traversalScore + rangeScore + touchScore + lineScore + anchorScore + durationScore + relevanceScore
+    // The swing-path component is constant (20) for every pattern that passes
+    // the pathOk gate, so it is excluded from the score: it stays a gate and a
+    // debug readout only. The remaining components (80 points) are scaled to
+    // 0-100 so the score range and Mindestqualität keep their meaning.
+    rawScore = traversalScore + rangeScore + touchScore + lineScore + anchorScore + durationScore + relevanceScore
+    score = int(math.round(float(rawScore) * 100.0 / 80.0))
     hardGatesOk = structureOk and pathOk and traversalOk and realizedExpansionOk and boundaryOk and lineQualityOk and durationOk
 
     Pattern.new(
@@ -731,7 +729,6 @@ if newSwing and sz >= wedgeWindow
     start = math.max(0, sz - searchDepth)
     candidatesPerWindowEnd = array.new<Pattern>()
     localBest = emptyPattern()
-    localBestTrackable = emptyPattern()
 
     // Guarded explicitly: Pine's `for i = A to B` silently reverses (and can
     // step on an out-of-bounds index) whenever A > B — which happens here if
@@ -845,8 +842,6 @@ if newSwing and sz >= wedgeWindow
                 else if not stillOpen
                     f_log("PATTERN SKIPPED (stillborn) type=" + c.ttype + " score=" + str.tostring(c.score))
                 if stillOpen and not alreadyAged
-                    if c.score > localBestTrackable.score
-                        localBestTrackable := c
                     overlapIdx = f_find_overlap_index(c)
                     if overlapIdx < 0
                         if array.size(trackedPatterns) < maxConcurrentPatterns
@@ -885,10 +880,6 @@ if newSwing and sz >= wedgeWindow
                             array.set(trackedPatterns, overlapIdx, newTp)
                             newWedgeFound := true
                             f_log("PATTERN REPLACED type=" + c.ttype + " score=" + str.tostring(c.score))
-
-    // `localBestTrackable` is populated only while processing candidates;
-    // assigning it earlier left the SCAN dashboard permanently empty.
-    bestTrackable := localBestTrackable
 
     // Cleans up any same-direction overlap chain the pairwise checks above
     // can miss (A overlaps B, B overlaps C, but A and C don't directly
@@ -979,15 +970,19 @@ plotshape(newSwing and showCandidate and best.score >= candidateThreshold and no
 if showDashboard and barstate.islast
     statusActive = array.size(trackedPatterns) > 0
 
-    // Reflects the actually tracked pattern when one exists, otherwise the
-    // best candidate that could actually be tracked right now (valid, still
-    // open, not already aged out) — not the raw `best`, which can be a
-    // stillborn or already-aged window-end that will never fire, making the
-    // dashboard show a misleadingly high score/type for a shape that was
-    // never going to appear on the chart.
-    Pattern dashPattern = statusActive ? array.get(trackedPatterns, f_find_best_active_index()).p : best
-    dashWatch = not statusActive and best.structureOk and best.score >= candidateThreshold
-    dashStatus = statusActive ? "ACTIVE" : dashWatch ? (best.valid ? "READY" : "WATCH") : "SCAN"
+    // Reflects the actually tracked pattern when one exists. Without one, a
+    // valid candidate is never "ready": a valid, open, non-aged candidate is
+    // tracked the moment it is found, so an untracked valid `best` is always
+    // stillborn, aged out or already resolved. Only a near-miss (structure
+    // OK, not valid — the same rule as the chart's candidate marker) is shown
+    // as WATCH; otherwise SCAN with no pattern details.
+    dashWatch = not statusActive and best.structureOk and best.score >= candidateThreshold and not best.valid
+    Pattern dashPattern = emptyPattern()
+    if statusActive
+        dashPattern := array.get(trackedPatterns, f_find_best_active_index()).p
+    else if dashWatch
+        dashPattern := best
+    dashStatus = statusActive ? "ACTIVE" : dashWatch ? "WATCH" : "SCAN"
 
     table.cell(dash, 0, 0, "Broadening Scanner", text_color=tc, bgcolor=hd, text_size=size.small)
     table.cell(dash, 1, 0, dashStatus, text_color=color.white, bgcolor=statusActive ? color.new(wedgeCol, 0) : dashWatch ? candidateCol : color.new(color.gray, 80), text_size=size.small)
@@ -1009,11 +1004,11 @@ if showDashboard and barstate.islast
 // ============================================================================
 
 if showDebug and barstate.islast
-    table.cell(dbgTable, 0, 0, "Score-Breakdown", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dbgTable, 0, 0, "Score (Σ/80 → 100)", text_color=tc, bgcolor=hd, text_size=size.small)
     table.cell(dbgTable, 1, 0, str.tostring(best.score) + " / " + str.tostring(minScore), text_color=tc, bgcolor=hd, text_size=size.small)
 
-    table.cell(dbgTable, 0, 1, "Swing-Pfad (20)", text_color=tc, text_size=size.tiny)
-    table.cell(dbgTable, 1, 1, str.tostring(best.pathScore) + (best.pathOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.tiny)
+    table.cell(dbgTable, 0, 1, "Swing-Pfad (Gate)", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 1, str.tostring(best.pathScore) + (best.pathOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
 
     table.cell(dbgTable, 0, 2, "Pfad-Fortschritt", text_color=tc, text_size=size.small)
     table.cell(dbgTable, 1, 2, str.tostring(best.progressionMatches) + "/" + str.tostring(best.progressionTests), text_color=tc, text_size=size.small)
