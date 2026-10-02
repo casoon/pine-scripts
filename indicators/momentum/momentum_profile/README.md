@@ -7,7 +7,7 @@ Analog to a volume-profile or money-flow delta profile, but for momentum: maps a
 ## Features
 
 - WaveTrend average per price zone — bars extend right from the anchor line, green = bullish average, red = bearish average
-- MFI average per zone as a colored reference band (green = net buying pressure, red = net selling, gray = neutral/mixed)
+- MFI average per zone as a colored reference band (green = net buying pressure, red = net selling, gray = neutral/mixed) — needs real trade volume (`syminfo.volumetype` base/quote); without it the band stays neutral gray and the dashboard shows Avg MFI as n/a
 - Momentum POC: the zone with the highest absolute average WaveTrend value, highlighted separately
 - Configurable lookback, row count, profile width (bars), and horizontal bar offset
 - Dashboard showing overall bias, average WT, average MFI, and the mPOC price level

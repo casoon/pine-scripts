@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.2.0 — 2026-10-02
+- Change: divergence reaction is now measured from the pivot-bar close over the "Reaction window" bars after the pivot (previously capped at the pivot confirmation bars, so the window input had no effect). Divergences are drawn at confirmation with a provisional score and finalized (score, tooltip, line width) once the window has passed; score-based alerts would have to fire at finalization
+- Change: fatigue component removed from the divergence score (it duplicated the MFI delta); its weight is redistributed proportionally over the remaining components. "Fatigue lookback" input removed
+- Fix: bull/bear divergence sequence count now resets when a confirmed pivot low/high is not a divergence of that direction (was unbounded)
+- Data validity: MFI (chart and HTF) now requires real trade volume (`syminfo.volumetype` base/quote); without it MFI parts go na and the CCI mode keeps working. Data Contract block added to the header
+
+## v1.1.3 — 2026-10-02
+- Fix (CCI / MFI+CCI with CCI engine): the divergence OS/OB area check now uses zones built from the active oscillator instead of the MFI zones, so CCI divergences are tested against their own range
+- Internal: divergence score lookbacks are now computed on every bar instead of inside the divergence branch (no change in values)
+
 ## v1.1.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

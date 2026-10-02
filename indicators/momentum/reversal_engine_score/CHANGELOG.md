@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.7.2 — 2026-10-02
+- Script header corrected: the quality score runs 0–2 (not 0–7), and the short RSI condition is RSI > 50 (elevated), not "overbought" — matching the code and README
+
 ## v1.7.1 — 2026-09-05
 - Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.0 — 2026-10-02
+- Fix: follow-through no longer counts the peak bar's own range. It is now measured from the peak bar's close against the extreme of the bars after the peak, so a single wide stress bar can no longer pass the MinFollow ATR check on its own
+- Fix: the MinExtreme duration filter is applied as named — an extreme must persist for MinExtreme bars (previously one bar less, so MinExtreme 2 had no effect)
+- Fix (peak-hold): an event whose strongest bar was the last bar of its cluster was silently dropped; the duration check now uses the finished cluster's length and trend alignment is read on the actual peak bar
 ## v1.0.4 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

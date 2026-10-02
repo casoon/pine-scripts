@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.3 — 2026-10-02
+- Fix: when two price pivots sit closer than the pivot window, their oscillator windows overlap and the current window extreme could be the previous pivot's own trough/peak — the divergence then compared an extreme against itself or against a bar before the reference pivot. A candidate pivot now only matches when the current oscillator extreme lies after that pivot's bar
+
+## v1.5.2 — 2026-10-02
+- Fix: the Level filter (Fixed / Dynamic Zones) and the StdDev filter tested the oscillator on the price-pivot bar, while the divergence itself compares the oscillator's extreme within the pivot window. Valid divergences whose oscillator trough/peak sat a few bars off the price pivot were suppressed. Both filters now test the same window extreme the divergence and quality score use
+
 ## v1.5.1 — 2026-09-05
 - Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
 

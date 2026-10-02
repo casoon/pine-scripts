@@ -43,7 +43,7 @@ All four layers are computed for both sides (0–100 each); the ribbons show the
 
 ### Timing (Trigger TF — display context; the gate is the cross itself)
 
-- WT cross (35) + WT momentum (30) + JMA structure (25) + Setup-TF WT direction (10)
+- WT cross (39) + WT momentum (33) + JMA structure (28) — Setup-TF WT direction is scored in Opportunity only, not repeated here
 
 ### Quality (Trigger TF — grades A/B)
 

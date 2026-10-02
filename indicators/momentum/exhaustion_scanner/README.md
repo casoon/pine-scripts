@@ -42,12 +42,12 @@ Per-market role-weight profiles. Money Flow is folded into the Exhaustion role a
 
 ## Signals
 
-- **Signal modes** — Early (base threshold 30), Normal (40), Conservative (50). The *effective* threshold per side is the base ± regime penalty − divergence relief.
+- **Signal modes** — Early (base threshold 30), Normal (40), Conservative (50). The *effective* threshold per side is the base ± regime penalty − divergence relief (only with Divergence assist on).
 - **One score** drives both the dashboard and the label — the number on the label is the same number in the dashboard.
 - **Confirmation modes**:
   - **Score Only** — marks the first bar the score reaches the effective threshold
   - **Candle Reaction** — additionally requires a reaction (reclaim-fail / WT-cross-from-extreme / wick rejection)
-- **Divergence assist** — an active WT divergence lowers the effective threshold by a configurable relief, so stretched + diverging price can label earlier. Divergences invalidate when price breaks beyond the divergence pivot, not just on the validity timer.
+- **Divergence assist** (off by default) — an active WT divergence lowers the effective threshold by a configurable relief, so stretched + diverging price can label earlier. The divergence already counts in the Exhaustion score, so enabling this counts it twice. Divergences invalidate when price breaks beyond the divergence pivot, not just on the validity timer.
 - **Signal spacing** — optional minimum bars between same-side labels.
 - **Exhaustion zones** — each signal draws a box over the overextended price area (Bollinger band → extreme). The zone keeps extending right until price reclaims the band or it reaches the configured max age, so the *region* to avoid chasing into stays visible, not just the bar.
 - **Heatmap background** — full intensity at signal level, faint at setup level.

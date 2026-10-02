@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.6.4 — 2026-10-02
+- Fix: the Setup-TF WT direction (4H WT1 rising/falling) was scored in both Opportunity (+20) and Timing (+10). It now counts in Opportunity only; Timing's three Trigger-TF components are rescaled 35/30/25 → 39/33/28 so its maximum stays 100. Display/composite context only — the entry gate is unchanged
+
+## v2.6.3 — 2026-10-02
+- Fix: the failed-signal check ran on the entry bar itself and tested that bar's wick (formed before the close entry) against the adverse-ATR level, so hammer/shooting-star entries were marked FAILED with "held 0b". The check now starts on the bar after entry
+
 ## v2.6.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

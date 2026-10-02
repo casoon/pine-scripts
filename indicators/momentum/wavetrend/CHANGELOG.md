@@ -1,5 +1,14 @@
 # Changelog
 
+## wavetrend v1.3.2 — 2026-10-02
+- Fix: dashboard Bias double-counted direction — the regime term (±2) repeated the oscillator-side direction already in `oscBias`. Regime now adds trend strength only (±1 when the spread is above its average); confidence scales against the new maximum of 6 and the bucket thresholds are scaled proportionally (×6/7). Display only, no effect on signals
+- Docs: Min Score tooltips and README now state that Persist signals can score at most 2 (percentile + divergence) and are suppressed at Min Score ≥ 3
+
+## wavetrend_v3 v3.2.4-experimental — 2026-10-02
+- Fix: on symbols without real trade volume (CFDs, tick volume) the per-family volume requirement blocked every setup — Balanced profile on ≤1H charts and Strict on any timeframe produced zero signals. The requirement now degrades to pass-through without real volume, as the code comment already specified
+- Fix: context score double-counted components the setup gate already requires. With the setup gate on, the pullback family hard-requires the structure condition and any family with an active volume requirement (on real volume) hard-requires the volume spike — both were then scored +1 again, so the pullback minimum score was effectively one point lower than set. These components now score 0 where they are already gated (same rule as the HTF component); the displayed maximum score drops accordingly
+- Fix: the virtual trade's running high/low (MFE, Capture % in the trade journal, and the opt-in follow-through exit) started at the entry bar's high/low although entry is at the close, so the pre-entry wick counted as favorable excursion. It now starts at the entry close
+
 ## v1.3.1 — 2026-09-05
 - Data validity pass (`wavetrend.pine`): added `volumeIsReal` guard (`syminfo.volumetype == "base"/"quote"` and not na) ahead of the opt-in "Gate: Volume Conviction" (`useVolGate`, default off). Without real trade volume the gate now degrades to pass-through instead of comparing against tick-count noise, so enabling it on a tick-volume symbol can't silently block or pass every signal forever. Noted in the input's tooltip. Data Contract added (`CFD-degraded`)
 - Fix: Compare Symbol dashboard row (`compareText`/`compareColor`) had no `na(compareWtOsc)` branch — the reference symbol has its own session/holidays, so on a bar where it has no data every threshold comparison against `na` evaluates false in Pine and silently fell through to the last branch, showing a fabricated `'Bear'` reading with no data behind it. Added an explicit neutral branch (`'—'`, `colorNeutral`), same as the `not useCompare` case; converted the ternary chain to `if`/`else if` in the process. Data Contract documents the compareSymbol reference as informational-only, no gating

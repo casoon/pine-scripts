@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.4.2 — 2026-10-02
+- Fix: Signal Quality depth component is now capped so it contributes at most its documented 50 points — previously a deep excursion alone could push the score to 100/100 even on a weak (stalled or counter-context) cross
+
 ## v1.4.1 — 2026-07-09
 - Fixed Sentiment Bar color: it used `score > 0 ? colBull : colBear`, coloring the overbought side (positive score) bull and the oversold side (negative score) bear — backwards from every other color cue in the panel (gradient line, Bull/Bear Extreme triangles), where `colBull` marks the oversold/bullish-reversal side and `colBear` the overbought/bearish-reversal side. Swapped to match.
 

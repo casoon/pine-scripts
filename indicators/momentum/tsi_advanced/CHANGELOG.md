@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.1 — 2026-10-02
+- Fix: Signal Quality depth component is now capped so it contributes at most its documented 50 points — previously a deep excursion alone could push the score to 100/100 even on a weak (stalled or counter-context) cross
+
 ## v1.3 — 2026-07-14
 - Removed fixed ±100 upper/lower zone boundary hlines and their OB/OS zone fill — these forced the panel's autoscale regardless of actual TSI range, compressing the TSI/signal/context lines near zero since real TSI values rarely approach ±100 at the default ±25 stretch zones. The panel now autoscales to the real data range. Same fix already applied to ROC Advanced and Fisher Transform Advanced in their v1.1.
 

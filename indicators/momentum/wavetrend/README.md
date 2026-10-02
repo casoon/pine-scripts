@@ -48,6 +48,8 @@ Measures the rate of change of `wtOsc` over a configurable lookback (`slopeLen` 
 
 Counts consecutive bars with `wtOsc` above or below zero. When the count reaches the configured minimum, a "Sustained Bull / Bear" signal is shown in the dashboard. This identifies wave-riding conditions where counter-trend signals should be discounted.
 
+Persist signals fire while the oscillator is already on the trend side of zero, so the zone-visit, zone-hold and deep-extreme score components cannot score for them. A Persist signal scores at most 2 (percentile + divergence) and is therefore suppressed at Min Score ≥ 3.
+
 ### D — Wave Anatomy
 
 Three metrics that describe where a wave is in its lifecycle, independent of timeframe:
@@ -106,7 +108,7 @@ The optional "Gate: Volume Conviction" (External Confirmations group, off by def
 | Percentile | Extension D: oscillator percentile rank in recent history |
 | Wave | Extension D: peak/trough structure (accelerating / fading) |
 | Correction | Extension D: pullback depth as % of last wave amplitude |
-| Bias | Composite score across all dimensions (with confidence %) |
+| Bias | Composite score of oscillator side, momentum, cross, divergence and trend strength (regime adds ±1 only, its direction is already in the oscillator side), with confidence % of the maximum 6 |
 | Compare | Optional: WaveTrend zone of a second symbol (OB / OS / Bull / Bear) |
 
 ## Bug Fixes vs. Source

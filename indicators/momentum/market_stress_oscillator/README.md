@@ -21,6 +21,6 @@ Bi-directional Williams VIX Fix stress oscillator. Downside stress (dip/fear) an
 ## Event Logic
 
 1. A stress extreme fires when the z-score exceeds the per-TF threshold for at least the minimum number of bars and the JMA slope + ADX filters agree.
-2. With peak-hold enabled, the cluster's strongest bar becomes the event candidate when the cluster ends.
-3. After the reaction window, follow-through (in ATR from the peak price) decides acceptance: `follow >= MinFollow ATR` → accepted, otherwise rejected.
+2. With peak-hold enabled, the cluster's strongest bar becomes the event candidate when the cluster ends; the minimum-duration check then applies to the whole cluster.
+3. After the reaction window, follow-through decides acceptance: the extreme reached by the bars after the peak bar, measured in ATR from the peak bar's close (`follow >= MinFollow ATR` → accepted, otherwise rejected). The peak bar's own range does not count.
 4. Cooldown bars suppress new events in the same direction after each evaluation.

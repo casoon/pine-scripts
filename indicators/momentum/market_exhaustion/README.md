@@ -11,7 +11,7 @@ MFI + StochRSI fusion in a single exhaustion panel. The MFI (optionally JMA-smoo
 - Auto-HTF MFI context: automatic higher-timeframe selection (5m→15m, 15m→1H, 1H→4H, intraday→D, daily→M) or manual TF; bias label at the top of the panel
 - JMA smoothing: optional Jurik-style smoothing for MFI, StochRSI K, and HTF MFI
 - Regular divergences on the active oscillator, anchored on price pivots, with OS/OB area check, ATR swing filter, and direction tolerances
-- Divergence quality score (0–100) from ΔMFI, swing size, time span, fatigue, reaction, and sequence count — strong divergences drawn with thicker lines
+- Divergence quality score (0–100) from ΔMFI, swing size, time span, post-pivot reaction, and sequence count — strong divergences drawn with thicker lines
 - Timeframe presets for divergence parameters (5m / 15m / 1H / 4H / 1D) with "More Signals" and "Conservative" profiles, or fully manual values
 - Optional candle coloring by HTF bias or signals
 - Alert conditions for long/short signals
@@ -26,4 +26,10 @@ MFI + StochRSI fusion in a single exhaustion panel. The MFI (optionally JMA-smoo
 
 ## Divergence Scoring
 
-Score (0–100) is a weighted blend of six normalized components: MFI delta, swing size vs ATR, bars between pivots, fatigue (distance from the recent oscillator extreme), price reaction after the pivot, and consecutive-divergence sequence — plus an optional HTF bias bonus. Lines with score ≥ the strong threshold are drawn thicker; the mid label shows the score (or "Bull/Bear Div" text).
+Score (0–100) is a weighted blend of five normalized components: MFI delta, swing size vs ATR, bars between pivots, price reaction after the pivot, and consecutive-divergence sequence — plus an optional HTF bias bonus. Lines with score ≥ the strong threshold are drawn thicker; the mid label shows the score (or "Bull/Bear Div" text).
+
+The reaction is measured from the pivot-bar close over the "Reaction window" bars after the pivot. A divergence is drawn as soon as its pivot is confirmed, with a provisional score (reaction pending, shown as "React: pending" in the tooltip). Once the reaction window has passed, the score, tooltip and line width are updated to their final values. The sequence count resets when a confirmed pivot is not a divergence of that direction. There are no divergence alerts; any alert built on the score has to fire at finalization, not at pivot confirmation.
+
+## Data requirements
+
+MFI needs real trade volume (`syminfo.volumetype` base/quote). On symbols without it (CFDs, tick volume, no volume) the MFI line, MFI zones, HTF MFI and the MFI-based long/short signals stay empty; the CCI oscillator mode and its divergences keep working.

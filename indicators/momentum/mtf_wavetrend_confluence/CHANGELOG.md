@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.7.3 — 2026-10-02
+- Fix: when the Wave TF equals the chart TF (e.g. a 4h chart in Fixed mode, where Auto keeps MTF grading on) the Wave alignment point was the Ripple cross itself, so every trigger got +1 from its own cross. The Wave point is now dropped in that case (max grade reduced by 1, Continuation type relies on Tide), and the table shows "Wave = chart TF · Wave point off"
+
 ## v0.7.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

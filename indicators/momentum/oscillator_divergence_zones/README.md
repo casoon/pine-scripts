@@ -12,7 +12,7 @@ This is **Stage 2** (exhaustion/momentum) of the reversal pipeline. The Fisher T
 - **Hidden divergence**: price/oscillator diverge in trend direction rather than against it — continuation signal, toggled separately with distinct visual style (dashed edge, transparent fill, triangle markers)
 - **Hidden divergence trend filter** (off by default): restricts hidden bullish to above the Trend EMA and hidden bearish to below it, so continuation signals align with the prevailing trend
 - **Level filter (three modes)**: Off / Fixed (percentage of the OB–OS range) / Dynamic Zones (adaptive percentile thresholds from recent oscillator history) — suppresses signals in the neutral oscillator zone
-- **StdDev filter**: optional statistical overextension gate — regular divergences only fire when the oscillator is outside its rolling mean ± N×StdDev band at the pivot
+- **StdDev filter**: optional statistical overextension gate — regular divergences only fire when the oscillator's extreme in the pivot window (the value the divergence compares) is outside its rolling mean ± N×StdDev band at the pivot
 - **Divergence Quality Score (0-100)**: combines pivot spacing, oscillator divergence magnitude, OB/OS extremity, and trend context into one informational score — shown in the signal tag/tooltip and reflected in zone shading; never filters or blocks a signal
 - **ATR-based zone width**: half-width is locked at creation-time ATR × factor, so the band reflects the volatility at the time of the signal
 - **Break trigger**: full-candle through the zone boundary (wick-resistant, default) or close-based — configurable
@@ -49,7 +49,7 @@ Hidden divergence zones use a dashed edge and transparent fill to visually disti
 
 Bar distance between consecutive pivots is measured between the actual pivot bars, not the confirmation bars. Pivots are detected on price (low for bullish, high for bearish), with the oscillator used only for momentum confirmation.
 
-Price pivots set the **timing** of a divergence; the oscillator side uses the **window extreme** (the oscillator's trough for bull, peak for bear within the pivot window) for both the comparison and the draw point. So the pane markers and divergence lines sit on the oscillator's own high/low rather than on a mid-slope reading at the exact pivot bar. Each line connects the matched prior pivot's oscillator extreme (one of the last three preceding pivots in range) to the current one. Regular and hidden divergences use separate zone arrays and separate line styles (dotted/full opacity for regular, dashed/reduced opacity for hidden).
+Price pivots set the **timing** of a divergence; the oscillator side uses the **window extreme** (the oscillator's trough for bull, peak for bear within the pivot window) for both the comparison and the draw point. So the pane markers and divergence lines sit on the oscillator's own high/low rather than on a mid-slope reading at the exact pivot bar. Each line connects the matched prior pivot's oscillator extreme (one of the last three preceding pivots in range) to the current one. A prior pivot only matches when the current oscillator extreme lies after that pivot's bar, so overlapping windows of closely spaced pivots cannot compare an extreme against itself. Regular and hidden divergences use separate zone arrays and separate line styles (dotted/full opacity for regular, dashed/reduced opacity for hidden).
 
 ## Quality Score
 

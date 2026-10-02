@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.1.0 — 2026-10-02
+- Fix: a single in-zone K/D cross stacked ~85 points on one TF (K-above-D flip 20 + K-rising 20 + cross 15 + in-zone cross 30). The cross bonus is now tiered and exclusive — 30 for a cross inside the oversold/overbought zone, 15 otherwise — so an in-zone cross scores 15 points less than before. Can shift when the smoothed total crosses the Long/Short levels
+- Docs: Sync Bonus tooltip and README state that adjacent pairs share their middle TF on purpose (adjacent sync is the concept)
+
 ## v2.0.0 — 2026-07-07
 - Added Bias / Quality / Timing state engine — collapses the score/agreement/exhaustion data into a single-glance readout (e.g. "LONG CONFIRMED · CLEAN · FRESH") instead of requiring the viewer to interpret two lines and a raw table
 - Bias: NO EDGE / LONG or SHORT BUILDING / LONG or SHORT CONFIRMED / CONFLICT (score vs. agreement pointing opposite ways)

@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.2 — 2026-10-02
+- Fix: without real trade volume, Impulse Pressure now renormalizes its volume weight onto range expansion and body size (as documented in the Data Contract and as Setup Pressure already did) instead of adding a constant mid-value volume term
+
 ## v2.4.1 — 2026-09-05
 - Volume validity guard aligned with the repo-wide `syminfo.volumetype` convention
 - Volume framing corrected in comments and the debug-log tooltip: the wording no longer claims that CFD feeds report no volume (they commonly report broker volume). The condition described is now feed-neutral — "a volume series that carries no usable turnover" — matching what the code actually tests

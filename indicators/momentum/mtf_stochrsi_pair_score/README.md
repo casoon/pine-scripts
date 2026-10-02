@@ -34,9 +34,8 @@ Per TF (clamped to ±100):
 | K rising / falling | ±20 |
 | K/D distance (continuous) | (k − d) × 0.5 |
 | K momentum (continuous) | (k − k[1]) × 0.8 |
-| Fresh K/D cross up / down | ±15 |
-| Cross inside the oversold / overbought zone | additional ±30 |
+| Fresh K/D cross up / down | ±15, or ±30 when the cross is inside the oversold / overbought zone (exclusive, not additive) |
 | K beyond zone and still pushing | ±10 |
 | Exhaustion (K and D both beyond zone, no counter-cross) | score × 0.65 |
 
-Pair score = lower TF × minor weight + higher TF × (1 − minor weight), then × sync bonus (both same direction) or × conflict penalty (opposing), clamped to ±100. Total = weight-normalized sum of all enabled pairs.
+Pair score = lower TF × minor weight + higher TF × (1 − minor weight), then × sync bonus (both same direction) or × conflict penalty (opposing), clamped to ±100. Total = weight-normalized sum of all enabled pairs. Pairs are built from adjacent TFs (1+2, 2+3, 3+4 …), so every middle TF contributes to two pairs. This overlap is intentional — the score measures sync between neighbouring timeframes, not independent votes.
