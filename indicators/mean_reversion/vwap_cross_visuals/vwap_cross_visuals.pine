@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // VWAP Cross Visuals [WavesUnchained]
-// Version: 2.1.3
+// Version: 2.3.0
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // Advanced VWAP cross detection with multi-timeframe zone management, bias context, and ranked confluence zones.
 //
@@ -260,11 +260,11 @@ detectVwapCluster(float sessionVwap, float anchoredHigh, float anchoredLow, Vwap
         clusterCenter = (anchoredHigh + anchoredLow) / 2.0
         priceInCluster := math.abs(close - clusterCenter) <= clusterTolerance
 
-    // Cluster is stronger if session VWAP is also part of it
-    // Boost cluster activity when session VWAP aligns with anchored VWAPs
-    clusterActive = vwapsInCluster and priceInCluster and (sessionInCluster or not na(sessionVwap))
+    // Session VWAP alignment does not gate the cluster; it raises its strength
+    // (see calcClusterStrength)
+    clusterActive = vwapsInCluster and priceInCluster and not na(sessionVwap)
 
-    [clusterActive, vwapsInCluster, priceInCluster, clusterTolerance]
+    [clusterActive, vwapsInCluster, priceInCluster, sessionInCluster, clusterTolerance]
 
 // === SIGNAL THROTTLING ===
 
@@ -288,38 +288,45 @@ updateSignalThrottle(VwapAnchors anchors, string signalType) =>
 // === SIGNAL STRENGTH CALCULATION ===
 
 calcCrossStrength(float sessionVwap, bool isPriceCross) =>
+    // ATR evaluated every bar — inside the conditional it would only update on
+    // cross bars and return a stale/incorrect value.
+    atrValue = ta.atr(14)
     if isPriceCross
         // Strength based on price distance from VWAP
         distance = math.abs(close - sessionVwap)
-        atrValue = ta.atr(14)
         strength = atrValue > 0 ? math.min(100.0, (distance / atrValue) * 50.0) : 50.0
         strength
     else
         0.0
 
-calcClusterStrength(bool vwapsInCluster, bool priceInCluster, float tolerance) =>
+calcClusterStrength(bool vwapsInCluster, bool priceInCluster, bool sessionInCluster, float tolerance, float anchoredHigh, float anchoredLow) =>
     if vwapsInCluster and priceInCluster
         // Strength based on tightness of cluster
         baseStrength = 75.0
-        // Add bonus for very tight clusters
-        priceDistFromCenter = math.abs(close - (ta.highest(close, 10) + ta.lowest(close, 10)) / 2.0)
-        tightness = tolerance > 0 ? 1.0 - (priceDistFromCenter / tolerance) : 0.0
-        baseStrength + (tightness * 25.0)
+        // Add bonus for very tight clusters: spread between the clustered
+        // anchored VWAPs relative to the cluster tolerance (0..1, since
+        // vwapsInCluster already guarantees spread <= tolerance)
+        vwapSpread = math.abs(anchoredHigh - anchoredLow)
+        tightness = tolerance > 0 ? math.max(0.0, 1.0 - (vwapSpread / tolerance)) : 0.0
+        // Bonus when the session VWAP is part of the cluster too.
+        // Provisional default — not yet validated on data.
+        sessionBonus = sessionInCluster ? 10.0 : 0.0
+        math.min(100.0, baseStrength + (tightness * 25.0) + sessionBonus)
     else
         0.0
 
 calcStructureStrength(float sessionVwap, float anchoredHigh, float anchoredLow) =>
     strength = 0.0
+    // ATR evaluated every bar, not only when the anchored VWAPs exist
+    atrValue = ta.atr(14)
 
     if not na(anchoredHigh) and not na(sessionVwap)
         distance = math.abs(sessionVwap - anchoredHigh)
-        atrValue = ta.atr(14)
         if atrValue > 0
             strength := math.max(strength, math.min(100.0, (distance / atrValue) * 30.0 + 40.0))
 
     if not na(anchoredLow) and not na(sessionVwap)
         distance = math.abs(sessionVwap - anchoredLow)
-        atrValue = ta.atr(14)
         if atrValue > 0
             strength := math.max(strength, math.min(100.0, (distance / atrValue) * 30.0 + 40.0))
 
@@ -353,7 +360,7 @@ processVwapDetection(VwapAnchors anchors, VwapConfig config, float vol) =>
     [structureCrossUp, structureCrossDown] = detectStructureCrosses(sessionVwap, anchoredHigh, anchoredLow)
 
     // Detect clusters
-    [clusterActive, vwapsInCluster, priceInCluster, clusterTolerance] = detectVwapCluster(sessionVwap, anchoredHigh, anchoredLow, config)
+    [clusterActive, vwapsInCluster, priceInCluster, sessionInCluster, clusterTolerance] = detectVwapCluster(sessionVwap, anchoredHigh, anchoredLow, config)
 
     // Check throttling
     canShowPriceCross = canShowSignal(updatedAnchors, config, "PRICE_CROSS")
@@ -365,7 +372,7 @@ processVwapDetection(VwapAnchors anchors, VwapConfig config, float vol) =>
 
     // Calculate signal strengths
     crossStrength = calcCrossStrength(sessionVwap, priceCrossUp or priceCrossDown)
-    clusterStrength = calcClusterStrength(vwapsInCluster, priceInCluster, clusterTolerance)
+    clusterStrength = calcClusterStrength(vwapsInCluster, priceInCluster, sessionInCluster, clusterTolerance, anchoredHigh, anchoredLow)
     structureStrength = calcStructureStrength(sessionVwap, anchoredHigh, anchoredLow)
 
     // Update throttle states if signals are shown
@@ -416,12 +423,12 @@ generateVwapSignals(VwapState state) =>
 
 // === VWAP BIAS ANALYSIS ===
 
-getVwapBias(VwapState state) =>
+getVwapBias(VwapState state, float atrValue) =>
     // Overall bias based on multiple factors
     biasScore = 0.0
 
-    // Price position relative to VWAP
-    biasScore += state.priceVwapPosition * 30.0
+    // Price position relative to VWAP (side only)
+    biasScore += state.priceVwapPosition * 10.0
 
     // Recent cross direction
     if state.priceCrossUp
@@ -435,8 +442,10 @@ getVwapBias(VwapState state) =>
     else if state.structureCrossDown
         biasScore -= 20.0
 
-    // Distance from VWAP (strength of move)
-    distanceBonus = math.min(25.0, state.priceVwapDistancePercent * 10.0)
+    // Distance from VWAP in ATR (strength of move): 10 points per ATR, capped at 2 ATR,
+    // so price position alone passes the ±20 bias threshold only beyond 1 ATR.
+    // Provisional default — not yet validated on data.
+    distanceBonus = atrValue > 0 ? math.min(2.0, nz(state.priceVwapDistance) / atrValue) * 10.0 : 0.0
     biasScore += state.priceVwapPosition * distanceBonus
 
     // Normalize to -100 to +100 range
@@ -642,8 +651,9 @@ updateZoneStatus(Zone zone) =>
     // Update box position
     box.set_right(zone.zoneBox, bar_index + 1)
 
-    // Check for touch
-    if not zone.touched and close >= zone.bottom and close <= zone.top
+    // Check for touch — only from the bar after creation: zones built from
+    // windows that include the creation bar contain its close by construction
+    if not zone.touched and time > zone.bornTime and close >= zone.bottom and close <= zone.top
         zone.touched := true
 
     // Check for violation
@@ -1350,20 +1360,22 @@ detectMarketRegime(VolumeState state, VolumeConfig config) =>
     isChoppy = state.choppiness > config.choppyThreshold
     isTrending = state.choppiness < config.trendingThreshold
 
-    // Secondary indicators: trend filters
+    // Secondary indicators: trend filters (series evaluated every bar)
+    emaFast = ta.ema(close, 21)
+    emaSlow = ta.ema(close, 50)
+    [_, stDirection] = ta.supertrend(3.0, 10)
     trendConfirms = 0
     totalFilters = 0
 
     if config.useEMAFilter
-        emaFast = ta.ema(close, 21)
-        emaSlow = ta.ema(close, 50)
         if emaFast > emaSlow * 1.002 or emaFast < emaSlow * 0.998  // 0.2% threshold
             trendConfirms += 1
         totalFilters += 1
 
     if config.useSupertrendFilter
-        [_, direction] = ta.supertrend(3.0, 10)
-        if direction != 0
+        // Supertrend confirms only when it agrees with the EMA 21/50 direction
+        // (ta.supertrend direction: < 0 = up, > 0 = down)
+        if (stDirection < 0 and emaFast > emaSlow) or (stDirection > 0 and emaFast < emaSlow)
             trendConfirms += 1
         totalFilters += 1
 
@@ -1543,7 +1555,12 @@ calculateTrendFilters(VolumeConfig config) =>
 
     trendBullish = emaOK and stBull and (not config.useMOSTFilter or mostBull)
 
-    [trendBullish, emaConfluence, stBull, mostBull]
+    // Mirror of trendBullish for the short-side signals (each disabled filter passes)
+    emaBearOK = not config.useEMAFilter or ema50 < ema200
+    stBear = not config.useSupertrendFilter or (not na(stDir) and stDir > 0)
+    trendBearish = emaBearOK and stBear and (not config.useMOSTFilter or not mostBull)
+
+    [trendBullish, trendBearish, emaConfluence, stBull, mostBull]
 
 // === SIGNAL DETECTION ===
 
@@ -1573,7 +1590,7 @@ findNearestNodes(array<VolumeNode> hvnNodes, array<VolumeNode> lvnNodes) =>
 
     [nearestLVN, nearestHVN]
 
-detectVolumeSignals(VolumeConfig config, VolumeProfile profile, bool trendBullish, bool htfConfluence) =>
+detectVolumeSignals(VolumeConfig config, VolumeProfile profile, bool trendBullish, bool trendBearish, bool htfConfluence) =>
     signals = array.new<VolumeSignal>()
     atr = ta.atr(14)
 
@@ -1601,7 +1618,7 @@ detectVolumeSignals(VolumeConfig config, VolumeProfile profile, bool trendBullis
             signal = VolumeSignal.new("LVN_BREAK", 1, 75.0, "LVN Break & Retest Long", profile.nearestLVN, htfConfluence, bar_index)
             array.push(signals, signal)
 
-        if retestDown and confluenceOK and trendBullish
+        if retestDown and confluenceOK and trendBearish
             signal = VolumeSignal.new("LVN_BREAK", -1, 75.0, "LVN Break & Retest Short", profile.nearestLVN, htfConfluence, bar_index)
             array.push(signals, signal)
 
@@ -1617,7 +1634,7 @@ detectVolumeSignals(VolumeConfig config, VolumeProfile profile, bool trendBullis
             signal = VolumeSignal.new("VA_REENTRY", 1, 65.0, "Value Area Re-entry Long (VAL)", profile.valueAreaLow, false, bar_index)
             array.push(signals, signal)
 
-        if vahReentry and trendBullish
+        if vahReentry and trendBearish
             signal = VolumeSignal.new("VA_REENTRY", -1, 65.0, "Value Area Re-entry Short (VAH)", profile.valueAreaHigh, false, bar_index)
             array.push(signals, signal)
 
@@ -1701,14 +1718,14 @@ processVolumeProfile(VolumeState state, VolumeConfig config) =>
     updatedState.currentProfile.htfConfluence := htfConfluence
 
     // Calculate trend filters
-    [trendBullish, emaConfluence, stBull, mostBull] = calculateTrendFilters(config)
+    [trendBullish, trendBearish, emaConfluence, stBull, mostBull] = calculateTrendFilters(config)
     updatedState.trendBullish := trendBullish
     updatedState.emaConfluence := emaConfluence
     updatedState.supertrendBull := stBull
     updatedState.mostBull := mostBull
 
     // Detect signals
-    signals = detectVolumeSignals(config, updatedState.currentProfile, trendBullish, htfConfluence)
+    signals = detectVolumeSignals(config, updatedState.currentProfile, trendBullish, trendBearish, htfConfluence)
 
     // Update signal flags
     updatedState.longLVNSignal := false
@@ -1771,15 +1788,13 @@ type HTFConfig
     // Trend detection settings
     int trendLength            // Period for trend detection (default: 50)
     float trendThreshold       // Minimum strength for trend confirmation (0-1)
-    string trendMethod         // "EMA", "SMA", "SUPERTREND", "MOST"
 
     // Stack analysis
     float stackThreshold       // Minimum confluence for stack confirmation (0-1)
     bool requireAllTFs         // Require all TFs to agree (strict mode)
     float confluenceBonus      // Bonus for multi-TF agreement (0-1)
 
-    // Choppiness and auto-tuning
-    bool enableAutoTuning      // Enable adaptive parameter adjustment
+    // Choppiness
     int choppinessLength       // Choppiness index calculation period
     float choppyThreshold      // Threshold for choppy market detection (0-100)
     float trendingThreshold    // Threshold for trending market detection (0-100)
@@ -1816,11 +1831,6 @@ type HTFStackState
     bool isTrending          // Market is in trending condition
     string marketRegime      // "TRENDING", "RANGING", "TRANSITION"
 
-    // Auto-tuning parameters
-    float vaPct_eff          // Effective volume area percentage
-    float epsATR_eff         // Effective epsilon ATR multiplier
-    float adaptiveAlpha      // Adaptive smoothing parameter
-
     // Signals
     bool bullStackSignal     // Bullish stack alignment signal
     bool bearStackSignal     // Bearish stack alignment signal
@@ -1834,10 +1844,10 @@ type HTFStackState
 // === CONFIGURATION HELPERS ===
 
 newHTFConfig() =>
-    HTFConfig.new(array.from<string>("15", "60", "240", "D"), array.from<float>(0.20, 0.25, 0.30, 0.25), true, 4, 50, 0.6, "EMA", 0.7, false, 0.2, true, 14, 61.8, 38.2, true, "top_right", 5, 3, true)
+    HTFConfig.new(array.from<string>("15", "60", "240", "D"), array.from<float>(0.20, 0.25, 0.30, 0.25), true, 4, 50, 0.6, 0.5, false, 0.2, 14, 61.8, 38.2, true, "top_right", 5, 3, true)
 
 newHTFStackState() =>
-    HTFStackState.new(array.new<HTFTrendData>(), 0.0, 0.0, 0.0, "NEUTRAL", 50.0, false, false, "TRANSITION", 0.70, 0.236, 0.3, false, false, false, na, array.new<label>(), array.new<box>())
+    HTFStackState.new(array.new<HTFTrendData>(), 0.0, 0.0, 0.0, "NEUTRAL", 50.0, false, false, "TRANSITION", false, false, false, na, array.new<label>(), array.new<box>())
 
 // === UTILITY FUNCTIONS ===
 
@@ -1884,34 +1894,6 @@ detectTrendEMA(int length, float threshold) =>
 
     [trendStrength, direction, confidence]
 
-detectTrendSupertrend(int atrLength, float multiplier) =>
-    [supertrend, direction] = ta.supertrend(multiplier, atrLength)
-
-    trendStrength = direction == 1 ? 0.8 : direction == -1 ? -0.8 : 0.0
-    trendDirection = direction == 1 ? "BULL" : direction == -1 ? "BEAR" : "NEUTRAL"
-
-    // Calculate confidence based on distance from Supertrend
-    distance = math.abs(close - supertrend)
-    atr = ta.atr(atrLength)
-    confidence = atr > 0 ? math.min(90.0, (distance / atr) * 30.0) : 50.0
-
-    [trendStrength, trendDirection, confidence]
-
-detectTrendMOST(int length, float multiplier) =>
-    // Moving Stop (MOST) trend detection
-    src = close
-    hl2_ = (high + low) / 2
-    atr_ = ta.atr(length) * multiplier
-
-    var float most = src
-    most := src > most[1] + atr_ ? src - atr_ : src < most[1] - atr_ ? src + atr_ : most[1]
-
-    trendStrength = src > most ? 0.7 : src < most ? -0.7 : 0.0
-    direction = trendStrength > 0 ? "BULL" : trendStrength < 0 ? "BEAR" : "NEUTRAL"
-    confidence = math.abs(trendStrength) * 100.0
-
-    [trendStrength, direction, confidence]
-
 // === MULTI-TIMEFRAME ANALYSIS ===
 
 analyzeTrendForTF(string tf, HTFConfig config) =>
@@ -1954,26 +1936,6 @@ calculateStackConfluence(array<HTFTrendData> tfData, HTFConfig config) =>
     bearConfluence = totalWeight > 0 ? (totalBearWeight / totalWeight) * 100.0 : 0.0
 
     [bullConfluence, bearConfluence]
-
-// === AUTO-TUNING SYSTEM ===
-
-calculateAutoTuningParams(float choppiness, float stackStrength, HTFConfig config) =>
-    // Adaptive Volume Area Percentage
-    baseVaPct = 0.70
-    vaPct_eff = choppiness > config.choppyThreshold ? baseVaPct + 0.15 : baseVaPct - (stackStrength / 100.0) * 0.10
-    vaPct_eff := math.max(0.50, math.min(0.90, vaPct_eff))
-
-    // Adaptive Epsilon ATR
-    baseEpsATR = 0.236
-    epsATR_eff = choppiness > config.choppyThreshold ? baseEpsATR * 1.5 : baseEpsATR * 0.8
-    epsATR_eff := math.max(0.1, math.min(0.5, epsATR_eff))
-
-    // Adaptive Alpha for smoothing
-    baseAlpha = 0.3
-    adaptiveAlpha = stackStrength > 70.0 ? baseAlpha * 0.7 : baseAlpha * 1.3
-    adaptiveAlpha := math.max(0.1, math.min(0.7, adaptiveAlpha))
-
-    [vaPct_eff, epsATR_eff, adaptiveAlpha]
 
 // === SIGNAL DETECTION ===
 
@@ -2098,13 +2060,6 @@ processHTFStack(HTFStackState state, HTFConfig config) =>
     else
         state.marketRegime := "TRANSITION"
 
-    // Auto-tuning parameters
-    if config.enableAutoTuning
-        [vaPct, epsATR, alpha] = calculateAutoTuningParams(state.choppiness, state.stackStrength, config)
-        state.vaPct_eff := vaPct
-        state.epsATR_eff := epsATR
-        state.adaptiveAlpha := alpha
-
     // Create visual panel — only on the last bar (a table per bar would be
     // recreated thousands of times over history for no visual benefit)
     if barstate.islast
@@ -2221,13 +2176,11 @@ useMOSTFilter = input.bool(true, "MOST Filter (ATR Trailing)", group=groupVolume
 groupHTFStack = "📊 HTF Stack Panel (Pro)"
 useHTFStack = input.bool(false, "Enable HTF Stack Panel", group=groupHTFStack, tooltip="Advanced multi-timeframe trend confluence analysis. Off by default — enable when you want the HTF confluence layer and panel.")
 
-htfStackMethod = input.string("EMA", "Trend Detection Method", options=["EMA", "SUPERTREND", "MOST"], group=groupHTFStack)
-
 htfStackPosition = input.string("top_left", "Panel Position", options=["top_left", "top_right", "bottom_left", "bottom_right"], group=groupHTFStack)
 
 autotunVolumeProfile = input.bool(true, "Auto-tune Volume Profile", group=groupHTFStack, tooltip="Automatically adjust volume profile parameters based on market conditions")
 
-htfStackThreshold = input.float(0.7, "Stack Alignment Threshold", minval=0.5, maxval=1.0, step=0.05, group=groupHTFStack, tooltip="Minimum confluence required for stack signal confirmation")
+htfStackThreshold = input.float(0.5, "Stack Alignment Threshold", minval=0.5, maxval=1.0, step=0.05, group=groupHTFStack, tooltip="Minimum confluence required for stack signal confirmation. Provisional default — not yet validated on data.")
 
 showChoppiness = input.bool(true, "Show Choppiness Index", group=groupHTFStack, tooltip="Display current market choppiness level")
 
@@ -2316,11 +2269,9 @@ htfConfig = newHTFConfig()
 
 // Configure HTF Stack Panel
 if useHTFStack
-    htfConfig.trendMethod := htfStackMethod
     htfConfig.showStackPanel := true
     htfConfig.panelPosition := htfStackPosition
     htfConfig.stackThreshold := htfStackThreshold
-    htfConfig.enableAutoTuning := autotunVolumeProfile
     htfConfig.autoSelectTFs := true
     htfConfig.maxTimeframes := 4
 
@@ -2336,14 +2287,19 @@ vwapAnchors := updatedAnchors
 vwapSignals = generateVwapSignals(vwapState)
 
 // Get VWAP bias analysis
-[vwapBias, biasTrend] = getVwapBias(vwapState)
+[vwapBias, biasTrend] = getVwapBias(vwapState, targetAtr14)
 
 // Get confluence metrics
 [confluenceCount, avgConfluenceStrength] = getVwapConfluence(vwapState)
 
-// VWAP-Zone confluence — declared at global scope: it is computed inside the
-// zone block below but also read in the alert section (separate scope)
-float vwapZoneConfluence = 0.0
+// Pivot-zone inputs evaluated every bar (ta.* must not run in conditional scope)
+float zonePivotHigh = ta.pivothigh(high, vwapPivotL, vwapPivotR)
+float zonePivotLow = ta.pivotlow(low, vwapPivotL, vwapPivotR)
+float zonePivotHighest15 = ta.highest(high, 15)
+float zonePivotHighest8 = ta.highest(high, 8)
+float zonePivotLowest15 = ta.lowest(low, 15)
+float zonePivotLowest8 = ta.lowest(low, 8)
+float zonePivotAtr = ta.atr(14)
 
 // Process Zone Management (Pro Feature - Enhanced)
 // Gated on volumeIsReal too: bias/regime (calculateBias) and several zone
@@ -2356,17 +2312,14 @@ if useZoneManagement and volumeIsReal
         if zoneSource == "Pivots"
             if vwapState.hasAnchoredHigh and vwapState.hasAnchoredLow
                 // Current timeframe zones based on VWAP structures
-                zonePivotHigh = ta.pivothigh(high, vwapPivotL, vwapPivotR)
-                zonePivotLow = ta.pivotlow(low, vwapPivotL, vwapPivotR)
-
                 if not na(zonePivotHigh)
                     // Enhanced bearish zone with VWAP bias
-                    zoneTop = ta.highest(high, 15)
-                    zoneBottom = ta.lowest(low, 8)
+                    zoneTop = zonePivotHighest15
+                    zoneBottom = zonePivotLowest8
 
                     // Apply VWAP context for zone quality
                     vwapDistance = math.abs(zoneTop - vwapState.sessionVwap)
-                    isNearVWAP = vwapDistance < (ta.atr(14) * 2.0)
+                    isNearVWAP = vwapDistance < (zonePivotAtr * 2.0)
 
                     if isNearVWAP or vwapState.crossStrength > 60.0
                         newZone = createZone(zoneTop, zoneBottom, false, false)
@@ -2374,12 +2327,12 @@ if useZoneManagement and volumeIsReal
 
                 if not na(zonePivotLow)
                     // Enhanced bullish zone with VWAP bias
-                    zoneTop = ta.highest(high, 8)
-                    zoneBottom = ta.lowest(low, 15)
+                    zoneTop = zonePivotHighest8
+                    zoneBottom = zonePivotLowest15
 
                     // Apply VWAP context for zone quality
                     vwapDistance = math.abs(zoneBottom - vwapState.sessionVwap)
-                    isNearVWAP = vwapDistance < (ta.atr(14) * 2.0)
+                    isNearVWAP = vwapDistance < (zonePivotAtr * 2.0)
 
                     if isNearVWAP or vwapState.crossStrength > 60.0
                         newZone = createZone(zoneTop, zoneBottom, true, false)
@@ -2471,23 +2424,6 @@ if useZoneManagement and volumeIsReal
     // Enhanced Zone Processing with VWAP Integration
     zoneState := processZoneManagement(zoneState, zoneConfig)
     zoneState := findNearestZones(zoneState)
-
-    // VWAP-Zone Confluence Analysis (assigns the global declared above)
-    if not na(zoneState.nearestBullZone) and zoneState.nearestBullZone.isActive
-        distanceToVWAP = math.abs(zoneState.nearestBullZone.mid - vwapState.sessionVwap)
-        maxDistance = ta.atr(14) * 1.0
-        if distanceToVWAP < maxDistance
-            vwapZoneConfluence += (1.0 - (distanceToVWAP / maxDistance)) * 30.0
-
-    if not na(zoneState.nearestBearZone) and zoneState.nearestBearZone.isActive
-        distanceToVWAP = math.abs(zoneState.nearestBearZone.mid - vwapState.sessionVwap)
-        maxDistance = ta.atr(14) * 1.0
-        if distanceToVWAP < maxDistance
-            vwapZoneConfluence += (1.0 - (distanceToVWAP / maxDistance)) * 30.0
-
-    // Update zone state with VWAP confluence
-    if not na(zoneState.biasScore)
-        zoneState.biasScore := zoneState.biasScore + vwapZoneConfluence
 
 // Process Volume Profile (Pro Feature) — literally a histogram of `volume`;
 // gated on volumeIsReal since tick-count volume produces a fabricated profile.
@@ -2727,8 +2663,8 @@ allSig = emitSignals and signalScope == "All signals"
 // carries a hover tooltip (price, VWAP, bias, confluence, cross strength).
 f_crossLabel(_isLong) =>
     string biasTxt = vwapBias > 0 ? "Bullish" : vwapBias < 0 ? "Bearish" : "Neutral"
-    int    strPct  = int(math.round(vwapState.crossStrength * 100))
-    string tip = (_isLong ? "Price crossed ABOVE VWAP — long bias" : "Price crossed BELOW VWAP — short bias") + "\nPrice: " + str.tostring(close, format.mintick) + "\nVWAP: " + str.tostring(vwapState.sessionVwap, format.mintick) + "\nBias: " + biasTxt + "\nConfluence: " + str.tostring(confluenceCount) + "/3\nCross strength: " + str.tostring(strPct) + "%"
+    int    strPct  = int(math.round(vwapState.crossStrength))
+    string tip = (_isLong ? "Price crossed ABOVE VWAP — long bias" : "Price crossed BELOW VWAP — short bias") + "\nPrice: " + str.tostring(close, format.mintick) + "\nVWAP: " + str.tostring(vwapState.sessionVwap, format.mintick) + "\nBias: " + biasTxt + "\nConfluence: " + str.tostring(confluenceCount - 1) + "/2 (structure cross, cluster)\nCross strength: " + str.tostring(strPct) + "%"
     label.new(bar_index, _isLong ? low : high, _isLong ? "▲" : "▼",
          xloc=xloc.bar_index, yloc=yloc.price,
          style=_isLong ? label.style_label_up : label.style_label_down,
@@ -2905,7 +2841,7 @@ if showLegend and barstate.islast
         // Volume Score
         table.cell(legend, 0, nextRow, "Volume Score:",
                    text_color=tcLegend)
-        table.cell(legend, 1, nextRow, str.tostring(volumeState.volumeScore, "#.#") + "/10",
+        table.cell(legend, 1, nextRow, str.tostring(volumeState.volumeScore, "#.#") + "/7",
                    text_color=volumeState.passFilter ? color.green : color.gray)
         nextRow += 1
 

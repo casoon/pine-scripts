@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.3.0 — 2026-10-02
+- Cluster: the session-VWAP alignment check had no effect (any existing session VWAP satisfied it). A cluster now forms from the two anchored VWAPs plus price as before, and gets +10 strength (capped at 100) when the session VWAP sits inside it too (provisional default)
+- VWAP bias: price position alone (±30) cleared the ±20 bias threshold on any tick above or below VWAP. Price position now counts ±10, plus 10 points per ATR of distance from VWAP (capped at 2 ATR, provisional), replacing the percent-based distance bonus — so price position alone turns the bias only beyond 1 ATR; crosses still count as before. Threshold stays ±20
+- Volume Profile regime: the Supertrend filter confirmed a trend on every bar (its direction is never 0). It now confirms only when its direction agrees with the EMA 21/50 direction
+- HTF Stack: the default Stack Alignment Threshold is lowered from 0.7 to 0.5 (provisional) — 0.7 was practically out of reach on intraday charts, so stack signals did not fire
+- Removed the "Trend Detection Method" input: the HTF stack always used the EMA detector; the unused Supertrend/MOST detectors (the Supertrend one also had its direction inverted) are removed
+- Removed dead code: the HTF stack's auto-tuning outputs (never read) and the VWAP-zone confluence added to the zone bias score (never read)
+
+## v2.2.0 — 2026-10-02
+- Fix: cross strength (which gates the price-cross marker) and structure strength used an ATR that only updated on the bars where it was needed, so it drifted far from the real ATR. Both now use an ATR calculated on every bar — cross markers can appear more or less often than before
+- Fix: cluster strength measured the cluster's tightness as the distance of price from its 10-bar close midrange (which could even go negative). It now measures the spread between the two clustered anchored VWAPs
+- Fix: pivot-based and VWAP-cluster zones were marked "touched" on the bar they were created, because the creation bar's close lies inside them by construction. Touch tracking now starts on the following bar
+- Fix: the Volume Profile short signals (LVN break & retest short, VAH re-entry short) required a bullish trend filter, so they only fired in uptrends. They now require the mirrored bearish filter (EMA 50 < 200, Supertrend down, MOST down — each only when enabled)
+- Cross label tooltip: "Confluence" no longer counts the cross itself (now shows the other two systems, n/2), and cross strength shows as 0–100 % instead of being multiplied by 100 a second time
+- Dashboard: Volume Score shows its real maximum (/7 instead of /10)
+
 ## v2.1.3 — 2026-09-05
 - **Exchange-only data contract**: added a hard `syminfo.volumetype`-based guard (`volumeIsReal`). Session VWAP, both anchored VWAPs, the Zone Management bias/target/confluence layer, and the Volume Profile module now all null out / stop processing on instruments without real trade volume — no VWAP lines, bias bands, zone boxes, target lines, or volume-profile output on those symbols.
 - A warning label ("benötigt echtes Handelsvolumen — aktuell: ...") now appears on the last bar when volume isn't real.

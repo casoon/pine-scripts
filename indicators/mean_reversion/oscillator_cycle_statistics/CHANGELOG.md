@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.5.4 — 2026-10-02
+- Fix: the Opportunity marker could fire on the bar a cycle completed (or timed out). On a completed cycle the marker was then drawn for the newly started opposite cycle, i.e. pointing the wrong way. The check now skips the resolution bar, like the calibration capture already did
+
 ## v1.5.3 — 2026-09-05
 - Volume validity is now decided by `syminfo.volumetype` instead of by volume being non-zero: tick-volume feeds count price updates, not traded quantity, and previously let MFI, EOM and Klinger build a plausible-looking oscillator on top of them
 - MFI, EOM and Klinger are held at a neutral 50 on any feed without real trade volume, so the cycle state machine never arms

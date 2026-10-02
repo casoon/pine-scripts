@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.7.2 — 2026-10-02
+- Fix: the Reclaim Quality Score counted the prior band stretch as a point, but every reclaim already requires that stretch — so every reclaim scored at least 1 and the bottom of the range was unreachable. The stretch is no longer scored; the score now runs 0–4 (`R n/4`). The high/medium/weak classification of a given reclaim is unchanged
+
 ## v2.7.1 — 2026-09-05
 - Data Contract added to the header: `Verdict: Exchange-only` — the MIDAS curve is volume-weighted at its core and has no valid reading without real trade volume
 - Hard `volumeIsReal` gate (`syminfo.volumetype` = `base`/`quote`) added ahead of all volume-weighted computation: on CFDs, Forex, and most indices, the curve, bands, topfinder/bottomfinder, context markers, live badge, and dashboard now render nothing instead of a degraded or fabricated read
