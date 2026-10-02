@@ -1,11 +1,12 @@
 # WaveTrend v4 — Strategy Backtest Assessment
 
 > ⚠️ **STALE — pending re-validation.** The run below (`test92`) was measured on strategy
-> **v4.21**. The shipped file is **v4.89**. Gate configuration, thresholds and exit handling
-> changed in between. Re-run on NatGas before relying on any figure here.
+> **v4.21**. The shipped file is **v4.91**. Gate configuration, thresholds and exit handling
+> changed in between — v4.90 changed the exit model itself (trailing stop replaces the fixed TP
+> and stays armed). Re-run on NatGas before relying on any figure here.
 
 **Instrument:** CAPITALCOM:NATURALGAS
-**Strategy file:** `wavetrend_v4_strategy.pine` (standalone, v4.89)
+**Strategy file:** `wavetrend_v4_strategy.pine` (standalone, v4.91)
 **Assessment date:** 2026-09-08 (results measured 2026-05-04 on v4.21)
 
 ---
@@ -83,7 +84,7 @@ later run exists outside the repo record, or the figure drifted. It has been rem
 README until a run backs it.
 
 **Next steps:**
-1. Re-run v4.89 on NatGas 1H/4H/1D — the current numbers describe a different script
+1. Re-run v4.91 on NatGas 15M/1H/4H/1D — the current numbers describe a different script. The earlier exit tests (test121 trailing, test124–126 structural exit) could not fire on 15M/1H/1D because the TP limit filled first; they need repeating on v4.91
 2. Address the 4H short leg specifically rather than tuning shared thresholds
 3. Work the exit side before adding further entry gates — capture rate, not selectivity, is
    where this strategy loses (the repo's own "Fundament vor Feintuning" principle)

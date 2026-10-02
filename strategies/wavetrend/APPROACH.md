@@ -185,9 +185,9 @@ Gate-Implikation nur richtungsgetrennt sinnvoll. Bestehender osFloor1D=−48 dec
 |---|---|---|
 | test116 | Gate D + I für 4H Loser-Cluster | 4H long +0.34, 4H short +0.28 |
 | test118 | Gate G TF-spezifisches Smoothing, 15M/1H hardcoded | positiv |
-| test121 | Trailing Stop (trailTriggerR=2.0) | NOOP, als Insurance behalten |
+| test121 | Trailing Stop (trailTriggerR=2.0) | NOOP, als Insurance behalten — **ungültig** (siehe unten: TP-Limit füllte vor dem Trail) |
 | test121 | Per-TF tpMult | 1D long +0.10, 1D short +0.20, 4H long +0.06 |
-| test124–126 | Structural Exit (3 Varianten) | alle gescheitert |
+| test124–126 | Structural Exit (3 Varianten) | alle gescheitert — **ungültig** (siehe unten: Mindest-R ≥ TP) |
 | test127 | BE-Trigger | NOOP, revertiert |
 | test128–132 | Gate B2 1H-Confluence für 15M (b2OsLevel=−30) | 15M avgR +0.13 |
 | test133 | Gate B Divergenz required | NOOP/negativ |
@@ -208,6 +208,20 @@ Gate-Implikation nur richtungsgetrennt sinnvoll. Bestehender osFloor1D=−48 dec
 | test166 | GateD 4H long [60,90)→[20,40) | REGRESSION +0.538→+0.38 — [60,90) bleibt geblockt |
 
 ---
+
+### Exit-Tests nachträglich ungültig (Review 2026-10-02)
+
+Die Exit-Befunde von test121 (Trailing) und test124–126 (Structural Exit) messen nicht die Exit-Logik:
+
+- 15M/1H: TP = 3 ATR = genau 2R (SL 1.5 ATR). Trail-Trigger 2R und Struct-Mindestgewinn 2R verlangen
+  Close ≥ TP — das TP-Limit hatte zu dem Zeitpunkt intrabar schon gefüllt. Trail und Struct-Exit konnten
+  dort nie auslösen.
+- 1D: Struct-Mindestgewinn 3.0R > TP 2.67R — Struct-Exit ebenfalls unerreichbar.
+- Zusätzlich war der Trail nicht gelatcht: fiel der Close unter den Trigger, sprang der Stop auf SL/BE zurück.
+
+Behoben in v4.90 (Trail ersetzt bei aktivem Trailing das TP-Limit, Trail bleibt nach dem ersten Auslösen
+scharf, Exit-Kommentar `trail`). Damit ist der Exit-Hebel — laut „Fundament vor Feintuning“ der größere —
+wieder offen und muss neu gemessen werden (Protokoll: `plan/34_wt4_exit_rebaseline.md`).
 
 ## Backlog
 
