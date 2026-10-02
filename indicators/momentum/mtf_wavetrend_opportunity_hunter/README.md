@@ -1,6 +1,6 @@
 # MTF WaveTrend Opportunity Hunter
 
-MTF confluence pane around WaveTrend. The core idea: make multi-timeframe confluence **visible over time** instead of reducing it to a one-bar label. The pane shows a net confluence histogram (long minus short final score) plus five heat ribbons — one per scoring layer plus a noise floor — so you can always see *why* a signal fired or *which layer* is currently blocking one. A RRG-inspired rotation map shows where the confluence is heading. Signals fire on a slim three-condition gate; Quality grades them (A/B) instead of filtering them out.
+MTF confluence pane around WaveTrend. The core idea: make multi-timeframe confluence **visible over time** instead of reducing it to a one-bar label. The pane shows a net confluence histogram (long minus short final score) plus five heat ribbons — one per scoring layer plus a noise floor — so you can always see *why* a signal fired or *which layer* is currently blocking one. A RRG-inspired rotation map shows where the confluence is heading. Signals follow a stop-and-reverse model: entries fire on the WT cross, the exit is the opposite cross (optionally an earlier turn/exhaustion hook). Opportunity only flags a high-opportunity subset (★); it does not block signals.
 
 ## Features
 
@@ -57,6 +57,16 @@ All four layers are computed for both sides (0–100 each); the ribbons show the
 - **Histogram near zero, ribbons mixed** — no edge, stand aside
 - **Noise ribbon orange** — tape unusually noisy for this instrument; expect grade B signals
 - **Rotation dot in IMPROVING moving toward LEADING** — confluence building; in WEAKENING — long confluence stalling even if the histogram is still positive
+
+## Measurement panels
+
+With **Show Signal Stats** on, three tables measure the stop-and-reverse model over the loaded history (R = exit − entry in ATR at entry):
+
+- **Stats** (bottom right) — trades, win %, average R, net R and fail % for Long and Short.
+- **Layer** (middle right) — average R for regime alignment, Trade✓ vs Watch, exit type and WT depth (both directions pooled).
+- **Situation** (bottom left) — average R and N per situational bucket, **split Long / Short**: 4H JMA slope with/against the trade, net drift over the last N bars with/against, stretch from the 4H mean (Room / Near / Extended), volatility regime (ATR percentile high/low). A bucket pair only points to a real driver if it separates on both sides in the same direction; a split that appears on one side only is the asymmetry itself, not its cause.
+
+All panels are diagnostics — none of them gates a signal.
 
 ## Final score weights (display only)
 

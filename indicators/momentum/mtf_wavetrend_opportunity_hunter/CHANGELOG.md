@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.7.0 — 2026-10-02
+- New Situation panel (bottom left, with "Show Signal Stats"): average R and trade count per situational bucket, split Long / Short. Buckets are recorded at entry and read relative to the trade direction, so they stay symmetric: 4H JMA slope with/against the trade, net drift over the last N bars with/against, stretch from the 4H mean (Room / Near / Extended) and volatility regime (ATR percentile high/low). Purpose: find a situational driver of the long/short asymmetry — measurement only, no signal is gated
+- Two inputs for the panel: Situation Drift Lookback (100 bars) and Stretch Threshold (1.0 × 4H ATR)
+- Tooltip of "Min Opportunity" no longer cites a subset result that did not hold on the full sample; header wording no longer calls the entry or the tradeable subset "validated"
+
 ## v2.6.5 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
 
