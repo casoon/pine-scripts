@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.2.0 — 2026-10-02
 - Speed Reference default 3.0 → 1.0 ATR×/bar (provisional, not yet validated on data). Typical swing legs move well below 3 ATR per bar, so the Speed component stayed in the bottom third of its range and contributed only about 13 of its 40 points; at 1.0 it uses its full range
 

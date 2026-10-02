@@ -1,5 +1,9 @@
 # Changelog
 
+## Scale precision — 2026-10-02
+- `vein_feature_exporter` v0.1.4→0.1.5: Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+- `vein_reversal_score` v0.2.2→0.2.3: Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## Design decisions — 2026-10-02
 - `vein_trend` v0.2.1→0.2.2: the header, the Min Confluence Gate Score / Require Follow-Through tooltips and the README now describe the confluence gate as what it is — a weighted score (Evidence 2.0, Trigger 1.5 + 0.5 + 0.5, Trend 1.0, Quality 1.0 + 0.5) where only the cooldown is a hard veto, not a list of required guards (no gate code change). Follow-through after a Spring/Upthrust is now measured against the event bar's close instead of its wick low/high, like every other structure event.
 - `vein_reversal_score` v0.2.1→0.2.2: same follow-through trigger level as `vein_trend` (event bar's close). The event bar's confirmation is latched and fades with the existing decay curve, so a structure event can still count as confirmed on its follow-through bars — CANDIDATE and the ACTION alert are reachable without a second event stacking on top. Setup + confirmation without follow-through is now always PENDING (previously CANDIDATE or EXPIRED once the follow-through window had passed); the EXPIRED status is gone.

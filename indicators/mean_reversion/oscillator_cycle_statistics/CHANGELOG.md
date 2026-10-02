@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.5.5 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.5.4 — 2026-10-02
 - Fix: the Opportunity marker could fire on the bar a cycle completed (or timed out). On a completed cycle the marker was then drawn for the newly started opposite cycle, i.e. pointing the wrong way. The check now skips the resolution bar, like the calibration capture already did
 

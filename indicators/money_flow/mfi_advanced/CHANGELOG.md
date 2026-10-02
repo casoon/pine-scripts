@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.3 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.3.2 — 2026-10-02
 - Fixed: Signal Quality could never exceed ~83 — zone depth was divided by the midline-to-zone distance instead of the zone's own width. Depth is now measured across the OS zone (OS level → 0) and OB zone (OB level → 100), so the documented 0-100 range is reachable; quality values on deep extremes rise accordingly
 ## v1.3.1 — 2026-09-05

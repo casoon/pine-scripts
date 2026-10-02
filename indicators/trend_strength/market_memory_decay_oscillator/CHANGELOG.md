@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.2 — 2026-10-02
 - Changed: the half-life now comes from the lag-1 autocorrelation of the smoothed impulse line instead of raw returns. Raw-return autocorrelation sits near zero, so the half-life was a fraction of a bar, the decay curve was zero one bar after any impulse, and Bullish/Bearish Carry (±25) was practically unreachable. The half-life now runs from the impulse EMA's own memory (about 6 bars at the default Fast Impulse Length) upward, still clamped by Max Half-Life; MMDO, Carry states, alerts and the dashboard half-life change accordingly
 ## v1.1 — 2026-10-02

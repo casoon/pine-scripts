@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.1.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v2.1.0 — 2026-10-02
 - Fix: a single in-zone K/D cross stacked ~85 points on one TF (K-above-D flip 20 + K-rising 20 + cross 15 + in-zone cross 30). The cross bonus is now tiered and exclusive — 30 for a cross inside the oversold/overbought zone, 15 otherwise — so an in-zone cross scores 15 points less than before. Can shift when the smoothed total crosses the Long/Short levels
 - Docs: Sync Bonus tooltip and README state that adjacent pairs share their middle TF on purpose (adjacent sync is the concept)

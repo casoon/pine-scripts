@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.5.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.5.0 — 2026-07-08
 - **EMA slope normalized by ATR**: `close vs EMA` context now uses `(ema − ema[5]) / ATR` against a new "EMA Slope Threshold (×ATR)" input, instead of a raw price-unit slope — makes up/down context scale-free across instruments and price levels.
 - **Compression requires ATR Rank AND BB Width Rank**: a new Bollinger-width rank (independent of ATR) must also be below the Compression threshold, so a slow drift with normal bar-to-bar range but still-wide multi-bar bands no longer misclassifies as Compression.

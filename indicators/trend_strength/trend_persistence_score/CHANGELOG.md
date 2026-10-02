@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.2 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.1.1 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 - Docs: header Features list still said "Light-theme dashboard" after the table was replaced by the compact info label — corrected to match README/DESCRIPTION_TV wording

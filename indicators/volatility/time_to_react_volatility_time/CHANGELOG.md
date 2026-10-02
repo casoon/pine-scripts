@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.2.0 — 2026-10-02
 - Fixed: BOS fired on every bar closing above the prior swing-lookback high (or below the low) — the "first break" check could never fail. BOS now fires only on the bar that first closes beyond the level, so far fewer BOS events
 - Fixed: the event bar could count as its own reaction (green BOS bar → speed score 100). The reaction search now starts on the bar after the event; a reaction on that next bar scores 100

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.2 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.3.1 — 2026-10-02
 - Fix: Signal Quality depth component is now measured relative to the zone-to-bound distance (0 / 100) and capped at 1 — previously its maximum was about a third of the documented 50 points, so the score could never exceed ~83
 

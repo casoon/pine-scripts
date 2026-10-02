@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.6.5 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v2.6.4 — 2026-10-02
 - Fix: the Setup-TF WT direction (4H WT1 rising/falling) was scored in both Opportunity (+20) and Timing (+10). It now counts in Opportunity only; Timing's three Trigger-TF components are rescaled 35/30/25 → 39/33/28 so its maximum stays 100. Display/composite context only — the entry gate is unchanged
 

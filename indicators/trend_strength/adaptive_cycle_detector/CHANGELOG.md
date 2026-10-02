@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.2 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.0.1 — 2026-06-11
 - Performance: zero-crossing count switched from a per-bar loop over the lookback window to a rolling sum
 - Removed dead interval-tracking code (lastInterval was never updated due to an off-by-one and never read)

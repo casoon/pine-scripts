@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.7.4 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v0.7.3 — 2026-10-02
 - Fix: when the Wave TF equals the chart TF (e.g. a 4h chart in Fixed mode, where Auto keeps MTF grading on) the Wave alignment point was the Ripple cross itself, so every trigger got +1 from its own cross. The Wave point is now dropped in that case (max grade reduced by 1, Continuation type relies on Tide), and the table shows "Wave = chart TF · Wave point off"
 

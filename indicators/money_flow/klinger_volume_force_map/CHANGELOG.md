@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.2 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.0.1 — 2026-09-05
 - Added hard Exchange-only data validity gate: real trade volume is checked via `syminfo.volumetype` (`base`/`quote`), routed through a single gated `vol` variable that all Volume Force formula variants read
 - On CFDs/Forex/indices (no real trade volume) the oscillator, signal line, histogram, regime engine, and divergence/event detection now go blank instead of computing on tick-count volume

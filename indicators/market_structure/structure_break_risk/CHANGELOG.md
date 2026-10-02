@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.3.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals (pane plots only; price-chart plots keep the symbol precision)
+
 ## v2.3.0 — 2026-10-02
 - "Structure Broken" (and the Top-/Bottom-Break alerts) now also fires on the bar the EMA trend context flips, when an earlier swing break stayed Break Pressure and price still closes beyond that swing level — as long as that level was not already consumed by an earlier confirmed break. Before, the break only counted when swing break and EMA flip fell on the same bar
 - Risk score is now scaled by its reachable maximum (weight sum minus the smaller of Structure Erosion / Pivot Divergence, which exclude each other at the same pivot pair), so 100 and the Critical band are reachable with default weights; state thresholds unchanged

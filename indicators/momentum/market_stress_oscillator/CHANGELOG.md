@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.1.0 — 2026-10-02
 - Fix: follow-through no longer counts the peak bar's own range. It is now measured from the peak bar's close against the extreme of the bars after the peak, so a single wide stress bar can no longer pass the MinFollow ATR check on its own
 - Fix: the MinExtreme duration filter is applied as named — an extreme must persist for MinExtreme bars (previously one bar less, so MinExtreme 2 had no effect)

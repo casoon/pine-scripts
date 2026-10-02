@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.4 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.1.3 — 2026-10-02
 - Fix: Flat Zone width now counts the consecutive bars near the extreme on both sides of the pivot (pivot bar plus the unbroken run left and right). Previously only bars left of the pivot were scanned, non-adjacent bars were counted too, and bars after the pivot were ignored
 

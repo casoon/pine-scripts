@@ -1,5 +1,10 @@
 # Changelog
 
+## Scale precision — 2026-10-02
+- `wavetrend` v1.3.2→1.3.3: Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+- `wavetrend_v2` v2.0.3-experimental→2.0.4-experimental: Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+- `wavetrend_v3` v3.2.4-experimental→3.2.5-experimental: Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals (pane plots only; price-chart plots keep the symbol precision)
+
 ## wavetrend v1.3.2 — 2026-10-02
 - Fix: dashboard Bias double-counted direction — the regime term (±2) repeated the oscillator-side direction already in `oscBias`. Regime now adds trend strength only (±1 when the spread is above its average); confidence scales against the new maximum of 6 and the bucket thresholds are scaled proportionally (×6/7). Display only, no effect on signals
 - Docs: Min Score tooltips and README now state that Persist signals can score at most 2 (percentile + divergence) and are suppressed at Min Score ≥ 3

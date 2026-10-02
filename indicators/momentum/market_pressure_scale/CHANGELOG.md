@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.3 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v2.4.2 — 2026-10-02
 - Fix: without real trade volume, Impulse Pressure now renormalizes its volume weight onto range expansion and body size (as documented in the Data Contract and as Setup Pressure already did) instead of adding a constant mid-value volume term
 

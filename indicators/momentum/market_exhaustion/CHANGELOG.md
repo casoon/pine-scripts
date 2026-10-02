@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.2.0 — 2026-10-02
 - Change: divergence reaction is now measured from the pivot-bar close over the "Reaction window" bars after the pivot (previously capped at the pivot confirmation bars, so the window input had no effect). Divergences are drawn at confirmation with a provisional score and finalized (score, tooltip, line width) once the window has passed; score-based alerts would have to fire at finalization
 - Change: fatigue component removed from the divergence score (it duplicated the MFI delta); its weight is redistributed proportionally over the remaining components. "Fatigue lookback" input removed

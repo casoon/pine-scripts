@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.4 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.3.3 — 2026-10-02
 - Fix: Live Trend Quality included the current reference leg, which already enters Permission as Reference Leg Quality, so that leg was counted twice. Live Trend Quality now reads only the completed legs before the current one (still `maxLegHistoryInput` legs); Trend Fatigue is unchanged
 

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.1 — 2026-10-02
+- Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
+
 ## v1.3.0 — 2026-10-02
 - Fix: Relationship Broken and Turn From Extreme fired every second bar while their condition persisted — the one-bar edge detector compared against its own previous output instead of the raw condition; they now fire once per entry into the condition
 - Fix: per-family signal cooldown now counts from the last fired event — previously every setup blocked by the cooldown restarted it, so a run of candidate bars could suppress the family indefinitely
