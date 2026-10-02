@@ -148,8 +148,9 @@ nicht hier.
 - [ ] Keine Backtest-Zahlen/Qualitäts-Superlative in `README.md`, `DESCRIPTION_TV.bbcode`, `CHANGELOG.md`, Input-Tooltips, `indicator()`/`strategy()`-Titel, Chart-Labels, Dashboard-Zellen oder Alert-Messages (CLAUDE.md „No performance claims in user-facing text")
 
 ### 4.6 Strategy-Infrastruktur (nur falls `@strategy-config`-Block oder zugehörige Strategie existiert)
-- [ ] Bei vorhandenem `@strategy-config`-Block: ist die generierte Strategie unter `strategies/` aktuell (kein manueller Drift ggü. `build_strategies.py`-Output)?
-- [ ] Ohne `@strategy-config`-Block, aber mit zugehöriger Strategie in `strategies/`: diese ist **standalone** und darf nie durch `build_strategies.py` überschrieben werden, auch nicht bei „rebuild all" — ohne explizite Rückfrage beim User
+- [ ] Bei vorhandenem `@strategy-config`-Block: deckt er die tatsächlichen Signal-/Stop-Variablen des Indikators ab (keine umbenannte oder entfallene Variable, auf die er noch zeigt)?
+- [ ] Bei zugehöriger Strategie in `strategies/`: spiegelt sie die aktuelle Indikator-Logik? Alle Strategien sind **standalone und handgepflegt** — eine Indikator-Änderung propagiert nicht von selbst, das Nachziehen ist ein bewusster Schritt (Skill `strategy-from-indicator`)
+- [ ] Strategie-Header trägt `— Strategy (standalone)`, der Charttyp-Guard ist vorhanden, und es existiert eine Assessment-Datei `strategies/<name>/<name>_strategy_assessment.md`
 
 ## 5. Ablauf
 

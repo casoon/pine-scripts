@@ -46,24 +46,26 @@ Full indicator index, grouped by focus, with one-line descriptions and links to 
 
 ## Strategies
 
-Most strategy files are **auto-generated** from indicator source files via `scripts/build_strategies.py` — do not edit those directly. The WaveTrend v4 strategy is standalone and maintained by hand. Each strategy adds a trade direction filter, confirmed-bar gate, cooldown, and optional break-even stop on top of the indicator logic.
+Every strategy under `strategies/` is **standalone and hand-maintained**. Each wraps one
+indicator's signal logic in a `strategy()` call and adds a trade direction filter,
+confirmed-bar gate, cooldown, optional break-even stop and a non-standard-chart-type guard.
 
-```bash
-python3 scripts/build_strategies.py          # rebuild all
-python3 scripts/build_strategies.py indicators/trend_direction/chandelier_flip_radar/
-```
+Building or updating one is a guided task rather than a script — the Claude Code skill
+`strategy-from-indicator` (`.claude/skills/`) carries the input groups, the exit patterns
+and the transformation rules.
 
-| Strategy | Based on | SL type | Backtest rating |
-|----------|----------|---------|-----------------|
-| [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising (PF 1.60, NatGas 4H) |
+| Strategy | Based on | SL type | Status |
+|----------|----------|---------|--------|
+| [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising |
 | [`market_average_relationship_engine_strategy.pine`](strategies/market_average_relationship_engine/market_average_relationship_engine_strategy.pine) | Market–Average Relationship Engine | Trailing (MA ∓ ATR×) | Not ready — not yet backtested |
-| [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising (PF 1.14, NatGas 4H) |
-| [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (PF 1.71 Long, NatGas 4H) |
-| [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Promising (PF 3.07, NatGas 1D — best in repo) |
-| [`reversal_engine_score_strategy.pine`](strategies/reversal_engine_score/reversal_engine_score_strategy.pine) | Reversal Engine Score | — | Not ready (PF 0.95, NatGas 15M) |
-| [`commodity_pulse_matrix_v4_strategy.pine`](strategies/commodity_pulse_matrix/commodity_pulse_matrix_v4_strategy.pine) | Commodity Pulse Matrix v4 | — | Not ready — not yet backtested |
+| [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising |
+| [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (Long Only) |
+| [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Promising |
+| [`reversal_engine_score_strategy.pine`](strategies/reversal_engine_score/reversal_engine_score_strategy.pine) | Reversal Engine Score | Structural + R-multiple TP | Not ready |
+| [`commodity_pulse_matrix_v4_strategy.pine`](strategies/commodity_pulse_matrix/commodity_pulse_matrix_v4_strategy.pine) | Commodity Pulse Matrix v4 | Directional fixed TP | Not ready — not yet backtested |
 
-Full backtest results and parameter notes: `strategies/<name>/<name>_strategy_assessment.md`. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
+Backtest results and parameter notes live in `strategies/<name>/<name>_strategy_assessment.md`
+— that is the only place figures belong. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
 
 ---
 

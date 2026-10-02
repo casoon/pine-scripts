@@ -1,138 +1,104 @@
 # Backtesting
 
-Strategy wrappers for selected WavesUnchained indicators. Each script is a
-self-contained Pine Script v6 `strategy()` that replicates the indicator logic
-exactly and adds entry/exit management for TradingView's Strategy Tester.
+Strategy wrappers for selected WavesUnchained indicators. Each script is a self-contained
+Pine Script v6 `strategy()` that replicates the indicator logic and adds entry/exit
+management for TradingView's Strategy Tester.
+
+All strategies are **standalone and hand-maintained**. There is no generator: an indicator
+change does not propagate by itself, pulling a strategy back in line is a deliberate step.
+The Claude Code skill `strategy-from-indicator` carries the build rules.
 
 ---
 
 ## Scripts
 
-| File | Based on | Signal type |
-|------|----------|-------------|
-| `cfr_strategy.pine` | Chandelier Flip Radar v1.2 | Trend flip (ATR trailing stop) |
-| `str_strategy.pine` | Smooth Trend Radar v3.3 | Trend flip + pivot rejection |
-| `odz_strategy.pine` | Oscillator Divergence Zones v1.0 | RSI/CCI/MFI divergence |
+| Directory | Based on | SL type |
+|---|---|---|
+| `chandelier_flip_radar/` | Chandelier Flip Radar | Trailing (ATR envelope) |
+| `commodity_pulse_matrix/` | Commodity Pulse Matrix v4 | Directional fixed SL/TP |
+| `market_average_relationship_engine/` | Market–Average Relationship Engine | Trailing (MA ∓ ATR×) |
+| `oscillator_divergence_zones/` | Oscillator Divergence Zones | Pivot + ATR buffer |
+| `reversal_engine_score/` | Reversal Engine Score | Structural + R-multiple TP |
+| `smooth_trend_radar/` | Smooth Trend Radar | Fixed, TP1/TP2/TP3 levels |
+| `wavetrend/` | WaveTrend v4 | Trailing |
+
+Each directory holds the `.pine` file and its `<name>_strategy_assessment.md` — the only
+place backtest figures belong. Schema: [`ASSESSMENT_SCHEMA.md`](ASSESSMENT_SCHEMA.md).
 
 ---
 
 ## How to load in TradingView
 
-1. Open Pine Editor (`/` → Pine Editor or bottom panel)
+1. Open the Pine Editor
 2. Paste the contents of one of the `.pine` files
-3. Click **Add to chart** — the Strategy Tester tab appears below the chart
-4. Set the date range in Strategy Tester → Properties → Backtest Range
+3. **Add to chart** — the Strategy Tester tab appears below
+4. Set the range in Strategy Tester → Properties → Backtest Range
+
+**Use standard candles/bars only.** Every strategy draws a red warning label on Heikin Ashi,
+Renko, Kagi, Line Break, P&F and Range charts: orders there fill at synthetic bar prices and
+the result is meaningless — reliably flattering, never reproducible.
 
 ---
 
-## Default settings
-
-All strategies share these defaults:
+## Shared defaults
 
 | Setting | Value | Note |
-|---------|-------|------|
-| Position size | 10% of equity | Change in `strategy()` header or via TradingView Properties |
-| Commission | 0.05% per side | Adjust for your broker/instrument |
+|---|---|---|
+| Position size | 10% of equity | Change via TradingView Properties |
+| Commission | 0.02% | Realistic for CFD/futures; raise for crypto maker/taker |
 | Slippage | 1 tick | Increase for illiquid instruments |
-| Entries | On bar close | Next-bar open execution (conservative) |
+| Entries | On confirmed bar | `confirmClose` input, on by default — prevents repainting |
 
----
+Overnight/roll financing on CFDs is **not** priced in. On multi-day holds that is a known,
+unquantified drag on every rating in this directory.
 
-## Strategy-specific notes
-
-### cfr_strategy.pine
-- Default behavior: enters on flip, exits on next opposite flip (no TP limit)
-- Enable **Use Fixed ATR Take Profit** to add a hard profit target
-- The **Chandelier trailing stop** is the SL — it ratchets in the direction of the trade every bar
-- Best for: trending markets, medium to high timeframes (1H+)
-
-### str_strategy.pine
-- **Entry Mode**: choose Flip Only, Rejection Only, or both
-- **Exit at TP**: selects which TP level (TP1/TP2/TP3) is used as the exit limit order. `None` = ride until the next flip closes the trade
-- **TP Method**: `R-Multiple` is most portable across instruments (no session dependency). `Pivot` requires clean daily/weekly pivots
-- **Trail to BE**: once TP1 is reached, SL moves to entry — useful for reducing drawdown without capping upside
-- Rejection signals fire `_efPivBars` bars after the actual pivot — this is non-repainting by design
-
-### odz_strategy.pine
-- Signals fire `pivRight` bars after the actual divergence pivot (confirmed, non-repainting)
-- SL is anchored to the **divergence pivot** (low for bull, high for bear) + ATR buffer — not to the entry bar
-- TP is a fixed R:R from entry close, using the SL distance as the unit
-- Hidden divergence (continuation) can be added via **Include Hidden Divergence Entries**
-- Best for: counter-trend reversals on daily/4H; continuation trades on 1H/15M with hidden div
+Shared inputs: Trade Direction (Both / Long Only / Short Only), Cooldown Bars After Exit,
+Break-Even Stop + trigger, plus a Filters group (session, date range, max drawdown, max
+intraday loss, losing-streak limit).
 
 ---
 
 ## Optimization workflow
 
-### Step 1 — Choose instrument and timeframe
-Run each strategy on at least 2 different instruments and 2 timeframes before drawing
-conclusions. Recommended combinations to test first:
+**Step 1 — instrument and timeframe.** Run on at least 2 instruments and 2 timeframes before
+drawing any conclusion. Candidates: ES/SPY (1H, 4H, D), NQ/QQQ (1H, 4H), EURUSD (4H, D),
+BTCUSD (1H, 4H, D), CL crude (1H, 4H), NG natural gas (1H, 4H, D).
 
-| Instrument | Timeframes |
-|------------|-----------|
-| ES / SPY | 1H, 4H, Daily |
-| NQ / QQQ | 1H, 4H |
-| EURUSD | 4H, Daily |
-| BTC/USDT | 1H, 4H, Daily |
-| CL (crude oil) | 1H, 4H |
+**Step 2 — baseline.** Run with defaults first and record net profit %, max drawdown %,
+win rate, profit factor and trade count. Under 30 trades is not a result.
 
-### Step 2 — Baseline run
-Before optimizing, run with defaults. Record:
-- Net profit %
-- Max drawdown %
-- Win rate %
-- Profit factor
-- Number of trades (< 30 = insufficient data)
+**Step 3 — one group at a time.** Optimizing all parameters at once produces an overfit set.
+Change one group, re-measure, keep or revert.
 
-### Step 3 — Optimize one group at a time
-Avoid optimizing all parameters simultaneously — it leads to overfitting.
-Suggested order:
+**Step 4 — walk-forward.** Validate on data outside the optimization window. A parameter set
+that only works on the window it was fitted to is fitted, not found.
 
-**CFR:** `atrLen` → `atrMult` → `bodyFilter` → `tpMult` (if TP enabled)
+**Step 5 — direction split.** Test Long Only and Short Only separately. Trend-following
+strategies are frequently asymmetric on a given instrument, and an aggregate that looks
+mediocre often hides one healthy side and one broken one.
 
-**STR:** `stFactor` → `slMultiplier` → `exitLevel` → `tpMode` → `tp multipliers`
-
-**ODZ:** `pivLeft`/`pivRight` → `oscLen` → `slBuf` → `tpRR` → `oscType`
-
-### Step 4 — Walk-forward check
-After finding good parameters, test on **out-of-sample** data (the period NOT used
-for optimization). A parameter set that works only on the optimized window is overfit.
-
-Typical split: optimize on bars up to 2024-01-01, validate on 2024-01-01 → present.
-
-### Step 5 — Direction filter
-Test each strategy with `Long Only` and `Short Only` separately. Many trend-following
-strategies perform significantly better in one direction on a given instrument.
+Every run that informs a decision belongs in the strategy's assessment file with its
+instrument, timeframe and sample size attached. A figure without that context is not a result.
 
 ---
 
-## Important limitations
+## Known limitations
 
-- **Entry execution**: signals fire on bar close; the strategy enters at the **next bar's open**.
-  This is realistic. If you set `process_orders_on_close=true` in the `strategy()` call,
-  entries execute at the exact close price — useful for comparison but not realistic.
-- **Pivot-based TP (STR)**: uses `request.security` with `lookahead=on` for prior-session
-  pivots. This is correct (uses *previous* session's H/L/C), but requires sufficient history.
-- **ODZ SL anchor**: the SL is set at the divergence pivot price, which can be several bars
-  in the past. On illiquid instruments, check that `pivRight` is not so large that the
-  pivot's SL distance makes the trade unrealistic.
-- **Commission and slippage**: the defaults (0.05%, 1 tick) are conservative for futures/FX
-  spot. For crypto with maker/taker fees, increase commission to 0.1%.
+- **Entry execution** — signals fire on bar close, the strategy enters at the next bar's open.
+  That is the realistic case. `process_orders_on_close=true` fills at the exact close: useful
+  for comparison, not for expectations.
+- **Pivot-anchored stops** — the SL can sit several bars in the past. On illiquid instruments
+  check that the resulting distance still describes a tradable risk.
+- **HTF pivots via `request.security`** use `lookahead=on` against `[1]`-offset series. That
+  is the correct non-repainting pattern, but it needs sufficient history to warm up.
 
 ---
 
-## Adding more strategies
+## Adding a strategy
 
-To wrap another indicator:
-1. Copy the indicator's full Pine Script
-2. Replace `indicator(...)` with `strategy(...)` (add `default_qty_type`, `commission_type`, etc.)
-3. Add a `g_strat = "Strategy"` input group with direction filter and exit level inputs
-4. Remove all `label.new()`, `line.new()`, `linefill.new()`, `alertcondition()` calls
-5. Keep `plot()` and `barcolor()` — useful for visual review of trades
-6. Add `strategy.entry()` on signal conditions
-7. Add `strategy.exit()` on `strategy.position_size != 0` every bar with current SL/limit
+Invoke the `strategy-from-indicator` skill — it holds the input groups, the six exit patterns,
+the `indicator()` → `strategy()` transformation and the traps (`alertcondition()` is a compile
+error in a strategy; break-even must fold into the existing stop, not become a second exit).
 
-Good candidates for future wrappers:
-- `vein_pullback.pine` — explicit pullback-end signals with clear SL (EMA + structure)
-- `vein_execution.pine` — 15M execution module with TRIGGER status
-- `chandelier_flip_radar` + `smooth_trend_radar` combined (CFR as filter, STR as entry)
+Candidates: `vein_pullback` (explicit pullback-end signals with a structural SL),
+`vein_execution` (15M execution module with TRIGGER status).
