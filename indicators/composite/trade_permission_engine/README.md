@@ -38,7 +38,8 @@ reference leg, not two separate detectors:
 
 - **Live Trend Quality** — a second, continuously-updated quality read alongside the quality frozen
   the instant the reference leg formed. Answers "is this impulse *still* healthy", not just "was it
-  good when it formed": a recency-weighted average of the last `maxLegHistoryInput` completed legs'
+  good when it formed": a recency-weighted average of the `maxLegHistoryInput` completed legs before
+  the current reference leg (that one already enters as the frozen quality) — their
   efficiency (more recent legs weighted higher), adjusted by whether that efficiency and the legs'
   ATR-normalized range are trending up or down across the tracked history. Fed into all four
   Permission formulas as an additional gated factor (`liveTrendQualityFloorInput` floor) alongside
@@ -91,7 +92,7 @@ reference leg, not two separate detectors:
   height aren't interpretable the way a moving curve is ("mit den Kurven konnte ich was anfangen,
   hiermit nicht") - reverted to curves in v1.3.0. Every other raw score (Active Permission, Live
   Trend Quality, the decay factors, etc.) is in the data window.
-- **Alerts**: Setup, Trigger, Signal (Trigger + Permission threshold), T1/T2 hit, Invalidation hit,
+- **Alerts**: Setup, Trigger, Signal (Trigger whose Active Permission still holds ≥ `signalRetentionInput` % of its Permission), T1/T2 hit, Invalidation hit,
   Cancelled — per side.
 
 ## Position Health (Long/Short)
@@ -107,10 +108,11 @@ new-entry Permission score.
 
 Six components, per direction:
 
-- **Live Quality** — blends the leg-boundary-gated Live Trend Quality with a new, genuinely
-  continuous per-bar read (`liveLegQuality`, same efficiency/overlap formula as reference-leg
-  quality but never reset mid-leg) — reacts within an in-progress pullback instead of only at the
-  next confirmed leg.
+- **Live Quality** — blends the leg-boundary-gated Live Trend Quality with a genuinely
+  continuous per-bar read of the counter-move since the current endpoint (`liveLegQuality`, same
+  efficiency/overlap formula as reference-leg quality, measured from the endpoint's pivot bar) —
+  reacts within an in-progress pullback instead of only at the next confirmed leg. A clean
+  counter-move lowers the held direction's health, a choppy one keeps it up.
 - **Pullback Health** — reuses Continuation Maturity's depth/duration/exhaustion read, blended
   against a healthy-100 baseline scaled by how much correction is actually present, while the held
   direction's own leg is still the active reference. While the OPPOSITE leg is the active reference

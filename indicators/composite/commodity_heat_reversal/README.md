@@ -29,7 +29,7 @@ The indicator also tracks an optional higher-timeframe EMA bias. When a heat set
 | Wick pressure | 1 | upper wick > 35% of candle range | lower wick > 35% |
 | BB breach | 1 | `close > bbUpper` | `close < bbLower` |
 
-Default threshold: 4/7. Extreme threshold (for counter-trend override): 6/7.
+Reversal signals require the exhaustion gate (RSI extreme or BB breach) and the wick-rejection gate, plus **reversal heat** from the two stretch components that are not gates: ATR distance to MA50 and ATR expansion (0–2). Default reversal heat threshold: 1 (distance or expansion). Extreme threshold (for counter-trend override): 2 (both). The 0–7 score above is kept for the dashboard and the pullback heat.
 
 ## Quality Gate
 

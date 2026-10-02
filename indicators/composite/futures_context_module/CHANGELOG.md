@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.1 — 2026-10-02
+- Fix: when the prior Open Interest (or prior front close) for the ΔOI lookback was missing, the change was measured against zero — the ΔOI row showed n/a while the OI x Price row still classified "OI rising + new longs/shorts". A missing prior value now leaves both rows at n/a
+
 ## v1.0.0 — 2026-09-05
 - Initial release: Daily-only futures context module — Open Interest, ΔOI vs. front-contract
   price change (OI×Price quadrant classification), Front/Next term structure

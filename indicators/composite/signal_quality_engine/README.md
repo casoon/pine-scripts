@@ -18,7 +18,7 @@ Adapted from the Exhaustion Scanner top/bottom logic, trimmed to three component
 | Component | Weight | What it measures |
 |---|---|---|
 | Distance | 40% | stretch past the mean — `(close−EMA50)/ATR` and Bollinger-Z |
-| Structure | 30% | recent high/low proximity + wick rejection + close beyond the band |
+| Structure | 30% | price at the edge of the 80-bar range (wick rejection is left to the candle trigger, close beyond the band to Distance) |
 | Momentum | 30% | RSI / StochRSI / WaveTrend overbought–oversold extreme |
 
 Computed for both edges; the dominant side is the Edge. A Trigger fires only on the dominant edge, when its score clears the threshold, the candle rejects, and the cooldown has elapsed.

@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Trade Permission Engine [WavesUnchained]
-// Version: 1.3.0
+// Version: 1.3.3
 // Author: WavesUnchained
-// Build: 2026-08-20
+// Build: 2026-10-02
 // ============================================================================
 // Answers "does the market currently permit trading Long or Short here", not
 // "how probable is this specific setup" - the successor to Directional
@@ -215,7 +215,7 @@ int htfAtrLenInput = input.int(14, "HTF ATR length", minval = 5, maxval = 100, g
 float scenarioHysteresisMarginInput = input.float(10.0, "Continuation/Reversal dominance margin (hysteresis)", minval = 0.0, maxval = 50.0, step = 1.0, tooltip = "The dominant scenario only flips to the other one once it leads by this many points - prevents the Target/Invalidation geometry from flickering between Continuation and Reversal when the two are close.", group = GROUP_MATURITY)
 
 float permissionThresholdInput = input.float(12.0, "Permission threshold (Setup/Watch)", minval = 0, maxval = 100, tooltip = "Gates longSetup/shortSetup, and so Trigger eligibility and the Setup/Trigger alerts; also drawn as a reference line against the Permission curve below. Provisional default, lowered from 55 - a real chart showed longPermission/shortPermission peaking around 10-15 (a floored-multiplicative product of several 0-1 factors compresses it well below a 0-100 scale's intuitive range), meaning 55 was very likely unreachable in practice and Trigger may never have fired. This is a rough recalibration from limited observation (one instrument, a few days), not a validated figure - revisit against a wider longPermission/shortPermission sample (visible directly on the pane) before relying on it.", group = GROUP_DISPLAY)
-float confirmationThresholdInput = input.float(50.0, "Active Permission threshold (fully qualified signal)", minval = 0, maxval = 100, tooltip = "Gates the TPE1 Long/Short Signal alerts.", group = GROUP_DISPLAY)
+float signalRetentionInput = input.float(50.0, "Signal retention (% of Permission)", minval = 0, maxval = 100, step = 5, tooltip = "Gates the TPE1 Long/Short Signal alerts: a Trigger counts as a fully qualified signal when Active Permission (after confirmation, CRV and decay factors) still holds at least this share of the side's Permission. Relative on purpose - Active Permission is a product of factors <= 1 and can never exceed Permission, which itself peaks far below 100, so an absolute threshold (previously 50) was unreachable. On the Trigger bar the confirmation factor is ~0.58 (CONFIRMED, no acceptance yet), so 50 % means: CRV factor >= ~0.87 and no decay.", group = GROUP_DISPLAY)
 
 // Position Health answers a different question than Permission above ("is an
 // EXISTING position still structurally healthy", not "is a NEW entry attractive
@@ -546,7 +546,7 @@ var array<float> legRangeAtrHistory = array.new_float()
 if newReferenceLeg and not na(referenceLegEfficiency)
     array.push(legQualityHistory, referenceLegQuality)
     array.push(legRangeAtrHistory, math.abs(swingEndPrice - swingOriginPrice) / math.max(nz(atrAtLegEnd, atrSafe), syminfo.mintick))
-    if array.size(legQualityHistory) > maxLegHistoryInput
+    if array.size(legQualityHistory) > maxLegHistoryInput + 1
         array.shift(legQualityHistory)
         array.shift(legRangeAtrHistory)
 
@@ -598,10 +598,24 @@ f_recentVsOlderRatio(array<float> arr) =>
         result := f_safeDiv(recentAvg - olderAvg, math.max(olderAvg, EPS), 0.0)
     result
 
-float legQualityLevel = f_recencyWeightedAvg(legQualityHistory)
-float legQualityTrend = f_recentHalfVsOlderHalf(legQualityHistory)
-float legRangeTrend = f_recentHalfVsOlderHalf(legRangeAtrHistory)
-float legRangeRatio = f_recentVsOlderRatio(legRangeAtrHistory)
+// The newest history entry IS the current reference leg, which already
+// enters Permission as referenceLegQuality. Live Trend Quality reads only the
+// completed legs before it (the history keeps maxLegHistoryInput + 1 entries
+// so that window stays maxLegHistoryInput legs long); Trend Fatigue keeps
+// reading the latest maxLegHistoryInput legs, current one included.
+int legHistorySize = array.size(legQualityHistory)
+array<float> priorLegQuality = array.new_float()
+array<float> priorLegRangeAtr = array.new_float()
+array<float> recentLegRangeAtr = array.new_float()
+if legHistorySize > 0
+    priorLegQuality := array.slice(legQualityHistory, 0, legHistorySize - 1)
+    priorLegRangeAtr := array.slice(legRangeAtrHistory, 0, legHistorySize - 1)
+    recentLegRangeAtr := array.slice(legRangeAtrHistory, math.max(legHistorySize - maxLegHistoryInput, 0), legHistorySize)
+
+float legQualityLevel = f_recencyWeightedAvg(priorLegQuality)
+float legQualityTrend = f_recentHalfVsOlderHalf(priorLegQuality)
+float legRangeTrend = f_recentHalfVsOlderHalf(priorLegRangeAtr)
+float legRangeRatio = f_recentVsOlderRatio(recentLegRangeAtr)
 
 float liveTrendQuality = 50.0
 if not na(legQualityLevel)
@@ -611,17 +625,40 @@ if not na(legQualityLevel)
     liveTrendQuality := f_clamp(legQualityLevel + 0.3 * legQualityTrend + 8.0 * f_clamp(legRangeTrend, -2.0, 2.0), 0.0, 100.0)
 
 int liveLegBars = na(swingEndBar) ? na : bar_index - swingEndBar
+
+// Live-leg accumulators: the live leg is the counter-move SINCE the current
+// endpoint (swingEndPrice), so its path/overlap must start at the endpoint's
+// true pivot bar, not at the confirmation bar pivotLen bars later (the
+// numerator |close - swingEndPrice| already spans those bars). On every
+// accepted endpoint update the window is seeded with the fixed-length
+// pivotLen-bar path since the pivot bar; afterwards it accumulates per bar.
+float endpointSeedPath = math.sum(math.abs(close - close[1]), pivotLen)
+float endpointSeedOverlap = math.sum(barOverlap, pivotLen)
+bool currentEndpointUpdated = (swingDirection == 1 and highEndpointUpdated) or (swingDirection == -1 and lowEndpointUpdated)
+
+var float liveLegPathSum = 0.0
+var float liveLegOverlapSum = 0.0
+var int liveLegOverlapCount = 0
+if currentEndpointUpdated
+    liveLegPathSum := nz(endpointSeedPath)
+    liveLegOverlapSum := nz(endpointSeedOverlap)
+    liveLegOverlapCount := pivotLen
+else
+    liveLegPathSum += math.abs(close - close[1])
+    liveLegOverlapSum += barOverlap
+    liveLegOverlapCount += 1
+
 float liveLegEfficiency = 0.0
-if not na(swingEndPrice) and legPathSum > EPS
-    liveLegEfficiency := f_clamp(f_safeDiv(math.abs(close - swingEndPrice), legPathSum, 0.0), 0.0, 1.0)
+if not na(swingEndPrice) and liveLegPathSum > EPS
+    liveLegEfficiency := f_clamp(f_safeDiv(math.abs(close - swingEndPrice), liveLegPathSum, 0.0), 0.0, 1.0)
 
 // Live Leg Quality: same formula as referenceLegQuality (fix #2's efficiency x
-// (1-overlap) blend), but reads the NOT-YET-RESET legPathSum/legOverlapSum
-// accumulators every bar instead of only at leg completion - a genuinely
-// continuous quality read for Position Health below, where liveTrendQuality's
-// leg-boundary gating (only updates on newReferenceLeg) is too slow to react
-// within an in-progress pullback.
-float liveLegOverlap = legOverlapCount > 0 ? f_clamp(legOverlapSum / legOverlapCount, 0.0, 1.0) : 0.5
+// (1-overlap) blend), but over the live-leg accumulators above, read every bar
+// - a genuinely continuous quality read for Position Health below, where
+// liveTrendQuality's leg-boundary gating (only updates on newReferenceLeg) is
+// too slow to react within an in-progress pullback. Note: this measures the
+// COUNTER-MOVE's cleanliness (direction opposite to swingDirection).
+float liveLegOverlap = liveLegOverlapCount > 0 ? f_clamp(liveLegOverlapSum / liveLegOverlapCount, 0.0, 1.0) : 0.5
 float liveLegQuality = f_clamp(100.0 * (liveLegEfficiency * 0.55 + (1.0 - liveLegOverlap) * 0.45), 0.0, 100.0)
 
 // ============================================================================
@@ -890,14 +927,21 @@ if latestLegBearish
 // genuinely continuous liveLegQuality above, then reads it per-direction.
 // swingDirection only flips once a counter-move retraces
 // legInvalidationRetracementInput (0.90) of the prior leg - an ordinary
-// Wave-4-style pullback (23-62%) does NOT flip it, so this stays reading the
-// held direction's own leg through a normal correction. The inversion branch
-// only matters in the rarer case structure has already flipped against the
-// held direction - there a clean opposite leg is bad news, a choppy one less
-// so (symmetric, situation-driven, not hardcoded by side).
-float blendedTrendQuality = f_weightedAvg2(liveTrendQuality, 60.0, liveLegQuality, 40.0)
-float liveQualityLong = swingDirection == 1 ? blendedTrendQuality : 100.0 - blendedTrendQuality
-float liveQualityShort = swingDirection == -1 ? blendedTrendQuality : 100.0 - blendedTrendQuality
+// Wave-4-style pullback (23-62%) does NOT flip it, so liveTrendQuality stays
+// reading the held direction's own legs through a normal correction. The
+// inversion branch only matters in the rarer case structure has already
+// flipped against the held direction - there a clean opposite leg is bad
+// news, a choppy one less so (symmetric, situation-driven, not hardcoded by
+// side). liveLegQuality is the COUNTER-MOVE's quality (opposite to
+// swingDirection), so it enters inverted for the swingDirection side and
+// as-is for the opposite side: a clean pullback lowers the held side's
+// health instead of raising it.
+float liveTrendQualityLong = swingDirection == 1 ? liveTrendQuality : 100.0 - liveTrendQuality
+float liveTrendQualityShort = swingDirection == -1 ? liveTrendQuality : 100.0 - liveTrendQuality
+float counterMoveQualityLong = swingDirection == 1 ? 100.0 - liveLegQuality : liveLegQuality
+float counterMoveQualityShort = swingDirection == -1 ? 100.0 - liveLegQuality : liveLegQuality
+float liveQualityLong = f_weightedAvg2(liveTrendQualityLong, 60.0, counterMoveQualityLong, 40.0)
+float liveQualityShort = f_weightedAvg2(liveTrendQualityShort, 60.0, counterMoveQualityShort, 40.0)
 
 // Pullback Health: continuationMaturityLong/Short can't be reused directly -
 // it scores a fresh impulse still making new highs (no correction yet,
@@ -1536,8 +1580,8 @@ float shortDecayFactor = f_clamp(1.0 - shortStaleBars * decayPerBarInput / 100.0
 float longScoreRaw = longScorePreCrv * longCrvFactor * longDecayFactor
 float shortScoreRaw = shortScorePreCrv * shortCrvFactor * shortDecayFactor
 
-bool newLongSignal = newLongTrigger and longScoreRaw >= confirmationThresholdInput
-bool newShortSignal = newShortTrigger and shortScoreRaw >= confirmationThresholdInput
+bool newLongSignal = newLongTrigger and longPermission > 0 and longScoreRaw >= longPermission * signalRetentionInput / 100.0
+bool newShortSignal = newShortTrigger and shortPermission > 0 and shortScoreRaw >= shortPermission * signalRetentionInput / 100.0
 
 float smoothedLong = ta.ema(longScoreRaw, smoothingInput)
 float smoothedShort = ta.ema(shortScoreRaw, smoothingInput)

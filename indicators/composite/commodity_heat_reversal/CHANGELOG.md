@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.0 — 2026-10-02
+- Reversal signals no longer count their own mandatory gates as score points. The exhaustion (RSI/BB) and wick-rejection gates stay required; on top of them a signal now needs reversal heat from ATR distance to MA50 and ATR expansion (0–2). Default 1 = distance or expansion, which is exactly what the old 4/7 threshold amounted to once the gates passed, so default signals are unchanged. "Score Threshold" / "Extreme Score Threshold" are replaced by "Reversal Heat Threshold" (1) and "Extreme Heat Threshold" (2) — custom values need to be set again
+
+## v1.4.7 — 2026-10-02
+- Fix: the weak counter-trend short classification (`close < MA200 and HTF up`) was not the mirror of the long one (`close < MA50 and MA50 slope ≤ 0`). A short now counts as counter-trend when price is above a flat-or-rising MA50 (`close > MA50 and MA50 slope ≥ 0`), the exact mirror of the long rule; this changes which shorts the Counter-Trend Reversals display setting shows, marks or hides
+
 ## v1.4.6 — 2026-06-30
 - Alerts: fixed alert messages to ALL CAPS format for consistency with library canon (`CHR · LONG`, `CHR · SHORT`, `CHR · COUNTER-TREND LONG/SHORT`, `CHR · PULLBACK CONTINUATION LONG/SHORT`, `CHR · REVERSAL SIGNAL`, `CHR · SIGNAL`)
 

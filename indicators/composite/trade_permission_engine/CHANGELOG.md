@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.3.3 — 2026-10-02
+- Fix: Live Trend Quality included the current reference leg, which already enters Permission as Reference Leg Quality, so that leg was counted twice. Live Trend Quality now reads only the completed legs before the current one (still `maxLegHistoryInput` legs); Trend Fatigue is unchanged
+
+## v1.3.2 — 2026-10-02
+- Fix: the live counter-move read (Live Leg efficiency, used by counter-move Exhaustion and Position Health) measured price movement from the endpoint's pivot bar but path length only from its confirmation bar, so it read close to "perfectly clean" right after every new endpoint. Path and overlap are now measured from the pivot bar too, and restart whenever the endpoint extends
+- Fix: Position Health's Live Quality fed the counter-move's cleanliness into the held direction uninverted, so Long Health rose during a clean pullback. A clean counter-move now lowers the held side's health (mirrored for Short)
+
+## v1.3.1 — 2026-10-02
+- Fix: the TPE1 Long/Short Signal alerts could not fire. They required Active Permission ≥ 50, but Active Permission is Permission times factors ≤ 1 and Permission itself peaks far below 50. Replaced the absolute "Active Permission threshold" with "Signal retention (% of Permission)" (default 50): a Trigger is a fully qualified signal when Active Permission still holds that share of its Permission — on the Trigger bar that means a good CRV factor and no decay
+
 ## v1.3.0 — 2026-08-20
 - Reverted the v1.2.0 "Decision Timeline" (three fixed-height lanes, height carries no information)
   back to plain value curves - real chart feedback, after the state-lifecycle bugs in that version

@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.4 — 2026-10-02
+- **Structure no longer double-counts** — a close beyond the band was scored in both Distance and Structure, and the opposing wick in both Structure and the candle trigger. Structure now measures only whether price sits at the edge of the 80-bar range; Distance keeps the stretch, the candle trigger keeps the rejection. Because Structure is now an at-edge/not-at-edge read, exhaustion scores away from the edge come out lower than before.
+
 ## v3.3 — 2026-07-08
 - **Sweep now targets the actual range edge** — `sweptHigh`/`sweptLow` compared price against `recentHigh[1]`/`recentLow[1]` (the 80-bar extreme) instead of just the prior candle's high/low, so the rejection confirms a liquidity grab of the edge being faded, not arbitrary 1-bar noise near it.
 - **Range channel fill** — a subtle shade between the upper/lower bands so the fade channel reads at a glance (`Show Range Fill & Edge Zones`, on by default).
