@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Commodity Pulse Matrix v4 [WavesUnchained]
-// Version: 4.1.0
+// Version: 4.2.0
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // Chart-timeframe entry engine with multi-timeframe confluence context.
 // Slimmed down from v3 (~7200 lines) to focus on filtered signal generation.
@@ -81,9 +81,9 @@ float wt1BoostThreshold = input.float(60.0, "WT1 Extreme Threshold", minval=40.0
 float wt1BoostAmount = input.float(0.10, "WT1 Boost Amount", minval=0.05, maxval=0.25, step=0.01, group="Signal Boost", tooltip="Strength added when WT1 is extreme (0.10 = 10%)")
 
 float strengthThreshold = input.float(0.55, "Strength Threshold", minval=0.20, maxval=0.70, step=0.05, group="Signal Boost", tooltip="Minimum strength required for final signal (lower = more signals)")
-float entryHeatMin       = input.float(0.00, "Entry Heat Filter (min)", minval=0.0, maxval=1.0, step=0.05, group="Signal Boost", tooltip="Optional final heat hard filter. Default 0 keeps heat as context instead of a mandatory veto.")
+float entryHeatMin       = input.float(0.40, "Entry Heat Evidence (min)", minval=0.0, maxval=1.0, step=0.05, group="Signal Boost", tooltip="Heat at or above this counts as one evidence point for the Final Signal Gate (not a veto). Provisional default - not yet checked against the heat distribution after the v4.2.0 scaling fixes.")
 int   finalMinGate       = input.int(4, "Final Signal Gate (strictness)", minval=2, maxval=5, group="Signal Boost",
-     tooltip="Strictness of the graded confidence gate. The timing trigger (Emit Entry + Entry Direction) is always required; this sets how much supporting evidence (Quality Gate / Trend Alignment / Heat, 0-3) must also confirm. 5=all 3 evidence points, 2=none required (trigger-only).")
+     tooltip="Strictness of the graded confidence gate. The timing trigger (Emit Entry + Entry Direction) is always required; this sets how many context evidence points must also confirm: quality context (volume + ATR regime or mean-reversion at S/R), trend alignment (trending regime + close vs JMA50) and heat >= Entry Heat Evidence. 5=all 3, 4=2 of 3, 3=1 of 3, 2=none (trigger-only).")
 
 // ==== EARLY REVERSAL CANDIDATES ====
 bool showEarlyReversal = input.bool(true, "Show Early Reversal Candidates", group="Early Reversal", tooltip="Shows early reversal candidates before final entries. Informational only, not used by strategy signals.")
@@ -1552,17 +1552,18 @@ calculateVolatilityScore(float atr, float closePrice, float src, bool useSqueeze
         float upperKC = keltnerBasis + (1.5 * keltnerRange)
         float lowerKC = keltnerBasis - (1.5 * keltnerRange)
         bool squeeze = (lowerBB > lowerKC) and (upperBB < upperKC)
-        sqzContrib := squeeze ? 0.3 : 0.0  // Squeeze = potential breakout = positive
+        sqzContrib := squeeze ? 1.0 : 0.0  // Squeeze = potential breakout = positive
 
     // Williams VIX Fix (WVF) - Market bottom indicator
     float highest_close = ta.highest(close, 22)
     float wvf = ((highest_close - low) / highest_close) * 100.0
     float wvfMA = ta.sma(wvf, 22)
-    float wvfBoost = wvf > wvfMA ? 0.2 : 0.0  // High WVF = potential reversal = positive
+    float wvfBoost = wvf > wvfMA ? 1.0 : 0.0  // High WVF = potential reversal = positive
 
-    // Weighted combination
-    // ATR 50%, Squeeze 30%, WVF 20%
-    float volScore = (atrScore * 0.50) + (sqzContrib * 0.30) + (wvfBoost * 0.20)
+    // Weighted combination of 0..1 components
+    // ATR 50%, Squeeze 30%, WVF 20% - renormalized over ATR + WVF when the squeeze is off
+    // (components used to be pre-scaled by their own weight, capping the score at +0.08)
+    float volScore = useSqueeze ? (atrScore * 0.50) + (sqzContrib * 0.30) + (wvfBoost * 0.20) : (atrScore * 0.50 + wvfBoost * 0.20) / 0.70
 
     // Convert to [-1, 1] range (currently [0, 1])
     (volScore * 2.0) - 1.0
@@ -1614,23 +1615,24 @@ calculateDivergenceScore(float oscillator, int leftBars = 5, int rightBars = 5) 
     float oscPivotLow = ta.pivotlow(oscillator, leftBars, rightBars)
 
     // Extract ta.valuewhen calls for consistency
-    float prevPriceLow = ta.valuewhen(not na(pricePivotLow), low, 1)
-    float prevOscLow = ta.valuewhen(not na(oscPivotLow), oscillator, 1)
-    float prevPriceHigh = ta.valuewhen(not na(pricePivotHigh), high, 1)
-    float prevOscHigh = ta.valuewhen(not na(oscPivotHigh), oscillator, 1)
+    // Compare pivot values (bar [rightBars]), not the confirmation bar's low/high/oscillator
+    float prevPriceLow = ta.valuewhen(not na(pricePivotLow), pricePivotLow, 1)
+    float prevOscLow = ta.valuewhen(not na(oscPivotLow), oscPivotLow, 1)
+    float prevPriceHigh = ta.valuewhen(not na(pricePivotHigh), pricePivotHigh, 1)
+    float prevOscHigh = ta.valuewhen(not na(oscPivotHigh), oscPivotHigh, 1)
 
     float divScore = 0.0
 
     // Bullish Regular Divergence: Price makes lower low, oscillator makes higher low
     if not na(pricePivotLow) and not na(oscPivotLow)
         if not na(prevPriceLow) and not na(prevOscLow)
-            if low < prevPriceLow and oscillator > prevOscLow
+            if pricePivotLow < prevPriceLow and oscPivotLow > prevOscLow
                 divScore += 0.5
 
     // Bearish Regular Divergence: Price makes higher high, oscillator makes lower high
     if not na(pricePivotHigh) and not na(oscPivotHigh)
         if not na(prevPriceHigh) and not na(prevOscHigh)
-            if high > prevPriceHigh and oscillator < prevOscHigh
+            if pricePivotHigh > prevPriceHigh and oscPivotHigh < prevOscHigh
                 divScore -= 0.5
 
     // Clamp to [-1, 1] range
@@ -1810,9 +1812,9 @@ calculateSignalStrengthScore(float total1, float total2, float total3, float tot
     int count = includeChart ? 4 : 3
     float avgMagnitude = sum / float(count)
 
-    // Normalize: 0=weak, 2.5+=strong
-    // Score range: 0-1 where 2.5+ magnitude = 1.0
-    math.min(1.0, avgMagnitude / 2.5)
+    // TF totals are clamped to [-1, 1], so the average magnitude is already 0-1
+    // (was divided by 2.5, capping this component at 0.4)
+    math.min(1.0, avgMagnitude)
 
 // ===========================================================================
 // 3. SETUP STATUS SCORE (0-1)
@@ -2164,8 +2166,10 @@ detectExhaustion(int confirmBars = 3, int rsiLength = 14, int atrLen = 14, int v
     // criterion never fires, so only 4 are available — lower the bar to 2 to
     // keep roughly the same 60% selectivity instead of silently tightening it)
     int watchThresh = volumeIsReal ? 3 : 2
-    bool bullWatch = bullCount >= watchThresh
-    bool bearWatch = bearCount >= watchThresh
+    // Range, volume and small body are identical for both sides - require at least one
+    // directional criterion (RSI extreme or rejection wick), else one wide doji fires both
+    bool bullWatch = bullCount >= watchThresh and (bull1 or bull4)
+    bool bearWatch = bearCount >= watchThresh and (bear1 or bear4)
 
     // Track consecutive watch bars
     var int bullWatchBars = 0
@@ -2710,9 +2714,11 @@ updateZoneAge(DiamondZone zone) =>
     if not na(zone)
         zone.barsAgo := zone.barsAgo + 1
 
-        // Decay strength over time (max 100 bars)
+        // Decay strength over time (max 100 bars, floor 0.5). Applied as the ratio of
+        // consecutive age factors so the decay doesn't compound bar over bar
+        float prevAgeFactor = math.max(0.5, 1.0 - ((zone.barsAgo - 1) / 100.0))
         float ageFactor = math.max(0.5, 1.0 - (zone.barsAgo / 100.0))
-        zone.strength := zone.strength * ageFactor
+        zone.strength := zone.strength * ageFactor / prevAgeFactor
     zone
 
 checkZoneBroken(DiamondZone zone, float closePrice) =>
@@ -3008,15 +3014,16 @@ detectRSIDivergences(float rsiVal, int lookbackLeft = 2, int lookbackRight = 2) 
     foundPL = not na(ta.pivotlow(rsiVal, lookbackLeft, lookbackRight))
 
     // Extract ta.valuewhen calls for consistency (bullish)
-    prevRSI_bull = ta.valuewhen(foundPL, rsiVal, 1)
-    prevLow_bull = ta.valuewhen(foundPL, low, 1)
+    // Pivot values sit at [lookbackRight] - the confirmation bar's rsi/low are not the pivot
+    prevRSI_bull = ta.valuewhen(foundPL, rsiVal[lookbackRight], 1)
+    prevLow_bull = ta.valuewhen(foundPL, low[lookbackRight], 1)
 
     bullDiv = false
     bullLevel = 0.0
 
     if foundPL
-        rsiHL = rsiVal > prevRSI_bull       // RSI Higher Low
-        priceLL = low < prevLow_bull         // Price Lower Low
+        rsiHL = rsiVal[lookbackRight] > prevRSI_bull       // RSI Higher Low
+        priceLL = low[lookbackRight] < prevLow_bull         // Price Lower Low
 
         bullDiv := rsiHL and priceLL
         bullLevel := low[lookbackRight]  // Support at divergence low
@@ -3025,15 +3032,15 @@ detectRSIDivergences(float rsiVal, int lookbackLeft = 2, int lookbackRight = 2) 
     foundPH = not na(ta.pivothigh(rsiVal, lookbackLeft, lookbackRight))
 
     // Extract ta.valuewhen calls for consistency (bearish)
-    prevRSI_bear = ta.valuewhen(foundPH, rsiVal, 1)
-    prevHigh_bear = ta.valuewhen(foundPH, high, 1)
+    prevRSI_bear = ta.valuewhen(foundPH, rsiVal[lookbackRight], 1)
+    prevHigh_bear = ta.valuewhen(foundPH, high[lookbackRight], 1)
 
     bearDiv = false
     bearLevel = 0.0
 
     if foundPH
-        rsiLH = rsiVal < prevRSI_bear        // RSI Lower High
-        priceHH = high > prevHigh_bear       // Price Higher High
+        rsiLH = rsiVal[lookbackRight] < prevRSI_bear        // RSI Lower High
+        priceHH = high[lookbackRight] > prevHigh_bear       // Price Higher High
 
         bearDiv := rsiLH and priceHH
         bearLevel := high[lookbackRight]  // Resistance at divergence high
@@ -3760,7 +3767,7 @@ calculateSignalConfidence(MultiTimeframeScores mtfScores, HeatScoreBreakdown hea
     confidence += mvScore * 0.20
 
     // Score Magnitude (15%)
-    float scoreMag = math.min(1.0, math.abs(mtfScores.consensusScore) / 2.0)
+    float scoreMag = math.min(1.0, math.abs(mtfScores.consensusScore))  // consensus is [-1, 1]
     confidence += scoreMag * 0.15
 
     // Exhaustion Confirmation (10%)
@@ -4197,12 +4204,12 @@ type EntryState
     float strength          // Strength at phase start
     int lastEntryBar        // Bar index of last entry event
     int lastWarnBar         // Bar index of last warning event
-    string lastEventType    // "FIRST", "UPGRADE", "NONE"
+    string lastEventType    // "FIRST", "REENTRY", "UPGRADE", "NONE"
 
 type EntryEvent
     bool emitEntry          // Should emit entry signal
     bool emitWarning        // Should emit warning signal
-    string eventType        // "FIRST", "UPGRADE", "NONE"
+    string eventType        // "FIRST", "REENTRY", "UPGRADE", "NONE"
     int direction           // Current direction
     float strength          // Current strength
     bool isUpgrade          // True if this is an upgrade event
@@ -4241,14 +4248,18 @@ processEntry( EntryState state, bool finalLong, bool finalShort, float longStren
 
     // Only check cooldown for same-direction signals
     bool cooldownPassed = canEmitEntry(state, entryCooldown)
-    bool canEmit = isDirectionChange or (isSameDirection and cooldownPassed)
+    // Entry triggers can persist for many bars (breakout/continuation) - a re-entry needs a fresh one
+    bool freshTrigger = (finalLong and not finalLong[1]) or (finalShort and not finalShort[1])
 
     // Detect event type
-    bool isFirst = isDirectionChange and canEmit
-    bool isUpgrade = isSameDirection and canEmit and isSignificantUpgrade(newStrength, state.strength, upgradeDelta)
+    // FIRST: direction change. REENTRY: same direction after the cooldown, on a fresh trigger.
+    // UPGRADE: same direction inside the cooldown, only if significantly stronger.
+    bool isFirst = isDirectionChange
+    bool isReentry = isSameDirection and cooldownPassed and freshTrigger
+    bool isUpgrade = isSameDirection and not cooldownPassed and isSignificantUpgrade(newStrength, state.strength, upgradeDelta)
 
-    bool emitEntry = isFirst or isUpgrade
-    string eventType = isFirst ? "FIRST" : isUpgrade ? "UPGRADE" : "NONE"
+    bool emitEntry = isFirst or isReentry or isUpgrade
+    string eventType = isFirst ? "FIRST" : isReentry ? "REENTRY" : isUpgrade ? "UPGRADE" : "NONE"
 
     // Build event
     EntryEvent event = EntryEvent.new(emitEntry, false, eventType, newDir, newStrength, isUpgrade)
@@ -4733,19 +4744,19 @@ getCellColor(float score, bool isHeader = false) =>
         color.new(#1976D2, 0)  // Blue for headers
     else if math.abs(score) < MATRIX_NEUTRAL_DEADZONE
         color.new(#616161, 0)  // Neutral - Dark Gray for contrast
-    else if score > 2.5
+    else if score > 0.8
         color.new(#00E676, 0)  // Very Strong Bullish - Bright Green
-    else if score > 1.5
-        color.new(#4CAF50, 0)  // Strong Bullish - Green
     else if score > 0.5
+        color.new(#4CAF50, 0)  // Strong Bullish - Green
+    else if score > 0.25
         color.new(#81C784, 0)  // Moderate Bullish - Medium Green
     else if score >= MATRIX_NEUTRAL_DEADZONE
         color.new(#66BB6A, 0)  // Weak Bullish - Darker Green for readability
-    else if score < -2.5
+    else if score < -0.8
         color.new(#FF1744, 0)  // Very Strong Bearish - Bright Red
-    else if score < -1.5
-        color.new(#F44336, 0)  // Strong Bearish - Red
     else if score < -0.5
+        color.new(#F44336, 0)  // Strong Bearish - Red
+    else if score < -0.25
         color.new(#E57373, 0)  // Moderate Bearish - Medium Red
     else if score <= -MATRIX_NEUTRAL_DEADZONE
         color.new(#EF5350, 0)  // Weak Bearish - Darker Red for readability
@@ -4755,19 +4766,19 @@ getCellColor(float score, bool isHeader = false) =>
 getScoreSymbol(float score) =>
     if math.abs(score) < MATRIX_NEUTRAL_DEADZONE
         "○"   // Neutral
-    else if score > 2.5
+    else if score > 0.8
         "▲▲"  // Very strong up
-    else if score > 1.5
-        "▲"   // Strong up
     else if score > 0.5
+        "▲"   // Strong up
+    else if score > 0.25
         "△"   // Moderate up
     else if score >= MATRIX_NEUTRAL_DEADZONE
         "·"   // Weak up
-    else if score < -2.5
+    else if score < -0.8
         "▼▼"  // Very strong down
-    else if score < -1.5
-        "▼"   // Strong down
     else if score < -0.5
+        "▼"   // Strong down
+    else if score < -0.25
         "▽"   // Moderate down
     else if score <= -MATRIX_NEUTRAL_DEADZONE
         "·"   // Weak down
@@ -4798,7 +4809,8 @@ formatTF(string tf) =>
 
 // Helper: Convert total score to action string
 scoreTFAction(float s) =>
-    s > 1.5 ? "STRONG BUY" : s > 0.5 ? "BUY" : s < -1.5 ? "STRONG SELL" : s < -0.5 ? "SELL" : "NEUTRAL"
+    // Totals are clamped to [-1, 1]
+    s > 0.5 ? "STRONG BUY" : s > 0.2 ? "BUY" : s < -0.5 ? "STRONG SELL" : s < -0.2 ? "SELL" : "NEUTRAL"
 
 drawMatrixTable(MultiTimeframeScores mtfScores, SignalResult signal, HeatScoreBreakdown heatBreakdown, MVInterpretation mvInterp, ExhaustionResult exhaust, string setupStatus, bool compactMode = false, string position = "Top Right") =>
 
@@ -5021,8 +5033,9 @@ float stochRSI = ta.stoch(rsi, rsi, rsi, 14)
 float volumeSMA = ta.sma(volume, 20)
 float recentHigh5 = ta.highest(high[1], 5)
 float recentLow5 = ta.lowest(low[1], 5)
-float swingHigh20 = ta.highest(high, 20)
-float swingLow20 = ta.lowest(low, 20)
+// Prior 20 bars only - including the current bar makes every new high/low "near S/R" by construction
+float swingHigh20 = ta.highest(high, 20)[1]
+float swingLow20 = ta.lowest(low, 20)[1]
 
 // === DETECT MARKET REGIME (Standalone) ===
 MarketRegime regime = analyzeMarketStructure(structureState, jma20, jma50, jma200, atr)
@@ -5034,14 +5047,15 @@ MVInterpretation mvInterp = analyzeMVConfluence(rsi, volume, 20)
 // === DETECT EXHAUSTION ===
 ExhaustionResult exhaust = detectExhaustion(3, 14, 14, 20)
 
-// === DETECT DIAMOND ZONES ===
-// proximityThreshold increased to 1.5% for better zone detection by Entry Engine
-DiamondZoneResult zones = detectDiamondZonesWithConfluence(5, 5, 14, 0.3, 0.015, exhaust.bullWatch or exhaust.bullConfirmed, exhaust.bearWatch or exhaust.bearConfirmed, exhaust.bullWatch or exhaust.bullConfirmed, exhaust.bearWatch or exhaust.bearConfirmed)
-
 // === DETECT DIVERGENCE ZONES ===
 // RSI-Price Divergence with smaller lookbacks for earlier detection
 // NOTE: Reusing 'rsi' from consolidated TA calculations
 DivergenceZonesResult divZones = analyzeDivergenceZones(rsi, 2, 2, 5, 100, 1.0, color.new(color.lime, 0), color.new(color.red, 0))
+
+// === DETECT DIAMOND ZONES ===
+// proximityThreshold increased to 1.5% for better zone detection by Entry Engine
+// Divergence args come from the RSI divergence zones (previously the exhaustion flag was passed twice)
+DiamondZoneResult zones = detectDiamondZonesWithConfluence(5, 5, 14, 0.3, 0.015, divZones.nearBullZone, divZones.nearBearZone, exhaust.bullWatch or exhaust.bullConfirmed, exhaust.bearWatch or exhaust.bearConfirmed)
 
 string setupContext = "BUILDING SETUP"
 if exhaust.bullConfirmed or exhaust.bearConfirmed
@@ -5153,57 +5167,47 @@ TimeframeScores chartTF = mtfScores.chartTF
 
 float signalOptimizedScore = (chartTF.flowScore * 0.40) + (chartTF.momentumScore * 0.40) + (chartTF.trendScore * 0.10) + (chartTF.volatilityScore * 0.05) + (chartTF.structureScore * 0.05)
 string chartDirection = signalOptimizedScore > 0 ? "BULLISH" : signalOptimizedScore < 0 ? "BEARISH" : "NEUTRAL"
-MultiTimeframeScores chartOnlyScores = MultiTimeframeScores.new(mtfScores.tf1, mtfScores.tf2, mtfScores.tf3, chartTF, signalOptimizedScore, chartDirection, 1, 1)
+MultiTimeframeScores chartOnlyScores = MultiTimeframeScores.new(mtfScores.tf1, mtfScores.tf2, mtfScores.tf3, chartTF, signalOptimizedScore, chartDirection, mtfScores.alignedCount, mtfScores.totalTFs)
 
 SignalResult signal = generateSignals(chartOnlyScores, zones, heatBreakdown, mvInterp, exhaust, regime, 0.75, 0.45, true, false, 0.3)
 
 // === SIGNAL QUALITY GATE (ATR + Volume) - Filter Entry V2 finals ===
 MarketQuality marketQuality = analyzeMarketQuality(atr, atrSMA, volume, volumeSMA, qualityATRContractThresh, qualityATRExpandThresh, qualityVolLowThresh, qualityVolHighThresh)
 
-// Quality Gate: filter entryV2 finalLong/finalShort
-bool qgAllowLong = entryV2.finalLong
-bool qgAllowShort = entryV2.finalShort
-
-if useQualityGate
-    bool nearSR = zones.nearSupport or zones.nearResistance or zones.atSupport or zones.atResistance
-
-    // Rule 1: Block entries on low volume
-    if qualityBlockLowVol and not marketQuality.allowEntries
-        qgAllowLong := false
-        qgAllowShort := false
-
-    // Rule 2: Block trend signals in range (unless near S/R + mean-rev allowance)
-    else if qualityBlockRange and not marketQuality.allowTrendSignals
-        if not (qualityAllowMeanReversion and nearSR)
-            qgAllowLong := false
-            qgAllowShort := false
-
-// Trend filter: regime + JMA50 alignment (suppresses counter-trend entries)
-bool trendOkLong  = not useTrendFilter or (regime.isTrending and close > jma50)
-bool trendOkShort = not useTrendFilter or (regime.isTrending and close < jma50)
-
-// Heat filter: setup quality gate
-bool heatOk = heatBreakdown.overall >= entryHeatMin
-
-// === FINAL GATE: timing trigger (required) + graded evidence confidence ===
+// === FINAL GATE: timing trigger (required) + optional hard filters + graded evidence ===
 // The genuine timing trigger must ALWAYS hold: the entry engine's directional final
 // (entryV2.finalLong/Short) plus the dedup/cooldown emit (entryEvent.emitEntry). These are
 // the trigger and may not be out-voted by context evidence.
 bool triggerLong  = entryEvent.emitEntry and entryV2.finalLong
 bool triggerShort = entryEvent.emitEntry and entryV2.finalShort
 
-// Hard structural veto (only the genuinely-structural one): dead volatility / illiquid bar.
-// Active only when the Quality Gate is enabled and configured to block low volume.
-bool deadVolVeto = useQualityGate and qualityBlockLowVol and not marketQuality.allowEntries
+bool nearSR = zones.nearSupport or zones.nearResistance or zones.atSupport or zones.atResistance
 
-// Remaining context (quality regime, trend alignment, heat) becomes graded confidence, not a veto.
-// Score range 0..3; finalMinGate (2..5) is clamped into 0..3 so the existing input still tunes strictness.
+// Quality context: enough volume (always true without real volume) and either an active ATR
+// regime or a mean-reversion setup at S/R
+bool qualityContextOk = marketQuality.allowEntries and (marketQuality.allowTrendSignals or (qualityAllowMeanReversion and nearSR))
+
+// Trend alignment: regime trending in the trade's direction
+bool trendAlignedLong  = regime.isTrending and close > jma50
+bool trendAlignedShort = regime.isTrending and close < jma50
+
+// Heat: setup quality
+bool heatOk = heatBreakdown.overall >= entryHeatMin
+
+// Optional hard filters (inputs default OFF)
+bool qualityVeto = useQualityGate and ((qualityBlockLowVol and not marketQuality.allowEntries) or (qualityBlockRange and not marketQuality.allowTrendSignals and not (qualityAllowMeanReversion and nearSR)))
+bool trendOkLong  = not useTrendFilter or trendAlignedLong
+bool trendOkShort = not useTrendFilter or trendAlignedShort
+
+// Graded evidence 0..3 from real context - none of the points may be the trigger itself or a
+// disabled filter (both used to count, so evidence was always 3/3 and the gate had no effect).
+// finalMinGate (2..5) maps to 0..3 required points.
 int evidenceThreshold = math.max(0, math.min(3, finalMinGate - 2))
-int longEvidence  = (qgAllowLong ? 1 : 0)  + (trendOkLong ? 1 : 0)  + (heatOk ? 1 : 0)
-int shortEvidence = (qgAllowShort ? 1 : 0) + (trendOkShort ? 1 : 0) + (heatOk ? 1 : 0)
+int longEvidence  = (qualityContextOk ? 1 : 0) + (trendAlignedLong ? 1 : 0)  + (heatOk ? 1 : 0)
+int shortEvidence = (qualityContextOk ? 1 : 0) + (trendAlignedShort ? 1 : 0) + (heatOk ? 1 : 0)
 
-bool finalLong  = triggerLong  and not deadVolVeto and longEvidence  >= evidenceThreshold
-bool finalShort = triggerShort and not deadVolVeto and shortEvidence >= evidenceThreshold
+bool finalLong  = triggerLong  and not qualityVeto and trendOkLong  and longEvidence  >= evidenceThreshold
+bool finalShort = triggerShort and not qualityVeto and trendOkShort and shortEvidence >= evidenceThreshold
 
 // === EARLY REVERSAL CANDIDATES (informational, pre-entry) ===
 bool earlyLongEvidence = (earlyUseDivergence and divZones.nearBullZone) or
@@ -5324,8 +5328,8 @@ bool strictHighOk = not revStrictMode or high[revPivRight] >= ta.highest(high, r
 float pivLowPrice  = low[revPivRight]
 float pivHighPrice = high[revPivRight]
 float pivATR       = nz(atr[revPivRight], atr)
-float postPivotHigh = ta.highest(high, revPivRight + 1)  // bars [0..revPivRight] inclusive
-float postPivotLow  = ta.lowest(low,  revPivRight + 1)
+float postPivotHigh = ta.highest(high, revPivRight)  // bars after the pivot only [0..revPivRight-1]
+float postPivotLow  = ta.lowest(low,  revPivRight)
 float swingMagLow   = (postPivotHigh - pivLowPrice)  / math.max(pivATR, 0.0001)
 float swingMagHigh  = (pivHighPrice - postPivotLow) / math.max(pivATR, 0.0001)
 bool swingLowOk  = not revUseSwingFilter or swingMagLow  >= revMinSwingATR

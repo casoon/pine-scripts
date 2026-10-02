@@ -14,7 +14,6 @@ Commodity Pulse Matrix v3 is a comprehensive multi-timeframe confluence indicato
 - Entry Timing (Break-Pullback-Continuation)
 - Signal Quality Gate (ATR + Volume)
 - Market Regime Detection (BOS, CHoCH)
-- Risk Management (ATR-based SL/TP)
 - Matrix Table Visualization
 - Mean Reversion System
 
