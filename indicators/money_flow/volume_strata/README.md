@@ -56,7 +56,7 @@ On an invalid instrument the indicator draws nothing; instead it shows a "benöt
 | **POC Str** | Volume at the POC as % of total — concentration measure. Green ≥ 15%, red ≤ 8% |
 | **Up Vol** | Buy volume as % of total. Green > 55%, red < 45% |
 | **Total Vol** | Total volume in the range, formatted (K/M/B) |
-| **Shape** | Profile shape: **D** (balanced), **P** (POC in upper third → accumulation), **b** (POC in lower third → distribution), **B** (≥ 3 HVNs → double distribution) |
+| **Shape** | Profile shape: **D** (balanced), **P** (POC in upper third → accumulation), **b** (POC in lower third → distribution), **B** (≥ 2 separate HVN nodes → double distribution; adjacent HVN rows count as one node) |
 | **VA State** | Whether close is Inside / Above / Below value area |
 | **POC** | Virgin (untouched in last 5 bars) or Touched |
 | **Dev POC** | Direction of POC vs. previous bar (rising / falling / stable) |

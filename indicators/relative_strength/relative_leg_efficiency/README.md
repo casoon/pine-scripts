@@ -19,7 +19,7 @@ Scores each price leg — from pivot to pivot — on how efficiently price moved
 RLE = 100 · (wPath · PE + wTime · TE + wCounter · CP) / (wPath + wTime + wCounter)
 ```
 
-- **PE (path efficiency)** = air distance / path distance, clamped to 0–1
+- **PE (path efficiency)** = air distance / path distance, both measured on the Path Source between the two pivot bars (so PE cannot exceed 1)
 - **TE (time efficiency)** = leg speed normalized against the average of recent legs (Speed Norm), `1 / (1 + bars/medianBars)` (Time Penalty), or the average of both (Combined)
 - **CP (counter-pressure)** = 1 − counter ratio, where the counter ratio is the share of opposing bars (Count), opposing body volume vs. total body volume (Body Weighted), or a 30/70 blend (Both)
 

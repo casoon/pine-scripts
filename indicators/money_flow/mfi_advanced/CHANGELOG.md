@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.3.2 — 2026-10-02
+- Fixed: Signal Quality could never exceed ~83 — zone depth was divided by the midline-to-zone distance instead of the zone's own width. Depth is now measured across the OS zone (OS level → 0) and OB zone (OB level → 100), so the documented 0-100 range is reachable; quality values on deep extremes rise accordingly
 ## v1.3.1 — 2026-09-05
 - Data validity: added a hard Exchange-only gate — `volumeIsReal` checks `syminfo.volumetype` (`base`/`quote` only) and every volume/typical-price-flow reference now runs on a gated `vol` value that is `na` on invalid instruments, instead of `nz(volume, 0.0)`
 - Removed the neutral-50 no-volume fallback — MFI, signal, histogram, context line, and all signal/alert conditions go blank (`na`) on instruments without real trade volume instead of pinning to a neutral midline value

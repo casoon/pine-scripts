@@ -15,7 +15,7 @@ Measures how quickly and cleanly price reacts after key market structure events 
 
 ## Scoring
 
-When an event fires, the indicator waits for the first reaction candle in the event direction. The speed score scales from 100 (immediate reaction) to 0 (reaction at the edge of the reaction window). From the reaction onward, the validation window tracks two components: A — close beyond the reaction extreme, B — progress of the move from the event reference level toward an ATR-multiple target. The final reaction score is the normalized weighted blend of speed and validation. If no reaction occurs within the reaction window, all scores are set to 0 and the event expires.
+When an event fires, the indicator waits for the first reaction candle in the event direction, starting with the bar after the event. The speed score scales from 100 (reaction on the next bar) to 0 (reaction at the edge of the reaction window). From the reaction onward, the validation window tracks two components: A — close beyond the reaction extreme, B — progress of the move from the event bar's close toward an ATR-multiple target. The final reaction score is the normalized weighted blend of speed and validation. If no reaction occurs within the reaction window, all scores are set to 0 and the event expires.
 
 ## Presets
 

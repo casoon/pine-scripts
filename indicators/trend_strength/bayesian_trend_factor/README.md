@@ -69,8 +69,8 @@ The continuation layer is gated by BTF direction and confidence. It does not cre
 
 1. **Trend gate** — BTF must be in a bull or bear trend, confidence must clear the configured minimum, and exhaustion must not be extreme.
 2. **Armed (`PB`)** — price comes from above/below the Pullback EMA and Fair Path, then re-enters the stricter pullback zone.
-3. **Mature** — the pullback is now both old enough (`Min Pullback Bars`) and deep enough (`Min Pullback Depth (ATR)`). Only a mature pullback can accept a continuation trigger; shallow pullbacks stay Armed.
-4. **Validity checks** — structure must hold (`lastLow` in bull trends, `lastHigh` in bear trends), pullback depth stays inside the configured ATR range, RSI remains non-aggressive, and volatility remains tradable. A break of structure, a timeout, or loss of the trend gate moves the state to **Invalidated**.
+3. **Mature** — the pullback is now old enough (`Min Pullback Bars`) and its depth lies between `Min Pullback Depth (ATR)` and `Max Pullback Depth (ATR)`. Only a mature pullback can accept a continuation trigger; shallow pullbacks stay Armed.
+4. **Validity checks** — structure must hold (`lastLow` in bull trends, `lastHigh` in bear trends), pullback depth stays inside the configured ATR range, RSI remains non-aggressive, and volatility remains tradable. A break of structure, a pullback deeper than `Max Pullback Depth (ATR)`, a timeout, or loss of the trend gate moves the state to **Invalidated**.
 5. **Triggered (`CONT`)** — fires when a mature pullback reclaims the Pullback EMA, breaks the prior bar in trend direction, or prints a rejection wick from the pullback zone.
 
 The `PB` and `CONT` labels include hover tooltips with the setup context, trigger reason, factor, confidence and relevant quality readings. The `CONT` label includes the continuation score (`0..10`). Defaults require `6.5+`.

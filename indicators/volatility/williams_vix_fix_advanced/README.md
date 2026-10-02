@@ -38,7 +38,7 @@ When `WVF − WVF[N] > stallWVFMin` AND `|price change over N bars| < stallFlatA
 
 ## Spike Quality
 
-`quality = min(100, spikeExcess × 50 + ctxExcess × 25 + (stall ? 0 : 25))`, where `spikeExcess = max(0, WVF / band − 1)` and `ctxExcess = max(0, WVF / contextEMA − 1)` (mirrored for the bearish side). The quality of the most recent spike is captured and carried into the Reclaim label.
+`quality = min(100, spikeExcess × 50 + ctxExcess × 25 + (stall ? 0 : 25))`, where `spikeExcess = min(1, max(0, WVF / band − 1))` (capped, so the band depth contributes at most 50 points) and `ctxExcess = max(0, WVF / contextEMA − 1)` (mirrored for the bearish side). The quality of the most recent spike is captured and carried into the Reclaim label.
 
 ## Reclaim
 

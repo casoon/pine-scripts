@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.8 — 2026-10-02
+- Max Pullback Depth (ATR) is now a hard gate instead of a score point: a pullback is Mature only while its depth stays inside the Min..Max band, and a pullback that runs deeper than the maximum moves to Invalidated (as the README state machine describes). Deep pullbacks can no longer produce a CONT signal through the remaining score points; RSI and volatility stay score points
+
 ## v1.7.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

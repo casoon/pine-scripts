@@ -6,7 +6,7 @@ Classifies whether the current market rewards momentum/trend-following or mean-r
 
 - Variance Ratio across three horizons (fast/medium/slow), VR > 1 = momentum tendency, VR < 1 = mean-reversion tendency
 - Return autocorrelation across the same three windows (positive = momentum, negative = reversion)
-- Hurst exponent approximation via range/stdev scaling (H > 0.5 = persistent, H < 0.5 = anti-persistent)
+- Hurst exponent approximation via single-window rescaled range on log returns (H > 0.5 = persistent, H < 0.5 = anti-persistent)
 - Fractal efficiency ratio (directional path vs. noisy path)
 - Composite −100..+100 Predictability Regime Index (PRI) with EMA smoothing and a signal line
 - Confidence read combining distance from the random-walk centerline with sensor agreement
@@ -21,7 +21,7 @@ Each sensor produces a −1..+1 score (positive = momentum-favoring, negative = 
 |---|---|---|
 | Variance Ratio | 0.38 | ratio of k-period to 1-period return variance vs. the random-walk expectation |
 | Autocorrelation | 0.24 | correlation of consecutive log returns |
-| Hurst approximation | 0.23 | rescaled-range proxy for path persistence |
+| Hurst approximation | 0.23 | rescaled range (R/S) of log returns — persistence of the return path |
 | Fractal efficiency | 0.15 | net displacement vs. total path length |
 
 The weighted sum is scaled to −100..+100 and EMA-smoothed into the **PRI**; a further EMA of the PRI produces the **Signal** line.

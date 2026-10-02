@@ -1,3 +1,7 @@
+# Changelog
+
+## v2.1.1 — 2026-10-02
+- Fixed: impulse memory started at the bar where the Expansion state was confirmed instead of where the expansion run began, so the first confirmation bars were missing from the impulse. Impulse size, efficiency and range now cover the whole run, and correction depth is measured against the full move — a normal pullback no longer reads as a near-complete retracement, so `BAL ↑/↓` / `COMP ↑/↓` keep their direction more often after real impulses
 ## v2.1.0 — 2026-09-05
 - Replaced the `not na(volume)` volume check with the full `syminfo.volumetype` guard (`base`/`quote` only); tick/n-a volume now degrades every volume-dependent calculation to neutral instead of silently treating no-volume as zero
 - Absorption (effort-vs-result) and the Exhaustion effort-vs-result term now drop out and renormalize their weight in Auction Pressure and Exhaustion Score when real volume is unavailable, instead of quietly running both scores structurally low

@@ -1,11 +1,11 @@
 # Market Memory & Decay Oscillator
 
-A signed oscillator that scores how much "memory" the current price impulse carries versus how fast that memory is decaying back toward random-walk noise. It combines four independent statistical reads on the same lookback window — return autocorrelation half-life, a Hurst exponent approximation, path efficiency, and range expansion/contraction — into one Carry/Decay axis, rather than treating momentum and mean-reversion as separate indicators.
+A signed oscillator that scores how much "memory" the current price impulse carries versus how fast that memory is decaying back toward random-walk noise. It combines four independent statistical reads on the same lookback window — impulse autocorrelation half-life, a Hurst exponent approximation, path efficiency, and range expansion/contraction — into one Carry/Decay axis, rather than treating momentum and mean-reversion as separate indicators.
 
 ## Features
 
-- Autocorrelation-derived half-life: how many bars a directional impulse statistically persists before its serial correlation decays to half
-- Hurst exponent approximation (rescaled-range over the memory window) to separate persistent (trending) from mean-reverting (anti-persistent) regimes
+- Autocorrelation-derived half-life: how many bars a directional impulse statistically persists before its serial correlation decays to half — measured on the smoothed impulse line (lag-1 autocorrelation), so it carries the impulse EMA's own memory as a floor
+- Hurst exponent approximation (rescaled range of log returns over the memory window) to separate persistent (trending) from mean-reverting (anti-persistent) regimes
 - Path efficiency: net displacement vs. total distance travelled, rewarding clean directional moves over choppy ones
 - Range expansion/decay via fast-vs-slow ATR ratio, feeding both the Memory Strength and Decay Pressure components
 - Composite **Memory Strength** (persistence-favoring) vs. **Decay Pressure** (reversion-favoring) blend into the main `MMDO` score

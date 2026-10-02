@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.9.2 — 2026-10-02
+- Fixed: Spike Quality band-depth component is now capped at 1, so it contributes at most its 50 points — previously a deep excursion past the StdDev band alone could push the quality to 100/100 even on a stalled spike
+- Fixed: the context component (excursion over the WVF context EMA) is capped at 1 as well, so it contributes at most its 25 points
+
+## v1.9.1 — 2026-10-02
+- Fixed: Reclaim could fire on the spike bar itself (the recency window started at 0 bars). A reclaim now needs a strong spike 1 to N bars back, matching the "reclaim after the extreme, not the extreme itself" intent
+- Fixed: the reclaim range lookup (prior N-bar high/low) was only evaluated after a recent spike (short-circuited) and is now computed on every bar, so its history is consistent
 ## v1.9 — 2026-07-07
 - Fixed: bearish stall/absorption used the bullish `stallNow` flag — added an independent `bStallNow` computed from `bwvf`, so bull-side stalls no longer suppress/soften bear spikes
 - Added Spike Quality (0–100): how far a spike pushed past its own band/context EMA, penalized by stall/absorption; captured per side into `lastBullQuality`/`lastBearQuality`

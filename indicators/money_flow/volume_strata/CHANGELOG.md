@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.10.0 — 2026-10-02
+- Fixed: Profile Shape almost always showed "B (Double)" because it counted HVN rows instead of HVN nodes — any single smooth peak spans several rows above the threshold. Shape now counts separate HVN nodes (contiguous runs of HVN rows); B requires at least two, so D / P / b are reachable again
 ## v1.9.4 — 2026-09-05
 - Hard Exchange-only gate: the entire profile (computation + all drawing) now only runs when `syminfo.volumetype` is `base`/`quote` and `volume` is not `na`; on tick/n/a volume it draws nothing but a "needs real trade volume" warning label instead
 - Added Data Contract header block (Verdict: Exchange-only)

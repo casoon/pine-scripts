@@ -17,7 +17,7 @@ MFI Advanced ports the CCI Advanced context view onto a Money Flow Index core. I
 - **Trend context line:** a slow MFI plotted faint behind the fast line; a cross against its side of 50 is marked counter-trend
 - **Divergence wedge:** fills the area between fast MFI and the trend context only when they move in opposite directions
 - **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far MFI sits inside its own OB/OS zone, plus a mini bar
-- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — OB/OS-zone depth (50%) + context agreement (25%) + stall-free (25%)
+- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — OB/OS-zone depth (50%, full weight when MFI reaches 0 / 100 inside the zone) + context agreement (25%) + stall-free (25%)
 - **Alert conditions:** bull/bear cross from extreme zone; 50-cross up/down
 
 ## Scoring

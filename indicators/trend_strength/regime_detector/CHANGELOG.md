@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.6 — 2026-10-02
+- Fix: no regime could ever form with default inputs. Regime confidence was the normalized efficiency ratio multiplied by Regime Sensitivity, which capped it at the sensitivity value (0.60 at default) — below Min Regime Confidence (0.65), so the regime stayed FLAT and every Bull/Bear-dependent part (bands, heatmap, playbook, AGING, MA zones, entries, tiers) was dead. Confidence is now the normalized efficiency ratio itself; entering a regime still requires a strong ER (≥ ~0.72 over the ER length at the default thresholds), so regimes remain selective
+- Regime Sensitivity now only drives the momentum gate (minimum normalized slope strength). Its tooltip said "higher = more sensitive", which was inverted for that gate — corrected: higher = stricter
+
 ## v1.1.5 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 
