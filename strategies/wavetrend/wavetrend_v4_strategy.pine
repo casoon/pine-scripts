@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
-// WaveTrend v4 [WavesUnchained]
-// Version: 4.89
+// WaveTrend v4 [WavesUnchained] — Strategy (standalone)
+// Version: 4.91
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // WT oscillator cross at OS/OB extremes — entry, ATR stop/target, break-even.
 // Optional gates: StochRSI, ATR rank, BB expansion, chop, pivot proximity, sweep.
@@ -13,7 +13,7 @@
 //   ✓ ATR frozen at signal bar; SL/TP set from fill price + frozen ATR
 //   ✓ Break-even confirmed on close from next bar only (calc_on_order_fills)
 //   ✓ Hard 1-bar post-exit cooldown prevents same-bar re-entry after fill
-//   ✓ Exit reason logged from exit_comment (tp / sl / be / struct)
+//   ✓ Exit reason logged from exit_comment (tp / sl / be / trail / struct)
 //   ✓ Session filter, date range, max drawdown, max intraday loss, losing streak limit
 //   ✓ Diagnostic logs: WT4 PIVOT, WT4 BLOCKED, WT4 ENTRY, WT4 REAL EXIT
 //
@@ -111,8 +111,8 @@ beTrigR  = input.float(1.0,  "Trigger (R×)", minval=0.1, step=0.1,         grou
 // Only moves the stop UP (long) / DOWN (short) — never against us.
 enableTrail   = input.bool(true,  "Enable Trailing Stop",                  group=g_be,
      tooltip="Trails SL after the trade reaches trailTriggerR progress. " +
-             "Defaults: triggerR=2.0 (after typical TP level) + distanceR=1.0 — " +
-             "trail only kicks in for big pivot moves >2R, leaves normal TP wins alone.")
+             "When enabled the fixed ATR TP is not placed as an order — the trail (and the structural exit) " +
+             "take over the profit side. With TP at 2R (15M/1H) a TP limit would fill before the trail could ever arm.")
 trailTriggerR = input.float(2.0, "  Trail Trigger (R×)",  minval=0.1, step=0.1, group=g_be)
 trailDistanceR= input.float(1.0, "  Trail Distance (R×)", minval=0.1, step=0.1, group=g_be,
      tooltip="Stop trails this distance behind extreme price (in R units).")
@@ -532,8 +532,14 @@ _divPlFound = not na(_divOsc[divLbR]) and _divOsc[divLbR] < _oscRightLo and _div
 // Wide price window to account for WT lag: on 4H, WT peaks ~15 bars after price peaks.
 // We need to look further left than just the WT pivot detection window.
 // divLbR + divLbL covers the oscillator window; +20 covers typical WT lag.
-_divWinHi   = ta.highest(high, divLbR + divLbL + 20)
-_divWinLo   = ta.lowest(low,   divLbR + divLbL + 20)
+// Clamped to the bars since the previous oscillator pivot of the same type, so two
+// consecutive pivots never share price bars (overlapping windows could return the
+// same high/low for both and hide or fake a HH/LL).
+_divWinMax  = divLbR + divLbL + 20
+_divPhGap   = nz(ta.barssince(_divPhFound)[1] + 1, _divWinMax)
+_divPlGap   = nz(ta.barssince(_divPlFound)[1] + 1, _divWinMax)
+_divWinHi   = ta.highest(high, math.min(_divWinMax, _divPhGap))
+_divWinLo   = ta.lowest(low,   math.min(_divWinMax, _divPlGap))
 
 _divOscLH   = _divOsc[divLbR] < ta.valuewhen(_divPhFound, _divOsc[divLbR], 1) + divEqTol
 _divPriceHH = _divWinHi > ta.valuewhen(_divPhFound, _divWinHi, 1)
@@ -759,6 +765,9 @@ varip bool  _shortBE   = false
 // Trailing-stop state: highest close since long entry / lowest close since short entry.
 varip float _maxCloseLong  = na
 varip float _minCloseShort = na
+// Trail stays armed once triggered — otherwise the stop falls back to SL/BE when close dips below the trigger
+varip bool  _longTrailArmed  = false
+varip bool  _shortTrailArmed = false
 
 varip int _lastExitBar = na
 
@@ -810,6 +819,7 @@ if _isNewLong
     _longRisk := math.max(_entry - _longSL, syminfo.mintick)
     _longBE   := false
     _maxCloseLong := _entry
+    _longTrailArmed := false
     _pendingLongAtr     := na
     _pendingShortAtr    := na
     _pendingLowPivBars  := na
@@ -823,6 +833,7 @@ if _isNewShort
     _shortRisk := math.max(_shortSL - _entry, syminfo.mintick)
     _shortBE   := false
     _minCloseShort := _entry
+    _shortTrailArmed := false
     _pendingLongAtr     := na
     _pendingShortAtr    := na
     _pendingLowPivBars  := na
@@ -892,13 +903,14 @@ if strategy.position_size > 0 and not na(_longRisk)
     if na(_maxCloseLong) or close > _maxCloseLong
         _maxCloseLong := close
     // Trail SL once trade has progressed by trailTriggerR. Stop never moves down.
-    _longTrailLevel = enableTrail and _nextBar and (close - strategy.position_avg_price) >= trailTriggerR * _longRisk
-                     ? _maxCloseLong - trailDistanceR * _longRisk
-                     : na
+    if enableTrail and _nextBar and (close - strategy.position_avg_price) >= trailTriggerR * _longRisk
+        _longTrailArmed := true
+    _longTrailLevel = _longTrailArmed ? _maxCloseLong - trailDistanceR * _longRisk : na
     _longBaseStop = _longBE ? strategy.position_avg_price : _longSL
     _longStop     = na(_longTrailLevel) ? _longBaseStop : math.max(_longBaseStop, _longTrailLevel)
-    _longExitComment = _longBE ? "be" : "sl"
-    strategy.exit("Long Exit", "Long", stop=_longStop, limit=_longTP,
+    _longExitComment = _longStop != _longBaseStop ? "trail" : _longBE ? "be" : "sl"
+    // Trail replaces the fixed TP: a TP limit at ≤ trailTriggerR would fill before the trail arms
+    strategy.exit("Long Exit", "Long", stop=_longStop, limit=enableTrail ? na : _longTP,
          comment_profit="tp", comment_loss=_longExitComment)
 
 if strategy.position_size < 0 and not na(_shortRisk)
@@ -909,13 +921,14 @@ if strategy.position_size < 0 and not na(_shortRisk)
     if na(_minCloseShort) or close < _minCloseShort
         _minCloseShort := close
     // Trail SL once trade has progressed by trailTriggerR. Stop never moves up.
-    _shortTrailLevel = enableTrail and _nextBar and (strategy.position_avg_price - close) >= trailTriggerR * _shortRisk
-                      ? _minCloseShort + trailDistanceR * _shortRisk
-                      : na
+    if enableTrail and _nextBar and (strategy.position_avg_price - close) >= trailTriggerR * _shortRisk
+        _shortTrailArmed := true
+    _shortTrailLevel = _shortTrailArmed ? _minCloseShort + trailDistanceR * _shortRisk : na
     _shortBaseStop = _shortBE ? strategy.position_avg_price : _shortSL
     _shortStop     = na(_shortTrailLevel) ? _shortBaseStop : math.min(_shortBaseStop, _shortTrailLevel)
-    _shortExitComment = _shortBE ? "be" : "sl"
-    strategy.exit("Short Exit", "Short", stop=_shortStop, limit=_shortTP,
+    _shortExitComment = _shortStop != _shortBaseStop ? "trail" : _shortBE ? "be" : "sl"
+    // Trail replaces the fixed TP: a TP limit at ≤ trailTriggerR would fill before the trail arms
+    strategy.exit("Short Exit", "Short", stop=_shortStop, limit=enableTrail ? na : _shortTP,
          comment_profit="tp", comment_loss=_shortExitComment)
 
 // ─── Structural exit (unconfirmed pivot) ─────────────────────────────────────
