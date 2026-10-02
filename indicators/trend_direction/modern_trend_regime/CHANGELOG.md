@@ -1,3 +1,19 @@
+# Changelog
+
+## v1.6.1 — 2026-07-15
+> Reconstructed from the diff — the header jumped 1.3.1 → 1.6.1 in one commit while the
+> entries below only ran to 1.5.1, so v1.6.0/v1.6.1 had no entry of their own.
+
+- Added a full "Benutzerdefiniert" (custom) preset: 34 dedicated inputs in their own
+  "Berechnung – Benutzerdefiniert" and "Seitwärtsmodus – Benutzerdefiniert" groups, so every
+  threshold the six tuned presets set internally can be driven by hand without editing code
+- `customBreakoutValidityBars` (default 10) bounds how long after a range ends a breakout still
+  counts, replacing the previous one-shot arming — the header feature line changed accordingly
+  from "Einmalig scharfgeschaltete Range-Ausbrüche" to "Zeitlich begrenzte Range-Ausbrüche"
+- `customRangeStructureLength` (default 20) controls the lookback for the range bounds that are
+  frozen on range entry
+- `customAtrLength` (default 14) exposes the ATR period used by the custom preset
+
 ## v1.5.1 — 2026-07-15
 - Raised Standard preset's confirmation bars (3 → 6) — direction (DI+stack+price) is trivially satisfied by any short swing, so the 4-of-5 trend score effectively only needed one lenient strength factor (ADX or ER) on top; on 1H charts this confirmed a "trend" on almost every wiggle inside an otherwise ranging market. A longer confirmation window filters short-lived alignment without touching the score math (which would risk reintroducing the opposite problem — see v1.3.0). Other presets unchanged for now
 

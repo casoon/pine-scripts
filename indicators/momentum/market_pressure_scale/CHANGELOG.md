@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.4.1 — 2026-09-05
+- Volume validity guard aligned with the repo-wide `syminfo.volumetype` convention
+- Volume framing corrected in comments and the debug-log tooltip: the wording no longer claims that CFD feeds report no volume (they commonly report broker volume). The condition described is now feed-neutral — "a volume series that carries no usable turnover" — matching what the code actually tests
+
 ## v2.4.0 — 2026-07-07
 - Move Strength: replaced the full-pane background with blue columns (same 5-band coloring) plotted behind Setup/Impulse Pressure, so it adds information without washing out the two curves. Input renamed "Show Columns" (was "Show Background")
 - Failed Coil now additionally requires price to have actually fallen back toward the middle of the range (`rangePosition` between 25–75), not just that Setup Pressure dropped — confirms the "range continues" hypothesis with real price behavior instead of Setup Pressure alone

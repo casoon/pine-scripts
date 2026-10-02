@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.0 — 2026-09-05
+- Volume validity guard: VWAP and Relative Volume confluence now require real trade volume (`syminfo.volumetype` base/quote). On tick/n-a feeds `relativeVolume` returns `na` instead of a fabricated ratio, and the VWAP/volume confluence checks are skipped rather than silently scoring zero
+- Confluence weight is renormalized when volume is unavailable: the freed `weightVWAP + weightVolume` is redistributed across the remaining EMA/Fib/Psychological weights, so the maximum achievable confluence score is unchanged instead of the ceiling quietly shrinking on volume-less instruments
+- Added the Data Contract header block (Verdict: CFD-degraded)
+
 ## v0.1.11 — 2026-08-12
 - Prevented routine Pivot Cluster / Multiple Test double scoring: an accepted PC candidate now suppresses the MT pivot candidate on the same side; MT is normally awarded only after repeated real lifecycle touches, while its stricter pivot clustering remains a fallback when PC is not accepted
 

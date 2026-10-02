@@ -1,3 +1,5 @@
+# Changelog
+
 ## v1.2 — 2026-07-05
 - Added Data Window debug plots (direction, quality, regression slope, efficiency ratio, strongBull/strongBear state, breakHigh/breakLow) to diagnose why a signal did or didn't fire at a given bar
 

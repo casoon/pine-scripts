@@ -1,5 +1,11 @@
 # Changelog
 
+## v4.9.0 — 2026-09-05
+- Volume validity guard across all Wyckoff volume tests (`syminfo.volumetype` base/quote). Without real trade volume the volume-gated events (SC/BC, ST, SOS/SOW, LPS/LPSY, Test, Markup/Markdown breakout) fall back to price-only triggers and are marked unconfirmed instead of evaluating a meaningless volume ratio
+- AVWAP, Effort vs Result and No Supply / No Demand / VDU disable outright without real volume — they have no meaningful price-only form
+- "Volume Lookback" input tooltip now states this degradation explicitly
+- Added the Data Contract header block (Verdict: CFD-degraded)
+
 ## v4.8.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 
