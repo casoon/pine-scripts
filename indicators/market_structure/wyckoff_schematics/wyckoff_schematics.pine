@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Wyckoff Schematics [WavesUnchained]
-// Version: 4.9.0
+// Version: 4.10.0
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // Volume/spread-based Wyckoff schematic detector with A–E phase heuristics,
 // event labeling (PS/PSY, SC, BC, AR, ST, Spring, Test, SOS, LPS, UTAD, SOW,
@@ -129,6 +129,9 @@ type WyckoffPhase
     float  springUtadVolRatio
     bool   awaitingTest
     string priorTrend
+    int    rangePivotTests = 0
+    float  climaxBarOpposite = na
+    bool   springUtadLeft = false
 
 type WyckoffEvent
     string eventType
@@ -327,9 +330,11 @@ detectLPSY(float rangeLow, float rangeHigh, float volumeAvg, float pivHigh, int 
     inSupplyZone   = rangeWidth > 0 and high[pLen] <= rangeHigh and high[pLen] >= rangeHigh - rangeWidth * 0.35
     (not volumeIsReal or pivVolRatio < 0.85) and close[pLen] < open[pLen] and inSupplyZone and pivotConfirmed
 
+testBandWidth(float rangeLow, float rangeHigh, float atrVal) =>
+    math.max(atrVal * 0.5, (rangeHigh - rangeLow) * 0.05)
+
 detectTest(float springPrice, float springVolRatio, float volumeRatio, bool isAccum, float rangeLow, float rangeHigh, float atrVal) =>
-    rangeWidth = rangeHigh - rangeLow
-    testBand = math.max(atrVal * 0.5, rangeWidth * 0.05)
+    testBand = testBandWidth(rangeLow, rangeHigh, atrVal)
     volOk = not volumeIsReal or volumeRatio < springVolRatio
     if isAccum
         low <= springPrice + testBand and low >= springPrice - testBand and volOk and close > springPrice
@@ -396,10 +401,13 @@ calcRangeScore(WyckoffPhase phase, float atrVal, int rangeDuration, bool recentV
     if volumeIsReal and recentVolDecline
         score += 20
 
-    // Multiple pivot tests within range
+    // Multiple pivot tests within range — counted per phase so the component
+    // persists instead of pulsing only on the pivot confirmation bar
     pivLowInRange  = not na(pivLow3)  and low[3]  > phase.rangeLow  * 0.98 and low[3]  < phase.rangeLow  + rangeWidth * 0.4
     pivHighInRange = not na(pivHigh3) and high[3] < phase.rangeHigh * 1.02 and high[3] > phase.rangeHigh - rangeWidth * 0.4
     if pivLowInRange or pivHighInRange
+        phase.rangePivotTests += 1
+    if phase.rangePivotTests >= 2
         score += 15
 
     // Climax volume ratio: high climax = clean initiation — volume-only component
@@ -540,6 +548,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
         state.currentPhase := newWyckoffPhase("ACCUMULATION", "SC", "A", priorTrend)
         state.currentPhase.climaxVolRatio := volumeRatio
         state.currentPhase.climaxPrice    := low
+        state.currentPhase.climaxBarOpposite := high
         state.compositeOperator := "ACCUMULATING"
         state.springConfirmed := false
         state.utadConfirmed   := false
@@ -566,6 +575,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
         state.currentPhase := newWyckoffPhase("DISTRIBUTION", "BC", "A", priorTrend)
         state.currentPhase.climaxVolRatio := volumeRatio
         state.currentPhase.climaxPrice    := high
+        state.currentPhase.climaxBarOpposite := low
         state.compositeOperator := "DISTRIBUTING"
         state.springConfirmed := false
         state.utadConfirmed   := false
@@ -617,17 +627,20 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
         // ── Phase A ──
         if phaseAE == "A"
             // AR must be a genuine reaction away from the climax, not the first counter-candle:
-            // require the swing to have travelled at least ~1 ATR from the climax extreme.
+            // require the swing to have travelled at least ~1 ATR from the climax extreme
+            // and to clear the climax bar's own range (accumulation: above the SC bar's
+            // high; distribution: below the BC bar's low) — a move inside the climax
+            // bar's range is still part of the climax, not a reaction to it.
             float arMinMove = atrVal
             if na(currentPhase.arBar) and phaseAge <= 15 and (not volumeIsReal or volumeRatio >= 0.8)
-                if isAccum and close > open and not na(currentPhase.climaxPrice) and high - currentPhase.climaxPrice >= arMinMove
+                if isAccum and close > open and not na(currentPhase.climaxPrice) and high - currentPhase.climaxPrice >= arMinMove and high > currentPhase.climaxBarOpposite
                     currentPhase.arExtreme := high
                     currentPhase.arBar     := bar_index
                     arEvt = newWyckoffEvent("AR", "Automatic Rally — demand absorbs supply", high, true)
                     arEvt.volumeRatio := volumeRatio
                     arEvt.significance := 70.0
                     pushEvent(state.events, arEvt)
-                else if not isAccum and close < open and not na(currentPhase.climaxPrice) and currentPhase.climaxPrice - low >= arMinMove
+                else if not isAccum and close < open and not na(currentPhase.climaxPrice) and currentPhase.climaxPrice - low >= arMinMove and low < currentPhase.climaxBarOpposite
                     currentPhase.arExtreme := low
                     currentPhase.arBar     := bar_index
                     arEvt = newWyckoffEvent("AR", "Automatic Reaction — supply overcomes demand", low)
@@ -659,6 +672,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
                 currentPhase.springUtadPrice  := low
                 currentPhase.springUtadVolRatio := volumeRatio
                 currentPhase.awaitingTest     := true
+                currentPhase.springUtadLeft   := false
                 sprEvt = newWyckoffEvent("SPRING", "Spring — false breakdown traps sellers", low)
                 sprEvt.volumeRatio  := volumeRatio
                 sprEvt.significance := 85.0
@@ -671,6 +685,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
                 currentPhase.springUtadPrice  := high
                 currentPhase.springUtadVolRatio := volumeRatio
                 currentPhase.awaitingTest     := true
+                currentPhase.springUtadLeft   := false
                 utadEvt = newWyckoffEvent("UTAD", "UTAD — upthrust after distribution", high, true)
                 utadEvt.volumeRatio  := volumeRatio
                 utadEvt.significance := 85.0
@@ -704,7 +719,13 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
         // ── Phase C ──
         else if phaseAE == "C"
             if currentPhase.awaitingTest and not na(currentPhase.springUtadBar)
-                if detectTest(currentPhase.springUtadPrice, currentPhase.springUtadVolRatio, volumeRatio, isAccum, currentPhase.rangeLow, currentPhase.rangeHigh, atrVal)
+                // A Test is a return to the Spring/UTAD level, so price must first leave it:
+                // a close beyond springPrice + testBand (UTAD: below price − testBand) on an
+                // earlier bar. Bars still hugging the extreme are part of the Spring/UTAD.
+                if not currentPhase.springUtadLeft
+                    float leaveBand = testBandWidth(currentPhase.rangeLow, currentPhase.rangeHigh, atrVal)
+                    currentPhase.springUtadLeft := isAccum ? close > currentPhase.springUtadPrice + leaveBand : close < currentPhase.springUtadPrice - leaveBand
+                else if detectTest(currentPhase.springUtadPrice, currentPhase.springUtadVolRatio, volumeRatio, isAccum, currentPhase.rangeLow, currentPhase.rangeHigh, atrVal)
                     currentPhase.awaitingTest := false
                     currentPhase.phaseAE      := "D"
                     currentPhase.subphase     := "TEST"

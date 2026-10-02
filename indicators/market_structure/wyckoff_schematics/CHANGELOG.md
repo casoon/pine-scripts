@@ -1,5 +1,12 @@
 # Changelog
 
+## v4.10.0 — 2026-10-02
+- AR now has to clear the climax bar's own range: an Automatic Rally needs a high above the SC bar's high, an Automatic Reaction a low below the BC bar's low. Previously the ≥ 1 ATR distance was measured only from the SC low / BC high, so a move still inside a wide climax bar could be labeled AR
+- Test after Spring/UTAD requires price to leave first: a Test is only allowed after a close beyond the Spring low + test band (UTAD: below the UTAD high − test band) on an earlier bar. Previously the bars right after a Spring that still hugged its low could immediately qualify as the Test
+
+## v4.9.1 — 2026-10-02
+- Range Score: the "multiple pivot tests within range" component (+15) is now counted per range and stays awarded once the range has at least two in-range pivot tests. Previously it only added +15 on the single bar a pivot was confirmed, so the Range Score (and the setup score's range-quality bonus) flickered and could retrigger the High Quality setup alerts
+
 ## v4.9.0 — 2026-09-05
 - Volume validity guard across all Wyckoff volume tests (`syminfo.volumetype` base/quote). Without real trade volume the volume-gated events (SC/BC, ST, SOS/SOW, LPS/LPSY, Test, Markup/Markdown breakout) fall back to price-only triggers and are marked unconfirmed instead of evaluating a meaningless volume ratio
 - AVWAP, Effort vs Result and No Supply / No Demand / VDU disable outright without real volume — they have no meaningful price-only form

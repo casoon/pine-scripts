@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.4.2 — 2026-10-02
+- Spring / UTAD Test now requires price to leave the ±*Test Window ATR* band around the Spring low (UTAD high) before a return into it counts as a Test — before, the bar right after the event could already fire a Test
+
+## v1.4.1 — 2026-10-02
+- Fixed: the Cause score's range-respect component (+15) was always granted outside an active Wyckoff state, because the unlocked range included the current bar. It is now judged against the range before the current bar, so a bar that sets a new range extreme no longer counts as respecting the range (affects the Neutral → Phase B entry)
+- Range Quality no longer counts ADX and range width twice (they were scored once on their own and again inside the range-ok term); weights are now ADX 50, width 40, central position 10
+- Confidence is shown without a "/ 100" suffix — the accumulation/distribution evidence score cannot reach 100 (location and midline reclaim exclude each other)
+
 ## v1.4.0 — 2026-09-06
 - Volume validity is now decided by `syminfo.volumetype`, and the two roles volume plays in Wyckoff are degraded differently
 - Confirming conditions (SOS/SOW, Spring/UTAD tests, pivot-confirmed LPS/LPSY) pass through without real volume. Previously `relVol` collapsed to 1.0, which could never satisfy the 0.85 test/LPS factors — those events silently stopped firing

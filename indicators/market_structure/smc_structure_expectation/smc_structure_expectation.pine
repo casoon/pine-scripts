@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // SMC Structure & Expectation [WavesUnchained]
-// Version: 1.1.2
+// Version: 1.1.5
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // Context & Confirmation Tool: Market Structure + Expectation + BOS Validation + Professional Order Block System
 //
@@ -181,7 +181,7 @@ string pendingLineStyle = input.string("Dotted", "Pending Line Style", options=[
 
 // ==== GROUP: ALERTS ====
 bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="Alerts")
-bool onlyHighPriorityAlerts = input.bool(true, "Only HIGH Priority OB Alerts (>80)", group="Alerts", tooltip="Filter alerts to only HIGH priority setups")
+bool onlyHighPriorityAlerts = input.bool(true, "Only HIGH Priority OB Alerts (>80)", group="Alerts", tooltip="Filter alerts to only HIGH priority setups. While on, the standard 'Bullish/Bearish Confirmation' alerts (priority 80 or below) never fire — use the 'HIGH Priority' alerts instead.")
 
 // ==== GROUP: TECHNICAL SETTINGS ====
 int atrLength = input.int(14, "ATR Length", minval=5, maxval=50, group="Technical")
@@ -234,6 +234,11 @@ var float internalLastSwingLow = na
 var string internalStructure = "Neutral"  // "HH/HL" or "LH/LL" or "Neutral"
 var string internalHighType = ""  // "HH" or "LH"
 var string internalLowType = ""   // "HL" or "LL"
+
+// Swings as they stood before this bar's pivots are processed — the opposite
+// swing preceding a newly confirmed pivot (used for BOS leg strength)
+float swingHighBeforeUpdate = lastConfirmedSwingHigh
+float swingLowBeforeUpdate = lastConfirmedSwingLow
 
 // === UPDATE STRUCTURE ON NEW PIVOTS ===
 // CRITICAL FIX: Use pivotHigh/pivotLow price and bar_index - structureLookback
@@ -443,6 +448,14 @@ if expectationActive and not na(expectationBar)
         expectationPrice := na
         expectationExpired := true
 
+// Flags mirror the persistent expectation state on every bar — set only inside the
+// derivation blocks above they were one-bar pulses, so BOS / invalidation / bar color
+// could only see them on the bar the expectation was set.
+expectHL           := expectationActive and currentExpectation == "Expect HL"
+expectLH           := expectationActive and currentExpectation == "Expect LH"
+expectContinuation := expectationActive and currentExpectation == "Expect Continuation"
+expectFailure      := expectationActive and currentExpectation == "Expect Failure"
+
 // === EXPECTATION INVALIDATION ===
 // Expectation is invalidated by structure break in opposite direction
 
@@ -488,6 +501,10 @@ bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quot
 
 var float bosSwingHigh = na
 var float bosSwingLow = na
+
+// Opposite swing preceding each BOS level (start of the impulse leg)
+var float bosPriorLow = na
+var float bosPriorHigh = na
 
 // Store bar indices at BOS trigger time (for Range-Mismatch check in OB creation)
 var int bosTriggerHighBar = na
@@ -599,9 +616,11 @@ calculateOBPriority(float baseScore) =>
 // CRITICAL: Use separate lastHighType/lastLowType to avoid overwrite issues
 if not na(pivotHigh) and (lastHighType == "HH" or lastHighType == "LH")
     bosSwingHigh := pivotHigh
+    bosPriorLow := swingLowBeforeUpdate
 
 if not na(pivotLow) and (lastLowType == "HL" or lastLowType == "LL")
     bosSwingLow := pivotLow
+    bosPriorHigh := swingHighBeforeUpdate
 
 // === BOS CONTEXT RANGE (For accurate Premium/Discount calculation) ===
 // Store the range that belongs to THIS specific BOS
@@ -724,21 +743,6 @@ if pendingBull
         // Store trigger bar for OB creation
         bosTriggerHighBar := pendingSwingBarBull
 
-        // Calculate Relative Leg Strength (Impulse vs Correction)
-        float impulseRange = na
-        float correctionRange = na
-
-        if not na(lastConfirmedSwingLow) and not na(pendingLevelBull)
-            // Impuls = vom letzten Swing-Low bis BOS-High
-            impulseRange := pendingLevelBull - lastConfirmedSwingLow
-
-            // Korrektur = vorheriges Leg (High vor diesem Low bis zum Low)
-            if not na(lastConfirmedSwingHigh)
-                correctionRange := lastConfirmedSwingHigh - lastConfirmedSwingLow
-
-                if correctionRange > 0
-                    currentLegStrength := impulseRange / correctionRange
-
         pendingLevelBull := na
         pendingSwingBarBull := na
 
@@ -772,21 +776,6 @@ if pendingBear
         // Store trigger bar for OB creation
         bosTriggerLowBar := pendingSwingBarBear
 
-        // Calculate Relative Leg Strength (Impulse vs Correction)
-        float impulseRange = na
-        float correctionRange = na
-
-        if not na(lastConfirmedSwingHigh) and not na(pendingLevelBear)
-            // Impuls = vom letzten Swing-High bis BOS-Low
-            impulseRange := lastConfirmedSwingHigh - pendingLevelBear
-
-            // Korrektur = vorheriges Leg (Low vor diesem High bis zum High)
-            if not na(lastConfirmedSwingLow)
-                correctionRange := lastConfirmedSwingHigh - lastConfirmedSwingLow
-
-                if correctionRange > 0
-                    currentLegStrength := impulseRange / correctionRange
-
         pendingLevelBear := na
         pendingSwingBarBear := na
 
@@ -804,6 +793,12 @@ if bullBOSEvent
             // Set BOS context range: HH that was broken + current HL
             bosRangeHigh := bosSwingHigh
             bosRangeLow := lastConfirmedSwingLow
+
+            // Relative Leg Strength: impulse (prior low -> broken high)
+            // vs correction (broken high -> HL), in both BOS modes
+            float impulseRange = bosSwingHigh - bosPriorLow
+            float correctionRange = bosSwingHigh - lastConfirmedSwingLow
+            currentLegStrength := not na(impulseRange) and correctionRange > 0 ? impulseRange / correctionRange : na
 
             // DEBUG LOG
             if enableDebugLog and logBOS
@@ -832,6 +827,12 @@ if bearBOSEvent
             // Set BOS context range: LL that was broken + current LH
             bosRangeLow := bosSwingLow
             bosRangeHigh := lastConfirmedSwingHigh
+
+            // Relative Leg Strength: impulse (prior high -> broken low)
+            // vs correction (broken low -> LH), in both BOS modes
+            float impulseRange = bosPriorHigh - bosSwingLow
+            float correctionRange = lastConfirmedSwingHigh - bosSwingLow
+            currentLegStrength := not na(impulseRange) and correctionRange > 0 ? impulseRange / correctionRange : na
 
             // DEBUG LOG
             if enableDebugLog and logBOS
@@ -1375,9 +1376,11 @@ checkTTL(OrderBlock ob) =>
 bool bullOBMitigatedNow = false
 bool bearOBMitigatedNow = false
 
+// Lifecycle checks start on the bar after the BOS that created the OB: the
+// creation bar's own range is the impulse, not a return into the zone.
 if enableOrderBlocks
     // Check bullish OB
-    if not na(bullOB)
+    if not na(bullOB) and bar_index > bullOB.bosBar
         // Track reaction type BEFORE invalidation/mitigation checks
         trackReactionType(bullOB)
 
@@ -1400,7 +1403,7 @@ if enableOrderBlocks
                 bullOB := na
 
     // Check bearish OB
-    if not na(bearOB)
+    if not na(bearOB) and bar_index > bearOB.bosBar
         // Track reaction type BEFORE invalidation/mitigation checks
         trackReactionType(bearOB)
 

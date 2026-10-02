@@ -19,9 +19,9 @@ Volume/spread-based Wyckoff schematic detector. Identifies accumulation and dist
 
 ## Phase lifecycle
 
-1. **Phase A** — Selling/Buying Climax starts the range. The climax is only accepted when prior trend agrees (an SC will not fire inside a clear uptrend, a BC not inside a clear downtrend). AR requires the swing to travel ≥ 1 ATR away from the climax; ST is detected within the range.
+1. **Phase A** — Selling/Buying Climax starts the range. The climax is only accepted when prior trend agrees (an SC will not fire inside a clear uptrend, a BC not inside a clear downtrend). AR requires the swing to travel ≥ 1 ATR away from the climax and to clear the climax bar's own range (above the SC bar's high, below the BC bar's low); ST is detected within the range.
 2. **Phase B** — range freezes after `Range Establish Bars`; STs repeat with a 10-bar cooldown.
-3. **Phase C** — Spring (accumulation) or UTAD (distribution) breaks the range edge and fails; a low-volume Test confirms it.
+3. **Phase C** — Spring (accumulation) or UTAD (distribution) breaks the range edge and fails; a low-volume Test confirms it. A Test is only accepted after price has first left the Spring/UTAD level — a close beyond the Spring low + test band (UTAD: below the UTAD high − test band) on an earlier bar.
 4. **Phase D** — in-range SOS/SOW on volume, LPS/LPSY as pivot-confirmed low-volume retests.
 5. **Phase E** — Markup/Markdown require Phase D, a confirmed internal structure (Spring/UTAD test, in-range SOS/SOW, or pivot-confirmed LPS/LPSY), a setup score ≥ 50, **and** a confirmed close beyond the range edge on expanding volume (≥ 1.2× avg). That decisive break is emitted as a distinct SOSB/SOWB breakout event. A close beyond the opposite edge plus the invalidation buffer marks the range as failed.
 
