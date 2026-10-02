@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Vein Trend [WavesUnchained]
-// Version: 0.2.0
+// Version: 0.2.2
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // Signal aggregator for the Vein suite. Works on any timeframe.
 // Combines Setup Score, Confirmation Score, and Phase Score into a
@@ -16,12 +16,13 @@
 //   Layer B  Confirmation  — structure events (Spring/UT, BOS/CHoCH, Climax seq.)
 //   Layer C  Phase Score   — accumulation / distribution phase quality
 //
-// Signal guards:
-//   ✓ Cooldown             — min bars between signals of the same direction
-//   ✓ Confirmation bars    — score must hold above threshold for N consecutive bars
-//   ✓ Score delta          — bull score must exceed bear score by a margin (and v.v.)
-//   ✓ Conflict suppression — no signal when both sides are simultaneously active
-//   ✓ Follow-through gate  — signal only after at least one follow-through bar
+// Signal gate — weighted confluence score (max 7.0) vs. Min Confluence Gate Score.
+// Only the cooldown is a hard veto; every other guard adds weight and none is
+// required on its own:
+//   Evidence  — composite ≥ threshold ................................ 2.0
+//   Trigger   — structure gate 1.5 + follow-through 0.5 + confirm bars 0.5
+//   Trend     — trend alignment filter ................................. 1.0
+//   Quality   — no conflict 1.0 + score delta 0.5
 //
 // Data Contract:
 //   Price:     REQUIRED   chart symbol
@@ -100,8 +101,8 @@ float scoreDelta      = input.float(2.0,  "Min Score Delta",          minval=0.0
 float deltaVeryStrong = input.float(3.0,  "Strong Dominance Delta",   minval=0.5, maxval=10.0, step=0.5, group=gSignal, tooltip="Composite delta for 'Strong Active' candle state (darker color)")
 int   cooldownInput   = input.int(10,     "Cooldown (bars)",          minval=1,   maxval=100,            group=gSignal, tooltip="Minimum bars between signals of the same direction (used when Auto Timeframe Settings is off)")
 int   confirmInput    = input.int(1,      "Confirmation Bars",        minval=1,   maxval=10,             group=gSignal, tooltip="Score must stay above threshold for N consecutive bars before firing (used when Auto Timeframe Settings is off)")
-int   minGateScore    = input.int(5,      "Min Confluence Gate Score", minval=1,   maxval=7,              group=gSignal, tooltip="How many of the 7 confluence conditions must be met to trigger a signal. Cooldown is always enforced as a hard veto.")
-bool  requireFT       = input.bool(false, "Require Follow-Through",                                      group=gSignal, tooltip="Signal fires only after at least one follow-through bar post-event. Enable on 1H/4H to reduce false signals. On Daily leave off — follow-through takes too long.")
+int   minGateScore    = input.int(5,      "Min Confluence Gate Score", minval=1,   maxval=7,              group=gSignal, tooltip="Minimum weighted confluence score (max 7.0) to trigger a signal.\n\nEvidence: composite ≥ threshold 2.0\nTrigger: structure gate 1.5 + follow-through 0.5 + confirmation bars 0.5\nTrend: alignment filter 1.0\nQuality: no conflict 1.0 + score delta 0.5\n\nThe guards are weights, not individual requirements — any combination reaching this score fires. Cooldown is always enforced as a hard veto.")
+bool  requireFT       = input.bool(false, "Require Follow-Through",                                      group=gSignal, tooltip="When on, follow-through after the last structure event adds 0.5 to the confluence gate score (when off, that 0.5 is always granted). Follow-through = a later close above the event bar's close (below for bear events) within 4 bars. Enable on 1H/4H to reduce false signals. On Daily leave off — follow-through takes too long.")
 bool  suppressConflict= input.bool(true,  "Suppress Conflicted Signals",                                 group=gSignal, tooltip="No signal when both bull and bear scores are simultaneously elevated")
 bool  trendFilter     = input.bool(true,  "Trend Alignment Filter",                                       group=gSignal, tooltip="Reversal signals only fire against the current EMA trend:\n  ▲ Bull arrow: allowed when EMA is bearish or flat (reversal FROM downtrend)\n  ▼ Bear arrow: allowed when EMA is bullish or flat (reversal FROM uptrend)\n\nPrevents false arrows mid-trend caused by overbought/oversold oscillators.")
 bool  autoTF          = input.bool(true,  "Auto Timeframe Settings",                                      group=gSignal, tooltip="Automatically adjusts all signal parameters based on the current timeframe.\n\nDaily:  5.5 / Δ1.5 / cd7  / conf1 / FT off\n4H:     5.0 / Δ1.5 / cd5  / conf1 / FT off\n1H:     6.0 / Δ1.5 / cd8  / conf2 / FT off\n<1H:    7.5 / Δ2.0 / cd25 / conf2 / FT on\n\n(threshold / delta / cooldown / confirm / follow-through)\n\nManual inputs above are used when this is off.")
@@ -224,9 +225,15 @@ float pivotLo = ta.pivotlow(low, leftBars, rightBars)
 var float lastSwingHigh = na
 var float lastSwingLow  = na
 
+var float prevSwingLow  = na
+var float prevSwingHigh = na
+
+// Shift the previous swing BEFORE overwriting the last one, otherwise prev == last
 if not na(pivotHi)
+    prevSwingHigh := lastSwingHigh
     lastSwingHigh := pivotHi
 if not na(pivotLo)
+    prevSwingLow := lastSwingLow
     lastSwingLow := pivotLo
 
 float majorPivotHi = ta.pivothigh(high, majLeftBars, majRightBars)
@@ -236,8 +243,6 @@ var float lastMajorHigh = na
 var float lastMajorLow  = na
 var float prevMajorHigh = na
 var float prevMajorLow  = na
-var float prevSwingLow  = na
-var float prevSwingHigh = na
 
 if not na(majorPivotHi)
     prevMajorHigh := lastMajorHigh
@@ -245,11 +250,6 @@ if not na(majorPivotHi)
 if not na(majorPivotLo)
     prevMajorLow := lastMajorLow
     lastMajorLow := majorPivotLo
-
-if not na(pivotHi)
-    prevSwingHigh := lastSwingHigh
-if not na(pivotLo)
-    prevSwingLow := lastSwingLow
 
 // ============================================================================
 // CALCULATIONS — Level Context
@@ -350,38 +350,39 @@ if isClimaxCandle
 int  clxLookback   = 20
 bool hasActiveClx  = clxState >= 1 and not na(clxBar) and (bar_index - clxBar) <= clxLookback
 
-if hasActiveClx and clxState == 1
-    if clxDirection == 1 and close > clxClose
-        clxState := 2
-    if clxDirection == -1 and close < clxClose
-        clxState := 2
+// One state step per bar at most (else-if chain), so a single bar cannot run 1→5
+if hasActiveClx
+    if clxState == 1
+        if clxDirection == 1 and close > clxClose
+            clxState := 2
+        if clxDirection == -1 and close < clxClose
+            clxState := 2
+    else if clxState == 2
+        bool clxReturning = false
+        if clxDirection == 1 and not na(clxClose) and atr14 > 0
+            clxReturning := close < clxClose + 1.5 * atr14 and close > clxLow - 0.5 * atr14
+        if clxDirection == -1 and not na(clxClose) and atr14 > 0
+            clxReturning := close > clxClose - 1.5 * atr14 and close < clxHigh + 0.5 * atr14
+        if clxReturning and (bar_index - clxBar) >= 2
+            clxState := 3
+    else if clxState == 3
+        bool clxTestBar_  = not na(clxRange) and candleRange <= clxRange * 0.6 and candleRange > 0 and (volumeIsReal ? not na(clxVolume) and volume <= clxVolume * 0.7 : true)
+        bool clxInZone    = not na(clxClose) and atr14 > 0 and math.abs(close - clxClose) <= 1.5 * atr14
+        if clxTestBar_ and clxInZone
+            clxState := 4
+    else if clxState == 4
+        if clxDirection == 1 and (microBullBOS or majorBullBOS)
+            clxState := 5
+        if clxDirection == -1 and (microBearBOS or majorBearBOS)
+            clxState := 5
 
-if hasActiveClx and clxState == 2
-    bool clxReturning = false
-    if clxDirection == 1 and not na(clxClose) and atr14 > 0
-        clxReturning := close < clxClose + 1.5 * atr14 and close > clxLow - 0.5 * atr14
-    if clxDirection == -1 and not na(clxClose) and atr14 > 0
-        clxReturning := close > clxClose - 1.5 * atr14 and close < clxHigh + 0.5 * atr14
-    if clxReturning and (bar_index - clxBar) >= 2
-        clxState := 3
-
-if hasActiveClx and clxState == 3
-    bool clxTestBar_  = not na(clxRange) and candleRange <= clxRange * 0.6 and candleRange > 0 and (volumeIsReal ? not na(clxVolume) and volume <= clxVolume * 0.7 : true)
-    bool clxInZone    = not na(clxClose) and atr14 > 0 and math.abs(close - clxClose) <= 1.5 * atr14
-    if clxTestBar_ and clxInZone
-        clxState := 4
-
-if hasActiveClx and clxState == 4
-    if clxDirection == 1 and (microBullBOS or majorBullBOS)
-        clxState := 5
-    if clxDirection == -1 and (microBearBOS or majorBearBOS)
-        clxState := 5
-
-if hasActiveClx and not na(clxBar) and (bar_index - clxBar) > clxLookback
+// Expire the sequence after the lookback (hasActiveClx is already false here)
+if clxState >= 1 and not na(clxBar) and (bar_index - clxBar) > clxLookback
     clxState := 0
 
 bool clxTestValid = clxState == 4 or clxState == 5
 bool clxConfirmed = clxState == 5
+bool clxJustConfirmed = clxConfirmed and not clxConfirmed[1]
 
 // ============================================================================
 // SCORING HELPER
@@ -678,14 +679,14 @@ var int   bullEventBar     = na
 var float bearTriggerLevel = na
 var int   bearEventBar     = na
 
-bool newBullEvent = isSpring or isMajorSpring or microBullBOS or majorBullBOS or (clxConfirmed and clxDirection == 1)
-bool newBearEvent = isUpthrust or isMajorUpthrust or microBearBOS or majorBearBOS or (clxConfirmed and clxDirection == -1)
+bool newBullEvent = isSpring or isMajorSpring or microBullBOS or majorBullBOS or (clxJustConfirmed and clxDirection == 1)
+bool newBearEvent = isUpthrust or isMajorUpthrust or microBearBOS or majorBearBOS or (clxJustConfirmed and clxDirection == -1)
 
 if newBullEvent
-    bullTriggerLevel := (isSpring or isMajorSpring) ? low : close
+    bullTriggerLevel := close
     bullEventBar     := bar_index
 if newBearEvent
-    bearTriggerLevel := (isUpthrust or isMajorUpthrust) ? high : close
+    bearTriggerLevel := close
     bearEventBar     := bar_index
 
 int bullEventAge = not na(bullEventBar) ? bar_index - bullEventBar : 999

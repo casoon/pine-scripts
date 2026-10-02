@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Vein Reversal Score 4H [WavesUnchained]
-// Version: 0.2.0
+// Version: 0.2.2
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // Two-layer reversal scoring for 4H NatGas.
 //
@@ -14,9 +14,13 @@
 //   → "structure confirms the setup"
 //
 // Combined status logic:
-//   Setup only          → WATCH (observe, don't act)
-//   Setup + Confirmation → CANDIDATE (take seriously)
-//   Confirmation only    → ALERT (structure event, check context)
+//   Setup only                            → WATCH (observe, don't act)
+//   Setup + Confirmation                  → PENDING (waiting for follow-through)
+//   Setup + Confirmation + Follow-through → CANDIDATE (take seriously)
+//   Confirmation only                     → ALERT (structure event, check context)
+//
+// The event bar's confirmation is latched and decays over the follow-through
+// window, so a structure event can reach CANDIDATE on its follow-through bar.
 //
 // Features:
 //   ✓ Separate Setup and Confirmation scores (bull/bear)
@@ -340,38 +344,39 @@ if isClimaxCandle
 int clxLookback = 20
 bool hasActiveClx = clxState >= 1 and not na(clxBar) and (bar_index - clxBar) <= clxLookback
 
-if hasActiveClx and clxState == 1
-    if clxDirection == 1 and close > clxClose
-        clxState := 2
-    if clxDirection == -1 and close < clxClose
-        clxState := 2
+// One state step per bar at most (else-if chain), so a single bar cannot run 1→5
+if hasActiveClx
+    if clxState == 1
+        if clxDirection == 1 and close > clxClose
+            clxState := 2
+        if clxDirection == -1 and close < clxClose
+            clxState := 2
+    else if clxState == 2
+        bool returningToZone = false
+        if clxDirection == 1 and not na(clxClose) and atr14 > 0
+            returningToZone := close < clxClose + 1.5 * atr14 and close > clxLow - 0.5 * atr14
+        if clxDirection == -1 and not na(clxClose) and atr14 > 0
+            returningToZone := close > clxClose - 1.5 * atr14 and close < clxHigh + 0.5 * atr14
+        if returningToZone and (bar_index - clxBar) >= 2
+            clxState := 3
+    else if clxState == 3
+        bool isTestBar = not na(clxRange) and candleRange <= clxRange * 0.6 and candleRange > 0 and (volumeIsReal ? not na(clxVolume) and volume <= clxVolume * 0.7 : true)
+        bool inZone = not na(clxClose) and atr14 > 0 and math.abs(close - clxClose) <= 1.5 * atr14
+        if isTestBar and inZone
+            clxState   := 4
+    else if clxState == 4
+        if clxDirection == 1 and (microBullBOS or majorBullBOS)
+            clxState := 5
+        if clxDirection == -1 and (microBearBOS or majorBearBOS)
+            clxState := 5
 
-if hasActiveClx and clxState == 2
-    bool returningToZone = false
-    if clxDirection == 1 and not na(clxClose) and atr14 > 0
-        returningToZone := close < clxClose + 1.5 * atr14 and close > clxLow - 0.5 * atr14
-    if clxDirection == -1 and not na(clxClose) and atr14 > 0
-        returningToZone := close > clxClose - 1.5 * atr14 and close < clxHigh + 0.5 * atr14
-    if returningToZone and (bar_index - clxBar) >= 2
-        clxState := 3
-
-if hasActiveClx and clxState == 3
-    bool isTestBar = not na(clxRange) and candleRange <= clxRange * 0.6 and candleRange > 0 and (volumeIsReal ? not na(clxVolume) and volume <= clxVolume * 0.7 : true)
-    bool inZone = not na(clxClose) and atr14 > 0 and math.abs(close - clxClose) <= 1.5 * atr14
-    if isTestBar and inZone
-        clxState   := 4
-
-if hasActiveClx and clxState == 4
-    if clxDirection == 1 and (microBullBOS or majorBullBOS)
-        clxState := 5
-    if clxDirection == -1 and (microBearBOS or majorBearBOS)
-        clxState := 5
-
-if hasActiveClx and not na(clxBar) and (bar_index - clxBar) > clxLookback
+// Expire the sequence after the lookback (hasActiveClx is already false here)
+if clxState >= 1 and not na(clxBar) and (bar_index - clxBar) > clxLookback
     clxState := 0
 
 bool clxTestValid    = clxState == 4 or clxState == 5
 bool clxConfirmed    = clxState == 5
+bool clxJustConfirmed = clxConfirmed and not clxConfirmed[1]
 bool clxBullSequence = clxDirection == 1 and clxState >= 1
 bool clxBearSequence = clxDirection == -1 and clxState >= 1
 string clxStateStr   = clxState == 0 ? "—" : clxState == 1 ? "CLX" : clxState == 2 ? "REACTING" : clxState == 3 ? "TEST PENDING" : clxState == 4 ? "TEST VALID" : clxState == 5 ? "CONFIRMED" : "—"
@@ -670,14 +675,14 @@ var float bearTriggerLevel = na
 var int   bearEventBar     = na
 
 // Register new bull confirmation events
-bool newBullEvent = (isSpring or isMajorSpring or microBullBOS or majorBullBOS or (clxConfirmed and clxDirection == 1))
-bool newBearEvent = (isUpthrust or isMajorUpthrust or microBearBOS or majorBearBOS or (clxConfirmed and clxDirection == -1))
+bool newBullEvent = (isSpring or isMajorSpring or microBullBOS or majorBullBOS or (clxJustConfirmed and clxDirection == 1))
+bool newBearEvent = (isUpthrust or isMajorUpthrust or microBearBOS or majorBearBOS or (clxJustConfirmed and clxDirection == -1))
 
 if newBullEvent
-    bullTriggerLevel := isSpring or isMajorSpring ? low : close
+    bullTriggerLevel := close
     bullEventBar     := bar_index
 if newBearEvent
-    bearTriggerLevel := isUpthrust or isMajorUpthrust ? high : close
+    bearTriggerLevel := close
     bearEventBar     := bar_index
 
 // ============================================================================
@@ -695,9 +700,17 @@ int bearEventAge = not na(bearEventBar) ? bar_index - bearEventBar : 999
 float bullDecay = bullEventAge <= decayStart ? 1.0 : bullEventAge <= decayFull ? 1.0 - 0.8 * (bullEventAge - decayStart) / (decayFull - decayStart) : 0.0
 float bearDecay = bearEventAge <= decayStart ? 1.0 : bearEventAge <= decayFull ? 1.0 - 0.8 * (bearEventAge - decayStart) / (decayFull - decayStart) : 0.0
 
-// Apply decay to confirmation scores
-float bullConfDecayed = bullConf * bullDecay
-float bearConfDecayed = bearConf * bearDecay
+// Latch the event bar's confirmation so it carries (decayed) into the follow-through window
+var float bullEventConf = 0.0
+var float bearEventConf = 0.0
+if newBullEvent
+    bullEventConf := bullConf
+if newBearEvent
+    bearEventConf := bearConf
+
+// Apply decay: current-bar confirmation or the decayed event-bar confirmation, whichever is higher
+float bullConfDecayed = math.max(bullConf, bullEventConf * bullDecay)
+float bearConfDecayed = math.max(bearConf, bearEventConf * bearDecay)
 
 // ============================================================================
 // MODULE: follow-through
@@ -810,10 +823,8 @@ if bullFailed
     bullStatus := "FAILED"
 else if bullSetupReady and bullConfirmed and bullFTAchieved
     bullStatus := bullCandidateOpposed ? "CONFLICTED" : bullTrendConflict ? "CONFLICTED" : "CANDIDATE"
-else if bullSetupReady and bullConfirmed and not bullFTAchieved and bullEventActive
-    bullStatus := bullCandidateOpposed ? "CONFLICTED" : bullTrendConflict ? "CONFLICTED" : "PENDING"
 else if bullSetupReady and bullConfirmed
-    bullStatus := bullCandidateOpposed ? "CONFLICTED" : bullTrendConflict ? "CONFLICTED" : bullDecay < 0.5 ? "EXPIRED" : "CANDIDATE"
+    bullStatus := bullCandidateOpposed ? "CONFLICTED" : bullTrendConflict ? "CONFLICTED" : "PENDING"
 else if bullSetupStrong
     bullStatus := bullTrendConflict ? "CONFLICTED" : "SETUP"
 else if bullConfirmed and not bullSetupReady
@@ -826,16 +837,26 @@ if bearFailed
     bearStatus := "FAILED"
 else if bearSetupReady and bearConfirmed and bearFTAchieved
     bearStatus := bearCandidateOpposed ? "CONFLICTED" : bearTrendConflict ? "CONFLICTED" : "CANDIDATE"
-else if bearSetupReady and bearConfirmed and not bearFTAchieved and bearEventActive
-    bearStatus := bearCandidateOpposed ? "CONFLICTED" : bearTrendConflict ? "CONFLICTED" : "PENDING"
 else if bearSetupReady and bearConfirmed
-    bearStatus := bearCandidateOpposed ? "CONFLICTED" : bearTrendConflict ? "CONFLICTED" : bearDecay < 0.5 ? "EXPIRED" : "CANDIDATE"
+    bearStatus := bearCandidateOpposed ? "CONFLICTED" : bearTrendConflict ? "CONFLICTED" : "PENDING"
 else if bearSetupStrong
     bearStatus := bearTrendConflict ? "CONFLICTED" : "SETUP"
 else if bearConfirmed and not bearSetupReady
     bearStatus := "ALERT"
 else if bearSetupReady
     bearStatus := "WATCH"
+
+// Latch whether the current event ever reached CANDIDATE (for the Invalidation alert)
+var bool bullWasCandidate = false
+var bool bearWasCandidate = false
+if newBullEvent
+    bullWasCandidate := false
+if newBearEvent
+    bearWasCandidate := false
+if bullStatus == "CANDIDATE"
+    bullWasCandidate := true
+if bearStatus == "CANDIDATE"
+    bearWasCandidate := true
 
 // Combined scores — role-weighted, not a flat sum of two heterogeneous layers.
 // Setup = Momentum/Location role · Confirmation = Structure/Trigger role.
@@ -1267,8 +1288,8 @@ alertcondition(alertOk and (bullAction), "Bull Action", "VEIN-RS · ACTION LONG 
 alertcondition(alertOk and (bearAction), "Bear Action", "VEIN-RS · ACTION SHORT · {{ticker}} {{interval}}")
 
 // ── INVALIDATION ALERTS — "previous signal is dead" ──
-alertcondition(alertOk and (bullFailed and not bullFailed[1]), "Bull Invalidation", "VEIN-RS · INVALIDATION LONG · {{ticker}} {{interval}}")
-alertcondition(alertOk and (bearFailed and not bearFailed[1]), "Bear Invalidation", "VEIN-RS · INVALIDATION SHORT · {{ticker}} {{interval}}")
+alertcondition(alertOk and (bullFailed and not bullFailed[1] and bullWasCandidate), "Bull Invalidation", "VEIN-RS · INVALIDATION LONG · {{ticker}} {{interval}}")
+alertcondition(alertOk and (bearFailed and not bearFailed[1] and bearWasCandidate), "Bear Invalidation", "VEIN-RS · INVALIDATION SHORT · {{ticker}} {{interval}}")
 
 // ── STRUCTURAL ALERTS ──
 alertcondition(alertOk and (bullStatus == "CANDIDATE"), "Bull Candidate", "VEIN-RS · CANDIDATE LONG · {{ticker}} {{interval}}")

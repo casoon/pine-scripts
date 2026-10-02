@@ -66,7 +66,7 @@ Everything else is **weak**.
 
 Hover over each label shows:
 - **Move** — achieved move in ATR
-- **MAE** — Max Adverse Excursion (largest adverse move in ATR)
+- **MAE** — Max Adverse Excursion (largest adverse move in ATR before the target is hit)
 - **Bars** — bars to target
 - **Timing** — Fast / Normal / Slow
 
@@ -288,11 +288,13 @@ Confirmation loses weight automatically after the event:
 | 4–6 | Linear decline → 20% |
 | >6 | 0% (expired) |
 
+The event bar's confirmation is latched and fades along this curve, so it still counts on the follow-through bars after the event.
+
 ### Follow-Through
 
 After an event, checked within 2–4 bars:
 - Is there a higher/lower close?
-- Does price hold above/below trigger level?
+- Does price hold above/below the trigger level (the event bar's close)?
 - No opposing BOS?
 
 ### Status Logic
@@ -303,10 +305,9 @@ After an event, checked within 2–4 bars:
 | WATCH | Setup building |
 | SETUP | Setup strong, waiting for confirmation |
 | ALERT | Structure event, but setup too weak |
-| PENDING | Setup + Conf, follow-through pending |
+| PENDING | Setup + Conf, follow-through not (yet) achieved |
 | **CANDIDATE** | **Setup + Conf + Follow-through — take seriously** |
 | **CONFLICTED** | **Contradictory — do not act** |
-| EXPIRED | Event too old |
 | **FAILED** | **No follow-through or trigger lost** |
 
 ### Table (top right)
@@ -378,6 +379,8 @@ A bottom/top is not an event but a phase: trend weakens → range forms → vola
 | **Vol Compression** | Candles/BB/ATR shrinking | Volatile | Declining | Compressed |
 | **Liquidity** | Sweeps, springs, upthrusts | None | Single events | Multiple/repeated |
 | **Early Structure** | First HL/LH, micro BOS | Nothing | First hints | Repeated |
+
+Range Formation and Vol Compression are direction-neutral. They count only for the side whose prior trend is weakening (Trend Loss > 0), so a range after a rally does not also build an accumulation score.
 
 ### States
 
@@ -457,6 +460,10 @@ The script pulls simplified 4H data:
 - Last swing high/low as reference levels
 
 **Activation:** 15m only works when 4H setup score ≥ threshold (default: 2.0). Otherwise shows "QUIET".
+
+The 4H scores come from the "Vein Module Inputs" sources. If both setup sources are left on their default (`close`), they count as not connected: the module stays QUIET and the table shows "4H sources not connected". The same applies to the two trend sources (treated as neutral).
+
+**Entries** (off by default) need a 15m structure trigger plus a micro score ≥ Entry Min Micro Score (default 6.0, provisional).
 
 ### Bias
 
@@ -646,20 +653,24 @@ Multi-layer composite score detecting high-probability reversal signals. Filters
 
 The score bar in the table fills to threshold — full bar = signal condition met.
 
-### Guards
+### Confluence Gate
 
-| Guard | Purpose |
-|-------|---------|
-| **Threshold** | Composite must exceed effThresh |
-| **Delta** | Bull and bear scores must differ by ≥ effDelta (prevents ambiguous signals) |
-| **Structure Gate** | On Daily: Confirm score ≥ 2.0 required (zone alone not enough) |
-| **Cooldown** | Minimum bars between signals in same direction |
-| **Trend Filter** | On sub-1H: requires follow-through confirmation |
-| **Conflict** | Suppresses signal when both sides near threshold |
+A signal fires when the weighted confluence score reaches **Min Confluence Gate Score** (default 5, max 7.0). The guards below are weights, not individual requirements — any combination that reaches the gate score fires. Only the cooldown is a hard veto.
+
+| Role | Guard | Weight | Condition |
+|------|-------|--------|-----------|
+| Evidence | **Threshold** | 2.0 | Composite ≥ effThresh |
+| Trigger | **Structure Gate** | 1.5 | Confirm score ≥ structure gate (AutoTF: Daily 2.0, other TFs 0; manual: 1.0) |
+| Trigger | **Follow-Through** | 0.5 | Follow-through after the last structure event (always granted when Require Follow-Through is off) |
+| Trigger | **Confirmation Bars** | 0.5 | Composite held above threshold for N bars |
+| Trend | **Trend Filter** | 1.0 | Not signalling with a confirmed EMA trend (reversal context) |
+| Quality | **No Conflict** | 1.0 | Not both sides near threshold without clear dominance |
+| Quality | **Delta** | 0.5 | Bull and bear composite differ by ≥ effDelta |
+| — | **Cooldown** | veto | Minimum bars between signals in same direction |
 
 ### Debug Markers
 
-Colored dots when composite ≥ threshold but a guard blocks the signal:
+Colored dots when composite ≥ threshold but the gate score stays below the minimum (color = first missing guard):
 
 | Color | Blocking Guard |
 |-------|---------------|
@@ -741,9 +752,9 @@ Detects when a move is overextended — temporally, emotionally, and through ord
 
 | Layer | Max | What it measures |
 |-------|-----|-----------------|
-| **Time** | 3 | Consecutive directional closes (grace: 1 bar tolerance before reset) |
+| **Time** | 3 | Consecutive directional closes (grace: 1 bar tolerance before reset; re-arms after ≥ 2 directional bars) |
 | **Overextension** | 3 | EMA distance in ATR units + RSI extreme + MFI extreme |
-| **Orderflow Proxy** | 2 | Directional absorption and capitulation/distribution |
+| **Orderflow Proxy** | 2 | Directional absorption, capitulation/blow-off and accumulation/distribution bars |
 | **Volatility** | 2 | Directional ATR spike + climax bar (bull or bear only) |
 
 ### Orderflow Events
@@ -753,7 +764,9 @@ Detects when a move is overextended — temporally, emotionally, and through ord
 | **Bear Absorption** | Bear exhaustion | Bearish bar + high vol + small range = buyers absorbing |
 | **Bull Absorption** | Bull exhaustion | Bullish bar + high vol + small range = sellers absorbing |
 | **Capitulation** | Bear exhaustion | Bearish bar + very high vol + large range + close near low |
+| **Blow-off** | Bull exhaustion | Bullish bar + very high vol + large range + close near high |
 | **Distribution** | Bull exhaustion | Bearish close after up move + upper wick dominates + overextended |
+| **Accumulation** | Bear exhaustion | Bullish close after down move + lower wick dominates + overextended |
 
 ### Signals
 
@@ -764,6 +777,7 @@ Detects when a move is overextended — temporally, emotionally, and through ord
 | ● cyan | Dot below bar | Bear absorption — buyers stepping in |
 | ● orange | Dot above bar | Bull absorption — sellers stepping in |
 | ★ | Cross below bar | Capitulation — panic low |
+| ★ | Cross above bar | Blow-off — buying climax |
 
 ### Score States
 
