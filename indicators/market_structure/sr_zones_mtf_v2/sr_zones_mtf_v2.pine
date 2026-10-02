@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // S/R Zones MTF [WavesUnchained]
-// Version: 3.1.3
+// Version: 3.2.0
 // Author: WavesUnchained
-// Build: 2026-09-06 00:00:00
+// Build: 2026-10-02 00:00:00
 // ============================================================================
 // Multi-timeframe S/R zones built from ATR-reversal structure swings with scoring and merging.
 //
@@ -73,6 +73,7 @@ grpBreak = "Break Rules"
 invalidation = input.string("Close", "Invalidation", options=["Wick","Close"], group=grpBreak)
 avoidFalseBreaks = input.bool(false, "Avoid False Breaks (Volume)", group=grpBreak, tooltip="Requires real trade volume. On feeds that report tick volume or none, the filter passes every break through rather than filtering on a meaningless value — the chart shows a note when that happens.")
 breakVolMult     = input.float(1.2, "Break Volume Threshold = SMA(vol)*", step=0.1, minval=0.1, maxval=5.0, group=grpBreak)
+breakFailBars    = input.int(5, "Break Failure Window (bars)", minval=1, group=grpBreak, tooltip="If price closes back on the old side of the broken zone edge within this many bars after a break, the break's score bonus is taken back. Provisional default — not yet validated on data.")
 
 grpFilter = "Filter / Score"
 useFilter   = input.bool(true, "Enable Filter", group=grpFilter)
@@ -171,7 +172,7 @@ f_updateZoneGeom(_i, _top, _bot, _bx, _ln, _tops, _bots) =>
         line.set_y1(l, mid)
         line.set_y2(l, mid)
 
-f_deleteZone(_i, _bx, _ln, _top, _bot, _isRes, _score, _touches, _lastEvtBar, _lastBreakDir, _lastBreakBar, _lastRetestBar) =>
+f_deleteZone(_i, _bx, _ln, _top, _bot, _isRes, _score, _touches, _lastEvtBar, _lastBreakDir, _lastBreakBar, _lastRetestBar, _breakBonus) =>
     box b = array.get(_bx, _i)
     line l = array.get(_ln, _i)
     if not na(b)
@@ -189,6 +190,7 @@ f_deleteZone(_i, _bx, _ln, _top, _bot, _isRes, _score, _touches, _lastEvtBar, _l
     array.remove(_lastBreakDir, _i)
     array.remove(_lastBreakBar, _i)
     array.remove(_lastRetestBar, _i)
+    array.remove(_breakBonus, _i)
 
 //──────────────────────────────────────────────────────────────────────────────
 // Structure swing engine (ATR-reversal, no lookahead)
@@ -273,6 +275,7 @@ var int[]   aEvt = array.new_int()
 var int[]   aBrk = array.new_int()   // -1 bear break, 0 none, +1 bull break
 var int[]   aBrkBar = array.new_int()
 var int[]   aLastRetestBar = array.new_int()
+var float[] aBrkBonus = array.new_float()   // break bonus still at risk of a failed break (0 = none)
 
 //──────────────────────────────────────────────────────────────────────────────
 // Add/Merge Zone
@@ -319,10 +322,11 @@ f_addOrMergeZone(_isRes, _price, _width, _srcAtr, _tfBoost) =>
             array.unshift(aBrk, 0)
             array.unshift(aBrkBar, na)
             array.unshift(aLastRetestBar, na)
+            array.unshift(aBrkBonus, 0.0)
 
             if array.size(aTop) > maxZones
                 int remIdx = useFilter ? f_lowestScoreIndex(aScr) : (array.size(aTop) - 1)
-                f_deleteZone(remIdx, aBx, aLn, aTop, aBot, aRes, aScr, aTch, aEvt, aBrk, aBrkBar, aLastRetestBar)
+                f_deleteZone(remIdx, aBx, aLn, aTop, aBot, aRes, aScr, aTch, aEvt, aBrk, aBrkBar, aLastRetestBar, aBrkBonus)
 
 //──────────────────────────────────────────────────────────────────────────────
 // Create zones from swing events (Chart + HTF1 + optional HTF2)
@@ -385,9 +389,9 @@ for i = 0 to n - 1
     bool sweepR = isR and h > top and c < top and c > bot
     bool sweepS = (not isR) and lo < bot and c > bot and c < top
 
-    // Test = enters zone, close still inside (soft touch)
-    bool testR = isR and inZone and c < top and c > bot
-    bool testS = (not isR) and inZone and c > bot and c < top
+    // Test = enters zone, close still inside (soft touch) — a sweep bar is scored as sweep only
+    bool testR = isR and inZone and c < top and c > bot and not sweepR
+    bool testS = (not isR) and inZone and c > bot and c < top and not sweepS
 
     // buffered breaks, invalidation-aware + volume filter
     bool breakUp = (invHigh > (top + breakBuf)) and volOK
@@ -432,6 +436,20 @@ for i = 0 to n - 1
             label.new(bar_index, isR ? h : lo, "SW", style=isR ? label.style_label_down : label.style_label_up,
               textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
 
+    // Failed break: if price closes back on the old side of the broken edge within
+    // the failure window, the break bonus is taken back.
+    float pendBonus = array.get(aBrkBonus, i)
+    int pendBar = array.get(aBrkBar, i)
+    if pendBonus != 0.0 and not na(pendBar)
+        int sinceBrk = bar_index - pendBar
+        int pendDir = array.get(aBrk, i)
+        bool brkFailed = sinceBrk > 0 and ((pendDir == 1 and c < top) or (pendDir == -1 and c > bot))
+        if brkFailed
+            sc -= pendBonus
+            array.set(aBrkBonus, i, 0.0)
+        else if sinceBrk >= breakFailBars
+            array.set(aBrkBonus, i, 0.0)
+
     // Role-Reversal on Break:
     // If resistance breaks up => becomes support
     // If support breaks down => becomes resistance
@@ -450,7 +468,9 @@ for i = 0 to n - 1
         array.set(aBrk, i, +1)
         array.set(aBrkBar, i, bar_index)
         f_applyVisuals(i, false, aBx, aLn)
-        sc += (wImpulse * 1.5) + (wCloseLoc * 0.5)
+        float brkBonusUp = (wImpulse * 1.5) + (wCloseLoc * 0.5)
+        sc += brkBonusUp
+        array.set(aBrkBonus, i, brkBonusUp)
         evtBreakUp := true
         if showBreaks
             label.new(bar_index, h, "B↑", style=label.style_label_up, textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)
@@ -468,7 +488,9 @@ for i = 0 to n - 1
         array.set(aBrk, i, -1)
         array.set(aBrkBar, i, bar_index)
         f_applyVisuals(i, true, aBx, aLn)
-        sc += (wImpulse * 1.5) + (wCloseLoc * 0.5)
+        float brkBonusDn = (wImpulse * 1.5) + (wCloseLoc * 0.5)
+        sc += brkBonusDn
+        array.set(aBrkBonus, i, brkBonusDn)
         evtBreakDn := true
         if showBreaks
             label.new(bar_index, lo, "B↓", style=label.style_label_down, textcolor=color.white, color=color.new(color.black, 0), size=size.tiny)

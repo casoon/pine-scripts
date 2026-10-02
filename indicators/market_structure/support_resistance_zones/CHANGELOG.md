@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0 — 2026-10-02
+- Reaction distance is now measured from the zone's near edge (support: `high − top`, resistance: `bottom − low`) instead of the zone midpoint, so a reaction only confirms once price has left the zone by `Successful Reaction · ATR` (#59)
+- Zone score no longer only rises: live zones without a confirmed reaction decay by `Score Decay per Bar · %` (default 0.25, provisional) each confirmed bar, and a touch that expires without a reaction subtracts `Failed Reaction Penalty` (default 6, provisional) (#59)
+- LIQ is suppressed when a PC candidate was accepted on the same side for the same pivot, removing the PC + LIQ double score on identical pivots (#59)
+- OB, SD and FVG evidence from the same impulse bar now earns one impulse credit per zone: only the highest of their weights counts instead of the sum (#59)
+
+## v0.2.1 — 2026-10-02
+- With `Convert Broken Zones Into Flip Zones` on, a zone now flips only once: a flipped zone that breaks again becomes `BROKEN` instead of flipping back, so `Keep Broken Zones` and `Show Broken Zones` take effect with default settings
+
 ## v0.2.0 — 2026-09-05
 - Volume validity guard: VWAP and Relative Volume confluence now require real trade volume (`syminfo.volumetype` base/quote). On tick/n-a feeds `relativeVolume` returns `na` instead of a fabricated ratio, and the VWAP/volume confluence checks are skipped rather than silently scoring zero
 - Confluence weight is renormalized when volume is unavailable: the freed `weightVWAP + weightVolume` is redistributed across the remaining EMA/Fib/Psychological weights, so the maximum achievable confluence score is unchanged instead of the ceiling quietly shrinking on volume-less instruments

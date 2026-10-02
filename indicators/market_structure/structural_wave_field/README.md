@@ -32,7 +32,7 @@ Aligned and counter segments are tracked as a small state machine (start/continu
 - **Maturity** — blends leg age, directionally valid maximum extension, completed expansion/correction cycles, multi-metric wave decay, efficiency loss and price/pressure mismatch against the leg's own historical baseline. Adverse movement beyond the leg origin is never counted as positive extension.
 - **Compression** — active only during a correction segment; how tightly price is coiling relative to the structural leg's typical duration.
 - **Re-Sync** — a progressive four-stage read (counter decay → neutralizing → acceleration/velocity recovery → aligned-energy confirmation) of the internal wave re-aligning with structure after a correction. Confirmation must own one completed, sensitivity-qualified counter segment and consumes it permanently; duration, depth, quality, structural strength/confidence and an adaptive cooldown remain additional gates. Directional `RS↑`/`RS↓` labels make the continuation direction explicit.
-- **Exhaustion** — gated by minimum maturity, combining decay evidence (wave-strength decay, efficiency loss, price/pressure-efficiency loss, optional participation loss) with continuation-failure evidence (price/pressure mismatch, failed expansion, repeated weak peaks).
+- **Exhaustion** — gated by minimum maturity, combining decay evidence (wave-strength decay, efficiency loss, price/pressure-efficiency loss, optional participation loss) with continuation-failure evidence (price/pressure mismatch, failed expansion). The peak-decay ratio enters only through wave-strength decay, not as a separate weak-peaks term.
 
 ## Phase Engine
 

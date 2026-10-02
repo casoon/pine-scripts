@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.0 — 2026-10-02
+- Speed Reference default 3.0 → 1.0 ATR×/bar (provisional, not yet validated on data). Typical swing legs move well below 3 ATR per bar, so the Speed component stayed in the bottom third of its range and contributed only about 13 of its 40 points; at 1.0 it uses its full range
+
 ## v1.1.3 — 2026-09-05
 - Fix: Volume Gradient used raw `volume` with no check on `syminfo.volumetype` — on feeds that report tick volume, its 20% default weight scored conviction against a meaningless tick count. Added a `volumeIsReal` guard (`base`/`quote` only); the gradient's weight now drops to 0 when volume isn't real, and Speed/Cleanliness renormalize through the existing `totalW` division instead of the score being silently distorted by tick noise
 - Data Contract header block added (`Volume: OPTIONAL`, `Verdict: CFD-degraded`)

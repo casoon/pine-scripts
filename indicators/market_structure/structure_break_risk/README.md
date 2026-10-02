@@ -17,7 +17,7 @@ Pivots are used as **swing-level references only** (Location); the *break event*
 
 ## Features
 
-- Five evidence sensors across the roles, weighted into one score — never an AND-chain
+- Four pre-break evidence sensors across the roles, weighted into one score — never an AND-chain — plus the confirmed break (BOS) as a separate event that is not mixed into the score
 - Symmetric top-/bottom-break scoring driven by a **latching** prevailing-trend context
 - **RSI pane** with 70 / 50 / 30 reference levels and **momentum-divergence lines** drawn on the RSI (price extends but RSI does not), with a compact "Div" label and RSI values in the tooltip — divergence shown where it is actually readable
 - **Break-level line** drawn on price (the decisive swing the trend must hold, coloured by the current risk band) + a **risk zone** shading the cushion between price and that level, intensifying as risk rises (shown from Watch upward)
@@ -33,22 +33,22 @@ Pivots are used as **swing-level references only** (Location); the *break event*
 | Sensor | Role | Reads (uptrend → top-break) |
 |---|---|---|
 | **Near Break Level** | Location → Trigger | Distance from close to the last swing low, in ATR — risk rises on approach (full within `Near Break Level ATR Distance`) |
-| **Confirmed BOS** | Trigger | Close below the last swing low — graded by depth in ATR (confirmed break floored at 0.65) |
+| **Confirmed BOS** | Trigger (event, not weighted) | Close below the last swing low — graded by depth in ATR (confirmed break floored at 0.65); shown in the info label, not part of the score |
 | **Failed Breakout / SFP** | Trigger + Location | High sweeps above the last swing high but the bar closes back below it |
 | **Structure Erosion** | Structure | The most recent swing high is *lower* than the prior one — graded by the drop in ATR |
 | **Pivot Divergence** | Momentum | The latest price-pivot high is higher than the prior, but RSI sampled at those pivots is lower |
 
-Each sensor mirrors symmetrically for a downtrend (higher low, break above swing high, bullish divergence, etc.). Transient sensors are held for `Evidence Hold Bars` so the gauge reflects recent structural evidence rather than a single firing bar.
+Each sensor mirrors symmetrically for a downtrend (higher low, break above swing high, bullish divergence, etc.). Structure Erosion and Pivot Divergence fire on the bar the new swing pivot is confirmed; all sensors then decay over `Evidence Memory Bars`, so the gauge reflects recent structural evidence and old evidence fades instead of being held as long as the last two pivots stay unchanged.
 
 ## Score and state
 
-`risk = Σ(sensorᵢ · weightᵢ) / Σweight · 100`, EMA-smoothed, gated to zero when no trend context exists. Interpretation: **0–35** Quiet, no acute break risk · **35–60** Watch · **60–80** Break Pressure, structure turning critical · **80–100** Critical — break very near, or **Structure Broken** once a close confirms beyond the swing with the EMA context flipped. The risk-band colour (neutral → orange → red → dark red) tells you the severity, not the trade direction; *which* structure is tested is named in words ("Uptrend at risk" / "Downtrend at risk").
+`risk = Σ(sensorᵢ · weightᵢ) / (Σweight − min(w_Erosion, w_Divergence)) · 100` over the four weighted sensors (capped at 100), EMA-smoothed, gated to zero when no trend context exists. Interpretation: **0–35** Quiet, no acute break risk · **35–60** Watch · **60–80** Break Pressure, structure turning critical · **80–100** Critical — break very near, or **Structure Broken** once a close confirms beyond the swing with the EMA context flipped (a swing break that came first as Break Pressure is confirmed on the later bar the EMA context flips, if price still holds beyond that swing). Erosion and Divergence exclude each other at the same pivot pair, so the divisor is the reachable maximum and 100 stays reachable. The risk-band colour (neutral → orange → red → dark red) tells you the severity, not the trade direction; *which* structure is tested is named in words ("Uptrend at risk" / "Downtrend at risk").
 
 ## How to use
 
 - **Trend management:** rising SBR inside a position warns the trend structure is deteriorating before the move fully reverses.
 - **With TPS:** read them together — `SBR high + TPS low` = M-top / structure break plausible (unclean *and* breaking); `SBR low + TPS low` = just range / chop, no clean break; `SBR high + TPS high` = strong trend running but approaching a critical level.
-- **Confirmation, not prediction:** the strongest sensor (Break of Structure) only fires on an actual close beyond the swing — SBR escalates as evidence accumulates rather than calling a top in advance.
+- **Confirmation, not prediction:** the Break of Structure event only fires on an actual close beyond the swing — SBR escalates as evidence accumulates rather than calling a top in advance.
 
 ## Notes
 

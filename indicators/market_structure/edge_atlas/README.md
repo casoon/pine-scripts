@@ -10,7 +10,7 @@ Edge Atlas is a right-edge price-level atlas. Instead of a conventional landscap
 - ✓ Asia, London, New York, and two freely nameable custom session ranges (High/Low/Midpoint), off by default
 - ✓ Traditional, Fibonacci, Camarilla, Woodie, and DeMark pivot points (Daily/Weekly/Monthly, PP/R1-3/S1-3 — DeMark only defines PP/R1/S1)
 - ✓ Swing-based Fibonacci retracements and extensions from the latest confirmed pivot pair
-- ✓ Pivot-cluster support/resistance zones with touch counting and age filtering
+- ✓ Pivot-cluster support/resistance zones with touch counting (reset when a close breaks the zone) and age filtering
 - ✓ Automatic or manual round-number levels (Major/Half/Quarter)
 - ✓ Session, weekly, and monthly VWAP, anchored via `timeframe.change`
 - ✓ Up to 4 manually entered price levels with a free-text label each

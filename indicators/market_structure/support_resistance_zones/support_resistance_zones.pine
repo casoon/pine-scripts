@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Support & Resistance Zones [WavesUnchained]
-// Version: 0.2.0
+// Version: 0.3.0
 // Author: WavesUnchained
-// Build: 2026-09-05 17:00:00
+// Build: 2026-10-02 00:00:00
 // ============================================================================
 // Detector-driven support/resistance zone engine: independent zone detectors
 // (pivot clusters, multiple tests, base/supply-demand, order blocks, fair
@@ -182,8 +182,16 @@ weightVolume = input.float(6, "Volume Confluence", minval = 0, maxval = 30, grou
 groupLife = "11 · Lifecycle / Validation"
 breakThresholdAtr = input.float(0.20, "Confirmed Break Distance · ATR", minval = 0, maxval = 3, step = 0.05, group = groupLife)
 enableZoneFlips = input.bool(true, "Convert Broken Zones Into Flip Zones", group = groupLife)
-reactionThresholdAtr = input.float(0.75, "Successful Reaction · ATR", minval = 0.1, maxval = 10, step = 0.05, group = groupLife)
+reactionThresholdAtr = input.float(
+     0.75, "Successful Reaction · ATR", minval = 0.1, maxval = 10, step = 0.05, group = groupLife,
+     tooltip = "Distance price must travel away from the zone's near edge (support: above the top, resistance: below the bottom) within the validation horizon — price has to leave the zone, not just bounce inside it.")
 reactionHorizon = input.int(20, "Reaction Validation Horizon", minval = 1, maxval = 200, group = groupLife)
+scoreDecayPct = input.float(
+     0.25, "Score Decay per Bar · %", minval = 0, maxval = 5, step = 0.05, group = groupLife,
+     tooltip = "A live zone without a confirmed reaction (state NEW, TESTED, WEAK or FLIPPED) loses this share of its score every confirmed bar, so unproven zones fade instead of keeping their score forever. CONFIRMED zones do not decay. 0 disables. Provisional default — not yet validated on data.")
+failedReactionPenalty = input.float(
+     6.0, "Failed Reaction Penalty", minval = 0, maxval = 50, step = 1, group = groupLife,
+     tooltip = "Score subtracted when a touch expires without reaching the reaction distance inside the validation horizon. Provisional default — not yet validated on data.")
 brokenKeepBars = input.int(100, "Keep Broken Zones", minval = 0, maxval = 1000, group = groupLife)
 
 // ============================================================================
@@ -263,6 +271,7 @@ type ZoneCandidate
     string sources
     float initialScore
     string reason
+    int impulseBar = na
 
 type Zone
     int id
@@ -287,6 +296,8 @@ type Zone
     float reactionAtr
     float maxFavorableExcursion
     bool multipleTestsAwarded
+    int impulseBar = na
+    float impulseWeight = 0.0
 
 // ============================================================================
 // STORAGE
@@ -483,7 +494,16 @@ f_ingestCandidate(ZoneCandidate c, int proposedId, float currentAtr) =>
             z.lastEvidenceBar := bar_index
             if newEvidence
                 z.sources := z.sources == "" ? c.sources : z.sources + "|" + c.sources
-                z.score := f_clampScore(z.score + c.initialScore)
+                // OB, SD and FVG raised by the same impulse bar are one piece of
+                // impulse evidence: only the highest of their weights counts.
+                float credit = c.initialScore
+                if not na(c.impulseBar) and z.impulseBar == c.impulseBar
+                    credit := math.max(0.0, c.initialScore - z.impulseWeight)
+                    z.impulseWeight := math.max(z.impulseWeight, c.initialScore)
+                else if not na(c.impulseBar)
+                    z.impulseBar := c.impulseBar
+                    z.impulseWeight := c.initialScore
+                z.score := f_clampScore(z.score + credit)
             f_log(
                  "[MERGE] Z" + str.tostring(z.id) + " source=" + f_sourceDisplay(c.sources) +
                  " range=" + str.tostring(z.bottom, format.mintick) + "-" + str.tostring(z.top, format.mintick) +
@@ -493,6 +513,8 @@ f_ingestCandidate(ZoneCandidate c, int proposedId, float currentAtr) =>
             Zone newZone = Zone.new(
                  proposedId, c.dir, c.top, c.bottom, c.originBar, bar_index, bar_index, c.confirmedBar, c.sources,
                  "NEW", f_clampScore(c.initialScore), 0, 0, 0, na, na, false, na, na, na, 0.0, false)
+            newZone.impulseBar := c.impulseBar
+            newZone.impulseWeight := na(c.impulseBar) ? 0.0 : c.initialScore
             array.push(zones, newZone)
             f_log(
                  "[CREATE] Z" + str.tostring(proposedId) + " dir=" + (c.dir == 1 ? "SUPPORT" : "RESISTANCE") +
@@ -621,10 +643,12 @@ if isConfirmedBar and enableMultipleTests and not pivotClusterHandledLow and not
 // Compare the current confirmed pivot against the complete retained pivot
 // history. Comparing only the immediately preceding pivot misses a valid
 // equal-high pair whenever an unrelated high occurs between its two tests.
+// Suppressed when PC was accepted on the same side for this pivot — LIQ and
+// PC would otherwise score the same pivots twice.
 // ============================================================================
 if isConfirmedBar and not na(ph)
     int currentPivotBar = bar_index - pivotDepth
-    if enableLiquidity
+    if enableLiquidity and not pivotClusterHandledHigh
         [clusterLow, clusterHigh, clusterCount, earliestBar] = f_findCluster(
              pivotHighPrices, pivotHighBars, ph, currentPivotBar, liquidityToleranceAtr * atr, pivotHistoryBars)
         if clusterCount >= 2
@@ -647,7 +671,7 @@ if isConfirmedBar and not na(ph)
 // ============================================================================
 if isConfirmedBar and not na(pl)
     int currentPivotBar = bar_index - pivotDepth
-    if enableLiquidity
+    if enableLiquidity and not pivotClusterHandledLow
         [clusterLow, clusterHigh, clusterCount, earliestBar] = f_findCluster(
              pivotLowPrices, pivotLowBars, pl, currentPivotBar, liquidityToleranceAtr * atr, pivotHistoryBars)
         if clusterCount >= 2
@@ -684,6 +708,7 @@ if isConfirmedBar and (enableBaseZones or enableSupplyDemand) and compactBase an
         ZoneCandidate c = f_candidate(
              1, previousBaseHigh, previousBaseLow, bar_index - baseBars,
              source, score, "Compact base followed by bullish displacement")
+        c.impulseBar := bar_index
         statCandidates += 1
         int action = f_ingestCandidate(c, nextZoneId, atr)
         if action == 1
@@ -699,6 +724,7 @@ if isConfirmedBar and (enableBaseZones or enableSupplyDemand) and compactBase an
         ZoneCandidate c = f_candidate(
              -1, previousBaseHigh, previousBaseLow, bar_index - baseBars,
              source, score, "Compact base followed by bearish displacement")
+        c.impulseBar := bar_index
         statCandidates += 1
         int action = f_ingestCandidate(c, nextZoneId, atr)
         if action == 1
@@ -727,6 +753,7 @@ if isConfirmedBar and enableOrderBlocks and bullishDisplacement
         ZoneCandidate c = f_candidate(
              1, obTop, obBottom, bar_index - foundOffset,
              "OB", weightOB, "Last bearish candle before bullish displacement and structure break")
+        c.impulseBar := bar_index
         statCandidates += 1
         int action = f_ingestCandidate(c, nextZoneId, atr)
         if action == 1
@@ -747,6 +774,7 @@ if isConfirmedBar and enableOrderBlocks and bearishDisplacement
         ZoneCandidate c = f_candidate(
              -1, obTop, obBottom, bar_index - foundOffset,
              "OB", weightOB, "Last bullish candle before bearish displacement and structure break")
+        c.impulseBar := bar_index
         statCandidates += 1
         int action = f_ingestCandidate(c, nextZoneId, atr)
         if action == 1
@@ -764,6 +792,8 @@ bool bullishFvg = low > high[2] and low - high[2] >= fvgMinAtr * atr
 bool bearishFvg = high < low[2] and low[2] - high >= fvgMinAtr * atr
 if isConfirmedBar and enableFVG and bullishFvg
     ZoneCandidate c = f_candidate(1, low, high[2], bar_index - 2, "FVG", weightFVG, "Bullish three-candle imbalance")
+    // The imbalance is left by the middle candle — that is its impulse bar.
+    c.impulseBar := bar_index - 1
     statCandidates += 1
     int action = f_ingestCandidate(c, nextZoneId, atr)
     if action == 1
@@ -775,6 +805,7 @@ if isConfirmedBar and enableFVG and bullishFvg
         statRejected += 1
 if isConfirmedBar and enableFVG and bearishFvg
     ZoneCandidate c = f_candidate(-1, low[2], high, bar_index - 2, "FVG", weightFVG, "Bearish three-candle imbalance")
+    c.impulseBar := bar_index - 1
     statCandidates += 1
     int action = f_ingestCandidate(c, nextZoneId, atr)
     if action == 1
@@ -850,7 +881,9 @@ if isConfirmedBar and lifecycleCount > 0
                          "[BREAK] Z" + str.tostring(z.id) +
                          " direction=" + (z.dir == 1 ? "SUPPORT" : "RESISTANCE") +
                          " close=" + str.tostring(close, format.mintick))
-                    if enableZoneFlips
+                    // A zone flips only once: a flip zone that breaks
+                    // again is a failed level and retires as BROKEN.
+                    if enableZoneFlips and z.breaks == 1
                         z.dir := -z.dir
                         z.state := "FLIPPED"
                         if not f_hasSource(z.sources, "BO")
@@ -880,7 +913,9 @@ if isConfirmedBar and lifecycleCount > 0
                         z.state := "TESTED"
                     z.pendingReaction := true
                     z.reactionStartBar := bar_index
-                    z.reactionReference := f_zoneMid(z.top, z.bottom)
+                    // Near edge, not the midpoint: price must leave the zone by
+                    // the reaction distance, not merely bounce inside it.
+                    z.reactionReference := z.dir == 1 ? z.top : z.bottom
                     z.reactionAtr := atr
                     z.maxFavorableExcursion := 0.0
                     if logTouches
@@ -914,8 +949,14 @@ if isConfirmedBar and lifecycleCount > 0
                         z.pendingReaction := false
                         if z.state != "FLIPPED"
                             z.state := "WEAK"
+                        z.score := f_clampScore(z.score - failedReactionPenalty)
                         statReactionWeak += 1
                         f_log("[WEAK] Z" + str.tostring(z.id) + " reaction horizon expired")
+                // -------------------------------------------------------------
+                // SCORE DECAY — live zones without a confirmed reaction fade
+                // -------------------------------------------------------------
+                if f_isLiveState(z.state) and z.state != "CONFIRMED"
+                    z.score := z.score * (1.0 - scoreDecayPct / 100.0)
 
 // ============================================================================
 // STORAGE PRUNING

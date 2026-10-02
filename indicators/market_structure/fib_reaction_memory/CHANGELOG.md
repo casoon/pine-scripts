@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.2 — 2026-10-02
+- Fixed: the broken-level check (Broken Level Penalty and Hold Rate) scanned from each reaction's own bar up to now, so the remaining A→B leg — and the reaction itself — counted as breaking the level, marking almost every reaction as broken. Breaks are now checked only over the current pullback, from B up to now
+
+## v1.4.1 — 2026-10-02
+- Fixed: reaction size now measures only the bars after the micro pivot. The pivot bar's own range was included, so a single wide pivot candle could pass the minimum-reaction filter on its own and inflated reaction strength
+
 ## v1.4 — 2026-08-11
 - Added per-level Hold Rate: % of historical reactions near a level that were never subsequently broken, shown next to the score in the label (`Show Hold Rate` toggle, on by default); reuses the v1.3 broken-level check, no new scan pass
 

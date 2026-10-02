@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.3.0 — 2026-10-02
+- Touch structure: the bar that sets each range extreme no longer counts as a touch of that edge — before, 2 of the required touches were free. Each side still needs at least one real retest
+- Minimum boundary touches lowered by 2 to match: Strict 5→3, Balanced 4→2, Aggressive 4→2, Custom default 4→2 (provisional defaults, not yet validated on data)
+
+## v1.2.6 — 2026-10-02
+- Fixed: Historical S/R Reuse (+10) no longer matches pivots inside the current range window — the range's own extreme was counted as a "historical" level
+- README corrected: breakouts are not gated by rising ADX, ADX is not a mandatory zone gate, and bias uses EMA structure instead of DI (matches the behaviour since v1.2.2)
+
 ## v1.2.5 — 2026-09-05
 - Volume data validity: `volumeAvailable` now also requires `syminfo.volumetype` to be `base` or `quote` — tick-volume instruments no longer treat their tick-count feed as real trade volume. The Volume Dry-Up score module and `breakoutVolumeOk` already degrade to a neutral/pass-through state when volume is unavailable; this only widens that definition to include tick volume. The dashboard's existing "Volume" row already surfaces "Unavailable" in that case. Data Contract added (`CFD-degraded`).
 

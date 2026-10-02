@@ -25,7 +25,7 @@ Scores each price swing (pivot-to-pivot leg) by three conviction factors: how fa
 | Scoring | Cleanliness Weight | 0.4 | Contribution of on-trend bar fraction |
 | Scoring | Volume Gradient Wt | 0.2 | Contribution of volume build toward pivot |
 | Scoring | ATR Length | 14 | ATR period for speed normalization |
-| Scoring | Speed Reference | 3.0 | ATR×/bar at which speed conviction maxes out |
+| Scoring | Speed Reference | 1.0 | ATR×/bar at which speed conviction maxes out (provisional default) |
 | Display | Show Divergence Labels | On | DIV labels at pivot bars |
 | Display | Show Dashboard | On | Toggle the info table |
 

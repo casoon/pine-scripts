@@ -17,7 +17,7 @@ Objective movement-character engine. It does not count Elliott waves — it clas
 
 ## Scoring
 
-Every confirmed and live leg runs through `f_calculateLeg`, which walks the leg's bars (capped at "Maximum bars evaluated per leg") and accumulates the 10 DNA features. Each feature maps to a 0–1 value; Impulse Score and Correction Score are the weighted sum of those features (inverted for Correction) scaled to 0–100 and pulled toward neutral (50) by the leg's Maturity — a leg younger than "Bars until full score maturity" is not yet fully committed to a character. A leg is classified `IMPULSE`/`CORRECTION` only once Maturity reaches 1.0 and the score separation clears "Minimum score separation"; otherwise it stays `NEUTRAL`.
+Every confirmed and live leg runs through `f_calculateLeg`, which walks the leg's bars (capped at "Maximum bars evaluated per leg") and accumulates the 10 DNA features. Each feature maps to a 0–1 value; Impulse Score and Correction Score are the weighted sum of those features (inverted for Correction) scaled to 0–100 and pulled toward neutral (50) by the leg's Maturity — a leg younger than "Bars until full score maturity" is not yet fully committed to a character. A leg is classified `IMPULSE`/`CORRECTION` only once Maturity reaches 1.0 and its score clears the Impulse/Correction threshold; otherwise it stays `NEUTRAL`. Because Impulse and Correction always sum to 100, the separation is 2 × (score − 50), so "Minimum score separation" only adds a constraint when it is set above 2 × (threshold − 50) — with the defaults (62 / 18) it never binds.
 
 ## Modes
 

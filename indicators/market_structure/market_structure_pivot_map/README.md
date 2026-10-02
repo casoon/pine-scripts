@@ -45,7 +45,7 @@ Everything else (location vs CPR, confluence, projections) is read directly off 
 
 ## Confluence
 
-Every drawn level is collected, sorted, and greedily clustered: adjacent levels within `Confluence Distance ATR Mult × ATR` form one zone. A zone is drawn only when it contains at least `Minimum Levels in Zone` levels. Cross-timeframe overlaps (e.g. a Daily R1 sitting on a Weekly P) are where the meaningful confluence appears.
+Every drawn level is collected, sorted, and greedily clustered: adjacent levels within `Confluence Distance ATR Mult × ATR` form one zone. A zone is drawn only when it contains at least `Minimum Levels in Zone` levels; the CPR members (P, TC, BC) of one timeframe count as a single level, so a CPR on its own never forms a confluence zone. Cross-timeframe overlaps (e.g. a Daily R1 sitting on a Weekly P) are where the meaningful confluence appears.
 
 ## Role & scope
 

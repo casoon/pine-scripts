@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.5.1 — 2026-10-02
+- Fixed (Flip Broken Levels): a level flipped by a breakout is now first eligible on the next bar — the breakout bar itself could also register as a sweep and reclaim of the freshly flipped level (BSL Breakout + SSL Sweep + Bullish Reclaim on one bar)
+- Dashboard Bias: a reclaim on the current bar is counted once (+2) instead of also adding the recent-event score (+1)
+
 ## v3.5.0 — 2026-09-06
 - Volume validity is now decided by `syminfo.volumetype`. Previously, on feeds without real trade volume, the volume gates on reclaims (`>= 1.2`) and stop hunts (`>= 1.5`) could never be met, so both event types silently stopped firing — the indicator looked quiet rather than degraded
 - Both gates now pass through when trade volume is unavailable

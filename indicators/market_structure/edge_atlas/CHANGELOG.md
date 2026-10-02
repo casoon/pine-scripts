@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.7.2 — 2026-10-02
+- Changed: S/R cluster touch counts only ever grew, so a zone price had already closed through kept its full pre-break count. A close beyond a cluster center by more than the cluster tolerance (above a resistance, below a support) now resets its touch count to zero; ×N counts pivots since the last break, and a broken zone drops out until it re-qualifies on new pivots. Tooltip updated
+
+## v1.7.1 — 2026-10-02
+- S/R tooltip corrected: the ×N touch count is a cumulative count of clustered pivots. Breaks through a zone are not tracked, so the tooltip no longer describes it as "repeated tests without a break"
+
 ## v1.7.0 — 2026-08-11
 - Rebuilt right-edge label/rail positioning from an `xloc.bar_time` offset (`time` + bar count × per-bar duration) to a plain `xloc.bar_index` offset (`bar_index` + "Label offset · bars"), matching the positioning principle Fib Reaction Memory uses for its projected Fib lines. Both are fixed, viewport-independent offsets, so this carries no regression risk for the pan/zoom freeze-then-jump bug the original bar_time system was built to avoid — bar_index is simply simpler, with no per-bar duration bookkeeping needed. The `atlasBarMs` helper is gone
 - Line width and rail/label opacity now scale with each level's priority (1-10): priority ≥8 renders one line-width step bolder and less transparent, priority ≤3 one step thinner and more transparent, everything in between unchanged — the same "visual weight tracks significance" principle Fib Reaction Memory applies to its Memory Score tiers, so the most significant levels (PDH/PDL-class) stand out from secondary ones at a glance instead of every level looking equally weighted

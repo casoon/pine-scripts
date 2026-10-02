@@ -21,10 +21,10 @@ clustering/merging -> confluence -> scoring -> lifecycle -> renderer + logs + st
 - Base / Supply & Demand detector — compact range followed by a displacement exit; the shared raw pattern is one source (`SD` when enabled, otherwise `BASE`), never `BASE+SD` double evidence
 - Order Block (OB) detector — displacement + prior-structure break + last opposite-color origin candle
 - Fair Value Gap (FVG) and residual unfilled classical Price Gap (GAP) detectors, tracked as separate sources
-- Equal High / Equal Low Liquidity (LIQ) detector from clusters of same-level confirmed pivots in retained history
+- Equal High / Equal Low Liquidity (LIQ) detector from clusters of same-level confirmed pivots in retained history; suppressed when a PC candidate was accepted on the same side for the same pivot, so the same pivots are not scored twice
 - Central zone registry with ATR-based merge distance, merged-width cap and stable `Zxxx` IDs
 - Confluence scoring: EMA, VWAP, Fibonacci (rolling high/low), psychological price step, relative volume
-- Lifecycle: touch detection with cooldown, reaction validation against a configurable ATR target and horizon, confirmed break detection, optional Support <-> Resistance flip on break (BO source)
+- Lifecycle: touch detection with cooldown, reaction validation against a configurable ATR target measured from the zone's near edge (support: above the top, resistance: below the bottom) and horizon, confirmed break detection, optional Support <-> Resistance flip on break (BO source)
 - Nearest-to-price renderer — top N zones per side, score-filtered, non-overlapping, on-chart state label, with hover tooltips (state, sources, score, touches, reactions, breaks, origin/created bar)
 - Pine Log event logging (`CREATE`/`MERGE`/`REJECT`/`TOUCH`/`REACTION`/`WEAK`/`BREAK`/`FLIP`) and an optional validation statistics table for Validation/Debug operating modes
 
@@ -37,11 +37,20 @@ clustering/merging -> confluence -> scoring -> lifecycle -> renderer + logs + st
 - Confluence hits (EMA/VWAP/Fib/Psychological/Volume), each awarded once per zone
 - A Breakout/Flip bonus (`BO`) the first time a zone is confirmed broken and flips direction
 
+Impulse evidence counts once: when OB, SD and FVG evidence from the same impulse bar (the displacement bar for OB/SD, the middle candle for FVG) lands in the same zone, only the highest of their weights is added.
+
+The score also falls:
+
+- `Score Decay per Bar · %` — every confirmed bar, a live zone without a confirmed reaction (`NEW`, `TESTED`, `WEAK`, `FLIPPED`) loses that share of its score; `CONFIRMED` zones do not decay. A zone that later fails a reaction turns `WEAK` and starts decaying again
+- `Failed Reaction Penalty` — subtracted when a touch expires without reaching the reaction distance
+
+Both defaults are provisional and not yet calibrated.
+
 All weights live in the `10 · Scoring` input group so relative detector/confluence importance can be tuned without touching code.
 
 ## Lifecycle states
 
-`NEW -> TESTED -> CONFIRMED` on a successful reaction, or `-> WEAK` if the reaction horizon expires without one. A confirmed break either sets `BROKEN` (kept for `Keep Broken Zones` bars, then `INVALID`) or, if `Convert Broken Zones Into Flip Zones` is on, sets `FLIPPED` and reverses `dir`. `INVALID` zones are functionally dead but remain in storage until pruned by `Maximum Stored Zones`. With `Show Zone State` on (default), the current state is appended to the on-chart label, e.g. `OB+FIB+MA · 28 · TESTED` — validity is visible without hovering.
+`NEW -> TESTED -> CONFIRMED` on a successful reaction, or `-> WEAK` if the reaction horizon expires without one. A confirmed break either sets `BROKEN` (kept for `Keep Broken Zones` bars, then `INVALID`) or, if `Convert Broken Zones Into Flip Zones` is on, sets `FLIPPED` and reverses `dir` on the first break; a flipped zone that breaks again sets `BROKEN`, so `Keep Broken Zones` / `Show Broken Zones` apply in both modes. `INVALID` zones are functionally dead but remain in storage until pruned by `Maximum Stored Zones`. With `Show Zone State` on (default), the current state is appended to the on-chart label, e.g. `OB+FIB+MA · 28 · TESTED` — validity is visible without hovering.
 
 ## Zone age vs. provenance
 

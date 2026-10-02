@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.5.3 — 2026-10-02 (`market_tradability_engine_v2.pine`, Beta)
+- Changed: boundary rejection quality was read from the touching bar's own close, so a test whose rotation only came on the following bars was scored as weak. Quality is now the furthest close toward the range midpoint within `Boundary Test Cooldown` bars after the test (measured against the boundary and midpoint frozen at the test) and finalizes once that window has passed. Test counts still update on the touching bar; the rejection average and stress/fatigue readings now lag the test by the cooldown window
+- Fix: `AFTERMATH` was practically unreachable — it required Energy to fall to an absolute ceiling of 20 within the impulse lookback. Quiet is now relative to the impulse: Energy must have dropped by at least `Aftermath Energy Drop (%)` (default 50, provisional) from its value on the impulse bar. Replaces the `Aftermath Energy Ceiling` input; the `MTE2 CONFIG` log field is now `aftermathEnergyDropPct` and `modelVersion` reads 2.5.3
+
+## v2.5.2 — 2026-10-02 (`market_tradability_engine_v2.pine`, Beta)
+- Fix: Boundary Test Cooldown ran from the last *counted* test, so a continuous press against one edge was counted again every few bars. It now runs from the last bar in contact — a press counts once, a new test needs the cooldown without contact
+- Fix: a one-bar dropout of the balance reading while the range stayed armed was treated as a new balance and wiped the boundary test counts. Test history now only resets when a balance arms from an unarmed state
+- Fix: the frozen balance boundaries were re-copied from the rolling window on every bar the balance reading still held — including during a breakout acceptance streak, where the rolling window already contains the breakout bar. They are no longer refreshed while a streak is running
+- Removed the failed-breakout streak reset, which never had an effect (a failed breakout closes back inside the range, so the streak is already 0); README wording corrected
+
+## v1.3.4 — 2026-10-02 (`market_tradability_engine.pine`)
+- Fix: Breakout acceptance was checked against the rolling range, which from the second bar on included the first breakout bar's own high/low — a multi-bar acceptance required new extremes instead of price holding beyond the range. The boundary is now frozen at the first breakout bar of a streak and released once the breakout confirms
+
 ## v2.5.1 — 2026-09-05 (`market_tradability_engine_v2.pine`, Beta)
 - Fix: the volume-confirmation gate on Breakout only checked `na(volume)`, not `syminfo.volumetype` — tick volume on a CFD feed is rarely `na`, so it passed straight through as if it were real trade volume. Added a `volumeIsReal` guard (`base`/`quote` only); `volumeConfirmed` now passes through neutrally (as if `Require Volume Confirmation` were off) whenever volume isn't real, instead of gating on tick-count noise
 - Data Contract header block added (`Volume: OPTIONAL`, `Verdict: CFD-degraded`)

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.3 — 2026-10-02
+- Fixed: confluence zones counted the P, TC and BC of one timeframe as three independent levels, so a narrow CPR alone was drawn as a "confluence zone". CPR members of the same timeframe now count as one level
+
 ## v1.0.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

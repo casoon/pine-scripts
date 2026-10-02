@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.3.0 — 2026-10-02
+- "Structure Broken" (and the Top-/Bottom-Break alerts) now also fires on the bar the EMA trend context flips, when an earlier swing break stayed Break Pressure and price still closes beyond that swing level — as long as that level was not already consumed by an earlier confirmed break. Before, the break only counted when swing break and EMA flip fell on the same bar
+- Risk score is now scaled by its reachable maximum (weight sum minus the smaller of Structure Erosion / Pivot Divergence, which exclude each other at the same pivot pair), so 100 and the Critical band are reachable with default weights; state thresholds unchanged
+
+## v2.2.0 — 2026-10-02
+- Fixed: "Structure Broken" and the Top-/Bottom-Break alerts could never fire with *Require Context Flip for Break* on (default) — the trend latch flipped on the breaking bar before the break was checked. The break is now judged against the trend in force before that bar, and the alerts follow the break direction
+- Event labels for a swing break are anchored to the broken swing level
+- Structure Erosion and Pivot Divergence now fire when the new swing pivot is confirmed and then decay over *Evidence Memory Bars*, instead of being re-set to full strength on every bar while the last two pivots meet the condition (which kept a constant risk floor)
+
 ## v2.1.0 — 2026-06-30
 - **Moved to a dedicated RSI pane** (`overlay=false`) so momentum divergence is shown where it is actually readable — against the RSI itself. A divergence is price-vs-momentum and cannot be conveyed on a price-only chart; drawing lines between price pivots only looked like trendlines
 - **Divergence lines drawn on the RSI** in the pane: when price makes a higher high while RSI makes a lower high (uptrend), or price a lower low while RSI a higher low (downtrend), a line marks the failing momentum. Read against the price above (shared time axis), the divergence is unmistakable. Compact "Div" label, RSI values in the tooltip

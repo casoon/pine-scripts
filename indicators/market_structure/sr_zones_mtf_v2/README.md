@@ -20,7 +20,7 @@ Each zone starts with a timeframe boost (Chart 0.5, HTF1 1.0, HTF2 2.0) and accu
 
 - `+ wTouch` per test, plus quality bonuses for close location, rejection wick and impulse
 - `+ 0.7 × wTouch` per sweep
-- `+ 1.5 × wImpulse + 0.5 × wCloseLoc` per break
+- `+ 1.5 × wImpulse + 0.5 × wCloseLoc` per break — taken back if the break fails (price closes back on the old side of the broken edge within `Break Failure Window` bars)
 - `+ 1.2 × wTouch` per confirmed retest
 - `− wAge` per bar (age decay)
 
