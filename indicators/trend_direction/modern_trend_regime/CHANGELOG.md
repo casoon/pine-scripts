@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.8.0 — 2026-10-02
+- Fix: a range breakout (`BREAK`) now needs a fresh cross on the signal bar — the previous close must still be inside the frozen boundary plus buffer. Previously price that had already drifted beyond the boundary while still in Range fired a late `BREAK` on the first bar after the Range ended; such a drift now gives no breakout
+
+## v1.7.0 — 2026-10-02
+- Fix: a Trend ↔ Range candidate now ends the active regime on the next bar (Transition) as documented — previously the old Trend or Range was held for `Bestätigungskerzen − 1` more bars until the new mode confirmed; only a direct opposite trend dropped to Transition immediately
+- Fix: a range reaction no longer fires on the Range entry bar itself (or on a boundary test that started there) — that bar set the frozen swing high/low it would be reacting to
+- Range swing high/low is now computed every bar and only frozen at Range entry (no `ta.*` call inside a conditional block)
+
 ## v1.6.1 — 2026-07-15
 > Reconstructed from the diff — the header jumped 1.3.1 → 1.6.1 in one commit while the
 > entries below only ran to 1.5.1, so v1.6.0/v1.6.1 had no entry of their own.

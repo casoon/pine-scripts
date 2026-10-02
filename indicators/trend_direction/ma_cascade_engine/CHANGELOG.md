@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.0 — 2026-10-02
+- Fix: Bull/Bear Regime Fading could never fire from an Expansion state — Expansion requires price above (bull) / below (bear) the Fast MA, Fading requires the close back through it. Fading is now gated on the long/short regime (Base vs. Anchor + Base slope) instead of the Expansion/Pullback state booleans
+- Fix: Base and Anchor Respect no longer count a breakout through the MA as a bounce — a bullish respect/rejection requires the bar before the touch episode to have closed above the MA, a bearish one below it
+- Fix: a touch that hits Base and Anchor MA on the same bar is no longer scored twice — Anchor Respect and Anchor Rejection markers/alerts now count only touches where the Base MA was not touched on the Anchor touch's start bar
+- Docs: `Maximum Pullback Distance` gates Long/Short Setups only; the Bull/Bear Pullback states stay ungated (README and tooltip now say so)
+
+## v1.4.0 — 2026-10-02
+- Fix: `Maximum Pullback Distance` is now a hard gate for Long/Short Setups as its tooltip states — previously Fast/Base proximity or any spread compression could qualify a setup with price far above (long) or below (short) the Base MA
+- Fix: Base and Anchor MA Respect now log one sample per touch episode instead of one per touching bar — a multi-bar hug of the line no longer inflates the respect statistics or fires repeated Anchor Rejection markers/alerts for the same touch
+
 ## v1.3.1 — 2026-08-01
 - Fix: Bullish/Bearish Anchor Rejection markers were drawn on the confirmation bar (`Reaction Horizon` bars, default 5, after the actual touch), landing visually inside the following move instead of at the real bounce — added `offset = -reactionBarsInput` (same idiom already used for pivot markers elsewhere in this repo, e.g. `mtf_wavetrend_opportunity_hunter.pine`, `cvd_bias.pine`) so the marker now draws at the historical touch bar; the underlying confirmation logic and non-repainting behaviour are unchanged
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.0 — 2026-10-02
+- Fix: Relationship Broken and Turn From Extreme fired every second bar while their condition persisted — the one-bar edge detector compared against its own previous output instead of the raw condition; they now fire once per entry into the condition
+- Fix: per-family signal cooldown now counts from the last fired event — previously every setup blocked by the cooldown restarted it, so a run of candidate bars could suppress the family indefinitely
+- Fix: Pullback "prior extension" is now measured in the trade's direction — a dip below the MA no longer satisfies the bullish requirement (and a spike above it no longer satisfies the bearish one)
+- Fix: Respect statistics take one sample per MA touch episode instead of one per bar inside the proximity band — a single multi-bar hug of the MA no longer fills the sample count, so low-evidence Respect scores regress toward neutral as documented
+- The standalone strategy clone in `strategies/market_average_relationship_engine/` (v1.2.3) received the identical fixes
+
 ## v1.2.1 — 2026-09-05
 - Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
 

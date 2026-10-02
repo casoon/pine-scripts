@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
-// Market–Average Relationship Engine [WavesUnchained]
-// Version: 1.2.1
+// Market–Average Relationship Engine [WavesUnchained] — Strategy (standalone)
+// Version: 1.2.3
 // Author: WavesUnchained
-// Build: 2026-09-05
+// Build: 2026-10-02
 // ============================================================================
 // Purpose
 // -------
@@ -60,7 +60,7 @@ string GROUP_EVENTS    = "04 · Event Logic"
 string GROUP_DIVERGE   = "05 · Divergence & Extremes"
 string GROUP_VISUALS   = "06 · Visuals"
 string GROUP_ALERTS    = "07 · Alerts"
-string GROUP_STRATEGY  = "08 · Strategy (generated)"
+string GROUP_STRATEGY  = "08 · Strategy"
 
 // — Moving average ------------------------------------------------------------
 
@@ -414,9 +414,9 @@ bool enableBreakAlertsInput = input.bool(true, "Relationship breaks", group = GR
 bool enableDivergenceAlertsInput = input.bool(true, "Price/relationship divergence", group = GROUP_ALERTS)
 bool enableTurnAlertsInput = input.bool(true, "Turn from extreme", group = GROUP_ALERTS)
 
-// — Strategy (generated) -------------------------------------------------------
-// Feeds only the strategy generated from this file (scripts/build_strategies.py,
-// see the @strategy-config block at the end); no effect on the indicator itself.
+// — Strategy hook --------------------------------------------------------------
+// Drives the trailing stop below; carried over from the indicator, where it has
+// no effect on scoring or display.
 
 float stopAtrMultInput = input.float(
      2.5,
@@ -442,9 +442,6 @@ normalize(float value, float low, float high) =>
 
 signedDirection(float value, float deadZone = 0.0) =>
     value > deadZone ? 1.0 : value < -deadZone ? -1.0 : 0.0
-
-barsSinceEvent(bool condition) =>
-    nz(ta.barssince(condition), 100000)
 
 formatScore(float value) =>
     str.tostring(value, "#.0")
@@ -486,8 +483,13 @@ respectStatistics(
         float distanceAtTouch = math.abs(close[i] - maAtTouch)
         bool valid = not na(atrAtTouch) and not na(maAtTouch)
         bool touched = valid and distanceAtTouch <= atrAtTouch * proximityAtr
+        // One sample per touch episode: skip bars whose predecessor was already
+        // within proximity, so a multi-bar hug of the MA counts once.
+        float atrBefore = atrValue[i + 1]
+        float maBefore = average[i + 1]
+        bool touchedBefore = not na(atrBefore) and not na(maBefore) and math.abs(close[i + 1] - maBefore) <= atrBefore * proximityAtr
 
-        if touched
+        if touched and not touchedBefore
             float localSlope = maAtTouch - average[i + 1]
             float trendSide = localSlope >= 0.0 ? 1.0 : -1.0
             float outcomeClose = close[i - responseBars]
@@ -772,7 +774,11 @@ else
 bool priorBullishTrend = trendDirection[1] > 0.0 and trendQuality[1] >= minimumTrendInput
 bool priorBearishTrend = trendDirection[1] < 0.0 and trendQuality[1] >= minimumTrendInput
 
-float recentMaximumExtension = ta.highest(absoluteDistanceAtr[1], math.max(2, accelerationLengthInput + 1))
+// Prior extension is measured in the trade's direction — a dip below the MA
+// does not count as a prior bullish extension (and vice versa).
+int priorExtensionLength = math.max(2, accelerationLengthInput + 1)
+float recentBullishExtension = ta.highest(signedDistanceAtr[1], priorExtensionLength)
+float recentBearishExtension = -ta.lowest(signedDistanceAtr[1], priorExtensionLength)
 
 bool bullishRejection =
      low <= ma + safeAtr * proximityAtrInput and
@@ -792,7 +798,7 @@ bool bullishPullbackSetup =
      trendDirection > 0.0 and
      trendQuality >= minimumTrendInput and
      respectScore >= minimumRespectInput and
-     recentMaximumExtension >= pullbackPriorExtensionInput and
+     recentBullishExtension >= pullbackPriorExtensionInput and
      bullishRejection and
      exhaustionScore <= maximumPullbackExhaustionInput
 
@@ -802,7 +808,7 @@ bool bearishPullbackSetup =
      trendDirection < 0.0 and
      trendQuality >= minimumTrendInput and
      respectScore >= minimumRespectInput and
-     recentMaximumExtension >= pullbackPriorExtensionInput and
+     recentBearishExtension >= pullbackPriorExtensionInput and
      bearishRejection and
      exhaustionScore <= maximumPullbackExhaustionInput
 
@@ -854,7 +860,7 @@ bool bearishExhaustionSetup =
 float recentBullishAcceptance = ta.sma(close > ma ? 1.0 : 0.0, breakConfirmationInput)
 float recentBearishAcceptance = ta.sma(close < ma ? 1.0 : 0.0, breakConfirmationInput)
 
-bool bullishRelationshipBrokenSetup =
+bool bullishRelationshipBrokenRaw =
      isConfirmed and
      trendDirection[breakConfirmationInput] > 0.0 and
      trendQuality[breakConfirmationInput] >= minimumTrendInput and
@@ -862,7 +868,7 @@ bool bullishRelationshipBrokenSetup =
      relationship < 10.0 and
      maSlopeAtr <= fullSlopeAtrInput * 0.10
 
-bool bearishRelationshipBrokenSetup =
+bool bearishRelationshipBrokenRaw =
      isConfirmed and
      trendDirection[breakConfirmationInput] < 0.0 and
      trendQuality[breakConfirmationInput] >= minimumTrendInput and
@@ -871,8 +877,8 @@ bool bearishRelationshipBrokenSetup =
      maSlopeAtr >= -fullSlopeAtrInput * 0.10
 
 // Fire only on the transition into the break condition.
-bullishRelationshipBrokenSetup := bullishRelationshipBrokenSetup and not bullishRelationshipBrokenSetup[1]
-bearishRelationshipBrokenSetup := bearishRelationshipBrokenSetup and not bearishRelationshipBrokenSetup[1]
+bool bullishRelationshipBrokenSetup = bullishRelationshipBrokenRaw and not bullishRelationshipBrokenRaw[1]
+bool bearishRelationshipBrokenSetup = bearishRelationshipBrokenRaw and not bearishRelationshipBrokenRaw[1]
 
 // — Divergence: price pivots stay a pure diagnostic here — they detect the
 // divergence event itself, but never gate the pullback/momentum/chase/exhaustion
@@ -918,36 +924,37 @@ if newPivotHigh
 float relationshipRecentLow = ta.lowest(relationship, turnLookbackInput)
 float relationshipRecentHigh = ta.highest(relationship, turnLookbackInput)
 
-bool bullishTurnSetup =
+bool bullishTurnRaw =
      isConfirmed and
      relationshipRecentLow <= -turnExtremeLevelInput and
      ta.rising(relationship, turnConfirmBarsInput)
 
-bool bearishTurnSetup =
+bool bearishTurnRaw =
      isConfirmed and
      relationshipRecentHigh >= turnExtremeLevelInput and
      ta.falling(relationship, turnConfirmBarsInput)
 
 // Fire only on the transition into a confirmed turn, not every bar it keeps rising/falling.
-bullishTurnSetup := bullishTurnSetup and not bullishTurnSetup[1]
-bearishTurnSetup := bearishTurnSetup and not bearishTurnSetup[1]
+bool bullishTurnSetup = bullishTurnRaw and not bullishTurnRaw[1]
+bool bearishTurnSetup = bearishTurnRaw and not bearishTurnRaw[1]
 
 // Shared cooldown by event family.
-bool pullbackCandidate = bullishPullbackSetup or bearishPullbackSetup
-bool momentumCandidate = bullishMomentumSetup or bearishMomentumSetup
-bool chaseCandidate = bullishDoNotChaseSetup or bearishDoNotChaseSetup
-bool exhaustionCandidate = bullishExhaustionSetup or bearishExhaustionSetup
-bool breakCandidate = bullishRelationshipBrokenSetup or bearishRelationshipBrokenSetup
-bool divergenceCandidate = bullishDivergenceSetup or bearishDivergenceSetup
-bool turnCandidate = bullishTurnSetup or bearishTurnSetup
-
-bool pullbackAllowed = barsSinceEvent(pullbackCandidate[1]) > signalCooldownInput
-bool momentumAllowed = barsSinceEvent(momentumCandidate[1]) > signalCooldownInput
-bool chaseAllowed = barsSinceEvent(chaseCandidate[1]) > signalCooldownInput
-bool exhaustionAllowed = barsSinceEvent(exhaustionCandidate[1]) > signalCooldownInput
-bool breakAllowed = barsSinceEvent(breakCandidate[1]) > signalCooldownInput
-bool divergenceAllowed = barsSinceEvent(divergenceCandidate[1]) > signalCooldownInput
-bool turnAllowed = barsSinceEvent(turnCandidate[1]) > signalCooldownInput
+// Cooldown counts from the last FIRED event of the family, not from blocked
+// candidates — a setup suppressed by the cooldown does not restart the clock.
+var int lastPullbackEventBar = na
+var int lastMomentumEventBar = na
+var int lastChaseEventBar = na
+var int lastExhaustionEventBar = na
+var int lastBreakEventBar = na
+var int lastDivergenceEventBar = na
+var int lastTurnEventBar = na
+bool pullbackAllowed = na(lastPullbackEventBar) or bar_index - lastPullbackEventBar - 1 > signalCooldownInput
+bool momentumAllowed = na(lastMomentumEventBar) or bar_index - lastMomentumEventBar - 1 > signalCooldownInput
+bool chaseAllowed = na(lastChaseEventBar) or bar_index - lastChaseEventBar - 1 > signalCooldownInput
+bool exhaustionAllowed = na(lastExhaustionEventBar) or bar_index - lastExhaustionEventBar - 1 > signalCooldownInput
+bool breakAllowed = na(lastBreakEventBar) or bar_index - lastBreakEventBar - 1 > signalCooldownInput
+bool divergenceAllowed = na(lastDivergenceEventBar) or bar_index - lastDivergenceEventBar - 1 > signalCooldownInput
+bool turnAllowed = na(lastTurnEventBar) or bar_index - lastTurnEventBar - 1 > signalCooldownInput
 
 bool bullishPullback = bullishPullbackSetup and pullbackAllowed
 bool bearishPullback = bearishPullbackSetup and pullbackAllowed
@@ -963,6 +970,21 @@ bool bullishDivergence = bullishDivergenceSetup and divergenceAllowed
 bool bearishDivergence = bearishDivergenceSetup and divergenceAllowed
 bool bullishTurn = bullishTurnSetup and turnAllowed
 bool bearishTurn = bearishTurnSetup and turnAllowed
+
+if bullishPullback or bearishPullback
+    lastPullbackEventBar := bar_index
+if bullishMomentum or bearishMomentum
+    lastMomentumEventBar := bar_index
+if bullishDoNotChase or bearishDoNotChase
+    lastChaseEventBar := bar_index
+if bullishExhaustion or bearishExhaustion
+    lastExhaustionEventBar := bar_index
+if bullishRelationshipBroken or bearishRelationshipBroken
+    lastBreakEventBar := bar_index
+if bullishDivergence or bearishDivergence
+    lastDivergenceEventBar := bar_index
+if bullishTurn or bearishTurn
+    lastTurnEventBar := bar_index
 
 // ============================================================================
 // 08. VISUALS — OSCILLATOR
@@ -1352,11 +1374,11 @@ plot(relationshipRecentHigh, "Diagnostic · Relationship recent high", display =
 // ============================================================================
 
 // ============================================================================
-// 13. STRATEGY HOOKS (generator-only)
+// 13. STRATEGY HOOKS
 // ============================================================================
-// These variables exist solely so build_strategies.py can turn this file into a
-// strategy (see @strategy-config below). They play no role in the indicator's
-// own scoring, state, or display logic.
+// These variables exist solely as the entry/stop declaration for the standalone
+// strategy derived from this file (see @strategy-config below). They play no
+// role in the indicator's own scoring, state, or display logic.
 //
 // Entries are limited to Pullback and Momentum Release — both already gated on
 // an established, quality-checked trend (see the Event Engine). Divergence and
@@ -1372,7 +1394,7 @@ bool strategyShortSignal = bearishPullback or bearishMomentum
 
 float longStop = ma - safeAtr * stopAtrMultInput
 float shortStop = ma + safeAtr * stopAtrMultInput
-// ─── Strategy inputs (generated) ─────────────────────────────────────────────
+// ─── Strategy inputs ─────────────────────────────────────────────
 g_strat       = "Strategy"
 tradeDirInput = input.string("Both", "Trade Direction",
      options=["Both", "Long Only", "Short Only"], group=g_strat,
@@ -1423,7 +1445,7 @@ enableVolExit = input.bool(true,  "Volatility Exit (ATR spike)", group=g_exits,
 volExitRatio  = input.float(1.6, "  Volatility Spike Ratio",   minval=1.2, maxval=5.0, step=0.1, group=g_exits,
      tooltip="Exit when ta.atr(atrLen) >= ratio × ema(ta.atr(atrLen), 50). Default 1.6 = current ATR is 60% above its 50-bar average.")
 
-// ─── Strategy execution (generated) ──────────────────────────────────────────
+// ─── Strategy execution ──────────────────────────────────────────
 _canLong  = tradeDirInput != "Short Only"
 _canShort = tradeDirInput != "Long Only"
 
@@ -1433,9 +1455,10 @@ if (strategyShortSignal) and _canShort and _canEntry
     strategy.entry("Short", strategy.short)
 
 // Volatility exit — close on ATR spike (climax / exhaustion bars)
+// Baseline computed every bar — inside the position block it would only average in-position bars
+_atrCur  = ta.atr(atrLen)
+_atrBase = ta.ema(_atrCur, 50)
 if enableVolExit and strategy.position_size != 0
-    _atrCur  = ta.atr(atrLen)
-    _atrBase = ta.ema(_atrCur, 50)
     _spike   = not na(_atrBase) and _atrCur >= _atrBase * volExitRatio
     if _spike and strategy.position_size > 0
         strategy.close("Long",  comment="Vol Exit (ATR×" + str.tostring(volExitRatio, '#.#') + ")")

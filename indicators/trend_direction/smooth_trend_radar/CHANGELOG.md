@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.5.3 — 2026-10-02
+- ADX threshold tooltip corrected: rejections fire in both regimes; the threshold only gates trend flips and tags rejections as Trend Pullback or Range Rejection. The standalone strategy clone received the same tooltip fix.
+
 ## v3.5.2 — 2026-09-05
 - Volume data validity (Kennzeichnen): added `volumeIsReal` guard (`syminfo.volumetype`) to the pivot-rejection Volume Filter — on instruments without real trade volume (tick/n/a), the filter degrades to pass-through instead of gating on tick-count noise. Tooltip updated to note the degradation. Data Contract added (`CFD-degraded`). The standalone strategy clone in `strategies/smooth_trend_radar/` (v3.4.1→3.4.2) received the identical fix to stay in sync.
 
