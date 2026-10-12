@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.3.1 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v0.3.0 — 2026-10-02
 - Reaction distance is now measured from the zone's near edge (support: `high − top`, resistance: `bottom − low`) instead of the zone midpoint, so a reaction only confirms once price has left the zone by `Successful Reaction · ATR` (#59)
 - Zone score no longer only rises: live zones without a confirmed reaction decay by `Score Decay per Bar · %` (default 0.25, provisional) each confirmed bar, and a touch that expires without a reaction subtracts `Failed Reaction Penalty` (default 6, provisional) (#59)

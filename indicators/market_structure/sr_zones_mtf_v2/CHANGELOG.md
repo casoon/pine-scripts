@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.2.1 — 2026-10-12
+- Fix: compile error CE10163 ("Ternary operations cannot return tuples") on the optional HTF 2 request — the request now runs unconditionally and its values are masked when HTF 2 is off
+- Fix: compile error CE10235 (if/else branches with different return types) in zone add/merge — the max-zones cleanup now runs after the branch; behaviour unchanged
+- Fix: runtime error RE10045 on bar 0 ("array.get() index 0 out of bounds") — in Pine v6 `for i = 0 to n - 1` counts down when n is 0; all loops over the zone arrays are now skipped when the arrays are empty
+- Without real volume, the "break volume filter inactive" notice is now a short "volume not available" note in the bottom-right corner instead of a label on the last candle
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v3.2.0 — 2026-10-02
 - Break bonus now has a failure path: if price closes back on the old side of the broken zone edge within *Break Failure Window* bars (new input, default 5 — provisional), the break's score bonus is subtracted again. Role reversal and break/retest labels are unchanged
 

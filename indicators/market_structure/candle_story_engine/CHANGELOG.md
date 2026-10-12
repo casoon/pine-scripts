@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.2 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+- Without real volume a short "… not available" notice sits in the bottom-right corner instead of a label on the last candle
+
 ## v1.10.1 — 2026-09-05
 - Volume data validity: `hasVolume` now also requires `syminfo.volumetype` to be `base` or `quote` — tick-volume instruments no longer treat their tick-count feed as real trade volume. `volumeRatio`/`volumeAdjustment` already degraded to their neutral values (1.0) when volume is unavailable; this only widens the definition of "unavailable" to include tick volume. Added a one-time `barstate.islast` label when the volume adjustment is inactive. Data Contract added (`CFD-degraded`).
 

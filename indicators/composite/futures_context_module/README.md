@@ -24,7 +24,7 @@ one signal engine and should not sit behind a suite namespace.
   short covering / long liquidation)
 - Front/Next term structure: Contango / Backwardation / Flat, plus a curve-trend read (rising /
   falling / flat) from the EMA of the spread
-- Real-volume validity check on the front contract via `syminfo.volumetype` (`base`/`quote` only)
+- Real-volume validity check on the front contract (the contract delivers volume and does not report `tick`)
   — degrades to a visible "not real" state on tick-volume or missing-volume feeds, never silently
   passes through
 - Visible "not configured" state when the Front/Next symbols are left empty or identical

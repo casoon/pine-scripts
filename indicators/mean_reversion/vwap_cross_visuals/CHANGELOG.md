@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.3.1 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+- Without real volume a short "… not available" notice sits in the bottom-right corner instead of a label on the last candle
+
 ## v2.3.0 — 2026-10-02
 - Cluster: the session-VWAP alignment check had no effect (any existing session VWAP satisfied it). A cluster now forms from the two anchored VWAPs plus price as before, and gets +10 strength (capped at 100) when the session VWAP sits inside it too (provisional default)
 - VWAP bias: price position alone (±30) cleared the ±20 bias threshold on any tick above or below VWAP. Price position now counts ±10, plus 10 points per ATR of distance from VWAP (capped at 2 ATR, provisional), replacing the percent-based distance bonus — so price position alone turns the bias only beyond 1 ATR; crosses still count as before. Threshold stays ±20

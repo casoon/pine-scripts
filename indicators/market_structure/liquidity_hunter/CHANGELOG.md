@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.5.2 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v3.5.1 — 2026-10-02
 - Fixed (Flip Broken Levels): a level flipped by a breakout is now first eligible on the next bar — the breakout bar itself could also register as a sweep and reclaim of the freshly flipped level (BSL Breakout + SSL Sweep + Bullish Reclaim on one bar)
 - Dashboard Bias: a reclaim on the current bar is counted once (+2) instead of also adding the recent-event score (+1)

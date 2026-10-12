@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.4 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+- Without real volume a short "… not available" notice sits in the bottom-right corner instead of a label on the last candle
+
 ## v1.0.3 — 2026-09-05
 - Data validity: added a hard Exchange-only gate — `volumeIsReal` checks `syminfo.volumetype` (`base`/`quote` only) and the running VWAP/σ accumulation now runs on a gated `vol` value that is `na` on invalid instruments, instead of raw `volume`
 - On instruments without real trade volume, the AVWAP line, σ bands, anchor markers, stretched markers, and dashboard now go fully blank instead of silently accumulating on tick/n/a volume

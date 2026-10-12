@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.2.1 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v3.2.0 — 2026-10-02
 - Fix: retest signals no longer fire on the bar whose own pattern created or merged into the zone — that bar always lies inside its zone, so it produced a "zone retest" signal/alert on creation and, with "Retest once only" on, used up the zone's single retest before the first real one
 - Fix: the per-bar zone score update dropped the pattern weight (Kangaroo/Tweezer), the structure bonus and the creation height factor, so those settings only affected the admission check. They are now stored per zone and kept in every update; only freshness and cleanliness change over time

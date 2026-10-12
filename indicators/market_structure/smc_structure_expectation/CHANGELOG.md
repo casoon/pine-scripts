@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.6 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+- Without real volume a short "… not available" notice sits in the bottom-right corner instead of a label on the last candle
+
 ## v1.1.5 — 2026-10-02
 - Fix: the leg-strength part of OB priority was effectively dead — it was only computed in High/Low-cross mode with confirmation, and there it divided a leg by itself (ratio ≈ 1, never "strong"). The swing preceding each BOS level is now stored; on a valid BOS, impulse = prior low → broken high and correction = broken high → HL (mirrored for bearish: prior high → broken low vs broken low → LH). Computed in both BOS modes, so the leg-strength priority bonus and the STR/WEK log tag now reflect the actual legs
 

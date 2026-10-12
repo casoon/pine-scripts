@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.2.2 — 2026-10-12
+- Fix: possible runtime error on empty lower-timeframe data (no intrabars returned for a bar) — in Pine v6 `for i = 0 to n - 1` counts down when n is 0; the loop now only runs when there is something to iterate
+
 ## v2.2.1 — 2026-08-12
 - Fixed poor label contrast (Retracement %, HH/HL/LH/LL pivot labels, rejected-pivot diagnostics): all three paired a highly transparent tinted background (e.g. 75-85% transparency) with fully-opaque colored text, so readability depended on whatever was behind the label — the Retracement % label was the worst case, since its default `color.new(color.gray, 35)` "Developing Color" made even the text itself partially transparent. All three now use a fully opaque background in the relevant color plus a new `f_contrastText()` helper that auto-picks black or white text from the background's actual luminance, so labels stay readable regardless of which Up/Down/Developing color the user configures. Pivot dot markers (the "•" style, no background) are unaffected — different case, not a background/text contrast pair
 

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.2 — 2026-10-12
+- Fix: the volume row never became valid on CME/EUREX contracts. They report `syminfo.volumetype = n/a` ("not specified") despite real contract volume, and the check only accepted `base`/`quote`. Now only `tick` is rejected; otherwise the row is valid once the front contract delivers volume. The state reads "not real (tick)" or "no volume"
+
 ## v1.0.1 — 2026-10-02
 - Fix: when the prior Open Interest (or prior front close) for the ΔOI lookback was missing, the change was measured against zero — the ΔOI row showed n/a while the OI x Price row still classified "OI rising + new longs/shorts". A missing prior value now leaves both rows at n/a
 

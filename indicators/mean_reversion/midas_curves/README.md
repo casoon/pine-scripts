@@ -29,13 +29,13 @@ Score's volume component. On an instrument without real trade volume there is no
 curve to compute; a script that produced one anyway would just be publishing a mislabeled
 close-price average.
 
-- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
-- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
-- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
-- The script checks `syminfo.volumetype` at runtime (`volumeIsReal`). When it is not `"base"`
-  or `"quote"`, every volume-weighted computation is forced to `na` — no curve, no bands, no
-  topfinder/bottomfinder, no context markers, no dashboard, no live badge. A single warning
-  label ("benötigt echtes Handelsvolumen — aktuell: …") appears on the last bar instead. There
+- **Valid:** any symbol whose feed delivers volume and does not declare it as `tick`. Most feeds outside crypto report `syminfo.volumetype = n/a` ("not specified"), futures with real contract volume included, so `n/a` with volume present counts as valid.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed with its own volume), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
+- **Invalid:** any symbol reporting `tick` (a number of transactions, not a quantity) or no volume at all — there is nothing to weight.
+- The script checks at runtime (`volumeIsReal`) whether the feed delivers volume and does not
+  report `syminfo.volumetype = "tick"`. When it fails, every volume-weighted computation is forced to `na` — no curve, no bands, no
+  topfinder/bottomfinder, no context markers, no dashboard, no live badge. A short
+  "MIDAS 2.0 · not available" notice appears in the bottom-right corner instead. There
   is no equal-weight or fallback substitute in this state — that would just recreate the same
   problem under a different name.
 

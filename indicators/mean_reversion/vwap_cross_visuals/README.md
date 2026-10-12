@@ -24,11 +24,11 @@ VWAP cross detection at its core, with optional advanced layers. Session VWAP an
 
 Jede Berechnung in diesem Skript — Session-VWAP, beide Anchored-VWAPs, das Zone-Management-Bias-Band, die Zone-Zielwerte und das Volume-Profile-Modul — ist volumengewichtet. Ob `volume` auf dem Chart-Symbol echtes gehandeltes Volumen ist, entscheidet `syminfo.volumetype` zur Laufzeit:
 
-- **Gültig:** jedes Symbol, dessen `syminfo.volumetype` `base` oder `quote` meldet — in der Regel Futures, börsennotierte Aktien und Krypto-Börsen, dazu Broker-Feeds, die echte gehandelte Menge durchreichen
-- **Näherung:** ist dieses Volumen der Anteil eines einzelnen Brokers (ein CFD-Feed, der `base` meldet), liegt der VWAP dort, wo *dieser Broker* gehandelt hat — nicht zwingend dort, wo die Börse gehandelt hat. Als ungefähres Niveau lesen, nicht als das Level, auf das andere Marktteilnehmer reagieren
-- **Ungültig:** jedes Symbol mit `volumetype` = `tick` (reine Zahl der Preis-Updates) oder `n/a` — dort gibt es nichts zu gewichten
+- **Gültig:** jedes Symbol, dessen Feed Volumen liefert und es nicht als `tick` ausweist. Die meisten Feeds außer Krypto melden `syminfo.volumetype = n/a` („nicht angegeben“), auch Futures mit echten Kontrakten — `n/a` mit vorhandenem Volumen gilt deshalb als gültig
+- **Näherung:** ist dieses Volumen der Anteil eines einzelnen Brokers (ein CFD-Feed mit eigenem Volumen), liegt der VWAP dort, wo *dieser Broker* gehandelt hat — nicht zwingend dort, wo die Börse gehandelt hat. Als ungefähres Niveau lesen, nicht als das Level, auf das andere Marktteilnehmer reagieren
+- **Ungültig:** jedes Symbol mit `volumetype` = `tick` (Anzahl Transaktionen, keine Menge) oder ganz ohne Volumen — dort gibt es nichts zu gewichten
 
-Auf einem ungültigen Instrument liefert das Skript **keinen VWAP-, Zonen- oder Volume-Profile-Output** — keine Linien, keine Bänder, keine Zonen-Boxen, keine Signale. Ein Warnlabel ("benötigt echtes Handelsvolumen") erscheint stattdessen auf der letzten Bar.
+Auf einem ungültigen Instrument liefert das Skript **keinen VWAP-, Zonen- oder Volume-Profile-Output** — keine Linien, keine Bänder, keine Zonen-Boxen, keine Signale. Unten rechts erscheint stattdessen kurz „VWAP Cross Visuals · not available“.
 
 Ein Referenzmarkt-Workaround (z. B. `NYMEX:NG1!` statt der Capital.com-CFD-Notierung) wurde für dieses Skript geprüft, aber bewusst nicht implementiert: Ein Intraday-VWAP über `request.security()` auf einem anderen Symbol würde die Preisbewegung des Chart-Symbols mit dem volumengewichteten Durchschnitt eines *anderen* Marktes überlagern. Beide Feeds haben unterschiedliche Preisniveaus (Spread-/Feed-Offset), sodass ein roh übernommener Referenzmarkt-VWAP-Preis auf dem Chart irreführend wäre, wenn er nicht sorgfältig normalisiert wird. Von einer naiven Implementierung wird abgeraten. Falls ein Referenzmarkt-VWAP je verfolgt wird, gehört er gemäß der Vertrauensrangfolge in `DATA_VALIDITY.md` §4.1 in ein einziges gemeinsames Daily-Kontext-Modul, nicht in diesen Einzelindikator.
 

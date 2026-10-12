@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.1 — 2026-10-12
+- Fix: possible runtime error on empty stats table (no recorded pullbacks yet) — in Pine v6 `for i = 0 to n - 1` counts down when n is 0; the loop now only runs when there is something to iterate
+
 ## v1.3.0 — 2026-10-02
 - Fixed: the "Break" outcome could never occur — it was judged at the next opposite pivot, which by construction always lies beyond the pullback pivot. The break is now judged at the next same-type pivot: Break when it undercuts (up impulse) or exceeds (down impulse) the pullback pivot; otherwise HH/LL/Weak from the follow-through pivot as before. The outcome stays Pending until that pivot exists. The Break outlook penalty and the confluence exclusion now take effect; the "R Break" marker sits on the breaking pivot
 

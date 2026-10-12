@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.1 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v1.3.0 — 2026-10-02
 - Touch structure: the bar that sets each range extreme no longer counts as a touch of that edge — before, 2 of the required touches were free. Each side still needs at least one real retest
 - Minimum boundary touches lowered by 2 to match: Strict 5→3, Balanced 4→2, Aggressive 4→2, Custom default 4→2 (provisional defaults, not yet validated on data)

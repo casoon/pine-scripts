@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.4.3 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v1.4.2 — 2026-10-02
 - Spring / UTAD Test now requires price to leave the ±*Test Window ATR* band around the Spring low (UTAD high) before a return into it counts as a Test — before, the bar right after the event could already fire a Test
 

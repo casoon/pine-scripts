@@ -41,10 +41,10 @@ These feed the *Location* role (skill §1) of a downstream reversal module as ev
 
 VWAP is fundamentally a volume-weighted average price — there is no meaningful VWAP without real trade volume feeding the weighting.
 
-- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
-- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
-- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
+- **Valid:** any symbol whose feed delivers volume and does not declare it as `tick`. Most feeds outside crypto report `syminfo.volumetype = n/a` ("not specified"), futures with real contract volume included, so `n/a` with volume present counts as valid.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed with its own volume), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
+- **Invalid:** any symbol reporting `tick` (a number of transactions, not a quantity) or no volume at all — there is nothing to weight.
 
-On an invalid instrument the running VWAP/σ sums never accumulate real volume, so the AVWAP line, bands, anchor markers, stretched markers, and dashboard all go blank (`na`/`—`), and a one-time "benötigt echtes Handelsvolumen" warning label appears on the last bar showing the detected `syminfo.volumetype`.
+On an invalid instrument the running VWAP/σ sums never accumulate real volume, so the AVWAP line, bands, anchor markers, stretched markers, and dashboard all go blank (`na`/`—`), and a short "AVWAP · not available" notice appears in the bottom-right corner.
 
 **Reference-market variant (documented, not implemented):** unlike a pure oscillator, an anchored VWAP is an absolute price level. Computing it from a different market's volume+price (e.g. `NYMEX:NG1!` while charting `CAPITALCOM:NATURALGAS`) would mix two feeds' price levels onto one chart — exactly what `DATA_VALIDITY.md` §4.2 discourages: intraday reference-market price comparison ranks as "schwach" (Stufe 3) due to latency, session, and settlement mismatch between the two feeds. A dedicated single context module could carry a reference-market VWAP as its own series, but grafting a foreign price level onto the CFD chart inside this indicator is not sound. Not implemented here.

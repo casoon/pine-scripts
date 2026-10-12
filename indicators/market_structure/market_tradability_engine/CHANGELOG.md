@@ -1,5 +1,9 @@
 # Changelog
 
+## Volume check — 2026-10-12
+- `market_tradability_engine` v1.3.4→1.3.5: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+- `market_tradability_engine_v2` v2.5.3→2.5.4: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v2.5.3 — 2026-10-02 (`market_tradability_engine_v2.pine`, Beta)
 - Changed: boundary rejection quality was read from the touching bar's own close, so a test whose rotation only came on the following bars was scored as weak. Quality is now the furthest close toward the range midpoint within `Boundary Test Cooldown` bars after the test (measured against the boundary and midpoint frozen at the test) and finalizes once that window has passed. Test counts still update on the touching bar; the rejection average and stress/fatigue readings now lag the test by the cooldown window
 - Fix: `AFTERMATH` was practically unreachable — it required Energy to fall to an absolute ceiling of 20 within the impulse lookback. Quiet is now relative to the impulse: Energy must have dropped by at least `Aftermath Energy Drop (%)` (default 50, provisional) from its value on the impulse bar. Replaces the `Aftermath Energy Ceiling` input; the `MTE2 CONFIG` log field is now `aftermathEnergyDropPct` and `modelVersion` reads 2.5.3

@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.1 — 2026-10-12
+- Bars per day and trading days per week are now measured on the chart (maximum over the last 5 sessions / 4 weeks) instead of assuming a 24h, 7-day calendar with a fixed table per timeframe. The "1/3/7-day" pre-pivot windows are now trading days, and the Wyckoff volume length, cooldown and bias expiry no longer come out several times too long on exchange-session feeds (stocks, futures sessions) or on timeframes missing from the old table (default was 96 bars/day)
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v2.5.0 — 2026-10-02
 - Fix: the Wyckoff context penalty (`Check Wyckoff Context`) never fired — it compared the phase label against "BULLISH"/"BEARISH", which the phase text never contains. It now checks the persistent Wyckoff bias (last SC/Spring or BC/UT event until it expires); the Spring/Upthrust exceptions are unchanged
 - Changed: `Min score jump` is now set in JMA steps (one step = one JMA crossing = 100 / active JMAs) instead of score points, so it means the same with any number of active JMAs. Default 2 steps (provisional); the old point default of 10 equalled one step with 10 JMAs and never filtered anything
