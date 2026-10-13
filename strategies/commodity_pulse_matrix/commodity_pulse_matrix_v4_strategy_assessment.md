@@ -26,6 +26,8 @@ None. This file exists so the strategy is not silently untracked.
 
 ---
 
+> **2026-10-12, volume check fixed (strategy v4.2.1):** the old `base`/`quote` check treated futures and stocks with real volume (most report `syminfo.volumetype = n/a`) as volume-less. Runs on those markets before this date were computed without the volume parts and are not comparable to new runs.
+
 ## Verdict
 
 **Rating:** Not ready — not backtested

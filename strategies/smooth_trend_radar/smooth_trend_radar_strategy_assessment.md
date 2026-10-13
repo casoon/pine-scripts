@@ -66,6 +66,8 @@ Run 1 (1D) excluded from consideration: only 23 trades, statistically insufficie
 
 ## Key Findings
 
+- **2026-10-12, volume check fixed (strategy v3.4.5):** the old `base`/`quote` check treated futures and stocks with real volume (most report `syminfo.volumetype = n/a`) as volume-less. Runs on those markets before this date were computed without the volume parts and are not comparable to new runs.
+
 **What worked:**
 - Switching exit from TP2 to TP1 (with wider 3× multiplier) was the most impactful change: Net profit improved from +0.23% → +4.75%, Max DD halved (9.39% → 4.69%).
 - Long-side PF 1.707 is the strongest result across all three strategies tested on NatGas.
