@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.1 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a` — the old `base`/`quote` check also blocked futures and stocks with real volume (e.g. EUREX:FDAX1!)
+- Without real trade volume a short "not available" notice now sits in the bottom-right corner instead of a long warning label on the last candle; the requirement is stated in the Data Contract header
+
 ## v1.10.0 — 2026-10-02
 - Fixed: Profile Shape almost always showed "B (Double)" because it counted HVN rows instead of HVN nodes — any single smooth peak spans several rows above the threshold. Shape now counts separate HVN nodes (contiguous runs of HVN rows); B requires at least two, so D / P / b are reachable again
 ## v1.9.4 — 2026-09-05

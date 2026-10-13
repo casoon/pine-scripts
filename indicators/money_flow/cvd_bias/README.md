@@ -13,11 +13,11 @@ Estimates a price-weighted volume balance over a rolling window. This is **not**
 
 ## Instrumente
 
-- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
-- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
-- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
+- **Valid:** any symbol whose feed delivers volume and does not declare it as `tick`. Most feeds outside crypto report `syminfo.volumetype = n/a` ("not specified"), futures with real contract volume included, so `n/a` with volume present counts as valid.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed with its own volume), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
+- **Invalid:** any symbol reporting `tick` (a number of transactions, not a quantity) or no volume at all — there is nothing to weight.
 
-On invalid instruments the indicator shows a "benötigt echtes Handelsvolumen" (needs real trade volume) label on the last bar and plots nothing, instead of silently computing on tick volume.
+On invalid instruments the indicator shows a short "not available" notice in the bottom-right corner and plots nothing, instead of silently computing on tick volume.
 
 A reference-market volume (e.g. `NYMEX:NG1!` for NatGas) would not fix this: the proxy is tied to the close-location of the chart's own candles — mapping another market's volume onto the CFD's price geometry would attribute trading activity that never happened on that market to bars that happened on this one. That is not "better volume for the same score," it is an unfounded link between two feeds, and per `DATA_VALIDITY.md` §4.1 it would additionally force a price comparison between the CFD and the future that the framework deliberately avoids outside a dedicated context module. Degradation (label + no output) remains the right answer here, not a reference-market request.
 

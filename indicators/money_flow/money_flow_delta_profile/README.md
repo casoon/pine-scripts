@@ -25,13 +25,33 @@ A directional volume/money flow profile. Every price row shows two bars anchored
 
 ## Instrumente
 
-- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
-- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
-- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
+- **Valid:** any symbol whose feed delivers volume and does not declare it as `tick`. Most feeds outside crypto report `syminfo.volumetype = n/a` ("not specified"), futures with real contract volume included, so `n/a` with volume present counts as valid.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed with its own volume), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
+- **Invalid:** any symbol reporting `tick` (a number of transactions, not a quantity) or no volume at all — there is nothing to weight.
 
-On an invalid instrument the indicator draws nothing; instead it shows a "benötigt echtes Handelsvolumen" (needs real trade volume) warning label on the last bar.
+On an invalid instrument the indicator draws nothing; instead it shows a short "not available" notice in the bottom-right corner.
 
 **Reference-market variant:** deliberately not implemented. A volume profile maps the chart symbol's own price axis. Substituting a cross-symbol volume request (e.g. `NYMEX:NG1!` instead of `CAPITALCOM:NATURALGAS`) would overlay a *different* market's volume distribution onto the chart instrument's price rows. CFD and future prices are not identical (spread/feed offset), so the price buckets would be misaligned against the volume that actually traded there — the profile would mark the wrong rows, not just imprecisely but structurally. For a volume profile, degradation (no output) is the correct choice, not a reference-market substitute.
+
+## Which chart?
+
+The profile is only as meaningful as the volume behind it, and the same index can be charted from feeds whose "volume" means very different things. Example DAX:
+
+| Chart | Volume it carries | Profile |
+|---|---|---|
+| `EUREX:FDAX1!` / `EUREX:FDXM1!` (future) | traded contracts, near-24h session | where the market traded — read it here |
+| `CAPITALCOM:GER40` (CFD) | tick volume — a number of transactions (`volumetype = tick`), not traded quantity | not drawn (needs real trade volume) |
+| `XETR:DAX` (cash index) | feed volume of an index that is not itself traded; session hours only | do not use |
+
+**Read the profile on the future, trade on the CFD.** Carry levels over as zones, shifted by the current basis (future − CFD at the same moment), not as exact prices.
+
+Profile tools without a volume check draw on all three charts and can show opposite colors there, for three reasons:
+
+- **Lookback counts bars, not time.** 200 4h-bars are about 33 trading days on a ~23h CFD but about 67 on the Xetra session — two different windows.
+- **Overnight moves are bar bodies on the CFD and gaps on the cash index.** A gap belongs to no bar, so it never enters the bull/bear split.
+- **Different weighting by hour.** A tick count does not scale with exchange volume, so quiet hours weigh more than they do at the exchange.
+
+The **source note** below the profile shows feed, `syminfo.type`, `syminfo.volumetype`, the resulting volume origin (exchange / broker proxy / index feed, orange when not exchange volume) and the calendar span the lookback covers. The origin is a label derived from `syminfo.type`; it never changes the computation.
 
 ## How to read it
 

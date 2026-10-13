@@ -19,10 +19,10 @@ Volume-force analysis based on Stephen J. Klinger's original 1997 concept. It ac
 
 ## Instrumente
 
-- **Gültig:** jedes Symbol, dessen `syminfo.volumetype` `"base"` oder `"quote"` meldet — in der Regel Futures, börsennotierte Aktien und Krypto-Börsen, dazu Broker-Feeds, die echte gehandelte Menge durchreichen.
-- **Näherung:** ist dieses Volumen der Anteil eines einzelnen Brokers (ein CFD-Feed, der `"base"` meldet), beschreibt der Oszillator dessen Fluss, nicht den der Börse — brauchbar als Näherung, nicht als Börsenvolumen.
-- **Ungültig:** jedes Symbol mit `"tick"` (Zahl der Preis-Updates) oder `"n/a"` — dort gibt es nichts zu gewichten.
-- Der Indikator prüft das zur Laufzeit über einen `volumetype`-Guard. Ist kein echtes Volumen vorhanden, bleiben Oszillator, Signal-Linie, Histogramm, Regime-Engine und Divergenzerkennung leer (kein Plot, keine Fehlinterpretation) und ein einmaliges Warn-Label ("benötigt echtes Handelsvolumen — aktuell: …") erscheint im Panel.
+- **Gültig:** jedes Symbol, dessen Feed Volumen liefert und es nicht als `"tick"` ausweist. Die meisten Feeds außer Krypto melden `syminfo.volumetype = "n/a"` („nicht angegeben“), auch Futures mit echten Kontrakten — `"n/a"` mit vorhandenem Volumen gilt deshalb als gültig.
+- **Näherung:** ist dieses Volumen der Anteil eines einzelnen Brokers (ein CFD-Feed mit eigenem Volumen), beschreibt der Oszillator dessen Fluss, nicht den der Börse — brauchbar als Näherung, nicht als Börsenvolumen.
+- **Ungültig:** jedes Symbol mit `"tick"` (Anzahl Transaktionen, keine Menge) oder ganz ohne Volumen — dort gibt es nichts zu gewichten.
+- Der Indikator prüft das zur Laufzeit über einen `volumetype`-Guard. Ist kein echtes Volumen vorhanden, bleiben Oszillator, Signal-Linie, Histogramm, Regime-Engine und Divergenzerkennung leer (kein Plot, keine Fehlinterpretation) und unten rechts erscheint kurz „KVO Force Map · not available“.
 - **Referenzmarkt-Variante (z.B. `NYMEX:NG1!`) — bewusst nicht implementiert:** Die Klinger Volume Force ist ein reiner Oszillator ohne absoluten Preislevel, ein Cross-Symbol-Wert würde also anders als bei VWAP keine Preisniveaus mischen. Das ändert aber nichts daran, dass ein `request.security()`-Aufruf auf ein Fremdsymbol laut `DATA_VALIDITY.md` §4.1 die Ausnahme bleibt, nicht der Standard: Latenz, Settlement-Unklarheit, Session-Versatz, Request-Budget, Repaint-Risiko und Symbol-Mapping sind sechs zusätzliche Fehlerquellen, die ein Einzelindikator nicht tragen sollte. Diese Abwägung ist hier dokumentiert, aber nicht umgesetzt — der Indikator degradiert stattdessen hart auf `Exchange-only`.
 
 ## Notes
@@ -30,4 +30,4 @@ Volume-force analysis based on Stephen J. Klinger's original 1997 concept. It ac
 - Divergences use confirmed price pivots — a divergence is only emitted after `Pivot right bars` have elapsed. This avoids repainting a still-forming pivot at the cost of confirmation delay.
 - The default normalization divides KVO, Signal, and the histogram by the same denominator (`EMA(abs(KVO), N)`), which preserves zero crossings and KVO/Signal crossings while making the pane comparable across instruments.
 - "StdDev scale" intentionally uses `KVO / stdev(KVO)`, not a mean-subtracted Z-score, so the semantic KVO zero line doesn't move.
-- Requires real trade volume (`syminfo.volumetype` `base`/`quote`). On CFDs, Forex, and most indices the indicator produces no output — see Instrumente above.
+- Requires real trade volume (no `tick` volume, feed must deliver volume). On tick-volume feeds (many CFDs, Forex) the indicator produces no output — see Instrumente above.

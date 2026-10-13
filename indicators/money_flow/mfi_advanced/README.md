@@ -5,7 +5,7 @@ MFI Advanced ports the CCI Advanced context view onto a Money Flow Index core. I
 ## Features
 
 - **MFI core:** manual MFI calculation → averaged main line → signal line via the shared smoothing kernel
-- **Exchange-only volume gate:** symbols without real trade volume (`syminfo.volumetype` is not `base`/`quote`) get no MFI output at all — no neutral placeholder, no fallback computation
+- **Exchange-only volume gate:** symbols without real trade volume (`syminfo.volumetype` is `tick`, or the feed delivers no volume) get no MFI output at all — no neutral placeholder, no fallback computation
 - **Bounded scale:** fixed 0-100 panel with 50 midline and configurable 80/20 OB/OS levels
 - **Signals on raw bounded values:** crossover detection uses MFI and its signal directly, so display toggles never affect signal logic
 - **4-state histogram:** rising/falling × positive/negative drives four opacity states
@@ -28,11 +28,11 @@ The optional extreme filter requires the MFI line to have visited the oversold o
 
 MFI is inherently volume-weighted (typical-price × volume flow ratio) — there is no meaningful MFI without real trade volume.
 
-- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
-- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
-- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
+- **Valid:** any symbol whose feed delivers volume and does not declare it as `tick`. Most feeds outside crypto report `syminfo.volumetype = n/a` ("not specified"), futures with real contract volume included, so `n/a` with volume present counts as valid.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed with its own volume), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
+- **Invalid:** any symbol reporting `tick` (a number of transactions, not a quantity) or no volume at all — there is nothing to weight.
 
-On an invalid instrument the indicator produces no MFI line, no signal/alert conditions, and no scores — every volume-dependent value gates to `na` and the panel goes blank except for a one-time "benötigt echtes Handelsvolumen" warning label on the last bar showing the detected `syminfo.volumetype`.
+On an invalid instrument the indicator produces no MFI line, no signal/alert conditions, and no scores — every volume-dependent value gates to `na` and the panel goes blank except for a short "MFI·ADV · not available" notice in the bottom-right corner.
 
 **Reference-market variant (documented, not implemented):** MFI is a pure oscillator with no absolute price level, so a reference-market MFI (e.g. computed from `NYMEX:NG1!` volume while charting `CAPITALCOM:NATURALGAS`) would at least avoid the price-mixing problem that an anchored VWAP would have. But per `DATA_VALIDITY.md` §4.1, a cross-symbol `request.security()` call inside a single indicator is the exception, not the default — the added latency, session-mismatch, and request-budget cost of a per-indicator reference request isn't justified when the framework's own guidance is to route any reference-market context through one shared context module rather than duplicating it per script. Not implemented here.
 

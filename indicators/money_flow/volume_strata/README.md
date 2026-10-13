@@ -21,11 +21,11 @@ Fixed-range volume profile anchored to the right edge of the lookback window, sh
 
 ## Instrumente
 
-- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
-- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
-- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
+- **Valid:** any symbol whose feed delivers volume and does not declare it as `tick`. Most feeds outside crypto report `syminfo.volumetype = n/a` ("not specified"), futures with real contract volume included, so `n/a` with volume present counts as valid.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed with its own volume), the resulting levels sit where *that broker's* volume traded, which need not be where the exchange's did. Read them as approximate, not as the levels other participants watch.
+- **Invalid:** any symbol reporting `tick` (a number of transactions, not a quantity) or no volume at all — there is nothing to weight.
 
-On an invalid instrument the indicator draws nothing; instead it shows a "benötigt echtes Handelsvolumen" (needs real trade volume) warning label on the last bar.
+On an invalid instrument the indicator draws nothing; instead it shows a short "not available" notice in the bottom-right corner.
 
 **Reference-market variant:** deliberately not implemented. A volume profile maps the chart symbol's own price axis. Substituting a cross-symbol volume request (e.g. `NYMEX:NG1!` instead of `CAPITALCOM:NATURALGAS`) would overlay a *different* market's volume distribution onto the chart instrument's price rows. CFD and future prices are not identical (spread/feed offset), so the price buckets would be misaligned against the volume that actually traded there — the profile, POC, and value area would mark the wrong rows, not just imprecisely but structurally. For a volume profile, degradation (no output) is the correct choice, not a reference-market substitute.
 

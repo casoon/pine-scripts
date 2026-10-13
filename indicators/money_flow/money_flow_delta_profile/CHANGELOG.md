@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.1.0 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a` — the old `base`/`quote` check blocked futures and stocks with real volume (e.g. EUREX:FDAX1!)
+- Without real trade volume a short "not available" notice now sits in the bottom-right corner instead of a long warning label on the last candle; the requirement is stated in the Data Contract header
+- Source note below the profile: feed, symbol type, volume type and where that volume comes from (exchange volume, broker proxy on CFDs, index feed volume on cash indices) — shown in orange when it is not exchange volume
+- The same note shows the calendar span the bar lookback actually covers, since a fixed bar count spans very different periods on a near-24h CFD and an exchange session
+- README: new "Which chart?" section — read the profile on the future, trade on the CFD; short requirements note in the description
+
 ## v2.0.2 — 2026-09-08
 - Removed the "Synthetic volume if missing" input: it dated from the assumption that CFD feeds report `volume = 0`, and since the Exchange-only gate the profile only computes on feeds with real trade volume at all — bars without turnover are skipped as before, with no substituted weight
 - Reworded the volume notes: validity is decided per symbol by `syminfo.volumetype`, not by instrument class

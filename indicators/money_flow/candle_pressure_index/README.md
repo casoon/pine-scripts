@@ -14,11 +14,11 @@ Measures buying vs. selling pressure purely from candle microstructure — no de
 
 ## Instrumente
 
-- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
-- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
-- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
+- **Valid:** any symbol whose feed delivers volume and does not declare it as `tick`. Most feeds outside crypto report `syminfo.volumetype = n/a` ("not specified"), futures with real contract volume included, so `n/a` with volume present counts as valid.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed with its own volume), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
+- **Invalid:** any symbol reporting `tick` (a number of transactions, not a quantity) or no volume at all — there is nothing to weight.
 
-On invalid instruments the indicator shows a "benötigt echtes Handelsvolumen" (needs real trade volume) label on the last bar and plots nothing, instead of falling back to a neutral `volume_rank` of 0.5.
+On invalid instruments the indicator shows a short "not available" notice in the bottom-right corner and plots nothing, instead of falling back to a neutral `volume_rank` of 0.5.
 
 A reference-market volume would not save the core idea here: `volume_rank` is meant to measure the relative trading intensity of the exact same candle whose geometry (`close_location`, `body_ratio`) also comes from the chart symbol. Applying another market's volume to the CFD's price geometry would attribute activity that happened on that market to candles that formed on a different one — and per `DATA_VALIDITY.md` §4.1 it would additionally force a price comparison between the CFD and the future that the framework deliberately avoids outside a dedicated context module. Degradation (label + no output) is the right answer, not a reference-market request.
 

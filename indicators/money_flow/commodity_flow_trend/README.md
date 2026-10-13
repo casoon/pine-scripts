@@ -15,11 +15,11 @@ MFI + CCI composite oscillator designed for commodity markets. Combines directio
 
 ## Instrumente
 
-- **Valid:** any symbol whose `syminfo.volumetype` reports `base` or `quote` — as a rule futures, exchange-listed stocks and crypto exchanges, plus broker feeds that pass real traded quantity through.
-- **Proxy:** where that volume is a broker's own share of the market (a CFD feed reporting `base`), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
-- **Invalid:** any symbol reporting `tick` (a count of price updates) or `n/a` — there is nothing to weight.
+- **Valid:** any symbol whose feed delivers volume and does not declare it as `tick`. Most feeds outside crypto report `syminfo.volumetype = n/a` ("not specified"), futures with real contract volume included, so `n/a` with volume present counts as valid.
+- **Proxy:** where that volume is a broker's own share of the market (a CFD feed with its own volume), the reading describes that broker's flow, not the exchange's — an approximation, not exchange volume.
+- **Invalid:** any symbol reporting `tick` (a number of transactions, not a quantity) or no volume at all — there is nothing to weight.
 
-On invalid instruments the indicator shows a "benötigt echtes Handelsvolumen" (needs real trade volume) label on the last bar; the MFI line, histogram, and all MFI-based signals plot nothing. The CCI line and its turn markers are pure price statistics and stay visible on any instrument.
+On invalid instruments the indicator shows a short "not available" notice in the bottom-right corner; the MFI line, histogram, and all MFI-based signals plot nothing. The CCI line and its turn markers are pure price statistics and stay visible on any instrument.
 
 A reference-market volume for the MFI calculation would not help: MFI weights the chart symbol's own price (`src`) by volume — applying another market's volume to the CFD's price would link two unrelated feeds without a sound basis, and per `DATA_VALIDITY.md` §4.1 it would force a price comparison between the CFD and the future that the framework deliberately avoids outside a dedicated context module. Degradation remains the right answer here.
 

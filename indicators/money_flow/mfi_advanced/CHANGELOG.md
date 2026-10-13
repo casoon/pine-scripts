@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.4 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a` — the old `base`/`quote` check also blocked futures and stocks with real volume (e.g. EUREX:FDAX1!)
+- Without real trade volume a short "not available" notice now sits in the bottom-right corner instead of a long warning label on the last candle; the requirement is stated in the Data Contract header
+
 ## v1.3.3 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
 
