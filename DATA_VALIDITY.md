@@ -40,8 +40,15 @@ Volumen-Validität wird **nicht** aus `syminfo.type` abgeleitet, sondern aus
 |---|---|---|
 | `"base"` | Volumen in Basiswährung/Kontrakten | ✅ ja |
 | `"quote"` | Volumen in Quote-Währung (Krypto) | ⚠️ ja, aber andere Einheit — nicht mit `base` mischen |
-| `"tick"` | Anzahl Preis-Updates, **kein** Handelsvolumen | ❌ nein |
-| `"n/a"` | kein Volumen | ❌ nein |
+| `"tick"` | Anzahl Transaktionen, **keine** Menge | ❌ nein |
+| `"n/a"` | kein Volumen **oder** Art nicht angegeben | ⚠️ nur, wenn der Feed Volumen liefert (`volume > 0` mindestens einmal) |
+
+**Korrektur 2026-10-12:** Die frühere Regel „nur `base`/`quote`“ sperrte fast alles aus. Laut
+Pine-Referenz liefern nur einige Datenanbieter die Volumenart mit, „mostly in the crypto
+sector“. `EUREX:FDAX1!` meldet trotz echter Kontrakte `n/a`, `CAPITALCOM:GER40` meldet `tick`.
+Ausdrücklich ausschließen lässt sich deshalb nur `tick`. Bei `n/a` entscheidet, ob überhaupt
+Volumen kommt. Ein CFD-Feed mit `n/a` und Broker-Volumen kommt so durch; das fängt die
+Herkunfts-Beschriftung über `syminfo.type` ab (Fußnote ¹), nicht der Guard.
 
 TradingView liefert Volumen genau so weiter, wie es vom Provider kommt — Trade-Volumen,
 Tick-Volumen oder gar nichts. Aus der bloßen Existenz einer `volume`-Serie folgt **nie**,
@@ -101,7 +108,7 @@ nie mit exakter Gleichheit.**
 | Wyckoff-Volumentests (SC, Spring, UT mit Volumenbestätigung) | 🔴/🟡¹ | 🔴/🟡¹ | 🔴 → Underlying | 🔴 | 🟢 | 🟢 | 🟢² |
 
 ¹ Abhängig vom Provider — muss zur Laufzeit über `syminfo.volumetype` entschieden werden.
-Ist es `tick`/`n/a`: 🔴. Ist es `base`: 🟡 (Broker-Volumen ≠ Börsenvolumen, aber immerhin
+Ist es `tick` oder `n/a` ohne Volumen: 🔴. Ist es `base` oder `n/a` mit Volumen: 🟡 (Broker-Volumen ≠ Börsenvolumen, aber immerhin
 gehandelte Menge bei diesem Broker) — Kennzeichnung Pflicht. **Die ganze Spalte hängt an dieser
 Fußnote**: welche Instrumentklasse welchen `volumetype` liefert, ist eine Eigenschaft des Feeds,
 keine des Instruments, und wird hier bewusst nicht als Tabelle geführt (siehe §2, Schlussabsatz).
@@ -292,8 +299,8 @@ Felder:
   - `CFD-safe` — läuft überall, keine Datenannahme jenseits Klasse A
   - `CFD-degraded` — läuft überall, Volumen-/OI-Anteil schaltet sich sichtbar ab
   - `Reference-required` — braucht Referenzmarkt, auf dem CFD allein nicht gültig
-  - `Exchange-only` — braucht echtes Handelsvolumen (`volumetype` `base`/`quote`); meldet der
-    Feed `tick`/`n/a`, schaltet das Skript sichtbar ab, statt zu degradieren
+  - `Exchange-only` — braucht echtes Handelsvolumen (Guard aus §7); meldet der Feed `tick`
+    oder gar kein Volumen, schaltet das Skript sichtbar ab, statt zu degradieren
 
 Die vier Verdicts beschreiben die **Datenanforderung**, nicht eine Instrumentklasse. Ob ein
 konkretes Symbol sie erfüllt, entscheidet der Guard zur Laufzeit — ein Data Contract sagt nie,
@@ -306,9 +313,11 @@ dass ein Skript „auf CFDs nicht läuft".
 ### Volumen-Validität
 
 ```pine
-// Echtes Handelsvolumen? tick/n/a zählt nicht.
-bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote")
-                    and not na(volume)
+// Echtes Handelsvolumen? "tick" schließt aus; "n/a" zählt, wenn der Feed Volumen liefert.
+var bool feedHasVolume = false
+if nz(volume) > 0
+    feedHasVolume := true
+bool volumeIsReal = syminfo.volumetype != "tick" and feedHasVolume
 
 // Feature-Gate: neutral, nicht 0
 float volScore = volumeIsReal ? f_volScore() : na
@@ -321,13 +330,15 @@ sonst sinkt der Gesamtscore systematisch auf CFDs.
 ### Sichtbarkeit
 
 Ein degradiertes Feature muss im UI erkennbar sein. Im Dashboard-Table eine Zeile, sonst
-ein einmaliges Label auf dem letzten Bar:
+eine Tabellenzelle unten rechts — nicht als Label auf der letzten Kerze, das verdeckt den Kurs
+(und `y = high` verzerrt in einem Oszillator-Pane die Skala). Der Text bleibt knapp: Kurzname des
+Indikators und „not available“. Was fehlt, steht im Data Contract im Kopf, nicht im Chart:
 
 ```pine
+var table volWarn = table.new(position.bottom_right, 1, 1)
 if barstate.islast and not volumeIsReal
-    label.new(bar_index, high, "Volumen: " + syminfo.volumetype + " — Volumenmodul inaktiv",
-              style=label.style_label_down, color=color.new(color.orange, 20),
-              textcolor=color.white, size=size.small)
+    table.cell(volWarn, 0, 0, "<Kurzname> · not available",
+         bgcolor = color.new(color.orange, 20), text_color = color.white, text_size = size.small)
 ```
 
 ### Referenzmarkt

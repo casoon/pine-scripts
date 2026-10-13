@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.5 — 2026-10-13
+- Fix: compile error CE10072 — `precision` was passed twice since the 2026-10-02 scale change; the duplicate is removed and the script's own precision (1 decimals) stays
+
 ## v1.3.4 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
 

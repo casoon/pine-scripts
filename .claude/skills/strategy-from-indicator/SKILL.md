@@ -78,11 +78,12 @@ darin **nicht** enthalten; sie ist eine bekannte, nicht eingepreiste Verzerrung.
 Direkt nach dem `strategy()`-Call:
 
 ```pine
+// Synthetische Bar-Preise (Heikin Ashi, Renko …): Orders füllen zu Marktpreisen,
+// der Backtest gilt dort nicht. Kurzer Hinweis unten rechts statt auf der Kerze.
+var table chartTypeWarn = table.new(position.bottom_right, 1, 1)
 if barstate.islast and not chart.is_standard
-    label.new(bar_index, high, "Backtest ungültig auf diesem Charttyp — Orders füllen zu " +
-              "Marktpreisen, nicht zu synthetischen Bar-Preisen (Heikin Ashi/Renko/Kagi/etc.)",
-              style=label.style_label_down, color=color.new(color.red, 10),
-              textcolor=color.white, size=size.small)
+    table.cell(chartTypeWarn, 0, 0, "<Kurzname> · backtest invalid on this chart type",
+         bgcolor = color.new(color.red, 10), text_color = color.white, text_size = size.small)
 ```
 
 Wortlaut nicht abwandeln — alle acht Strategien tragen exakt diesen Block.
