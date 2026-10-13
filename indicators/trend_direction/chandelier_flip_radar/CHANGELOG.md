@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.6.3 — 2026-10-12
+- The "backtest invalid" notice on non-standard chart types (Heikin Ashi, Renko …) now sits in the bottom-right corner as a short note instead of a label on the last candle
+
 ## v1.6.2 — 2026-09-05
 - Added chart-type guard: visible warning label when loaded on a non-standard chart (Heikin Ashi, Renko, Kagi, Line Break, P&F, Range) since the underlying strategy's backtest results are invalid there
 

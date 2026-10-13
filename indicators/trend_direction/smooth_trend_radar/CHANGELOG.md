@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.5.4 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+- The "backtest invalid" notice on non-standard chart types (Heikin Ashi, Renko …) now sits in the bottom-right corner as a short note instead of a label on the last candle
+
 ## v3.5.3 — 2026-10-02
 - ADX threshold tooltip corrected: rejections fire in both regimes; the threshold only gates trend flips and tags rejections as Trend Pullback or Range Rejection. The standalone strategy clone received the same tooltip fix.
 

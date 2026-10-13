@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.7 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v1.1.6 — 2026-10-02
 - Fix: no regime could ever form with default inputs. Regime confidence was the normalized efficiency ratio multiplied by Regime Sensitivity, which capped it at the sensitivity value (0.60 at default) — below Min Regime Confidence (0.65), so the regime stayed FLAT and every Bull/Bear-dependent part (bands, heatmap, playbook, AGING, MA zones, entries, tiers) was dead. Confidence is now the normalized efficiency ratio itself; entering a regime still requires a strong ER (≥ ~0.72 over the ER length at the default thresholds), so regimes remain selective
 - Regime Sensitivity now only drives the momentum gate (minimum normalized slope strength). Its tooltip said "higher = more sensitive", which was inverted for that gate — corrected: higher = stricter

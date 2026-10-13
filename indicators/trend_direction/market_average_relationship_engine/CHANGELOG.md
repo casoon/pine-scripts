@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.2 — 2026-10-12
+- The "backtest invalid" notice on non-standard chart types (Heikin Ashi, Renko …) now sits in the bottom-right corner as a short note instead of a label on the last candle
+- Fix: compile error CE10072 — `precision` was passed twice since the 2026-10-02 scale change; the duplicate is removed and the script's own precision (1 decimals) stays
+
 ## v1.3.1 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
 
