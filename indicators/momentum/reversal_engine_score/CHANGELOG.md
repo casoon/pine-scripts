@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.7.3 — 2026-10-12
+- The "backtest invalid" notice on non-standard chart types (Heikin Ashi, Renko …) now sits in the bottom-right corner as a short note instead of a label on the last candle
+
 ## v1.7.2 — 2026-10-02
 - Script header corrected: the quality score runs 0–2 (not 0–7), and the short RSI condition is RSI > 50 (elevated), not "overbought" — matching the code and README
 

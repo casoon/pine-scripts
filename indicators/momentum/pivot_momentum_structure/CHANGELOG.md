@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.9.1 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v2.9.0 — 2026-09-08
 - Add MFI (Money Flow Index) as a ninth oscillator source: `ta.mfi(hlc3, MFI Length)`, bounded 0..100, OB/OS 80/20, midline 50, with a configurable `MFI Signal Line` (SMA). Fixed hlc3 like CCI — the shared `Source` input does not apply
 - MFI is guarded by `syminfo.volumetype` (`base`/`quote` only). Without real trade volume the series is `na`, so no oscillator structure, divergence, alignment or alert is produced, and a notice label on the last bar names the detected `volumetype`. The eight price-based sources are unaffected

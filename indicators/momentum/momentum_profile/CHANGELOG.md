@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.3 — 2026-10-12
+- Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
+
 ## v1.0.2 — 2026-10-02
 - Data validity: MFI now requires real trade volume (`syminfo.volumetype` base/quote). Without it the MFI series is na, the reference band stays neutral and the dashboard shows Avg MFI as "n/a" (previously a volume floor of 1 turned price-only data into a pseudo-MFI). Data Contract block added to the header
 

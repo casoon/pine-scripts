@@ -32,4 +32,4 @@ The reaction is measured from the pivot-bar close over the "Reaction window" bar
 
 ## Data requirements
 
-MFI needs real trade volume (`syminfo.volumetype` base/quote). On symbols without it (CFDs, tick volume, no volume) the MFI line, MFI zones, HTF MFI and the MFI-based long/short signals stay empty; the CCI oscillator mode and its divergences keep working.
+MFI needs real trade volume (the feed delivers volume and `syminfo.volumetype` is not `tick`). On symbols without it (CFDs, tick volume, no volume) the MFI line, MFI zones, HTF MFI and the MFI-based long/short signals stay empty; the CCI oscillator mode and its divergences keep working.

@@ -75,8 +75,8 @@ ROC was deliberately left out: it is unbounded (no fixed OB/OS), and this indica
 ### MFI and volume validity
 
 MFI is the only source in the dropdown that is not derived from price alone. Whether a feed
-carries real trade volume is decided per symbol by `syminfo.volumetype`: `base`/`quote` is
-traded quantity, `tick` counts price updates, `n/a` means none at all. The script checks this
+carries real trade volume is decided per symbol by `syminfo.volumetype`: `tick` is a
+number of transactions, not a quantity; most non-crypto feeds report `n/a`, so the feed counts when it delivers volume and does not report `tick`. The script checks this
 at runtime (`volumeIsReal`).
 
 Without real volume the MFI series is `na`. Because every pivot is processed only when an
