@@ -6,7 +6,7 @@ order: 2
 
 ## 1. Pick an indicator
 
-The [indicator index](../indicators/) lists every indicator with one sentence each; the sidebar
+The [catalog](../indicators/) lists every indicator with one sentence, its status and how far it has been checked; the sidebar
 groups them by what they measure. Start from the question you want answered — where is the
 structure, is there a trend, is a move exhausted — rather than from a signal.
 

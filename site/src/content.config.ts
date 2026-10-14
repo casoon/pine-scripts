@@ -26,8 +26,8 @@ const docs = defineCollection({
           // Generated; "Edit this page" leads to the generator.
           filePath: '../site/src/repo.ts',
           data: {
-            title: 'Indicator index',
-            description: 'Every indicator in the repository, grouped as in the sidebar, with the first sentence of its README.',
+            title: 'Catalog',
+            description: 'Every indicator and strategy in the repository with its status and how far it has been checked on real charts. Experimental.',
             order: 3,
           },
           body: indicatorIndex(indicators),
