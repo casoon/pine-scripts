@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import mdx from '@astrojs/mdx';
 import type { AstroIntegration } from 'astro';
+import type { Lang } from './lib/i18n';
 
 export interface PackageLink {
   /** Label shown in the footer and as badge, e.g. "crates.io" or "npm". */
@@ -14,12 +15,12 @@ export interface CasoonPagesOptions {
   name: string;
   /** One sentence; used as default meta description. */
   description: string;
-  /** GitHub repository as "owner/name". */
-  repo: string;
+  /** GitHub repository as "owner/name". Omit for a private repository: no GitHub or edit links. */
+  repo?: string;
   /** Current release, shown in the header and on docs pages. */
   version?: string;
-  /** SPDX licence identifier. Default: "MIT". */
-  license?: string;
+  /** SPDX licence identifier, or false for proprietary code (no licence named). Default: "MIT". */
+  license?: string | false;
   /** Default branch, used for "Edit this page" links. Default: "main". */
   branch?: string;
   /** Project accent colour for light and dark theme. Default: CASOON petrol. Both must meet 4.5:1 on the page background. */
@@ -48,6 +49,10 @@ export interface CasoonPagesOptions {
    * project's own output, say. Same name as a theme component: the project's wins.
    */
   mdxComponents?: string;
+  /** Language of the theme's own UI strings and of `<html lang>`. Default: "en". */
+  lang?: Lang;
+  /** Lead paragraph of the showcase overview, instead of the theme's generic one. */
+  showcaseLead?: string;
 }
 
 export interface ResolvedConfig
@@ -80,7 +85,7 @@ export default function casoonPages(options: CasoonPagesOptions): AstroIntegrati
         const resolved: ResolvedConfig = {
           name: options.name,
           description: options.description,
-          repo: options.repo,
+          repo: options.repo ?? '',
           version: options.version ?? '',
           license: options.license ?? 'MIT',
           branch: options.branch ?? 'main',
@@ -94,6 +99,8 @@ export default function casoonPages(options: CasoonPagesOptions): AstroIntegrati
               : resolve(root, options.changelog ?? '../CHANGELOG.md'),
           hasShowcase: showcasePath !== null,
           demo: options.demo === false || options.demo === undefined ? '' : options.demo,
+          lang: options.lang ?? 'en',
+          showcaseLead: options.showcaseLead ?? '',
         };
 
         const route = (pattern: string, file: string) =>
