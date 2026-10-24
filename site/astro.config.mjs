@@ -12,6 +12,7 @@ export default defineConfig({
       name: 'pine-scripts',
       description:
         'Experimental TradingView indicators and strategies in Pine Script v6: market structure, trend, momentum and confluence. For learning, not advice.',
+      tagline: 'Experimental TradingView indicators',
       repo: 'casoon/pine-scripts',
       license: 'MIT',
       packages: [{ label: 'TradingView', href: 'https://www.tradingview.com/u/WavesUnchained/' }],

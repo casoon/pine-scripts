@@ -25,3 +25,24 @@ export interface ShowcaseExample {
    */
   preview?: { html: string };
 }
+
+const escapeHtml = (text: string) =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/**
+ * A description as HTML: text escaped, `backtick spans` as `<code>`, no other markup.
+ * Text without backticks comes out as the escaped text alone.
+ */
+export function descriptionHtml(text: string): string {
+  return text
+    .split(/(`[^`]+`)/)
+    .map((part, i) =>
+      i % 2 === 1 ? `<code>${escapeHtml(part.slice(1, -1))}</code>` : escapeHtml(part)
+    )
+    .join('');
+}
+
+/** A description as plain text (meta description and other text-only places): backticks of code spans removed. */
+export function descriptionText(text: string): string {
+  return text.replace(/`([^`]+)`/g, '$1');
+}
