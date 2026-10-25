@@ -67,7 +67,7 @@ export const collections = { docs: docsCollection() };
 | `tagline` | – | A few words for the start page's `<title>` and the OG image; see „Search engines" |
 | `website` | – | The project's landing page (`https://judge.casoon.de`): header, footer, JSON-LD `sameAs` |
 | `catalog` | repository name | Slug of the project's entry on casoon.dev (`#projekt-<slug>`), linked in the footer; `false` for none |
-| `version` | – | Header badge, "Docs for vX" |
+| `version` | the project's manifest | Header badge, "Docs for vX"; see „Version" | 
 | `license` | `MIT` | SPDX id for footer and JSON-LD; `false` for proprietary code names no licence |
 | `branch` | `main` | "Edit this page" links |
 | `accent` | CASOON petrol | `{ light, dark }` project colour; needs 4.5:1 on `#f6f6f5` and `#101010` |
@@ -79,6 +79,18 @@ export const collections = { docs: docsCollection() };
 | `mdxComponents` | – | Module exporting `components` for docs MDX, next to the theme's; see „Docs frontmatter" |
 | `lang` | `en` | `en` or `de`: `<html lang>` and the theme's own UI strings (`lib/i18n.ts`); props passed by the project win |
 | `showcaseLead` | – | Lead paragraph of the showcase overview, instead of the theme's generic one |
+
+#### Version
+
+Left out, `version` comes from the manifest next to `site/`: `version` in `package.json`, else
+`[package]` or `[workspace.package]` in `Cargo.toml`. So the number is maintained in one place,
+and a release updates the site by itself. Pages read it as `config.version` from
+`virtual:casoon-pages/config` — a start page that shows the release in a `Badge` takes it from
+there instead of typing it out.
+
+A wrong number is worse than none, so anything that cannot be read with certainty yields none:
+a workspace whose version sits in a member crate, a `package.json` without `version`, a project
+with neither manifest. Those pass `version` themselves, and `false` shows none at all.
 
 ### Routes
 
@@ -222,13 +234,19 @@ in `astro.config.mjs`.
   `website`, the project's catalog entry on casoon.dev and the catalog itself, all with
   descriptive text in the page's `lang`.
 
-`casoon.github.io` has no root repository, so there is no root `robots.txt` pointing at the
-sitemaps. Register each site in Google Search Console instead, once per project:
+The root `https://casoon.github.io/` comes from the repository `casoon/casoon.github.io`: an
+overview of the project sites, the only `robots.txt` crawlers read for the domain (one `Sitemap:`
+line per project), and the Google Search Console verification. Its URL-prefix property
+`https://casoon.github.io/` covers every project site, so a project needs no property and no
+verification file of its own. For a new site:
 
-1. *Add property* → *URL prefix* → `https://casoon.github.io/<repo>/`.
-2. Verify ownership with the *HTML file* method: put the downloaded `google<id>.html` into the
-   project's `site/public/` and deploy; it is served at `https://casoon.github.io/<repo>/google<id>.html`.
-3. *Sitemaps* → submit `sitemap.xml` (resolved against the prefix).
+1. Deploy it and check that `https://casoon.github.io/<repo>/sitemap.xml` answers 200.
+2. In `casoon/casoon.github.io`, add `Sitemap: https://casoon.github.io/<repo>/sitemap.xml` to
+   `robots.txt` and the site to `index.html`, then push.
+3. In the property `https://casoon.github.io/`, *Sitemaps* → submit `<repo>/sitemap.xml`.
+
+Never set a custom domain on `casoon/casoon.github.io`: GitHub would redirect every project site
+to it as well.
 
 ## Rules the theme enforces
 
