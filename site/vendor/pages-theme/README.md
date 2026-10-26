@@ -123,7 +123,7 @@ Import from `@casoon/pages-theme/components` in `.astro` files; available direct
 | Component | Use |
 | --- | --- |
 | `Hero` | Title, lead, default slot (install, badges), `output` slot (real output); `layout`, `command` and `tone` pick the variant |
-| `Install` | Install command per ecosystem, CSS-only tabs, copy button |
+| `Install` | Install command per ecosystem, CSS-only tabs, copy button; long commands wrap |
 | `Badge`, `Badges` | Static badges (no external badge services) |
 | `Facts` | Verifiable key figures |
 | `Features` | 3–5 core points |
@@ -158,6 +158,9 @@ files.
 | Pipeline | `layout="stack" command="<cmd>"` plus a `source` slot | `FileSet view="tabs"` — one pane per file |
 | Colour field | `tone="invert"` on any layout | `Terminal`, or whatever the project shows |
 | Editorial | `layout="editorial"` | `FileSet view="rail"` — names and one line each |
+
+The split layout gives the text column a little more than half from 900 px up, with a title
+size that fits about 40 characters on two lines at 1440 px; below 900 px text and output stack.
 
 The stack layout reads as a pipeline from top to bottom: the `source` slot (usually a
 `CodeBlock` with the configuration), the `command` pill, then the output — each over the full
@@ -272,4 +275,5 @@ Grundlage ist das Claude-Design-Projekt „CASOON Pages Template“. Bewusst ge�
 - Footer mit echtem CASOON-Logo (hell/dunkel) statt Farbquadrat; alle `#`-Links durch echte
   Ziele ersetzt.
 - Tabs ohne JavaScript (Radio-Buttons); „Last updated“ in der Doku entfällt vorerst.
-- Auf schmalen Bildschirmen rückt die Navigation in eine zweite Zeile.
+- Auf schmalen Bildschirmen rückt die Navigation in eine zweite, einzeilige Zeile, die seitlich
+  scrollt, wenn sie nicht passt; der Theme-Umschalter bleibt neben dem Namen.
