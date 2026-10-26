@@ -123,7 +123,7 @@ Import from `@casoon/pages-theme/components` in `.astro` files; available direct
 | Component | Use |
 | --- | --- |
 | `Hero` | Title, lead, default slot (install, badges), `output` slot (real output); `layout`, `command` and `tone` pick the variant |
-| `Install` | Install command per ecosystem, CSS-only tabs, copy button; long commands wrap |
+| `Install` | Install command per ecosystem, CSS-only tabs, copy button; long commands wrap at spaces and after a `/` |
 | `Badge`, `Badges` | Static badges (no external badge services) |
 | `Facts` | Verifiable key figures |
 | `Features` | 3–5 core points |
