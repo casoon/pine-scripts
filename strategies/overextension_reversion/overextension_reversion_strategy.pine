@@ -1,0 +1,253 @@
+//@version=6
+// ============================================================================
+// Overextension Reversion [WavesUnchained] — Strategy (standalone)
+// Version: 1.1.0
+// Author: WavesUnchained
+// Build: 2026-11-05 00:00:00
+// ============================================================================
+// Research strategy: mean reversion in non-trending markets. Price stretches
+// outside an EMA ± ATR band with an extreme RSI, then closes back inside the
+// band with RSI and close turning — the entry targets the EMA as it stood at
+// the signal, with a fixed ATR stop and a time limit.
+//
+// Features:
+//   ✓ Overextension band: EMA ± ATR×, re-entry into the band as the trigger (no falling-knife entry)
+//   ✓ Confirmation: previous-bar RSI extreme, RSI and close both turning on the signal bar
+//   ✓ Range-regime gate: ADX ceiling plus EMA slope ceiling (ATR per bar)
+//   ✓ Target frozen at the signal-bar EMA; minimum target/stop ratio checked at signal close
+//   ✓ Stop at the overextension extreme + ATR buffer (thesis invalidation), or fixed ATR from the fill
+//   ✓ Target/stop ratio checked against the stop actually used; time exit after N held bars
+//   ✓ Standard strategy features: trade direction, confirmed-bar entries, cooldown, break-even, filters, chart-type guard
+//   ✓ Status panel: regime, ADX / slope against their limits, time limit
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol (OHLC)
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
+//
+// ============================================================================
+
+strategy("Overextension Reversion [WavesUnchained] — Strategy", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     pyramiding=0, margin_long=100, margin_short=100,
+     commission_type=strategy.commission.percent, commission_value=0.02,
+     slippage=1, calc_on_every_tick=false, calc_on_order_fills=false,
+     process_orders_on_close=false)
+
+// Synthetische Bar-Preise (Heikin Ashi, Renko …): Orders füllen zu Marktpreisen,
+// der Backtest gilt dort nicht.
+var table chartTypeWarn = table.new(position.bottom_right, 1, 1)
+if barstate.islast and not chart.is_standard
+    table.cell(chartTypeWarn, 0, 0, "OER Strategy · backtest invalid on this chart type",
+         bgcolor = color.new(color.red, 10), text_color = color.white, text_size = size.small)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+g_zone = "Normal Range and Overextension"
+meanLength = input.int(50, "Mean EMA Period", minval=10, maxval=500, group=g_zone)
+atrLength  = input.int(14, "ATR Period", minval=2, maxval=100, group=g_zone)
+bandAtr    = input.float(2.0, "Overextension Band (ATR×)", minval=0.5, step=0.25, group=g_zone,
+     tooltip="Distance of the outer band from the EMA. A setup needs a close outside the band, then a close back inside.")
+rsiLength  = input.int(14, "RSI Period", minval=2, maxval=100, group=g_zone)
+oversold   = input.float(35, "RSI Max on Downside Overextension", minval=1, maxval=49, group=g_zone,
+     tooltip="RSI of the bar before the long signal must be at or below this value.")
+overbought = input.float(65, "RSI Min on Upside Overextension", minval=51, maxval=99, group=g_zone,
+     tooltip="RSI of the bar before the short signal must be at or above this value.")
+
+g_regime    = "Strong-Trend Filter"
+adxLength   = input.int(14, "DI / ADX Period", minval=2, maxval=100, group=g_regime)
+maxAdx      = input.float(25, "Max ADX", minval=5, maxval=60, step=1, group=g_regime,
+     tooltip="Reversion entries are blocked while ADX is above this value — a strong trend tends to keep running instead of returning to the mean.")
+slopeLength = input.int(5, "EMA Slope Window", minval=1, maxval=50, group=g_regime)
+maxSlope    = input.float(0.10, "Max Absolute EMA Slope (ATR per bar)", minval=0.01, step=0.01, group=g_regime,
+     tooltip="Blocks entries while the mean itself is moving fast, so the target is not a moving one.")
+
+g_trade       = "Trade and Exits"
+stopMode      = input.string("Swing Extreme", "Stop Mode", options=["Swing Extreme", "Fixed ATR"], group=g_trade,
+     tooltip="Swing Extreme: stop beyond the low (long) / high (short) of the overextension swing plus an ATR buffer — the level whose break invalidates the reversion. Fixed ATR: tick-rounded ATR distance from the actual fill price.")
+swingBars     = input.int(5, "Swing Window (bars)", minval=2, maxval=50, group=g_trade, active=stopMode == "Swing Extreme",
+     tooltip="Bars up to and including the signal bar that are searched for the overextension extreme.")
+stopBufferAtr = input.float(0.25, "Swing Stop Buffer (ATR×)", minval=0, step=0.05, group=g_trade, active=stopMode == "Swing Extreme",
+     tooltip="Distance beyond the swing extreme, so a plain retest does not stop the trade out.")
+stopAtr       = input.float(1.5, "Fixed Stop Distance (ATR×)", minval=0.25, step=0.25, group=g_trade, active=stopMode == "Fixed ATR",
+     tooltip="Tick-rounded, frozen at the signal bar, measured from the actual fill price.")
+minRewardRisk = input.float(0.75, "Min Target / Stop Distance Ratio", minval=0.1, step=0.05, group=g_trade,
+     tooltip="Checked at the signal close before costs. The entry fills at the next open; gaps and slippage can change the ratio.")
+maxHold       = input.int(20, "Max Holding Period (closed bars)", minval=1, maxval=200, group=g_trade,
+     tooltip="Without a target or stop hit, a market exit is sent after this many closed bars and fills at the next open.")
+
+g_strat       = "Strategy"
+tradeDirInput = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=g_strat,
+     tooltip="Filter entries by direction. Useful for asymmetric instruments.")
+confirmClose  = input.bool(true,  "Entries on Confirmed Bar Only", group=g_strat,
+     tooltip="Only trigger entries on closed bars. Prevents repainting in live trading.")
+cooldownBars  = input.int(0,     "Cooldown Bars After Exit", minval=0, group=g_strat,
+     tooltip="Block new entries for N bars after a position closes. Set 0 to disable.")
+enableBE      = input.bool(false, "Break-Even Stop", group=g_strat,
+     tooltip="Move SL to entry price once the trade is N×ATR in profit.")
+beATRInput    = input.float(1.0,  "Break-Even Trigger (ATR×)", minval=0.1, step=0.1, group=g_strat,
+     tooltip="ATR distance from entry that triggers the break-even move.")
+
+g_filters     = "Filters"
+useSession    = input.bool(false, "Session Filter", group=g_filters)
+sessionInput  = input.session("0000-2345", "Session", group=g_filters)
+useDateRange  = input.bool(false, "Date Range", group=g_filters)
+dateFrom      = input.time(timestamp("01 Jan 2020 00:00 +0000"), "From", group=g_filters)
+dateTo        = input.time(timestamp("31 Dec 2030 23:59 +0000"), "To",   group=g_filters)
+useMaxDD      = input.bool(false, "Max Drawdown", group=g_filters)
+maxDD         = input.float(20.0, "Max Drawdown (%)", minval=1, step=1, group=g_filters)
+useMaxIntraDD = input.bool(false, "Max Intraday Loss", group=g_filters)
+maxIntraDD    = input.float(5.0,  "Max Intraday Loss (%)", minval=1, step=1, group=g_filters)
+useLossStreak = input.bool(false, "Losing Streak Limit", group=g_filters)
+maxLossStreak = input.int(5,      "Max Consecutive Losses", minval=1, group=g_filters)
+
+g_vis     = "Visuals"
+showPanel = input.bool(true, "Show Status Panel", group=g_vis)
+
+// ─── Calculation ─────────────────────────────────────────────────────────────
+float mean  = ta.ema(close, meanLength)
+float atr   = ta.atr(atrLength)
+float upper = mean + bandAtr * atr
+float lower = mean - bandAtr * atr
+float rsi   = ta.rsi(close, rsiLength)
+[plusDi, minusDi, adx] = ta.dmi(adxLength, adxLength)
+float slope = atr > 0 ? math.abs(mean - mean[slopeLength]) / (atr * slopeLength) : na
+int warmup  = math.max(meanLength + slopeLength, math.max(atrLength, math.max(rsiLength, adxLength * 2)))
+bool ready  = bar_index >= warmup and atr > 0 and not na(rsi[1]) and not na(adx) and not na(slope)
+bool rangeRegime = ready and adx <= maxAdx and slope <= maxSlope
+
+// Close wieder INNERHALB des Bandes, auf der Vorkerze außerhalb bei extremem RSI.
+// Kreuzungen auf jeder Kerze berechnen, damit die Historie konsistent bleibt.
+bool returnedFromBelow = ta.crossover(close, lower)
+bool returnedFromAbove = ta.crossunder(close, upper)
+bool longConfirmation  = returnedFromBelow and rsi[1] <= oversold and rsi > rsi[1] and close > close[1]
+bool shortConfirmation = returnedFromAbove and rsi[1] >= overbought and rsi < rsi[1] and close < close[1]
+
+// Auf Tickgröße gerundeter Stop; der ATR-Wert wird am Signal eingefroren.
+int   candidateStopTicks = int(math.max(1, math.round(atr * stopAtr / syminfo.mintick)))
+float stopDistance       = candidateStopTicks * syminfo.mintick
+float candidateTarget    = math.round_to_mintick(mean)
+float longReward         = candidateTarget - close
+float shortReward        = close - candidateTarget
+
+// Struktureller Stop: Extrem der Übertreibung plus Puffer. Bricht es, ist die
+// Rückkehr-These widerlegt.
+bool  swingStop     = stopMode == "Swing Extreme"
+float longSwingStop  = math.round_to_mintick(ta.lowest(low, swingBars) - stopBufferAtr * atr)
+float shortSwingStop = math.round_to_mintick(ta.highest(high, swingBars) + stopBufferAtr * atr)
+float longRisk       = swingStop ? close - longSwingStop  : stopDistance
+float shortRisk      = swingStop ? shortSwingStop - close : stopDistance
+
+// ─── Entry gating ────────────────────────────────────────────────────────────
+strategy.risk.max_drawdown(useMaxDD ? maxDD : 100, strategy.percent_of_equity)
+strategy.risk.max_intraday_loss(useMaxIntraDD ? maxIntraDD : 100, strategy.percent_of_equity)
+
+var int _genLossStreak = 0
+if strategy.losstrades > strategy.losstrades[1]
+    _genLossStreak := _genLossStreak + 1
+if strategy.wintrades > strategy.wintrades[1]
+    _genLossStreak := 0
+_genFilterOk = (not useSession or not na(time(timeframe.period, sessionInput))) and
+     (not useDateRange or (time >= dateFrom and time <= dateTo)) and
+     (not useLossStreak or _genLossStreak < maxLossStreak)
+
+var int _lastExitBar = na
+_justClosed = strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+if _justClosed
+    _lastExitBar := bar_index
+_inCooldown = cooldownBars > 0 and not na(_lastExitBar) and (bar_index - _lastExitBar) < cooldownBars
+_canEntry   = not _inCooldown and (not confirmClose or barstate.isconfirmed) and _genFilterOk
+
+_canLong  = tradeDirInput != "Short Only"
+_canShort = tradeDirInput != "Long Only"
+
+bool mayEnter    = rangeRegime and _canEntry and strategy.position_size == 0
+bool longSignal  = mayEnter and _canLong  and longConfirmation  and longRisk  > 0 and longReward  >= minRewardRisk * longRisk
+bool shortSignal = mayEnter and _canShort and shortConfirmation and shortRisk > 0 and shortReward >= minRewardRisk * shortRisk
+
+// ─── Strategy execution ──────────────────────────────────────────────────────
+// Ziel = Normalbereich AM SIGNAL, wandert nicht mit der EMA.
+// Swing-Stop: fester Preis ab Signal. Fixed ATR: am Signal als Tick-Abstand
+// (Füllpreis noch unbekannt), ab der Einstiegskerze als Preis ab dem
+// tatsächlichen Füllpreis — derselbe Level. Break-Even faltet in denselben Stop.
+var float targetPrice = na
+var int   stopTicks   = na
+var float swingLevel  = na
+
+if longSignal
+    targetPrice := candidateTarget
+    stopTicks   := candidateStopTicks
+    swingLevel  := swingStop ? longSwingStop : na
+    strategy.entry("Long", strategy.long)
+    if swingStop
+        strategy.exit("Long Exit", "Long", limit=targetPrice, stop=swingLevel)
+    else
+        strategy.exit("Long Exit", "Long", limit=targetPrice, loss=stopTicks)
+if shortSignal
+    targetPrice := candidateTarget
+    stopTicks   := candidateStopTicks
+    swingLevel  := swingStop ? shortSwingStop : na
+    strategy.entry("Short", strategy.short)
+    if swingStop
+        strategy.exit("Short Exit", "Short", limit=targetPrice, stop=swingLevel)
+    else
+        strategy.exit("Short Exit", "Short", limit=targetPrice, loss=stopTicks)
+
+float stopPrice = na
+if strategy.position_size != 0
+    float avgPx  = strategy.position_avg_price
+    float dist   = stopTicks * syminfo.mintick
+    bool  isLong = strategy.position_size > 0
+    stopPrice := not na(swingLevel) ? swingLevel : isLong ? avgPx - dist : avgPx + dist
+    if enableBE and isLong and close >= avgPx + atr * beATRInput
+        stopPrice := math.max(stopPrice, avgPx)
+    if enableBE and not isLong and close <= avgPx - atr * beATRInput
+        stopPrice := math.min(stopPrice, avgPx)
+    if isLong
+        strategy.exit("Long Exit", "Long", limit=targetPrice, stop=stopPrice)
+    else
+        strategy.exit("Short Exit", "Short", limit=targetPrice, stop=stopPrice)
+
+    // Ohne Ziel-/Stop-Treffer: nach maxHold abgeschlossenen Kerzen Marktorder,
+    // Ausführung an der nächsten Eröffnung.
+    int heldBars = bar_index - strategy.opentrades.entry_bar_index(0) + 1
+    if barstate.isconfirmed and heldBars >= maxHold
+        strategy.close(isLong ? "Long" : "Short", comment="Time")
+
+// ─── Visuals ─────────────────────────────────────────────────────────────────
+plot(mean, "Mean (EMA)", color=color.orange, linewidth=2)
+upperPlot = plot(upper, "Upper Overextension Band", color=color.new(color.red, 40))
+lowerPlot = plot(lower, "Lower Overextension Band", color=color.new(color.teal, 40))
+fill(upperPlot, lowerPlot, color=color.new(color.gray, 94), title="Normal Range")
+plot(strategy.position_size != 0 ? targetPrice : na, "Fixed Target", color=color.teal, linewidth=2, style=plot.style_linebr)
+plot(stopPrice, "Fixed Stop", color=color.red, style=plot.style_linebr)
+plotshape(longSignal,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.teal, size=size.tiny)
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.tiny)
+plot(adx,   "ADX",                    display=display.data_window)
+plot(slope, "EMA Slope (ATR per bar)", display=display.data_window)
+plot(rangeRegime ? 1 : 0, "Range Regime", display=display.data_window)
+
+// ─── Status panel ────────────────────────────────────────────────────────────
+var table panel = table.new(position.top_right, 2, 4,
+     bgcolor=color.new(color.white, 5),
+     border_color=color.new(color.gray, 60),
+     border_width=1,
+     frame_color=color.new(color.gray, 40),
+     frame_width=1)
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+if showPanel and barstate.islast
+    string status = not ready ? "Warm-up" : strategy.position_size != 0 ? "Position open" : not rangeRegime ? "Trend filter blocks" : "Waiting for return"
+    color statusBg = not ready or strategy.position_size != 0 ? color.new(color.gray, 80) : rangeRegime ? #00c853 : #ff6f00
+    color statusTx = not ready or strategy.position_size != 0 ? tc : color.white
+    table.cell(panel, 0, 0, "Status", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(panel, 1, 0, status, text_color=statusTx, bgcolor=statusBg, text_size=size.small)
+    table.cell(panel, 0, 1, "ADX / Max", text_color=tc, text_size=size.small)
+    table.cell(panel, 1, 1, str.tostring(adx, "#.#") + " / " + str.tostring(maxAdx, "#.#"), text_color=adx <= maxAdx ? tc : #d50000, text_size=size.small)
+    table.cell(panel, 0, 2, "Slope / Max", text_color=tc, text_size=size.small)
+    table.cell(panel, 1, 2, str.tostring(slope, "#.###") + " / " + str.tostring(maxSlope, "#.###"), text_color=slope <= maxSlope ? tc : #d50000, text_size=size.small)
+    table.cell(panel, 0, 3, "Time Limit", text_color=tc, text_size=size.small)
+    table.cell(panel, 1, 3, str.tostring(maxHold) + " bars", text_color=tc, text_size=size.small)

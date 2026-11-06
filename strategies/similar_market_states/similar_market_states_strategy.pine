@@ -1,0 +1,258 @@
+//@version=6
+// ============================================================================
+// Similar Market States [WavesUnchained] — Strategy (standalone)
+// Version: 1.1.0
+// Author: WavesUnchained
+// Build: 2026-11-05 00:00:00
+// ============================================================================
+// Research strategy: trend/momentum continuation, filtered by a k-nearest-
+// neighbour lookup over earlier bars that formed the same setup. A trade is
+// only taken when the most similar past setups, replayed with exactly the
+// trade's own stop and holding period, cleared the cost hurdle.
+//
+// Features:
+//   ✓ Base setup: EMA trend (price side + slope) plus momentum in trend direction
+//   ✓ Four state features (RSI, momentum/ATR, EMA distance/ATR, relative volatility), each scaled by its own rolling stdev
+//   ✓ Neighbours drawn only from past bars that formed the same base setup in the same direction
+//   ✓ Neighbour outcome replays the real trade: entry next open, fixed ATR stop, time exit — no raw-move proxy
+//   ✓ Decision in R (stop distance): lower confidence bound of the neighbour mean must clear the cost in R
+//   ✓ Non-overlapping, index-anchored sampling grid; newest case ends on the previous bar (no lookahead)
+//   ✓ Model on/off switch: same entries, stop and holding period without the filter, for direct comparison
+//   ✓ Standard strategy features: trade direction, confirmed-bar entries, cooldown, break-even, filters, chart-type guard
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol (OHLC)
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
+//
+// ============================================================================
+
+strategy("Similar Market States [WavesUnchained] — Strategy", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     pyramiding=0, margin_long=100, margin_short=100,
+     commission_type=strategy.commission.percent, commission_value=0.02,
+     slippage=1, calc_on_every_tick=false, calc_on_order_fills=false,
+     process_orders_on_close=false, max_bars_back=5000)
+
+// Synthetische Bar-Preise (Heikin Ashi, Renko …): Orders füllen zu Marktpreisen,
+// der Backtest gilt dort nicht.
+var table chartTypeWarn = table.new(position.bottom_right, 1, 1)
+if barstate.islast and not chart.is_standard
+    table.cell(chartTypeWarn, 0, 0, "SMS Strategy · backtest invalid on this chart type",
+         bgcolor = color.new(color.red, 10), text_color = color.white, text_size = size.small)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+g_model = "Similarity Model"
+useModel    = input.bool(true, "Use Similarity Filter", group=g_model,
+     tooltip="Off: plain trend/momentum base strategy with the same entries, stop and holding period. Exists for a direct with/without comparison.")
+lookback    = input.int(1500, "Search Window (bars)", minval=200, maxval=3000, group=g_model,
+     tooltip="How far back neighbours are searched. Also the window for the rolling stdev that scales each feature.")
+neighbors   = input.int(20, "Nearest Neighbours", minval=5, maxval=50, group=g_model,
+     tooltip="Number of most similar past setups that must be found. Fewer matches within the max distance → no trade.")
+horizon     = input.int(4, "Holding Period (bars)", minval=1, maxval=50, group=g_model,
+     tooltip="Bars a trade is held unless the stop hits first. The neighbour outcomes are replayed with the same period.")
+spacing     = input.int(4, "Min Spacing Between Cases", minval=1, maxval=100, group=g_model,
+     tooltip="Sampling step through history. Never below the holding period, so neighbour outcomes do not overlap.")
+maxDistance = input.float(0.6, "Max Mean Feature Distance", minval=0.01, step=0.05, group=g_model,
+     tooltip="Upper bound on the mean of log(1 + |Δ| / stdev) across the four features. Lower = only very close matches count.")
+minAgreement = input.float(60, "Min Favourable Neighbours (%)", minval=50, maxval=100, step=5, group=g_model,
+     tooltip="Share of neighbours whose replayed trade closed in profit before costs.")
+costHurdle  = input.float(0.15, "Estimated Round-Trip Cost (%)", minval=0, step=0.01, group=g_model,
+     tooltip="Decision threshold only, not deducted in the tester. Estimate entry + exit including spread and slippage. Converted into R (multiples of the current stop distance) for the decision. Set the tester's own costs under Properties.")
+minEdgeR    = input.float(0.05, "Min Edge After Costs (R)", minval=0, step=0.01, group=g_model,
+     tooltip="Extra margin, in multiples of the stop distance, the neighbour estimate must clear on top of the cost.")
+confK       = input.float(1.0, "Uncertainty Discount (SE×)", minval=0, step=0.25, group=g_model,
+     tooltip="The neighbour mean is reduced by this many standard errors (stdev / √neighbours) before it is compared with the cost. 0 = compare the plain mean. Keeps a handful of lucky neighbours from passing as an edge.")
+
+g_trade = "Trend and Trade"
+trendLength    = input.int(200, "EMA Trend Period", minval=20, maxval=500, group=g_trade)
+momentumLength = input.int(5, "Momentum Period", minval=1, maxval=50, group=g_trade)
+stopAtr        = input.float(2, "Fixed Stop Distance (ATR×)", minval=0.25, step=0.25, group=g_trade,
+     tooltip="Stop = signal-bar close ∓ ATR(14) × this value. Set once at entry and never trailed.")
+
+g_strat       = "Strategy"
+tradeDirInput = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=g_strat,
+     tooltip="Filter entries by direction. Useful for asymmetric instruments.")
+confirmClose  = input.bool(true,  "Entries on Confirmed Bar Only", group=g_strat,
+     tooltip="Only trigger entries on closed bars. Prevents repainting in live trading.")
+cooldownBars  = input.int(0,     "Cooldown Bars After Exit", minval=0, group=g_strat,
+     tooltip="Block new entries for N bars after a position closes. Set 0 to disable.")
+enableBE      = input.bool(false, "Break-Even Stop", group=g_strat,
+     tooltip="Move SL to entry price once the trade is N×ATR in profit. Not part of the neighbour replay — switching it on decouples the trade from what the model evaluated.")
+beATRInput    = input.float(1.0,  "Break-Even Trigger (ATR×)", minval=0.1, step=0.1, group=g_strat,
+     tooltip="ATR distance from entry that triggers the break-even move.")
+
+g_filters     = "Filters"
+useSession    = input.bool(false, "Session Filter", group=g_filters)
+sessionInput  = input.session("0000-2345", "Session", group=g_filters)
+useDateRange  = input.bool(false, "Date Range", group=g_filters)
+dateFrom      = input.time(timestamp("01 Jan 2020 00:00 +0000"), "From", group=g_filters)
+dateTo        = input.time(timestamp("31 Dec 2030 23:59 +0000"), "To",   group=g_filters)
+useMaxDD      = input.bool(false, "Max Drawdown", group=g_filters)
+maxDD         = input.float(20.0, "Max Drawdown (%)", minval=1, step=1, group=g_filters)
+useMaxIntraDD = input.bool(false, "Max Intraday Loss", group=g_filters)
+maxIntraDD    = input.float(5.0,  "Max Intraday Loss (%)", minval=1, step=1, group=g_filters)
+useLossStreak = input.bool(false, "Losing Streak Limit", group=g_filters)
+maxLossStreak = input.int(5,      "Max Consecutive Losses", minval=1, group=g_filters)
+
+// ─── Features ────────────────────────────────────────────────────────────────
+// Alle Merkmale nur aus bereits geschlossenen Kursen.
+float atr             = ta.atr(14)
+float ema             = ta.ema(close, trendLength)
+float rsiFeature      = (ta.rsi(close, 14) - 50.0) / 50.0
+float momentumFeature = atr > 0 ? (close - close[momentumLength]) / atr : na
+float trendFeature    = atr > 0 ? (close - ema) / atr : na
+float relativeAtr     = close > 0 ? atr / close : na
+float typicalVol      = ta.sma(relativeAtr, 100)
+float volFeature      = typicalVol > 0 ? relativeAtr / typicalVol : na
+
+// Jedes Merkmal auf seine eigene Streuung skalieren. Ohne das dominiert die
+// EMA-Distanz (± viele ATR) den Abstand, RSI und Volatilität zählen kaum.
+float rsiSd   = ta.stdev(rsiFeature, lookback)
+float momSd   = ta.stdev(momentumFeature, lookback)
+float trendSd = ta.stdev(trendFeature, lookback)
+float volSd   = ta.stdev(volFeature, lookback)
+
+int trend = close > ema and ema > ema[5] ? 1 : close < ema and ema < ema[5] ? -1 : 0
+// Basis-Setup: Trend plus Momentum in Trendrichtung. Genau das Setup, das auch
+// gehandelt wird — die Nachbarn kommen nur aus Kerzen mit demselben Setup.
+int setupDir = trend == 1 and momentumFeature > 0 ? 1 : trend == -1 and momentumFeature < 0 ? -1 : 0
+
+bool featuresReady = not na(rsiFeature) and not na(momentumFeature) and not na(trendFeature) and not na(volFeature)
+bool scaleReady    = rsiSd > 0 and momSd > 0 and trendSd > 0 and volSd > 0
+// Gleiches Anlaufintervall für Modell und Basisstrategie.
+bool ready = featuresReady and scaleReady and bar_index >= lookback + horizon + math.max(trendLength, 150)
+
+f_dist(float a, float b, float sd) =>
+    math.log(1 + math.abs(a - b) / sd)
+
+// ─── Neighbour search ────────────────────────────────────────────────────────
+float expectedR   = na
+float lowerR      = na
+float agreement   = na
+int   matchCount  = 0
+
+if ready and setupDir != 0
+    array<float> distances = array.new_float(0)
+    array<float> outcomes  = array.new_float(0)
+    int stride = math.max(spacing, horizon)
+    // Jüngster Fall: Signal s mit s + horizon <= bar_index - 1, endet also
+    // spätestens auf der VORHERIGEN Kerze. Raster an absoluten Indizes verankert.
+    int firstOffset = horizon + 1 + (bar_index - horizon - 1) % stride
+    int lastOffset  = horizon + lookback
+    if firstOffset <= lastOffset
+        for offset = firstOffset to lastOffset by stride
+            bool histReady = not na(rsiFeature[offset]) and not na(momentumFeature[offset]) and not na(trendFeature[offset]) and not na(volFeature[offset])
+            if histReady and setupDir[offset] == setupDir and open[offset - 1] > 0
+                float distance = (f_dist(rsiFeature, rsiFeature[offset], rsiSd) + f_dist(momentumFeature, momentumFeature[offset], momSd) + f_dist(trendFeature, trendFeature[offset], trendSd) + f_dist(volFeature, volFeature[offset], volSd)) / 4.0
+                if distance <= maxDistance
+                    // Historischen Trade exakt so nachspielen, wie er gehandelt würde:
+                    // Einstieg Open(s+1), fester Stop ab Close(s), Ausstieg Close(s+horizon).
+                    float entryPx = open[offset - 1]
+                    float stopPx  = close[offset] - setupDir * stopAtr * atr[offset]
+                    float exitPx  = close[offset - horizon]
+                    for k = 1 to horizon
+                        int o = offset - k
+                        if setupDir == 1 and low[o] <= stopPx
+                            exitPx := math.min(open[o], stopPx)
+                            break
+                        if setupDir == -1 and high[o] >= stopPx
+                            exitPx := math.max(open[o], stopPx)
+                            break
+                    // Ergebnis in R (Vielfache des Stop-Abstands): vergleichbar über
+                    // Volatilitätsphasen, anders als eine Prozentbewegung.
+                    float outcome = setupDir * (exitPx - entryPx) / (stopAtr * atr[offset])
+                    if array.size(distances) < neighbors
+                        array.push(distances, distance)
+                        array.push(outcomes, outcome)
+                    else
+                        float worstDistance = array.max(distances)
+                        if distance < worstDistance
+                            int worstIndex = array.indexof(distances, worstDistance)
+                            array.set(distances, worstIndex, distance)
+                            array.set(outcomes, worstIndex, outcome)
+
+    matchCount := array.size(outcomes)
+    if matchCount == neighbors
+        int favorable = 0
+        for i = 0 to matchCount - 1
+            if array.get(outcomes, i) > 0
+                favorable += 1
+        expectedR  := array.avg(outcomes)
+        lowerR     := expectedR - confK * array.stdev(outcomes) / math.sqrt(matchCount)
+        agreement  := 100.0 * favorable / matchCount
+
+// Kosten in R des aktuellen Trades: Prozentkosten relativ zum Stop-Abstand.
+float costR = costHurdle / 100.0 * close / (stopAtr * atr)
+bool modelPass = matchCount == neighbors and lowerR > costR + minEdgeR and agreement >= minAgreement
+
+// ─── Entry gating ────────────────────────────────────────────────────────────
+strategy.risk.max_drawdown(useMaxDD ? maxDD : 100, strategy.percent_of_equity)
+strategy.risk.max_intraday_loss(useMaxIntraDD ? maxIntraDD : 100, strategy.percent_of_equity)
+
+var int _genLossStreak = 0
+if strategy.losstrades > strategy.losstrades[1]
+    _genLossStreak := _genLossStreak + 1
+if strategy.wintrades > strategy.wintrades[1]
+    _genLossStreak := 0
+_genFilterOk = (not useSession or not na(time(timeframe.period, sessionInput))) and
+     (not useDateRange or (time >= dateFrom and time <= dateTo)) and
+     (not useLossStreak or _genLossStreak < maxLossStreak)
+
+var int _lastExitBar = na
+_justClosed = strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+if _justClosed
+    _lastExitBar := bar_index
+_inCooldown = cooldownBars > 0 and not na(_lastExitBar) and (bar_index - _lastExitBar) < cooldownBars
+_canEntry   = not _inCooldown and (not confirmClose or barstate.isconfirmed) and _genFilterOk
+
+_canLong  = tradeDirInput != "Short Only"
+_canShort = tradeDirInput != "Long Only"
+
+bool mayEnter    = ready and _canEntry and strategy.position_size == 0 and (not useModel or modelPass)
+bool longSignal  = mayEnter and _canLong  and setupDir == 1
+bool shortSignal = mayEnter and _canShort and setupDir == -1
+
+// ─── Strategy execution ──────────────────────────────────────────────────────
+// Stop wird mit dem Einstieg platziert (aktiv ab der Einstiegskerze), Abstand
+// fest ab Signal-Close — identisch zur Nachbar-Simulation.
+var float stopLevel = na
+
+if longSignal
+    stopLevel := close - stopAtr * atr
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=stopLevel)
+if shortSignal
+    stopLevel := close + stopAtr * atr
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=stopLevel)
+
+if strategy.position_size != 0
+    float avgPx = strategy.position_avg_price
+    bool beLong  = enableBE and strategy.position_size > 0 and close >= avgPx + atr * beATRInput
+    bool beShort = enableBE and strategy.position_size < 0 and close <= avgPx - atr * beATRInput
+    if beLong
+        stopLevel := math.max(stopLevel, avgPx)
+    if beShort
+        stopLevel := math.min(stopLevel, avgPx)
+    if strategy.position_size > 0
+        strategy.exit("Long Exit", "Long", stop=stopLevel)
+    else
+        strategy.exit("Short Exit", "Short", stop=stopLevel)
+
+    // Zeitausstieg auf dem Close der horizon-ten Haltekerze (= Close(s+horizon)).
+    int barsHeld = bar_index - strategy.opentrades.entry_bar_index(0) + 1
+    if barsHeld >= horizon
+        strategy.close(strategy.position_size > 0 ? "Long" : "Short", comment="Time", immediately=true)
+
+// ─── Visuals ─────────────────────────────────────────────────────────────────
+plot(ema, "Trend EMA", color=trend == 1 ? color.teal : trend == -1 ? color.red : color.gray)
+plot(strategy.position_size != 0 ? stopLevel : na, "Stop", color=color.orange, style=plot.style_linebr)
+plot(expectedR,   "Neighbour Mean Result (R)", display=display.data_window)
+plot(lowerR,      "Neighbour Lower Bound (R)", display=display.data_window)
+plot(costR,       "Cost Hurdle (R)",           display=display.data_window)
+plot(agreement,   "Neighbour Agreement (%)",   display=display.data_window)
+plot(matchCount,  "Neighbour Matches",         display=display.data_window)
