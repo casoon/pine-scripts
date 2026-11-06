@@ -19,7 +19,9 @@ The Claude Code skill `strategy-from-indicator` carries the build rules.
 | `kestrel_opportunity_lens/` | Kestrel Opportunity Lens | Time exit, no stop (evaluation) |
 | `market_average_relationship_engine/` | Market–Average Relationship Engine | Trailing (MA ∓ ATR×) |
 | `oscillator_divergence_zones/` | Oscillator Divergence Zones | Pivot + ATR buffer |
+| `overextension_reversion/` | — (research, standalone) | Swing/fixed SL + TP + time exit |
 | `reversal_engine_score/` | Reversal Engine Score | Structural + R-multiple TP |
+| `similar_market_states/` | — (research, standalone) | Fixed + time exit |
 | `smooth_trend_radar/` | Smooth Trend Radar | Fixed, TP1/TP2/TP3 levels |
 | `wavetrend/` | WaveTrend v4 | Trailing |
 

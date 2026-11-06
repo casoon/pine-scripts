@@ -194,6 +194,8 @@ Ratings: **Not ready** (PF < 1.15 or Return/DD < 1.5) · **Promising** (PF ≥ 1
 | [reversal_engine_score_strategy](strategies/reversal_engine_score/) | Reversal Engine Score | Strukturell + R-Multiple TP | Not ready | Gate-Modell über v1.1–v1.4 umgebaut (additiver Score rankte invers); **stale**: Datei ist v1.6.1, Messungen bis v1.4 |
 | [commodity_pulse_matrix_v4_strategy](strategies/commodity_pulse_matrix/) | Commodity Pulse Matrix v4 | Directional Fixed TP | Not ready | Kein Backtest vorhanden |
 | [kestrel_opportunity_lens_strategy](strategies/kestrel_opportunity_lens/) | Kestrel Opportunity Lens | Zeitausstieg, kein Stop | Not ready | Evaluationsstrategie: misst jedes Long/Short-Setup über 3/6/12/24 Bars plus MFE/MAE, gruppiert nach Trendkontext, gegen Williams-Zonenaustritt als Baseline; noch nicht getestet |
+| [similar_market_states_strategy](strategies/similar_market_states/) | — (Forschung, standalone) | Fixed + Zeitausstieg | Not ready | kNN-Filter über vergangene gleiche Setups, Nachbar-Ergebnis spielt den echten Trade nach; v1.0 auf NatGas ohne Edge, v1.1 (Entscheidung in R mit Unsicherheitsabschlag) noch nicht getestet |
+| [overextension_reversion_strategy](strategies/overextension_reversion/) | — (Forschung, standalone) | Fixed SL/TP + Zeitausstieg | Not ready | Mean Reversion EMA±ATR-Band mit ADX-/Slope-Range-Gate; v1.0 auf NatGas unter PF-Schwelle, v1.1 (Swing-Extrem-Stop) noch nicht getestet |
 
 Backtest-Zahlen stehen ausschließlich in `strategies/<name>/<name>_strategy_assessment.md`,
 wo Instrument, Timeframe und Stichprobengröße mitlaufen.
