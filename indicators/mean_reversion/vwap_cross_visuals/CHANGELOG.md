@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.1 — 2026-11-17
+- Anchored VWAPs (pivot high/low) no longer stay empty for the rest of the chart after a single bar without volume: such a bar now adds nothing to the running sums. On symbols without real volume the anchored VWAPs stay empty as before
+
 ## v2.4.0 — 2026-11-17
 - Structure crosses (`◆ S`) ignore the jump of an anchored VWAP when it re-anchors on a new pivot, like the session-VWAP reset; the legend table is sized for its maximum row count
 - **Display tool:** the script now shows where price stands relative to VWAP and no longer grades setups or emits trade signals. Removed: entry signals (`L` / `S`), zone signals (`ZL` / `ZS`), volume-profile signals (`VL` / `VS`, LVN break & retest, VA re-entry), HTF stack signals (`HTF↑` / `HTF↓` / `BREAK`), the VWAP bias score and its BULLISH/BEARISH verdict, the confluence count and average strength, cross/structure/cluster strength scores, strength-coloured markers, target lines, the Zone Strength background, Avg Zone Score, Volume Score, HTF stack strength / bias / market regime, and the hidden export plots `VWAP_Bias_Score` and `VWAP_Confluence_Count`

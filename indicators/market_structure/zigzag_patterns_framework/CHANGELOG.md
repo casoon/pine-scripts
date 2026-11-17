@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.4.1 — 2026-11-17
+- Fix (1-2-3): a pending setup no longer triggers on a superseded Point 2. When a later pivot of Point 2's type forms beyond Point 2 (also when it gets there by replacing the last pivot), the swing passed Point 2 without a close-through and turned; the setup is dropped
+- Fix (1-2-3): when a more extreme pivot replaces Point 3, the full setup rules are checked again (Point 3 inside Point 1, retracement within the 1-2-3 band), not only the Point 1 limit. If they hold, the stored Point 3 moves and the "Max Wait for Break" window restarts from the new Point 3; otherwise the setup is dropped
+
 ## v1.4.0 — 2026-11-17
 - Alerts: "1-2-3 Long" / "1-2-3 Short" are renamed "1-2-3 Bullish" / "1-2-3 Bearish"; messages read "ZPF · 1-2-3 BULL · …" / "ZPF · 1-2-3 BEAR · …" instead of LONG/SHORT. Existing 1-2-3 alerts must be recreated
 

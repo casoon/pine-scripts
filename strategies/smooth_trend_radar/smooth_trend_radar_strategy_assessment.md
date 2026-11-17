@@ -5,6 +5,8 @@
 **Assessment date:** 2026-04-29
 
 > **Stale as of 2026-07-09**: the strategy was resynced to indicator v3.4.0 (ATR-scaled slope-threshold trend detection instead of raw crossover; rejection signals no longer gated to sideways-only regime; optional volume/volatility-adaptive filters). All runs below reflect the pre-v3.4.0 logic and need to be re-validated.
+>
+> **Exit logic changed 2026-11-17 (strategy v3.4.7)**: a trend change now closes a position against the new trend and ends its setup (before, the position kept its SL/TP until its own exit). Runs before this date are not comparable.
 
 ---
 

@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Wolfe Wave Scanner Pro [WavesUnchained]
-// Version: 4.16
+// Version: 4.16.1
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
@@ -53,7 +53,7 @@ expiryBufferBars  = input.int(10, "Ablaufpuffer nach ETA (Bars)", minval=0, maxv
 maxLegPurityRatio = input.float(0.50, "Max. Zwischen-Swing / Leg", minval=0.10, maxval=1.0, step=0.05)
 invalidateOnClose = input.bool(true, "Invalidierung nur per Close (aus = Intrabar High/Low)")
 
-showOldPatterns   = input.bool(false, "Abgeschlossene/ersetzte Patterns behalten")
+showOldPatterns   = input.bool(false, "Abgeschlossene Patterns behalten")
 drawZigzag        = input.bool(true, "Interne ZigZag-Struktur zeichnen")
 showLabels        = input.bool(true, "Punktlabels anzeigen")
 showInfoLabel     = input.bool(true, "Info-Label anzeigen (Richtung, P5-Alter, EPA@ETA)")
@@ -335,25 +335,6 @@ f_find_overlap_index(Pattern p) =>
                 idx := i
     idx
 
-// Index of the lowest-ranked currently tracked pattern — used to make room
-// for a new, non-overlapping, higher-ranked candidate once the cap is
-// reached. Without this, the first `maxConcurrentPatterns` patterns that
-// happen not to invalidate for a long stretch permanently fill every slot,
-// silently discarding every new, better candidate found afterward (observed
-// in logs: `best.valid=true` kept firing for over a year with zero new
-// PATTERN FIRED/REPLACED events once all slots were occupied).
-f_find_weakest_index() =>
-    n = array.size(trackedPatterns)
-    idx = -1
-    minRankSeen = 1000000
-    if n > 0
-        for i = 0 to n - 1
-            tp = array.get(trackedPatterns, i)
-            if tp.p.rank < minRankSeen
-                minRankSeen := tp.p.rank
-                idx := i
-    idx
-
 // Index of the highest-ranked currently tracked pattern — used so the
 // dashboard's Pattern/EPA/Invalidation reflect an actual tracked, live pattern
 // instead of the raw search candidate, which can be an invalid best-in-window
@@ -378,31 +359,6 @@ f_delete_tracked(TrackedPattern tp) =>
         line.delete(array.pop(tp.objLines))
     while array.size(tp.objLabels) > 0
         label.delete(array.pop(tp.objLabels))
-
-// Cleans up same-direction overlap chains the pairwise insertion check can
-// miss: if A overlaps B and B overlaps C, but A and C don't directly
-// overlap each other, all three could end up tracked at once even though
-// they visually occupy the same stretch. Checks every pair, keeping only
-// the higher-ranked one of each same-direction, overlapping pair.
-f_dedupe_overlaps() =>
-    n = array.size(trackedPatterns)
-    if n > 1
-        keep = array.new_bool(n, true)
-        for i = 0 to n - 2
-            for j = i + 1 to n - 1
-                tpI = array.get(trackedPatterns, i)
-                tpJ = array.get(trackedPatterns, j)
-                if array.get(keep, i) and array.get(keep, j) and f_overlaps(tpI.p, tpJ.p)
-                    if tpI.p.rank >= tpJ.p.rank
-                        array.set(keep, j, false)
-                    else
-                        array.set(keep, i, false)
-        for i = n - 1 to 0
-            if not array.get(keep, i)
-                tp = array.get(trackedPatterns, i)
-                if not showOldPatterns
-                    f_delete_tracked(tp)
-                array.remove(trackedPatterns, i)
 
 // ============================================================================
 // Rule + Rank Engine
@@ -764,6 +720,7 @@ if newSwing and sz >= 5
     start = math.max(0, sz - searchDepth)
     perI5Best = array.new<Pattern>()
     localBest = emptyPattern()
+    bool hasBest = false
     evalCount = 0
     structHits = 0
 
@@ -783,6 +740,10 @@ if newSwing and sz >= 5
 
         localBestForI5 = emptyPattern()
         localBestRawForI5 = emptyPattern()
+        // Found flags instead of comparing against the empty pattern's rank 0,
+        // so a valid combination with rank 0 can still be selected.
+        bool hasValidForI5 = false
+        bool hasRawForI5 = false
 
         // Guarded explicitly: Pine's `for i = A to B` silently reverses (and
         // can step on an out-of-bounds index) whenever A > B, which small
@@ -808,16 +769,18 @@ if newSwing and sz >= 5
                                          i1, i2, i3, i4, i5)
                                     evalCount += 1
                                     structHits += candidate.structureOk ? 1 : 0
-                                    if candidate.rank > localBestRawForI5.rank
+                                    if not hasRawForI5 or candidate.rank > localBestRawForI5.rank
                                         localBestRawForI5 := candidate
+                                        hasRawForI5 := true
                                     // A higher-ranked shape that already
                                     // fails structural gates must not hide a
                                     // slightly lower-ranked valid setup for
                                     // the same point-5 anchor.
-                                    if candidate.valid and candidate.rank > localBestForI5.rank
+                                    if candidate.valid and (not hasValidForI5 or candidate.rank > localBestForI5.rank)
                                         localBestForI5 := candidate
+                                        hasValidForI5 := true
 
-        if localBestForI5.rank == 0
+        if not hasValidForI5
             localBestForI5 := localBestRawForI5
 
         // Run only once per i5, on the single winning combination — see
@@ -836,8 +799,9 @@ if newSwing and sz >= 5
         // Global best must see the exact same post-containment candidate that
         // is stored/tracked. Updating it inside the combination loop left the
         // dashboard showing a pre-validation winner.
-        if localBestForI5.rank > localBest.rank
+        if hasRawForI5 and (not hasBest or localBestForI5.rank > localBest.rank)
             localBest := localBestForI5
+            hasBest := true
 
         array.push(perI5Best, localBestForI5)
 
@@ -862,13 +826,11 @@ if newSwing and sz >= 5
          + " barViolationAtr=" + str.tostring(best.barBoundaryViolationAtr, "#.##") + " barViolationX=" + str.tostring(best.barBoundaryViolationX))
 
     // Every distinct, non-overlapping valid point-5 anchor gets its own
-    // tracked pattern. An overlapping candidate only replaces the existing
-    // one at that spot if it ranks higher and isn't literally the same
-    // pattern already tracked. Once the cap is full, a non-overlapping
-    // candidate evicts the weakest currently tracked pattern if it ranks
-    // higher than that one — without this, the first `maxConcurrentPatterns`
-    // patterns that happen not to invalidate for a while permanently occupy
-    // every slot and silently block every better candidate found afterward.
+    // tracked pattern while a slot is free. A tracked pattern is never
+    // replaced or evicted: it leaves only through its own lifecycle end
+    // (EPA reached, invalidated, expired). An overlapping candidate, or one
+    // found while every slot is taken, is dropped; it is found again on a
+    // later swing while its point 5 is still inside the search window.
     if array.size(perI5Best) > 0
         for i = 0 to array.size(perI5Best) - 1
             c = array.get(perI5Best, i)
@@ -907,34 +869,7 @@ if newSwing and sz >= 5
                             f_log("PATTERN FIRED bull=" + str.tostring(c.bull) + " rank=" + str.tostring(c.rank)
                                  + " x1=" + str.tostring(c.x1) + " x5=" + str.tostring(c.x5))
                         else
-                            weakestIdx = f_find_weakest_index()
-                            weakest = array.get(trackedPatterns, weakestIdx)
-                            if c.rank > weakest.p.rank
-                                if not showOldPatterns
-                                    f_delete_tracked(weakest)
-                                newTp = f_draw_pattern(c)
-                                array.set(trackedPatterns, weakestIdx, newTp)
-                                newBullPattern := newBullPattern or c.bull
-                                newBearPattern := newBearPattern or not c.bull
-                                f_log("PATTERN EVICTED old_rank=" + str.tostring(weakest.p.rank) + " new bull=" + str.tostring(c.bull)
-                                     + " rank=" + str.tostring(c.rank) + " x1=" + str.tostring(c.x1) + " x5=" + str.tostring(c.x5))
-                    else
-                        existing = array.get(trackedPatterns, overlapIdx)
-                        if c.x5 != existing.p.x5 and c.rank > existing.p.rank
-                            if not showOldPatterns
-                                f_delete_tracked(existing)
-                            newTp = f_draw_pattern(c)
-                            array.set(trackedPatterns, overlapIdx, newTp)
-                            newBullPattern := newBullPattern or c.bull
-                            newBearPattern := newBearPattern or not c.bull
-                            f_log("PATTERN REPLACED bull=" + str.tostring(c.bull) + " rank=" + str.tostring(c.rank)
-                                 + " x1=" + str.tostring(c.x1) + " x5=" + str.tostring(c.x5))
-
-    // Cleans up any same-direction overlap chain the pairwise checks above
-    // can miss (A overlaps B, B overlaps C, but A and C don't directly
-    // overlap each other) — otherwise several patterns can end up tracked
-    // at once even though they visually occupy the same stretch.
-    f_dedupe_overlaps()
+                            f_log("PATTERN DROPPED (no free slot) bull=" + str.tostring(c.bull) + " rank=" + str.tostring(c.rank) + " x5=" + str.tostring(c.x5))
 
 // ============================================================================
 // Pattern lifecycle tracking (every bar)

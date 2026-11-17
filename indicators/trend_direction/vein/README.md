@@ -6,12 +6,12 @@ The system consists of 6 indicators that work together on a NatGas chart.
 
 | Script | Type | Timeframe | File |
 |--------|------|-----------|------|
-| Vein Reversal Labeler | Overlay | 4H | `vein_reversal_labeler_4h.pine` |
-| Vein Structure & Zones | Overlay | 4H | `vein_structure_zones_4h.pine` |
-| Vein Feature Exporter | Panel | 4H | `vein_feature_exporter_core_4h.pine` |
-| Vein Reversal Score | Panel | 4H | `vein_reversal_score_4h.pine` |
-| Vein Accumulation Phase | Overlay | 4H | `vein_accumulation_phase_4h.pine` |
-| Vein Execution 15m | Overlay | 15m | `vein_execution_15m.pine` |
+| Vein Reversal Labeler | Overlay | 4H | `vein_reversal_labeler.pine` |
+| Vein Structure & Zones | Overlay | 4H | `vein_structure_zones.pine` |
+| Vein Feature Exporter | Panel | 4H | `vein_feature_exporter.pine` |
+| Vein Reversal Score | Panel | 4H | `vein_reversal_score.pine` |
+| Vein Accumulation Phase | Overlay | 4H | `vein_accumulation_phase.pine` |
+| Vein Execution 15m | Overlay | 15m | `vein_execution.pine` |
 
 **Core principle:** 4H = Context (where to look). 15m = Timing (when to act). Accumulation = Patience (is a base forming?).
 
@@ -95,26 +95,22 @@ All swing and BOS events are detected on two levels:
 
 | Label | Meaning |
 |-------|---------|
-| ★ SPRING | Major Spring — fake breakdown below significant swing low |
+| SPRING | Major Spring — fake breakdown below significant swing low |
 | spring | Micro Spring — fake breakdown below local swing low |
-| ★ UPTHRUST | Major Upthrust — fake breakout above significant swing high |
+| UPTHRUST | Major Upthrust — fake breakout above significant swing high |
 | upthrust | Micro Upthrust — fake breakout above local swing high |
-| ★ BOS ↑↑ / ★ BOS ↓↓ | Major Break of Structure |
+| BOS ↑↑ / BOS ↓↓ | Major Break of Structure |
 | bos ↑ / bos ↓ | Micro Break of Structure |
 
-#### Event Quality
+#### Event Tooltips
 
-Each event gets a quality grade based on 4 factors:
-- Wick size (≥ 55% = strong)
-- Candle range (≥ 0.8× ATR = strong)
-- Volume (≥ 1.3× average = strong)
-- Sweep depth (≥ 0.15× ATR = strong)
+Event labels show the plain event name. The tooltip carries the raw measurements of the bar:
 
-| Prefix | Quality | Color | Criterion |
-|--------|---------|-------|-----------|
-| ★ | **Strong** | bold | 3–4 factors above threshold |
-| (none) | Normal | medium | 1–2 factors |
-| ~ | Weak | faded | Barely qualified |
+| Event | Tooltip facts |
+|-------|---------------|
+| Spring / Upthrust | Sweep depth beyond the swing level (ATR), wick % of range, candle range (× ATR), volume (× average, only with real volume) |
+| BOS / CHoCH | Close beyond the broken swing level (ATR), volume (× average, only with real volume) |
+| Rejection | Wick % of range, body % of range, candle range (× ATR), volume (× average, only with real volume) |
 
 #### Climax Sequence
 
@@ -131,7 +127,7 @@ Internally 5 stages: CLX → Reacting → Test Pending → Test Valid → Confir
 | Label | Meaning |
 |-------|---------|
 | FB | Fake Break — breakout above/below swing level, close back inside |
-| ★rej / rej / ~rej | Rejection (with quality) |
+| rej | Rejection candle |
 | · | Swing High/Low (minimal dot) |
 
 ### Automatic Zones
@@ -163,7 +159,7 @@ Events generate horizontal S/R zones as colored boxes.
 - **Green boxes** = Support
 - **Red boxes** = Resistance
 - **Amber boxes** = Flip zones
-- Only the top N zones are shown (default: 8), prioritized by type, quality, status, touches and age
+- Only the top N zones are shown (default: 8), prioritized by type, status, touches, age and the formation of the source bar (wick, range, absorption, climax volume); the ranking only decides what is drawn and is not shown
 
 ### Nearest Zone Info
 

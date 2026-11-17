@@ -11,6 +11,7 @@ Detects two specific reversal candlestick patterns — tweezer tops/bottoms and 
 - Internal zone ranking from five components (rejection, extreme proximity, impulse before, freshness, cleanliness) — used only to highlight the Top N active zones
 - Zone labels (direction + pattern) with tooltips showing the raw zone measures, touches, age and invalidation level
 - Zone merging on overlap, cluster limit, TTL, and close-through invalidation
+- `Max stored zones` (default 100) caps the zones kept in memory: above it the oldest inactive zone is removed first, otherwise the oldest zone, together with its box and label
 - Structure context: HH/HL/LH/LL swing detection with a ranking bonus
 - Trend gate: EMA + HTF regime, optional Supertrend and MOST (local/HTF/both scopes)
 - Retest signals: first retest of a zone, optionally only with the HTF trend on the signal's side

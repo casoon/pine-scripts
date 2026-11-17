@@ -1,5 +1,12 @@
 # Changelog
 
+## v4.16.1 — 2026-11-17
+- A tracked pattern is no longer replaced or evicted by a higher-ranked candidate while its lifecycle runs. It now ends only as EPA reached, Invalidated or Expired, each with its label and alert; before, it could vanish without an end event (also after 50% EPA) while a new "detected" alert fired
+- A new candidate that overlaps a tracked pattern is skipped; one found while every slot is taken is dropped and is found again on a later search once a slot is free, as long as it is still open and inside the search window. The overlap cleanup pass is gone (tracked patterns can no longer overlap)
+- A valid combination with internal rank 0 can now be selected for its point-5 anchor; before, it was ignored in favour of an invalid one
+- Input `Abgeschlossene/ersetzte Patterns behalten` renamed to `Abgeschlossene Patterns behalten`
+- Pine logs: `PATTERN REPLACED` / `PATTERN EVICTED` replaced by `PATTERN DROPPED`
+
 ## v4.16 — 2026-11-17
 Rebuilt as a display of Wolfe geometry: no quality grade, no trade metrics, lifecycle-event alerts. **Existing alerts must be recreated** — titles and messages changed.
 - Removed the 0-100 score as a verdict: no `Mindestqualität` gate, no score on the chart label, dashboard or debug header. The former 80→100 renormalization is gone. Validity now comes only from the hard rules (structure, contraction, channel, swing and bar boundary hold, leg purity, P5 zone, apex convergence)

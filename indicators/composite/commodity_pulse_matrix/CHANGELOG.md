@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.6.1 — 2026-11-17
+Bug fix and cleanup in v3; v4 is unchanged. The HTF midline now draws one HTF bar later than before and no longer moves while the HTF bar is forming.
+
+- **HTF Midline repainted** (v3). The midline read the still-forming higher-timeframe bar, so its history differed from what was shown live. All modes (Simple, OHLC4, VWAP, Dynamic) now show the value of the last closed HTF bar
+- **Legacy entry engine removed** (v3). Entry V2 is the only entry path. The legacy continuation entry dots (● shown only with the new engine switched off) were driven by pivot highs/lows and a confluence count that included divergence-zone proximity; they are removed together with the 3-factor confluence module and the chart pivot tracking that only fed them. The divergence-zone lines stay as display
+- **Input removed** (v3): Enable New Entry Engine. Volatility-stop lines, the ranging background, Entry V2 labels, weakness labels and the debug output no longer depend on it
+- **Marker removed** (v3): the legacy continuation entry dot (●)
+- No alerts removed. The Weakness Bull/Bear alerts no longer depend on the removed input
+
 ## v3.6.0 / v4.4.0 — 2026-11-17
 The remaining point and grade gates are removed. The Entry V2 trigger stays; around it only the explicit optional filters remain. Breaking: inputs are gone, and v4 entries change frequency. With the old default (2 of 3 evidence points) entries the context points used to block now fire, so expect more entries. Re-check on the chart and re-run the strategy backtest.
 

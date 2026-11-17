@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.4.1 — 2026-11-17
+- New input `Max stored zones` (default 100, group "Zone Management"): above the cap the oldest inactive zone is removed, otherwise the oldest zone, with its box and label. Before, every zone stayed in memory and was checked on every bar, which could hit Pine's loop-time or memory limits on long histories. Top-N ranking and retest signals work on the remaining zones
+
 ## v3.4.0 — 2026-11-17
 - Removed: zone grades A/B/C — the grade in zone labels and tooltips, the grade-based label colors and the tooltip trading hints ("Best: First retest" / "Good: Wait for confirmation" / "Context only"); inputs `Show only A/B Zones`, `Grade A: Min Score`, `Grade B: Min Score` are gone
 - Removed: the `Min Zone Score (0-100)` input and its admission gate — every pattern that passes the cluster/overlap checks now creates a zone, so more zones and therefore more retest signals can appear
