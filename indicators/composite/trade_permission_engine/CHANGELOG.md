@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.4.0 — 2026-11-17
+- **Role: context display.** The "fully qualified Long/Short signal" alerts and the "Signal retention" input are removed; the other alerts now describe events ("permission rose above the threshold", "trigger event", "price reached reference level T1", "price crossed the invalidation level") instead of recommending trades. Calculation and display are unchanged. Saved alerts on "TPE1 Long/Short Signal" no longer exist
+
 ## v1.3.5 — 2026-10-13
 - Fix: compile error CE10072 — `precision` was passed twice since the 2026-10-02 scale change; the duplicate is removed and the script's own precision (1 decimals) stays
 

@@ -329,13 +329,17 @@ Compact display with rich hover tooltips on every cell:
 | Trend conflict | Setup against strong trend (ER > 0.45) |
 | Opposed candidate | Candidate + opposing side confirmed |
 
-### Three Alert Types
+### Alerts describe events
 
-| Alert | Condition | Purpose |
-|-------|-----------|---------|
-| **REVIEW** | Setup ≥ 4, Conf ≥ 1.5, no strong conflict | "Look at this" |
-| **ACTION** | Setup ≥ 5, Conf ≥ 3, Follow-through ✓, no conflict | "Consider acting" |
-| **INVALIDATION** | Previously Candidate, now Failed | "Signal is dead" |
+`vein_reversal_score` is a context display, not a signal generator: its setup (oscillator extremes,
+stretch) and confirmation (springs/upthrusts, BOS/CHoCH) are event types that showed no robust net
+entry edge when measured broadly with costs against random entries (`chronicles/11`). There is no
+REVIEW/ACTION stage and no quality grade. Alerts describe what happened:
+
+| Alert | Condition |
+|-------|-----------|
+| **Setup + Structure Event** | Status = CANDIDATE (setup and a structure event on the same side) |
+| **Invalidation** | Previously Candidate, now Failed |
 
 Plus: **Trap Hint** when a failed reversal signals the opposite direction.
 
@@ -558,7 +562,7 @@ All tables follow consistent design:
 
 | Alert | Source | Purpose |
 |-------|--------|---------|
-| **Bull/Bear Review** | Vein Score (4H) | "Something is building — look at chart" |
+| **Bull/Bear Setup + Structure Event** | Vein Score (4H) | Setup and a structure event on the same side |
 | **Bull/Bear Trigger** | Vein Execution (15m) | "Now it's getting concrete" |
 | **Bull/Bear Invalidation** | Vein Score (4H) | "Cancel — signal failed" |
 
@@ -566,10 +570,8 @@ All tables follow consistent design:
 
 | Source | Alert | Condition |
 |--------|-------|-----------|
-| Score | Bull/Bear Review | Setup ≥ 4 + Conf ≥ 1.5 |
-| Score | Bull/Bear Action | Setup ≥ 5 + Conf ≥ 3 + FT |
 | Score | Bull/Bear Invalidation | Candidate → Failed |
-| Score | Bull/Bear Candidate | Status = CANDIDATE |
+| Score | Bull/Bear Setup + Structure Event | Status = CANDIDATE |
 | Score | Conflict | Significant conflict detected |
 | Score | Spring/Upthrust | Heuristic triggered |
 | Score | Major BOS | Major Break of Structure |

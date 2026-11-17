@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- `vein_reversal_score` v0.2.4→0.3.0 — **role: context display.** REVIEW and ACTION alerts, the hand-weighted "Quality" grade (table row, data window, "High Quality" diamonds) and the "Min Quality for ACTION Alert" input are removed. "Candidate" alerts are renamed "Setup + Structure Event". Setup, confirmation and status are calculated as before. Saved REVIEW/ACTION alerts no longer exist
 - `vein_reversal_score`, `vein_exhaustion`: without real volume the MFI points are no longer moved to RSI (RSI was counted twice). The setup/exhaustion maximum is lower on such symbols; thresholds are unchanged, so fewer setups reach them there. Instruments with real volume are unaffected. `vein_reversal_score`: comment on the confirmation maximum corrected
 
 ## Volume check — 2026-10-12

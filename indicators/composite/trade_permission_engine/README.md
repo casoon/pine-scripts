@@ -1,5 +1,11 @@
 # Trade Permission Engine
 
+**Role: context display, not a signal generator.** Its triggers (rejection at an extreme, close beyond
+a micro swing) and gates (retracement maturity, leg efficiency, divergence exhaustion) belong to
+event types that showed no robust net entry edge when measured broadly with costs against random
+entries (`chronicles/11`). The script shows where the market stands; it does not recommend entries.
+Pivots are used as known reference levels (no lag on the event itself).
+
 The successor to `directional_probability_engine` (archived, see
 `archive/indicators/directional_probability_engine/`). It answers *"does the market currently
 permit trading Long or Short here"*, not *"how probable is this specific setup"* — a reframing
@@ -92,7 +98,7 @@ reference leg, not two separate detectors:
   height aren't interpretable the way a moving curve is ("mit den Kurven konnte ich was anfangen,
   hiermit nicht") - reverted to curves in v1.3.0. Every other raw score (Active Permission, Live
   Trend Quality, the decay factors, etc.) is in the data window.
-- **Alerts**: Setup, Trigger, Signal (Trigger whose Active Permission still holds ≥ `signalRetentionInput` % of its Permission), T1/T2 hit, Invalidation hit,
+- **Alerts** (descriptive events, no entry recommendation): permission above threshold, trigger event, price at reference level T1/T2, Invalidation hit,
   Cancelled — per side.
 
 ## Position Health (Long/Short)
