@@ -63,7 +63,7 @@ and the transformation rules.
 | [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Promising |
 | [`reversal_engine_score_strategy.pine`](strategies/reversal_engine_score/reversal_engine_score_strategy.pine) | Reversal Engine Score | Structural + R-multiple TP | Not ready |
 | [`commodity_pulse_matrix_v4_strategy.pine`](strategies/commodity_pulse_matrix/commodity_pulse_matrix_v4_strategy.pine) | Commodity Pulse Matrix v4 | Directional fixed TP | Not ready — not yet backtested |
-| [`kestrel_opportunity_lens_strategy.pine`](strategies/kestrel_opportunity_lens/kestrel_opportunity_lens_strategy.pine) | Kestrel Opportunity Lens | Time exit, no stop (evaluation) | Not ready — not yet tested |
+| [`kestrel_opportunity_lens_strategy.pine`](strategies/kestrel_opportunity_lens/kestrel_opportunity_lens_strategy.pine) | Kestrel Opportunity Lens | Time exit, no stop (evaluation) | Not ready — NatGas 4h tested, 4 setup models |
 | [`similar_market_states_strategy.pine`](strategies/similar_market_states/similar_market_states_strategy.pine) | — (research, standalone) | Fixed + time exit | Not ready |
 | [`overextension_reversion_strategy.pine`](strategies/overextension_reversion/overextension_reversion_strategy.pine) | — (research, standalone) | Swing/fixed SL + TP + time exit | Not ready |
 
