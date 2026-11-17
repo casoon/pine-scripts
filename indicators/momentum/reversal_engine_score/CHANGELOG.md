@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Quality no longer depends on pivots.** The "no LL / no HH" point is removed from the quality score; the score is now RSI above 50 only (0–1). Min. Quality inputs are 0–1 (Long default 1, Short default 0, which keeps the earlier effect of "either point" for shorts). Pivot markers and the structure line in the tooltip stay as display. Long signals that failed only because of a lower-low now pass; the strategy file carries the same change
+
 ### Fixed
 - Gate F (HTF trend) failed open while the higher-timeframe EMAs were not yet available (warm-up): "not bearish" was true for missing data. It now requires the HTF EMAs to exist
 

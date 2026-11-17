@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- `commodity_pulse_matrix_v4` and its strategy: the Divergence category no longer enters the 6-category aggregate (weight 0; it was the largest single weight). It stays as a context row in the matrix. Heat score and A-setup read the remaining five categories, so signal density changes
 - `commodity_pulse_matrix_v4` and its strategy: without real volume the Flow weight no longer drops out of the 6-category aggregate (which stretched the other categories, Divergence to 28 %); the missing evidence counts as absent. Affects only symbols without real volume; the heat score there is lower than before
 - `commodity_pulse_matrix_v3`, `_v4` and the v4 strategy: code comments no longer claim JMA gives "less lag / better responsiveness"; comments only, no calculation change
 
