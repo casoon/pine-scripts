@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.0 — 2026-11-17
+- **Position Health counts trend efficiency once:** the Regime/Sideways-Risk component (a Kaufman efficiency ratio) is removed; Live Quality already measures path-vs-net efficiency. The inputs "Regime/Sideways-Risk weight" and "Regime efficiency lookback" are gone. Health now averages five components, so its level shifts slightly and the HOLD/PROTECT/REDUCE/EXIT thresholds, set for the six-part blend, are not recalibrated
+- **Dead code removed:** the divergence decay values that no longer fed Permission
+
 ## v1.5.0 — 2026-11-17
 - **Long/Short Signal back**, with the "Signal retention" input; the v1.4.0 switch to display-only rested on missing data, not on the code. Re-create the signal alerts if you use them
 - **Permission scale fixed:** Permission is now the geometric mean of its gated factors instead of their plain product, which compressed it far below 100 and made any threshold arbitrary. Default threshold back to 55

@@ -14,6 +14,10 @@ Changes to Kestrel Opportunity Lens are recorded here using Semantic Versioning.
 - **Episode spacing:** Accepted starts now need at least the configured spacing (previously one bar more than configured).
 - **Trend context:** The neutral context is labelled "mixed" instead of "mixed / range"; it means price side and EMA slope disagree, not necessarily a sideways market.
 
+### Removed
+
+- **WaveTrend gate:** The optional `Require WaveTrend turning with the setup` condition, its dashboard row and data-window series are gone. WaveTrend is a second momentum reading next to Williams, so the setup keeps one momentum condition (Williams) and one price condition (ATR recovery).
+
 ### Fixed
 
 - **Review reminders:** With the review lock off, each setup keeps its own review reminder; previously a newer setup overwrote the pending review of the older one. The review tooltip no longer shows the data of a setup that fires on the same bar.

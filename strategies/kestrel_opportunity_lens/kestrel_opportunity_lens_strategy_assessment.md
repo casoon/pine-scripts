@@ -10,7 +10,7 @@
 
 | Signal | Expression |
 |--------|------------|
-| Long   | `longSide.setupEv` — long window (Williams ≤ zone), recovery from the window extreme in Williams and close (ATR), optional rising WaveTrend |
+| Long   | `longSide.setupEv` — long window (Williams ≤ zone), recovery from the window extreme in Williams and close (ATR) |
 | Short  | `shortSide.setupEv` — mirror image (Williams ≥ 100 − zone) |
 | SL type | none — time exit on the close of the `exitBars`-th held bar; optional break-even only |
 

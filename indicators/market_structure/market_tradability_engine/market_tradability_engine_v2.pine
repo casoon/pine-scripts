@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Market Tradability Engine v2 [WavesUnchained]
-// Version: 2.5.5
+// Version: 2.6.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
@@ -15,9 +15,8 @@
 //   STRUCTURE  (0-100)     - is there a coherent framework right now, either
 //                            a respected range or a clean trend?
 //   ENERGY     (0-100)     - is movement intensity building or fading -
-//                            volatility, momentum acceleration, candle
-//                            commitment, and how efficiently it converts
-//                            into net progress?
+//                            volatility, momentum acceleration and candle
+//                            commitment (one input per information family)?
 //   ACCEPTANCE (-100..100) - are new prices being validated (held) or
 //                            rejected (wicked away), and which way?
 //
@@ -207,7 +206,7 @@ int customRankLength = input.int(
      minval = 50,
      maxval = 500,
      group = groupCore,
-     tooltip = "Lookback used to rank ATR/bandwidth/efficiency/ADX/candle ratios against their " +
+     tooltip = "Lookback used to rank ATR/bandwidth/efficiency/candle ratios against their " +
           "own recent history, instead of comparing them to fixed constants that would only " +
           "fit one timeframe/instrument. Longer = more stable but slower to adapt to a genuine " +
           "regime shift."
@@ -522,8 +521,8 @@ string baselineType = input.string(
      "Baseline Type",
      options = ["EMA", "SMA", "RMA", "WMA", "SuperSmoother", "T3", "KAMA", "JMA Approx"],
      group = groupSmoothing,
-     tooltip = "Moving average type behind the Quality Baseline - feeds Structure's trend-" +
-          "cleanliness reading, Acceptance's baseline displacement, and the Trend state's " +
+     tooltip = "Moving average type behind the Quality Baseline - feeds Acceptance's slope " +
+          "direction and the Trend state's " +
           "close-vs-baseline check. SuperSmoother/T3/KAMA/JMA Approx behave meaningfully " +
           "differently from the plain MA family (adaptive to volatility/trend, or filter-" +
           "based lag reduction), not just a different weighting scheme."
@@ -922,26 +921,6 @@ float directionStep =
      close < close[1] ? -1.0 :
      0.0
 
-float signedConsistency =
-     f_safeDiv(
-         math.sum(directionStep, qualityLength),
-         qualityLength,
-         0.0
-     )
-
-float baselineCross =
-     ta.cross(close, baseline) ? 1.0 : 0.0
-
-float baselineCrossRate =
-     f_safeDiv(
-         math.sum(baselineCross, qualityLength),
-         qualityLength,
-         0.0
-     )
-
-float closeDisplacement =
-     f_safeDiv(close - baseline, atr, 0.0)
-
 // Per-bar acceptance: does the bar close near its favorable extreme (held)
 // or get wicked back toward the opposite extreme (rejected)? Scaled to
 // [-1, 1] and smoothed - this is the raw sensor v1 didn't have.
@@ -1076,38 +1055,13 @@ float rangeCompactness =
 float rangeStructureQuality =
      math.sqrt(sustainedBoundaryStability * rangeCompactness) * 100.0
 
-// Rare baseline crosses alone don't make a clean trend - a quiet drift that
-// happens to sit on one side of a slow baseline would score high. Blend the
-// cross rate with efficiency, ADX, slope and directional consistency so a
-// high trend quality actually means "directed and efficient".
-
-float trendCrossQuality =
-     ta.percentrank(-baselineCrossRate, rankLength)
-
-float trendEfficiencyQuality =
-     ta.percentrank(efficiencyRatio, rankLength)
-
-float trendAdxQuality =
-     ta.percentrank(adx, rankLength)
-
-// Ranked against their own recent history like the other three components,
-// not a fixed f_scale/multiply-by-100 - those average well below 50 (strong
-// slope/consistency readings are rare by nature), which silently dragged the
-// whole composite's average below the Structure Threshold regardless of
-// instrument or timeframe.
-
-float trendSlopeQuality =
-     ta.percentrank(math.abs(normalizedSlope), rankLength)
-
-float trendConsistencyQuality =
-     ta.percentrank(math.abs(signedConsistency), rankLength)
+// Trend quality is one input: efficiency-ratio rank ("directed and efficient").
+// Baseline-cross rarity, ADX, slope and directional consistency all read the
+// same directional price path, so blending them counted one family five times.
+// Ranked against its own recent history like the range branch's sensors.
 
 float trendStructureQuality =
-     trendCrossQuality       * 0.25 +
-     trendEfficiencyQuality  * 0.25 +
-     trendAdxQuality         * 0.20 +
-     trendSlopeQuality       * 0.20 +
-     trendConsistencyQuality * 0.10
+     ta.percentrank(efficiencyRatio, rankLength)
 
 float structureScore = math.max(rangeStructureQuality, trendStructureQuality)
 
@@ -1123,24 +1077,16 @@ bool rangeFramework = rangeStructureQuality >= trendStructureQuality
 float slopeDirection =
      f_clamp(normalizedSlope / 0.75, -1.0, 1.0)
 
-float baselineDirection =
-     f_clamp(closeDisplacement / 2.0, -1.0, 1.0)
-
-float diDenominator = plusDi + minusDi
-float diDirection =
-     f_safeDiv(plusDi - minusDi, diDenominator, 0.0)
-
-float rangePressure =
-     f_clamp((rangePosition - 0.5) * 2.0, -1.0, 1.0)
-
+// One input per family, family weights kept from the former blend
+// (trend 0.68, price action 0.32): baseline slope for direction, bar
+// acceptance (closes held at the favourable extreme vs. wicked back) for
+// price action. Baseline displacement, DI dominance and directional
+// consistency repeated the slope's information; range position repeated
+// the bar-acceptance read.
 float acceptanceScore =
      (
-         slopeDirection * 0.22 +
-         baselineDirection * 0.16 +
-         diDirection * 0.16 +
-         signedConsistency * 0.14 +
-         rangePressure * 0.12 +
-         averageBarAcceptance * 0.20
+         slopeDirection * 0.68 +
+         averageBarAcceptance * 0.32
      ) * 100.0
 
 acceptanceScore := f_clamp(acceptanceScore, -100.0, 100.0)
@@ -1149,12 +1095,9 @@ acceptanceScore := f_clamp(acceptanceScore, -100.0, 100.0)
 // ENERGY
 // ============================================================================
 
-// Is movement intensity building or fading? Volatility expansion, how
-// efficiently movement converts into net progress, whether directional
-// conviction is accelerating, and candle commitment.
-
-float energyEfficiency =
-     ta.percentrank(efficiencyRatio, rankLength)
+// Is movement intensity building or fading? Volatility expansion, whether
+// directional conviction is accelerating, and candle commitment. Efficiency
+// is not repeated here: it is already the trend-quality input of Structure.
 
 // acceptanceScore is already homogenized into a fixed -100..100 range by
 // construction, so its bar-to-bar delta doesn't need ranking the same way a
@@ -1178,11 +1121,11 @@ float energyMomentumAccel =
 float candleCommitmentScore =
      ta.percentrank(averageBodyRatio, rankLength)
 
+// Former weights 0.30 / 0.20 / 0.20 kept in proportion over the three inputs.
 float energyScore =
-     volatilityExpansionScore * 0.30 +
-     energyEfficiency * 0.30 +
-     energyMomentumAccel * 0.20 +
-     candleCommitmentScore * 0.20
+     volatilityExpansionScore * 0.30 / 0.70 +
+     energyMomentumAccel * 0.20 / 0.70 +
+     candleCommitmentScore * 0.20 / 0.70
 
 energyScore := f_clamp(energyScore, 0.0, 100.0)
 
@@ -2015,7 +1958,7 @@ var bool calibrationConfigLogged = false
 
 if enableCalibrationLog and not calibrationConfigLogged and barstate.isconfirmed
     log.info(str.format(
-         'MTE2 CONFIG | modelVersion=2.5.3 | preset={0} | reactivity={1} | qualityLen={2} | rangeLen={3} | baselineLen={4} | atrLen={5} | adxLen={6} | rankLen={7} | baselineType={8} | structureTh={9} | maxRangeAtr={10} | energyLowTh={11} | energyVeryLowTh={12} | energyHighTh={13} | acceptNeutral={14} | acceptPressure={15} | acceptStrong={16} | breakoutAcceptTh={17} | breakoutBufferAtr={18} | breakoutAcceptBars={19} | confirmBars={20} | minStateBars={21} | breakoutHoldBars={22} | postBreakoutLockBars={23} | impulseLookback={24} | recentImpulseEnergyTh={25} | recentImpulseAcceptTh={26} | aftermathEnergyDropPct={27} | tf={28} | symbol={29} | requireVolume={30} | volumeFactor={31} | jmaPhase={32} | jmaPower={33} | boundaryTouchDistanceAtr={34} | boundaryTestCooldownBars={35} | boundaryFreshTestMax={36} | boundaryStressedTestMin={37} | weakRejectionTh={38} | requireBoundaryStressForReady={39} | detectFailedBreakouts={40} | failedBreakoutReentryAtr={41}',
+         'MTE2 CONFIG | modelVersion=2.6.0 | preset={0} | reactivity={1} | qualityLen={2} | rangeLen={3} | baselineLen={4} | atrLen={5} | adxLen={6} | rankLen={7} | baselineType={8} | structureTh={9} | maxRangeAtr={10} | energyLowTh={11} | energyVeryLowTh={12} | energyHighTh={13} | acceptNeutral={14} | acceptPressure={15} | acceptStrong={16} | breakoutAcceptTh={17} | breakoutBufferAtr={18} | breakoutAcceptBars={19} | confirmBars={20} | minStateBars={21} | breakoutHoldBars={22} | postBreakoutLockBars={23} | impulseLookback={24} | recentImpulseEnergyTh={25} | recentImpulseAcceptTh={26} | aftermathEnergyDropPct={27} | tf={28} | symbol={29} | requireVolume={30} | volumeFactor={31} | jmaPhase={32} | jmaPower={33} | boundaryTouchDistanceAtr={34} | boundaryTestCooldownBars={35} | boundaryFreshTestMax={36} | boundaryStressedTestMin={37} | weakRejectionTh={38} | requireBoundaryStressForReady={39} | detectFailedBreakouts={40} | failedBreakoutReentryAtr={41}',
          preset, reactivity, qualityLength, rangeLength, baselineLength, atrLength, adxLength, rankLength, baselineType,
          str.tostring(structureThreshold, '#.#'), str.tostring(maximumRangeAtr, '#.##'),
          str.tostring(energyLowThreshold, '#.#'), str.tostring(energyVeryLowThreshold, '#.#'),
@@ -2055,11 +1998,6 @@ if enableCalibrationLog and barstate.isconfirmed
          ' | rangeStructure=' + str.tostring(rangeStructureQuality, '#.##') +
          ' | rangeCompactness=' + str.tostring(rangeCompactness, '#.###') +
          ' | trendStructure=' + str.tostring(trendStructureQuality, '#.##') +
-         ' | trendCross=' + str.tostring(trendCrossQuality, '#.##') +
-         ' | trendEfficiency=' + str.tostring(trendEfficiencyQuality, '#.##') +
-         ' | trendAdx=' + str.tostring(trendAdxQuality, '#.##') +
-         ' | trendSlope=' + str.tostring(trendSlopeQuality, '#.##') +
-         ' | trendConsistency=' + str.tostring(trendConsistencyQuality, '#.##') +
          ' | energy=' + str.tostring(energyScore, '#.##') +
          ' | acceptance=' + str.tostring(acceptanceScore, '#.##') +
          ' | dataReady=' + str.tostring(dataReady) +

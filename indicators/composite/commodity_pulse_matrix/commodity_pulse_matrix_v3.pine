@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Commodity Pulse Matrix v3 [WavesUnchained]
-// Version: 3.6.1
+// Version: 3.7.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
@@ -20,8 +20,8 @@
 //
 // Data Contract:
 //   Price:     REQUIRED   chart symbol
-//   Volume:    OPTIONAL   real trade volume only (MFI, OBV, VFI, VWAP, MV
-//              Confluence) — degrades to neutral on tick/n/a volume
+//   Volume:    OPTIONAL   real trade volume only (MFI flow category, HTF
+//              midline VWAP, MV Confluence) — degrades to neutral on tick/n/a volume
 //   OI:        NO
 //   Reference: NO
 //   Verdict:   CFD-degraded
@@ -115,7 +115,7 @@ color mrLongColor = input.color(color.new(#2E7D32, 10), "Long Signal Color", gro
 color mrShortColor = input.color(color.new(#C62828, 10), "Short Signal Color", group="Mean Reversion", tooltip="Color for overbought reversal signals (deep red, subtle)")
 
 // ==== DATA VALIDITY ====
-// Volume-derived components (MFI, OBV, VFI/flow, VWAP, MV Confluence) need
+// Volume-derived components (MFI flow category, HTF midline VWAP, MV Confluence) need
 // real trade volume. Where the feed reports tick volume or none they degrade to
 // neutral instead of producing a false signal — see DATA_VALIDITY.md.
 bool volumeIsReal = (ta.cum(nz(volume)) > 0 and syminfo.volumetype != "tick") and not na(volume)
@@ -1369,34 +1369,15 @@ nzmap(float val, float low, float high) =>
 // ===========================================================================
 // 1. FLOW SCORE CALCULATION
 // ===========================================================================
-// Combines Money Flow Index (MFI), On-Balance Volume (OBV), and Volume Flow Indicator (VFI)
-// Weight Distribution: MFI 50%, VFI 30%, OBV 20%
+// Money Flow Index (MFI) only - real volume required
 
 calculateFlowScore(float mfi, float closePrice, float volume, float obvSlope, int zLen = 50) =>
-    // MFI, VFI and OBV all need real trade volume (DATA_VALIDITY.md) — mfi/obvSlope
-    // already arrive as na from calculateEssentialIndicators when volume is not real.
-    // Volume Flow Indicator (VFI) - Price-weighted volume momentum
-    float typical = (high + low + close) / 3.0
-    float inter = math.log(typical) - math.log(typical[1])
-    float vinter = ta.stdev(inter, 30)
-    float cutoff = 0.2 * vinter * close
-    float volumeSma = ta.sma(volume, 30)  // Extract ta.sma for consistency
-    float volumeConfirmedPriceChange = volumeIsReal and math.abs(close - close[1]) > cutoff ? volume * (close - close[1]) / (volumeSma * cutoff) : 0.0
-    float vfi = calculateJMA(volumeConfirmedPriceChange, 30)  // JMA instead of EMA
-    float vfiZ = volumeIsReal ? zLocal(vfi, zLen) : na
-
-    // MFI Component (0-100 oscillator)
+    // One volume input: MFI. VFI and OBV read the same volume-weighted price
+    // change, so blending them counted the volume family three times. MFI needs
+    // real trade volume (DATA_VALIDITY.md) and arrives as na otherwise; the flow
+    // score is then 0.0 at full category weight (no renormalization).
     float mfiZ = volumeIsReal ? zLocal(mfi, zLen) : na
-
-    // OBV Slope Component (may be na in MTF mode, or when volume is not real) - Extract z() for consistency
-    float obvZ_raw = zLocal(obvSlope, zLen)
-    float obvZ = na(obvSlope) ? 0.0 : obvZ_raw
-
-    // Weighted combination (adjust weights if OBV/MFI/VFI are unavailable)
-    // No real volume: MFI, VFI and OBV are all invalid — flow score is neutral
-    // (0.0) and the Flow category weight is excluded/renormalized where this
-    // score feeds the 6-category aggregate (calculateAggregateScore call site).
-    float flowScore = not volumeIsReal ? 0.0 : na(obvSlope) ? (mfiZ * 0.625) + (vfiZ * 0.375) : (mfiZ * 0.5) + (vfiZ * 0.3) + (obvZ * 0.2)
+    float flowScore = not volumeIsReal ? 0.0 : nz(mfiZ, 0.0)
 
     // Clamp to ±3 sigma and normalize to [-1, 1]
     math.max(-3.0, math.min(3.0, flowScore)) / 3.0
@@ -1404,96 +1385,41 @@ calculateFlowScore(float mfi, float closePrice, float volume, float obvSlope, in
 // ===========================================================================
 // 2. MOMENTUM SCORE CALCULATION
 // ===========================================================================
-// Combines RSI, Rate of Change (ROC), Stochastic RSI, and Commodity Channel Index (CCI)
-// Note: WaveCycle Momentum (WCM) is calculated in separate wcm_oscillator.pine module
+// RSI only - one momentum input
 
 calculateMomentumScore(float rsi, float cci, float roc, float src, int zLen = 50, bool useWCM = false) =>
-    // RSI Component (0-100 oscillator)
+    // One momentum input: RSI. ROC, Stochastic RSI (a transform of the same
+    // RSI) and CCI read the same overbought/oversold swing; the cci/roc/src
+    // parameters stay only so the call sites keep their signature.
     float rsiZ = zLocal(rsi, zLen)
-
-    // Rate of Change Component
-    float rocZ = zLocal(roc, zLen)
-
-    // Stochastic RSI Component
-    float rsiStoch = ta.stoch(rsi, rsi, rsi, 14)
-    float stochNorm = (rsiStoch - 50.0) / 50.0  // Convert to [-1, 1]
-
-    // CCI Component (Commodity Channel Index)
-    float cciNorm = math.max(-3.0, math.min(3.0, cci / 100.0)) / 3.0  // Normalize from typical ±300 range
-
-    // WCM REMOVED: Memory optimization for 2H+ timeframes
-    // Rebalanced weights WITHOUT WCM (10% redistributed):
-    // RSI 27.5% (+2.5%), ROC 22.5% (+2.5%), StochRSI 37.5% (+2.5%), CCI 12.5% (+2.5%)
-    // Rebalanced weights (RSI 27.5%, ROC 22.5%, StochRSI 37.5%, CCI 12.5%)
-    float momScore = (rsiZ * 0.275) + (rocZ * 0.225) + (stochNorm * 0.375) + (cciNorm * 0.125)
     // Clamp to ±3 sigma and normalize
-    math.max(-3.0, math.min(3.0, momScore)) / 3.0
+    math.max(-3.0, math.min(3.0, rsiZ)) / 3.0
 
 // ===========================================================================
 // 3. TREND SCORE CALCULATION
 // ===========================================================================
-// Combines ADX strength, DMI directional indicators, EMA stack alignment, and VWAP position
+// ADX strength × DMI direction only - one trend input
 
 calculateTrendScore(float adx, int emaStackDir, float diPlus, float diMinus, float closePrice, float vwap, int zLen = 50) =>
-    // ADX Strength Component (0-100, threshold 25 for trending)
+    // One trend input: ADX strength × DMI direction. The EMA stack and the
+    // VWAP position read the same directional price path (and VWAP needs real
+    // volume); emaStackDir/vwap stay as parameters for the call sites.
     float adxNorm = nzmap(adx, 15, 35)  // Map 15-35 to 0-1
-
-    // DMI Directional Component
     float adxDir = adx > 25 ? (diPlus > diMinus ? 1.0 : -1.0) : 0.0
-
-    // EMA Stack Component (-1 = bearish, 0 = mixed, +1 = bullish)
-    float emaContrib = emaStackDir  // Already normalized to [-1, 1]
-
-    // VWAP Position Component (may be na in MTF mode)
-    float vwapNorm = 0.0
-    if not na(vwap)
-        float vwapDist = (closePrice - vwap) / vwap
-        vwapNorm := math.max(-0.05, math.min(0.05, vwapDist)) / 0.05  // ±5% range
-
-    // Weighted combination (adjust if VWAP is disabled)
-    // ADX+DMI 50%, EMA Stack 35%, VWAP 15%
-    float trendScore = na(vwap) ? (adxNorm * adxDir * 0.59) + (emaContrib * 0.41) : (adxNorm * adxDir * 0.50) + (emaContrib * 0.35) + (vwapNorm * 0.15)
-
-    // Already in [-1, 1] range
-    math.max(-1.0, math.min(1.0, trendScore))
+    math.max(-1.0, math.min(1.0, adxNorm * adxDir))
 
 // ===========================================================================
 // 4. VOLATILITY SCORE CALCULATION
 // ===========================================================================
-// Combines ATR%, Bollinger Band Squeeze, and Williams VIX Fix (WVF)
-// Lower volatility = positive score, higher volatility = negative score
+// ATR% only - lower volatility = positive score, higher volatility = negative score
 
 calculateVolatilityScore(float atr, float closePrice, float src, bool useSqueeze = true, int zLen = 50) =>
-    // ATR% Component (volatility as % of price)
+    // One volatility input: ATR% (low volatility = positive). The squeeze and
+    // the Williams VIX Fix read the same range expansion; src/useSqueeze stay
+    // as parameters for the call sites.
     float atrPct = (atr / closePrice) * 100.0
     float atrNorm = nzmap(atrPct, 0.5, 3.0)  // Map 0.5-3% to 0-1
-    float atrScore = 1.0 - atrNorm  // Invert: low volatility = positive
-
-    // Bollinger Band Squeeze Component - Extract ta.* calls for consistency
-    float basis = ta.sma(src, 20)
-    float dev = ta.stdev(src, 20)
-    float keltnerBasis = calculateJMA(src, 20)
-    float keltnerRange = calculateJMA(ta.tr, 20)
-
-    float sqzContrib = 0.0
-    if useSqueeze
-        float upperBB = basis + (2.0 * dev)
-        float lowerBB = basis - (2.0 * dev)
-        float upperKC = keltnerBasis + (1.5 * keltnerRange)
-        float lowerKC = keltnerBasis - (1.5 * keltnerRange)
-        bool squeeze = (lowerBB > lowerKC) and (upperBB < upperKC)
-        sqzContrib := squeeze ? 1.0 : 0.0  // Squeeze = potential breakout = positive
-
-    // Williams VIX Fix (WVF) - Market bottom indicator
-    float highest_close = ta.highest(close, 22)
-    float wvf = ((highest_close - low) / highest_close) * 100.0
-    float wvfMA = ta.sma(wvf, 22)
-    float wvfBoost = wvf > wvfMA ? 1.0 : 0.0  // High WVF = potential reversal = positive
-
-    // Weighted combination of 0..1 components
-    // ATR 50%, Squeeze 30%, WVF 20% - renormalized over ATR + WVF when the squeeze is off
-    // (components used to be pre-scaled by their own weight, capping the score at +0.08)
-    float volScore = useSqueeze ? (atrScore * 0.50) + (sqzContrib * 0.30) + (wvfBoost * 0.20) : (atrScore * 0.50 + wvfBoost * 0.20) / 0.70
+    float volScore = 1.0 - atrNorm
 
     // Convert to [-1, 1] range (currently [0, 1])
     (volScore * 2.0) - 1.0
@@ -1501,36 +1427,17 @@ calculateVolatilityScore(float atr, float closePrice, float src, bool useSqueeze
 // ===========================================================================
 // 5. STRUCTURE SCORE CALCULATION
 // ===========================================================================
-// Combines price position relative to EMAs and Donchian Channel breakouts
+// Donchian breakout of the prior range only - one structure input
 
 calculateStructureScore(float closePrice, float ema20, float ema50, float ema200, float highVal, float lowVal, int donchianLen = 20) =>
-    // EMA Position Components
-    float above20 = closePrice > ema20 ? 1.0 : -1.0
-    float above50 = closePrice > ema50 ? 1.0 : -1.0
-    float above200 = na(ema200) ? 0.0 : closePrice > ema200 ? 1.0 : -1.0  // Handle na in MTF
-
-    // EMA distance (normalized)
-    float dist20 = (closePrice - ema20) / ema20
-    float dist50 = (closePrice - ema50) / ema50
-    float dist200 = na(ema200) ? 0.0 : (closePrice - ema200) / ema200
-
-    // Adjust distance calculation if ema200 is disabled
-    float distScore = na(ema200) ? (dist20 * 0.625) + (dist50 * 0.375) : (dist20 * 0.5) + (dist50 * 0.3) + (dist200 * 0.2)
-    float distNorm = math.max(-0.10, math.min(0.10, distScore)) / 0.10  // ±10% range
-
-    // Donchian Channel Breakout (prior 20-period high/low - including the current
-    // bar would make a breakout require close == high)
+    // One structure input: Donchian breakout of the prior range. Price position
+    // and distance to the EMAs are trend reads (already the Trend category's
+    // job); the EMA parameters stay for the call sites.
+    // Prior 20-period high/low - including the current bar would make a
+    // breakout require close == high.
     float donchHigh = ta.highest(highVal, donchianLen)[1]
     float donchLow = ta.lowest(lowVal, donchianLen)[1]
-    float donchBreakout = closePrice >= donchHigh ? 1.0 : closePrice <= donchLow ? -1.0 : 0.0
-
-    // Weighted combination (adjust if ema200 is disabled)
-    // Position above EMAs 40%, Distance from EMAs 40%, Donchian Breakout 20%
-    float emaPositionScore = na(ema200) ? (above20 * 0.571) + (above50 * 0.429) : (above20 * 0.4) + (above50 * 0.3) + (above200 * 0.3)
-    float structScore = (emaPositionScore * 0.40) + (distNorm * 0.40) + (donchBreakout * 0.20)
-
-    // Already in [-1, 1] range
-    math.max(-1.0, math.min(1.0, structScore))
+    closePrice >= donchHigh ? 1.0 : closePrice <= donchLow ? -1.0 : 0.0
 
 // ===========================================================================
 // 6. DIVERGENCE SCORE CALCULATION
@@ -1618,6 +1525,9 @@ type IndicatorSet
     float obv
     float obvSlope
     float volume
+    // Structure: close beyond the prior 20-bar Donchian range (+1 / -1 / 0),
+    // computed on the set's own timeframe
+    float donchBreak = 0.0
 
 // Memory-optimized version: calculates only essential indicators for MTF
 calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cciLen = 20, int rocLen = 9, int adxLen = 14, int atrLen = 14) =>
@@ -1647,10 +1557,11 @@ calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cc
     float _obv_raw = volumeIsReal ? ta.obv : na
     float _obvSlope_raw = na(_obv_raw) ? na : ta.change(_obv_raw, 5) / 5.0
     float _volumeForSet = volumeIsReal ? volume : na
+    float _donchBreak = calculateStructureScore(close, na, na, na, high, low)
 
     if not shouldCalculate
         // Return neutral dummy data for old bars
-        IndicatorSet.new(50.0, 50.0, 0.0, 0.0, 50.0, 25.0, 25.0, 25.0, na, src, src, na, na, 0, 1.0, 1.0, na, na, _volumeForSet)
+        IndicatorSet.new(50.0, 50.0, 0.0, 0.0, 50.0, 25.0, 25.0, 25.0, na, src, src, na, na, 0, 1.0, 1.0, na, na, _volumeForSet, 0.0)
     else
         // Use pre-calculated values
         float _atrPct = (_atr_raw / close) * 100.0
@@ -1659,7 +1570,7 @@ calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cc
         int _jmaStackDir = _jma20_raw > _jma50_raw and _jma50_raw > _jma200_raw ? 1 : _jma20_raw < _jma50_raw and _jma50_raw < _jma200_raw ? -1 : 0
 
         // Return indicator set (ema fields now contain JMA values)
-        IndicatorSet.new(_rsi_internal, _mfi_raw, _cci_raw, _roc_raw, _stochRSI_raw, _adx_raw, _diPlus_raw, _diMinus_raw, na, _jma20_raw, _jma50_raw, _jma200_raw, _vwap_raw, _jmaStackDir, _atr_raw, _atrPct, _obv_raw, _obvSlope_raw, _volumeForSet)
+        IndicatorSet.new(_rsi_internal, _mfi_raw, _cci_raw, _roc_raw, _stochRSI_raw, _adx_raw, _diPlus_raw, _diMinus_raw, na, _jma20_raw, _jma50_raw, _jma200_raw, _vwap_raw, _jmaStackDir, _atr_raw, _atrPct, _obv_raw, _obvSlope_raw, _volumeForSet, _donchBreak)
 
 
 
@@ -1831,34 +1742,31 @@ calculateVolatilityScore(float stochRSI, float macdHist, float atrCurrent, float
 // Measures agreement between different indicator categories
 
 calculateConfluenceScore(float flow, float mom, float trend, float vol, float structure, float div) =>
-    // Guard against na values
+    // Pivot divergence is context, not evidence: it no longer enters the
+    // confluence check (div stays as a parameter for the call sites).
     float _flow = nz(flow, 0.0)
     float _mom = nz(mom, 0.0)
     float _trend = nz(trend, 0.0)
     float _vol = nz(vol, 0.0)
     float _structure = nz(structure, 0.0)
-    float _div = nz(div, 0.0)
 
-    // Check if major categories agree
     bool flowTrendAgree = (_flow > 0 and _trend > 0) or (_flow < 0 and _trend < 0)
-    bool momDivAgree = (_mom > 0 and _div > 0) or (_mom < 0 and _div < 0)
+    bool momTrendAgree = (_mom > 0 and _trend > 0) or (_mom < 0 and _trend < 0)
     bool structVolAgree = (_structure > 0 and _vol > 0) or (_structure < 0 and _vol < 0)
 
-    // Count agreements
     int agreements = 0
     if flowTrendAgree
         agreements += 1
-    if momDivAgree
+    if momTrendAgree
         agreements += 1
     if structVolAgree
         agreements += 1
 
-    // Additional: Check if all positive or all negative (perfect confluence)
-    bool allPositive = _flow > 0 and _mom > 0 and _trend > 0 and _vol > 0 and _structure > 0 and _div > 0
-    bool allNegative = _flow < 0 and _mom < 0 and _trend < 0 and _vol < 0 and _structure < 0 and _div < 0
+    bool allPositive = _flow > 0 and _mom > 0 and _trend > 0 and _vol > 0 and _structure > 0
+    bool allNegative = _flow < 0 and _mom < 0 and _trend < 0 and _vol < 0 and _structure < 0
 
     if allPositive or allNegative
-        1.0  // Perfect confluence - all indicators agree
+        1.0  // Perfect confluence - all categories agree
     else
         float(agreements) / 3.0  // Partial confluence
 
@@ -3182,7 +3090,8 @@ calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW
     float momentumScore = calculateMomentumScore(_rsi, _cci, _roc, close, 50, false)
     float trendScore = calculateTrendScore(_adx, _emaStackDir, _diPlus, _diMinus, close, _vwap)
     float volatilityScore = calculateVolatilityScore(_atr, close, close, false)
-    float structureScore = calculateStructureScore(close, _ema20, _ema50, _ema200, high, low)
+    // Structure comes from the requested timeframe's own bars, like the other categories
+    float structureScore = hasIndicators ? indicators.donchBreak : 0.0
     float divergenceScore = calculateDivergenceScore(_rsi, 5, 5)
 
     // Flow score is neutral (0.0) without real volume (MFI/VFI/OBV). Its weight

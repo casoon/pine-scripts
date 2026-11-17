@@ -255,7 +255,7 @@ Oscillators alone are not enough. Only Setup + Structure confirmation + Follow-t
 
 ### Two Layers
 
-**Layer A — Setup Score (bars in panel):**
+**Layer A — Setup Score (bars in panel):** one input per information family — momentum (RSI), volume (MFI, only with real volume), stretch (EMA20 distance in ATR), candle (wick). Stoch RSI, MACD, the Bollinger touch and the efficiency bonus are not scored, because each repeats a family already counted. Without real volume the MFI points are absent and the thresholds stay as they are.
 
 | Component | Points |
 |-----------|--------|
@@ -263,14 +263,10 @@ Oscillators alone are not enough. Only Setup + Structure confirmation + Follow-t
 | RSI turning | +0.5 |
 | MFI in extreme zone | +1 |
 | MFI turning | +0.5 |
-| Stoch RSI / MACD (by variant) | +0.5 to +1 |
 | Price far from EMA20 | +1 to +1.5 |
-| Bollinger band touched | +1 |
 | Strong wick | +1 |
-| **At meaningful level** | **+1** |
 | Trend against setup | -1 |
-| No volume | -0.5 |
-| Far from any level | -0.5 |
+| Relative volume < 0.6 (real volume only) | -0.5 |
 
 **Layer B — Confirmation Score (circles in panel):**
 

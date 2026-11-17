@@ -18,14 +18,14 @@ Commodity Pulse Matrix v3 is a comprehensive multi-timeframe confluence indicato
 
 ## Scoring
 
-Each bar is evaluated across six categories, each contributing to an overall confluence score:
+Each bar is evaluated across six categories, each contributing to an overall confluence score. Every category reads one input, so no information family is counted twice:
 
-- **Flow** — Directional bias based on price and volume flow
-- **Momentum** — Short-term momentum strength and direction
-- **Trend** — Medium-to-long-term trend alignment across timeframes
-- **Volatility** — Market condition quality relative to ATR expansion/contraction
-- **Structure** — Market structure events (Break of Structure, Change of Character)
-- **Divergence** — Momentum-price divergences, shown as a context row (weight 0 in the aggregate and the heat score)
+- **Flow** — MFI (real volume only; neutral 0 at full weight otherwise)
+- **Momentum** — RSI
+- **Trend** — ADX strength × DMI direction
+- **Volatility** — ATR% (low volatility scores positive)
+- **Structure** — close beyond the prior 20-bar Donchian high/low
+- **Divergence** — Momentum-price divergences, shown as a context row (weight 0 in the aggregate, not part of the heat confluence check)
 
 The matrix table displays these per-category scores across timeframes, along with a Heat Score (0–1) that shows how far the timeframes and categories agree. The DECISION row shows the direction and the raw multi-timeframe consensus value (for example "Bull +0.62", "Bear -0.40", or "Neutral" inside ±0.20); the per-timeframe rows show direction and value the same way. Matrix, heat and DECISION are display only and have no alerts.
 
@@ -47,7 +47,7 @@ Breakouts and continuations are off in ranging markets (ATR compression). An ent
 
 ## Data validity
 
-The Flow category (MFI, OBV, VFI), the VWAP component of the Trend category, the
+The Flow category (MFI), the
 HTF Midline VWAP mode (v3), and MV Confluence all need real trade volume
 (the feed delivers volume and `syminfo.volumetype` is not `tick`). On instruments that only provide tick
 volume or none at all these components degrade to neutral automatically — the Flow category keeps its weight with a

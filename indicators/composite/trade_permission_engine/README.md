@@ -118,7 +118,7 @@ as a weighted average, not a multiplicative floored gate: a single weak dimensio
 say) must not crash a hold decision the way a weak factor is intentionally allowed to crash a
 new-entry Permission score.
 
-Six components, per direction:
+Five components, per direction (one trend-efficiency read — Live Quality — rather than a second Kaufman efficiency ratio on top):
 
 - **Live Quality** — blends the leg-boundary-gated Live Trend Quality with a genuinely
   continuous per-bar read of the counter-move since the current endpoint (`liveLegQuality`, same
@@ -150,14 +150,12 @@ Six components, per direction:
   Health: while the opposite leg is active, this reads a continuous recovery ratio (how much of that
   leg's range price has already recovered) scaled against the same 0.90 threshold, instead of a hard
   0 - the two branches meet at 100 exactly at the moment the leg would flip, so there's no cliff.
-- **Regime/Sideways-Risk** — a Kaufman-style net-movement/path-length efficiency ratio, independent
-  of leg structure.
 
 Classified into four states via configurable thresholds: **HOLD** (68+), **PROTECT** (54–68),
 **REDUCE** (36–54), **EXIT** (below 36) — PROTECT is the gap this closes: a state between "fine"
 and "get out" that lets a healthy-but-cooling trend be managed (tighten stops, take partials)
 without forcing an all-or-nothing decision. These are calibrated against 34,776 bars of backtested
-Pine Logs, not round numbers - with all six components in their current form, the combined score
+Pine Logs, not round numbers - with the components in their former six-part form, the combined score
 empirically tops out around 76 (Live Quality alone rarely exceeds ~75-85 in real, noisy price
 action, since its underlying efficiency measure - net move / path length - is rarely close to 1.0;
 this looks like a genuine property of real market data, not a formula defect). The original
@@ -174,7 +172,7 @@ curve's own height - vivid/opaque at HOLD, fading toward gray-transparent toward
 aren't individually plotted to the data window - this script's `plot()`/`alertcondition()` combined
 were already close to Pine's 64-output cap before Position Health, so they're only exposed via
 `longPositionHealth`/`shortPositionHealth`'s own value (both the pane curve and the data window). A
-"Debug: log Position Health components" toggle (off by default) logs all six sub-components plus the
+"Debug: log Position Health components" toggle (off by default) logs all five sub-components plus the
 final score/state per bar via `log.info()` instead - this does not count against the same output cap,
 so it's available for debugging without touching the plot budget; read it in TradingView's Pine Logs
 panel. Only a PROTECT-entry alert is added per side — the state this feature actually closes a gap

@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.5 — 2026-11-17
+- **Momentum counts once** — the momentum third of the exhaustion score mixed RSI, StochRSI (a transform of the same RSI) and WaveTrend, i.e. the same overbought/oversold reading three times. It now uses RSI alone. Momentum readings between the old blend and pure RSI differ, so scores near the threshold can shift.
+
 ## v3.4 — 2026-10-02
 - **Structure no longer double-counts** — a close beyond the band was scored in both Distance and Structure, and the opposing wick in both Structure and the candle trigger. Structure now measures only whether price sits at the edge of the 80-bar range; Distance keeps the stretch, the candle trigger keeps the rejection. Because Structure is now an at-edge/not-at-edge read, exhaustion scores away from the edge come out lower than before.
 

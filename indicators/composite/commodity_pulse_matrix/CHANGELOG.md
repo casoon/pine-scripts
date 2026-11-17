@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.7.0 / v4.5.0 — 2026-11-17
+Matrix categories, aggregate and heat change on every chart; the v4 entries (event + RSI > 50 + trend) do not use them.
+
+- **One input per category** (v3, v4, v4 strategy). Flow = MFI (VFI and OBV removed), Momentum = RSI (ROC, Stochastic RSI and CCI removed), Trend = ADX × DMI (EMA stack and VWAP removed), Volatility = ATR% (Williams VIX Fix removed), Structure = prior-range Donchian breakout (EMA position and distance removed — they are trend reads). Several inputs per category counted the same information several times. Category values, the aggregate, DECISION and the heat score shift; the trend category reads 0 while ADX ≤ 25
+- **Divergence out of the heat confluence check** (v3, v4). The check now compares Flow/Trend, Momentum/Trend and Structure/Volatility; divergence stays a context row
+- **Structure reads each row's own timeframe** (v3, v4). The category was computed from the chart bars for every timeframe row, so all rows showed the same value; the Donchian breakout now comes with the timeframe's other indicators (last closed bar of that timeframe)
+- **Structure breakout fixed in v4 and the v4 strategy.** The Donchian reference still included the current bar there, so a breakout needed close == high; it now uses the prior 20 bars as in v3
+
 ## v3.6.1 — 2026-11-17
 Bug fix and cleanup in v3; v4 is unchanged. The HTF midline now draws one HTF bar later than before and no longer moves while the HTF bar is forming.
 
