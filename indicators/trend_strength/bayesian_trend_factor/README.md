@@ -1,8 +1,8 @@
 # Bayesian Trend Factor
 
-Bayesian Trend Factor is a Bayesian-inspired probabilistic **trend-quality filter** that maps the current directional thesis to a signed `-100..+100` score and a separate `0..100` confidence reading. It answers one question first: *is the active trend context clean enough to trust, and in which direction?*
+Bayesian Trend Factor is a Bayesian-inspired probabilistic **trend-context filter** that maps the current directional thesis to a signed `-100..+100` score and a separate `0..100` confidence reading. It answers one question first: *is the active trend context clean enough to trust, and in which direction?*
 
-The model fuses directional evidence blocks into log-odds: regression direction, gated trend strength and exhaustion risk. Volatility is kept out of direction and acts as a quality multiplier. Confidence measures whether the evidence quality is high enough for the factor to matter. Optional modules add Pullback / Continuation triggers and HAMA-style smoothed trend candles.
+The model fuses directional evidence blocks into log-odds: regression direction, gated trend strength and exhaustion risk. Volatility is kept out of direction and only damps the thesis (volatility damping). Confidence measures whether the evidence is strong enough for the factor to matter. Optional modules add Pullback / Continuation triggers and HAMA-style smoothed trend candles.
 
 ## Evidence blocks
 
@@ -10,7 +10,7 @@ The model fuses directional evidence blocks into log-odds: regression direction,
 |---|---|---|
 | Direction | Linear-regression slope normalized by ATR | Primary directional thesis |
 | Strength | ADX, Kaufman Efficiency Ratio and Regression R2 | Confirms whether movement is clean and persistent |
-| Volatility | ATR percentile in an optimal regime zone | Quality multiplier only, never directional evidence |
+| Volatility | ATR percentile in an optimal regime zone | Volatility damping only, never directional evidence |
 | Exhaustion | Overextension plus rejection or momentum fade | Penalizes late or rejected trend moves |
 
 ## Interpretation
@@ -19,23 +19,23 @@ The model fuses directional evidence blocks into log-odds: regression direction,
 |---|---|
 | `+80..+100` | Strong bullish trend |
 | `+55..+79` | Bullish trend active |
-| `-54..+54` | Neutral, transition or low-quality trend |
+| `-54..+54` | Neutral, transition or unclean trend |
 | `-55..-79` | Bearish trend active |
 | `-80..-100` | Strong bearish trend |
 
-The confidence gate soft-neutralizes the factor when evidence quality is below the configured minimum. Trend state uses hysteresis: it activates at `Trend Threshold` and exits at `Trend Exit Threshold`, so the state does not flicker around the main threshold. A high positive or negative factor with low confidence should be treated as unfinished context, not a signal.
+The confidence gate soft-neutralizes the factor when confidence is below the configured minimum. Trend state uses hysteresis: it activates at `Trend Threshold` and exits at `Trend Exit Threshold`, so the state does not flicker around the main threshold. A high positive or negative factor with low confidence should be treated as unfinished context, not a signal.
 
 ## Features
 
 - Signed `-100..+100` Bayesian Trend Factor plus `0..100` Confidence
 - Four evidence blocks (three weighted in log-odds, volatility as multiplier) with exposed role weights
-- Volatility kept out of directional log-odds and applied only as a quality multiplier
+- Volatility kept out of directional log-odds and applied only as volatility damping
 - Strength evidence gated until regression direction is meaningful
 - Exhaustion is a malus only; low exhaustion no longer adds confidence by itself
 - Optional short factor smoothing to reduce state flicker
 - Trend-state hysteresis via separate activation and exit thresholds
 - Final Bull/Bear evidence score derived from the smoothed factor, with raw evidence score still exposed for diagnostics
-- Confidence gate that scales down low-quality directional reads
+- Confidence gate that scales down weakly supported directional reads
 - Fair Path regression line plus optional `+/-2 ATR` bands
 - Candle coloring by trend state and optional score labels on threshold/large-score changes
 - Optional Pullback / Continuation module with PB setup labels and continuation trigger labels (`RECLAIM` / `BOS` / `REJECT`), both with hover explanations
@@ -75,7 +75,7 @@ The `PB` and trigger labels include hover tooltips with the setup context, trigg
 
 ## Notes
 
-- The base script is a trend-quality filter; the optional continuation layer is the only entry-style component.
+- The base script is a trend-context filter; the optional continuation layer is the only entry-style component.
 - The swing level uses confirmed pivots (`Swing Level Pivot Length`). It is only the level a pullback must hold; it is not part of the Trend Factor.
 - Volatility confirms whether the environment is suitable, but does not create or strengthen a bullish/bearish view by itself.
 - Exhaustion is intentionally a penalty against the active direction; positive acceleration alone is not treated as exhaustion.

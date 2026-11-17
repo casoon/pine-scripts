@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.4.0 — 2026-11-17
+- Removed: zone grades A/B/C — the grade in zone labels and tooltips, the grade-based label colors and the tooltip trading hints ("Best: First retest" / "Good: Wait for confirmation" / "Context only"); inputs `Show only A/B Zones`, `Grade A: Min Score`, `Grade B: Min Score` are gone
+- Removed: the `Min Zone Score (0-100)` input and its admission gate — every pattern that passes the cluster/overlap checks now creates a zone, so more zones and therefore more retest signals can appear
+- Zone labels show direction and pattern only (e.g. `D K`), without score; tooltips show the raw zone measures instead of a grade and score. Zone fill and label color depend on direction only, no longer on the score
+- The zone score remains only as the internal ranking for Top-N highlighting; `Enable Zone Scoring` is renamed `Enable Zone Ranking (Top N)`, `Reversal Bonus` / `Continuation Penalty` moved to the "Zone Scoring" group. Panel no longer shows "MinScore"
+- Alerts unchanged
+
 ## v3.3.0 — 2026-11-17
 - Removed: the confluence score on zone retests and its gate — inputs `Min Score BUY` / `Min Score SELL` are gone, as are the panel rows "Raw", "BUY N", "SELL N", "Min", "Filters", "RV/Thin" and the hidden exports `confluenceScoreRaw`, `buyScoreNorm0_10`, `sellScoreNorm0_10`, `binaryBuyFilter`, `binarySellFilter`
 - Retest signal is now the first zone retest plus one side-specific condition: new input `Require HTF trend in signal direction` (default on) — BUY only with the last closed HTF bar above its EMA, SELL only below it. Retest signals can come more often than with the score gate

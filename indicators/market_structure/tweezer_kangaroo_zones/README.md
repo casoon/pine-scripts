@@ -1,6 +1,6 @@
 # Tweezer & Kangaroo Zones
 
-Detects two specific reversal candlestick patterns — tweezer tops/bottoms and kangaroo tails (pin bars) — and converts them into scored supply and demand zones that persist and decay over time. Instead of just marking the pattern, the script uses it as the origin of a dynamic zone whose score decays with age and touches, producing a living map of supply/demand levels grounded in actual rejection events.
+Detects two specific reversal candlestick patterns — tweezer tops/bottoms and kangaroo tails (pin bars) — and converts them into supply and demand zones that persist over time. Instead of just marking the pattern, the script uses it as the origin of a dynamic zone, producing a living map of supply/demand levels grounded in actual rejection events.
 
 ## Features
 
@@ -8,21 +8,20 @@ Detects two specific reversal candlestick patterns — tweezer tops/bottoms and 
 - Kangaroo tail (pin bar) detection with wick/body ratio, body fraction, and body position thresholds
 - Timeframe sensitivity: pattern thresholds auto-adjust to the chart timeframe (stricter on low TFs, looser on high TFs)
 - Auto-tuning of kangaroo thresholds based on choppiness regime
-- 5-component zone scoring (0–100): rejection quality, extreme proximity, impulse before, freshness, cleanliness
-- Zone freshness decay (configurable half-life) and Top-N filtering of active zones
-- Zone grading (A/B/C) with labels and detailed tooltips, reversal bonus / continuation penalty
+- Internal zone ranking from five components (rejection, extreme proximity, impulse before, freshness, cleanliness) — used only to highlight the Top N active zones
+- Zone labels (direction + pattern) with tooltips showing the raw zone measures, touches, age and invalidation level
 - Zone merging on overlap, cluster limit, TTL, and close-through invalidation
-- Structure context: HH/HL/LH/LL swing detection with score bonus
+- Structure context: HH/HL/LH/LL swing detection with a ranking bonus
 - Trend gate: EMA + HTF regime, optional Supertrend and MOST (local/HTF/both scopes)
 - Retest signals: first retest of a zone, optionally only with the HTF trend on the signal's side
-- HTF Stack panel (3 timeframes) plus session, chop, signal-HTF and zone-score readouts (light-theme table)
-- Buy/sell alerts on zone retests; hidden plots export signals, regime, chop, HTF direction and top zone scores for external consumers
+- HTF Stack panel (3 timeframes) plus session, chop, signal-HTF and zone-ranking readouts (light-theme table)
+- Buy/sell alerts on zone retests; hidden plots export signals, regime, chop, HTF direction and top zone ranking values for external consumers
 - Optional session filter (RTH/ETH profiles) and daily zone reset
 - Debug logging for pattern tuning
 
-## Scoring
+## Zone ranking
 
-A zone is created when a pattern fires and the initial score clears `Min Zone Score`. The base score weights five components: rejection 30%, extreme proximity 25%, impulse 20%, freshness 15%, cleanliness 10%. The result is multiplied by the pattern weight (kangaroo default 1.2, tweezer 0.8), gets a structure bonus when aligned with swing structure, and a reversal bonus or continuation penalty depending on zone classification. Scores update every bar as freshness decays and touches accumulate — pattern weight and structure bonus are kept in those updates; grade and color follow the score. Impulse is measured over the five bars before the pattern bar, so the pattern's own wick is not counted as impulse.
+Every pattern that passes the cluster and overlap checks creates (or merges into) a zone — there is no minimum score. The ranking only decides which active zones are highlighted as the Top N; the others are dimmed. It does not create, remove or label zones and does not affect retest signals. The ranking weights five components: rejection 30%, extreme proximity 25%, impulse 20%, freshness 15%, cleanliness 10%. The result is multiplied by the pattern weight (kangaroo default 1.2, tweezer 0.8), gets a structure bonus when aligned with swing structure, and a reversal bonus or continuation penalty depending on zone classification. Scores update every bar as freshness decays and touches accumulate — pattern weight and structure bonus are kept in those updates. Zone fill and label color depend only on direction (supply/demand). Impulse is measured over the five bars before the pattern bar, so the pattern's own wick is not counted as impulse.
 
 ## Retest signals
 

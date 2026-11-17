@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Vein Execution 15m [WavesUnchained]
-// Version: 0.2.0
+// Version: 0.3.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
@@ -19,7 +19,7 @@
 //   ✓ Rejection candles + engulfing
 //   ✓ Follow-through / tempo validation
 //   ✓ Entry + invalidation signals
-//   ✓ Compact micro score (0-10), display and entry weight
+//   ✓ Entry = structure trigger + active setup + (behaviour or follow-through)
 //
 // Data Contract:
 //   Price:     REQUIRED   chart symbol
@@ -38,7 +38,7 @@ indicator("Vein: Execution 15m [WavesUnchained]", "Vein Exec", overlay=true, max
 var gHTF = "4H Context"
 string htfTimeframe     = input.timeframe("240", "HTF Timeframe", group=gHTF)
 float  activationThresh = input.float(2.0, "Min Setup Score to Activate", minval=0.5, maxval=5.0, step=0.5, group=gHTF, tooltip="15m only works when the connected Bull/Bear Setup Score Source >= this value. The source is an external plot on this chart (computed on the chart timeframe), not a 4H request.")
-float  zoneProximityATR = input.float(0.8, "Zone Proximity (ATR)", minval=0.2, maxval=3.0, step=0.1, group=gHTF, tooltip="Max distance to 4H zone for 'near zone' bonus")
+float  zoneProximityATR = input.float(0.8, "Zone Proximity (ATR)", minval=0.2, maxval=3.0, step=0.1, group=gHTF, tooltip="Distance to the 4H swing level below which the status table highlights the 4H Zone row (display only)")
 
 var gMicro = "Micro Structure"
 int   microLeft      = input.int(2, "Micro Pivot Left Bars", minval=1, maxval=5, group=gMicro)
@@ -54,7 +54,6 @@ float engBodyRatio   = input.float(0.6, "Engulfing: Min Body Ratio", minval=0.3,
 var gTempo = "Follow-Through"
 int   ftWindow       = input.int(4, "Follow-Through Window (Bars)", minval=2, maxval=8, group=gTempo)
 float ftMinMove      = input.float(0.3, "Follow-Through Min Move (ATR)", minval=0.1, maxval=1.0, step=0.1, group=gTempo)
-float entryScoreThresh = input.float(6.0, "Entry Min Micro Score", minval=1.0, maxval=10.0, step=0.5, group=gTempo, tooltip="Role-weighted micro score required to emit an entry (with a structure trigger). Behaviour/FT contribute weight rather than acting as a hard gate. Provisional default — not yet validated on data.")
 
 var gDisplay = "Display"
 string displayMode   = input.string("Light", "Display Mode", options=["Light", "Debug"], group=gDisplay)
@@ -244,103 +243,57 @@ bool bullFT = bullTriggerAge > 0 and bullTriggerAge <= ftWindow and not na(bullT
 bool bearFT = bearTriggerAge > 0 and bearTriggerAge <= ftWindow and not na(bearTriggerPrice) and atr15m > 0 and (bearTriggerPrice - close) / atr15m >= ftMinMove
 
 // ============================================================================
-// MODULE: micro score (0-10)
+// MODULE: roles
 // ============================================================================
 
 // Distance to the 4H swing levels — kept as a control/diagnosis reference for the
-// dashboard only. Per the role ruleset, proximity to a (HTF) pivot does NOT feed the
-// micro score; it is shown but never scored.
+// dashboard only. Proximity to a (HTF) pivot is shown but never part of a signal.
 float distToHTFSup = not na(htfSwingLo) and atr15m > 0 ? math.abs(close - htfSwingLo) / atr15m : 999.0
 float distToHTFRes = not na(htfSwingHi) and atr15m > 0 ? math.abs(close - htfSwingHi) / atr15m : 999.0
-bool nearHTFZone = (bias >= 0 and distToHTFSup <= zoneProximityATR) or (bias <= 0 and distToHTFRes <= zoneProximityATR)
 
-// This module has ONE score: the 15m timing evidence. The 4H setup is consumed as the
-// activation/context evidence (single score path) — it is NOT re-built into a parallel
-// internal setup score. microScore = Evidence(4H) + Structure + Behaviour + Tempo,
-// each computed 0..1 within its role, then combined with role weights (total ≈ 0..10).
+// Each role is an explicit on/off condition per side — no points, no weights.
+// Setup     = the connected setup source is active for that side (htfHasBull / htfHasBear)
+// Structure = 15m micro event: sweep, sweep hold or micro BOS (pivot-order HL/LH not used)
+// Behaviour = rejection or engulfing candle, or a range-expansion bar in that direction
+// Tempo     = follow-through after an earlier trigger within the window
+bool structBull = sweepBull or sweepBullConfirmed or microBullBOS
+bool structBear = sweepBear or sweepBearConfirmed or microBearBOS
+bool behBull    = bullRejection or bullEngulfing or (isBullBar and rangeExpansion)
+bool behBear    = bearRejection or bearEngulfing or (isBearBar and rangeExpansion)
 
-// --- Evidence role (0..1) — strength of the gating 4H setup ---
-float activeSetup = bias == 1 ? nz(bullSetupSrc) : bias == -1 ? nz(bearSetupSrc) : math.max(nz(bullSetupSrc), nz(bearSetupSrc))
-float evidenceRole = activationThresh > 0 ? math.min(activeSetup / (activationThresh * 2.0), 1.0) : 0.0
+// Effective direction for signals and the role display
+int signalDir = bias == 1 ? 1 : bias == -1 ? -1 : (nz(bullSetupSrc) > nz(bearSetupSrc) ? 1 : -1)
 
-// --- Structure role (0..1) — 15m micro events (sweep, sweep hold, BOS; pivot-order
-// HL/LH shifts are not scored) ---
-float structRaw = 0.0
-if bias >= 0
-    structRaw += sweepBull ? 1.0 : 0.0
-    structRaw += sweepBullConfirmed ? 1.0 : 0.0
-    structRaw += microBullBOS ? 1.0 : 0.0
-if bias <= 0
-    structRaw += sweepBear ? 1.0 : 0.0
-    structRaw += sweepBearConfirmed ? 1.0 : 0.0
-    structRaw += microBearBOS ? 1.0 : 0.0
-if bias == 0
-    structRaw := structRaw / 2.0  // dampen during conflict
-float structRole = math.min(structRaw / 3.0, 1.0)
-
-// --- Behaviour role (0..1) — candle character ---
-float behRaw = 0.0
-if bias >= 0
-    behRaw += (bullRejection or bullEngulfing) ? 1.0 : 0.0
-    behRaw += (isBullBar and rangeExpansion) ? 1.0 : 0.0
-if bias <= 0
-    behRaw += (bearRejection or bearEngulfing) ? 1.0 : 0.0
-    behRaw += (isBearBar and rangeExpansion) ? 1.0 : 0.0
-if bias == 0
-    behRaw := behRaw / 2.0
-float behRole = math.min(behRaw / 2.0, 1.0)
-
-// --- Tempo role (0..1) — follow-through ---
-float tempoRole = 0.0
-if bias >= 0 and bullFT
-    tempoRole := 1.0
-if bias <= 0 and bearFT
-    tempoRole := 1.0
-
-// --- Role-weighted micro score (≈0..10): Evidence 3 · Structure 4 · Behaviour 2 · Tempo 1 ---
-float microScore = isActive ? 3.0 * evidenceRole + 4.0 * structRole + 2.0 * behRole + 1.0 * tempoRole : 0.0
-
-// Component scores retained on the original scales for the status table / data window.
-float setupScore  = 3.0 * evidenceRole
-float structScore = 4.0 * structRole
-float behScore    = 2.0 * behRole
-float tempoScore  = 1.0 * tempoRole
+bool setupOn  = signalDir == 1 ? htfHasBull : htfHasBear
+bool structOn = signalDir == 1 ? structBull : structBear
+bool behOn    = signalDir == 1 ? behBull : behBear
+bool tempoOn  = signalDir == 1 ? bullFT : bearFT
 
 // ============================================================================
 // MODULE: status logic
 // ============================================================================
 
-bool hasStructureTrigger = (bias >= 0 and (sweepBull or sweepBullConfirmed or microBullBOS)) or (bias <= 0 and (sweepBear or sweepBearConfirmed or microBearBOS))
-
+// TRIGGER = structure event + (behaviour or tempo); SETUP = structure event only;
+// WATCH = setup active, no structure event yet.
 string microStatus = "QUIET"
 if not isActive
     microStatus := "QUIET"
-else if microScore >= 7.0 and hasStructureTrigger
+else if structOn and (behOn or tempoOn)
     microStatus := "TRIGGER"
-else if microScore >= 5.0 and hasStructureTrigger
+else if structOn
     microStatus := "SETUP"
-else if microScore >= 3.0
-    microStatus := "WATCH"
 else
-    microStatus := "QUIET"
-
-// Effective direction for signals
-int signalDir = bias == 1 ? 1 : bias == -1 ? -1 : (nz(bullSetupSrc) > nz(bearSetupSrc) ? 1 : -1)
+    microStatus := "WATCH"
 
 // ============================================================================
 // MODULE: entry & invalidation signals
 // ============================================================================
 
-// Entry conditions — evidence scoring, not a hard AND chain.
-// Trigger = a 15m structure event firing in the bias direction (timing).
-// Weight   = the role-weighted micro score must clear entryScoreThresh.
-// Behaviour/follow-through now contribute weight (via microScore) instead of acting
-// as a separate mandatory gate, so a strong-structure entry is no longer vetoed by a
-// single missing candle-character condition.
-bool bullTrigger = signalDir == 1 and (sweepBull or sweepBullConfirmed or microBullBOS)
-bool bearTrigger = signalDir == -1 and (sweepBear or sweepBearConfirmed or microBearBOS)
-bool entryBull = enableEntries and isActive and bullTrigger and microScore >= entryScoreThresh
-bool entryBear = enableEntries and isActive and bearTrigger and microScore >= entryScoreThresh
+// Entry = structure trigger AND active setup AND (behaviour OR follow-through).
+bool bullTrigger = signalDir == 1 and structBull
+bool bearTrigger = signalDir == -1 and structBear
+bool entryBull = enableEntries and htfHasBull and bullTrigger and (behBull or bullFT)
+bool entryBear = enableEntries and htfHasBear and bearTrigger and (behBear or bearFT)
 
 // Track active entries for invalidation
 var bool  bullEntryActive = false
@@ -461,13 +414,12 @@ if showTable and barstate.islast
     table.cell(statusTbl, 0, 1, "Setup Bias", text_color=color.new(chart.fg_color, 30), text_size=size.normal)
     table.cell(statusTbl, 1, 1, biasStr + " " + str.tostring(math.max(nz(bullSetupSrc), nz(bearSetupSrc)), "#.0"), text_color=biasCol, text_size=size.normal, text_halign=text.align_right)
 
-    // Micro Score breakdown
-    table.cell(statusTbl, 0, 2, "Micro Score", text_color=color.new(chart.fg_color, 30), text_size=size.normal)
-    table.cell(statusTbl, 1, 2, str.tostring(microScore, "#.0") + " / 10", text_color=microScore >= 7 ? (signalDir == 1 ? #00e676 : #ff1744) : microScore >= 5 ? #e65100 : color.new(chart.fg_color, 60), text_size=size.normal, text_halign=text.align_right)
-
-    // Components
-    table.cell(statusTbl, 0, 3, "Set|Str|Beh|Tmp", text_color=color.new(chart.fg_color, 50), text_size=size.normal)
-    table.cell(statusTbl, 1, 3, str.tostring(setupScore, "#") + " | " + str.tostring(structScore, "#") + " | " + str.tostring(behScore, "#") + " | " + str.tostring(tempoScore, "#"), text_color=color.new(chart.fg_color, 30), text_size=size.normal, text_halign=text.align_right)
+    // Roles (raw on/off, in the signal direction)
+    string dirStr = signalDir == 1 ? "Bull" : "Bear"
+    table.cell(statusTbl, 0, 2, dirStr + " Set | Str", text_color=color.new(chart.fg_color, 30), text_size=size.normal)
+    table.cell(statusTbl, 1, 2, (setupOn ? "on" : "off") + " | " + (structOn ? "on" : "off"), text_color=color.new(chart.fg_color, 30), text_size=size.normal, text_halign=text.align_right)
+    table.cell(statusTbl, 0, 3, dirStr + " Beh | Tmp", text_color=color.new(chart.fg_color, 30), text_size=size.normal)
+    table.cell(statusTbl, 1, 3, (behOn ? "on" : "off") + " | " + (tempoOn ? "on" : "off"), text_color=color.new(chart.fg_color, 30), text_size=size.normal, text_halign=text.align_right)
 
     // Interpretation line
     string interpStr = ""
@@ -483,13 +435,11 @@ if showTable and barstate.islast
         else
             interpStr := "Setup quiet — nothing to time"
     else if microStatus == "TRIGGER"
-        interpStr := (signalDir == 1 ? "Bull" : "Bear") + " trigger: structure event + micro score ≥ 7"
+        interpStr := (signalDir == 1 ? "Bull" : "Bear") + " trigger: structure event + behaviour or follow-through"
     else if microStatus == "SETUP"
-        interpStr := "Structure event + micro score ≥ 5"
-    else if microStatus == "WATCH"
-        interpStr := "Setup active, 15m watching for structure event"
+        interpStr := "Structure event, no behaviour or follow-through yet"
     else
-        interpStr := "Active but no micro signals yet"
+        interpStr := "Setup active, 15m watching for structure event"
 
     color interpCol = microStatus == "TRIGGER" ? (signalDir == 1 ? #00e676 : #ff1744) : microStatus == "SETUP" ? #e65100 : color.new(chart.fg_color, 40)
     table.cell(statusTbl, 0, 4, interpStr, text_color=interpCol, text_size=size.normal)
@@ -511,11 +461,10 @@ if showTable and barstate.islast
 // MODULE: data window plots
 // ============================================================================
 
-plot(microScore, "Micro Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
-plot(setupScore, "Setup Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
-plot(structScore, "Structure Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
-plot(behScore, "Behaviour Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
-plot(tempoScore, "Tempo Score [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(setupOn ? 1 : 0, "Setup Role [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(structOn ? 1 : 0, "Structure Role [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(behOn ? 1 : 0, "Behaviour Role [dw]", display=display.data_window, color=color.new(color.gray, 100))
+plot(tempoOn ? 1 : 0, "Tempo Role [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(nz(bullSetupSrc), "4H Bull Setup [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(nz(bearSetupSrc), "4H Bear Setup [dw]", display=display.data_window, color=color.new(color.gray, 100))
 plot(bias, "Bias [dw]", display=display.data_window, color=color.new(color.gray, 100))

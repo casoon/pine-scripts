@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- **Naming (v1.10.0):** the volatility multiplier is now called "volatility damping". Input `Volatility Quality Weight` is now `Volatility Damping Weight`; dashboard rows "Vol Quality" / "Quality Mult" are now "Vol Fit" / "Vol Damping"; the score-label tooltip, README and TradingView description follow. Pure rename: the math and all values are unchanged
 - **Naming:** "Probability" outputs are now called "Evidence Score" (data window, dashboard, README, TradingView description). The numbers are unchanged; they come from hand-weighted evidence and were never calibrated against outcomes
 
 ### Removed

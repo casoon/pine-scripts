@@ -12,7 +12,6 @@ Commodity Pulse Matrix v3 is a comprehensive multi-timeframe confluence indicato
 - MV Confluence (Momentum-Volume)
 - Diamond Zones (Support/Resistance)
 - Entry Engine V2 (breakout, pullback, continuation with trend and momentum in direction)
-- Signal Quality Gate (ATR + Volume)
 - Market Regime Detection (BOS, CHoCH)
 - Matrix Table Visualization
 - Mean Reversion System
@@ -28,7 +27,9 @@ Each bar is evaluated across six categories, each contributing to an overall con
 - **Structure** — Market structure events (Break of Structure, Change of Character)
 - **Divergence** — Momentum-price divergences, shown as a context row (weight 0 in the aggregate and the heat score)
 
-The matrix table displays these per-category scores across timeframes, along with a Heat Score (0–1) that shows how far the timeframes and categories agree. Matrix, heat and confidence are display only and have no alerts.
+The matrix table displays these per-category scores across timeframes, along with a Heat Score (0–1) that shows how far the timeframes and categories agree. The DECISION row shows the direction and the raw multi-timeframe consensus value (for example "Bull +0.62", "Bear -0.40", or "Neutral" inside ±0.20); the per-timeframe rows show direction and value the same way. Matrix, heat and DECISION are display only and have no alerts.
+
+The market bias band reads the chart-timeframe Flow, Momentum, Trend, Volatility and Structure scores; divergence is not part of it.
 
 ## Entry Engine V2
 

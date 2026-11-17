@@ -1,5 +1,10 @@
 # Changelog
 
+## v4.12.0 — 2026-11-17
+- Removed: the range-score grade words ("High Confidence" / "Strong" / "Moderate" / "Weak") and the score-based color of the dashboard "Range Score" row — the row now shows the raw score (0–100) as a number
+- Alert messages describe the event without LONG/SHORT: "MARKUP STARTED", "MARKDOWN STARTED", "SPRING", "UTAD", "SIGN OF STRENGTH", "SIGN OF WEAKNESS", "SOS BREAKOUT", "SOW BREAKDOWN", "SPRING+TEST CONFIRMED", "UTAD+TEST CONFIRMED" (prefix `WYS · `). Alert titles are unchanged; existing alerts keep the old message text until they are recreated
+- Fix: the dashboard had an empty row between the separator and "Range Score" (left over from the removed setup score row); rows are renumbered
+
 ## v4.11.0 — 2026-11-17
 - Removed: the setup score (points per event, "High Confidence" label) with its dashboard row, the inputs `Min Breakout Score (Markup/Markdown)`, `Show Only Quality Signals` and `Min Setup Score`, and the alerts "High Quality Accumulation Setup" / "High Quality Distribution Setup"
 - Markup/Markdown now flip on structure alone (Phase D, Spring/UTAD test, in-range SOS/SOW or LPS/LPSY, confirmed close beyond the range on volume) — Markup/Markdown and SOSB/SOWB can come more often than with the score gate; TEST/SOS/SOW/LPS/LPSY labels are no longer hidden by a score filter

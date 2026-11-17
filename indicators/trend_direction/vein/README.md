@@ -469,7 +469,7 @@ Only the reference levels come from the 4H timeframe via `request.security`: las
 
 If both setup sources are left on their default (`close`), they count as not connected: the module stays QUIET and the table shows "Setup sources not connected". The same applies to the two trend sources (treated as neutral).
 
-**Entries** (off by default) need a 15m structure trigger plus a micro score ≥ Entry Min Micro Score (default 6.0, provisional).
+**Entries** (off by default) need a 15m structure trigger AND an active setup on that side AND (a behaviour candle OR follow-through).
 
 ### Bias
 
@@ -480,23 +480,23 @@ If both setup sources are left on their default (`close`), they count as not con
 | MIXED | Both sides active — 15m dampened |
 | QUIET | Setup source below threshold — 15m inactive |
 
-### Micro Score (0–10)
+### Roles (on/off, no points)
 
-| Component | Max | Source |
-|-----------|-----|--------|
-| **Setup** | 3 | Connected setup score, scaled: reaches 3 at twice the activation threshold |
-| **Structure** | 4 | 15m events: sweep, sweep confirmed, micro BOS (each a third of the role); pivot-order HL/LH shifts are not scored |
-| **Behaviour** | 2 | Candle: rejection/engulfing (+1), range expansion + volume (+1) |
-| **Tempo** | 1 | Follow-through within 4 bars (+1) |
+| Role | On when |
+|------|---------|
+| **Setup** | Connected setup score for that side ≥ activation threshold |
+| **Structure** | 15m event: sweep, sweep confirmed or micro BOS; pivot-order HL/LH shifts are not used |
+| **Behaviour** | Rejection or engulfing candle, or a range-expansion bar (with volume) in that direction |
+| **Tempo** | Follow-through of at least the minimum move within the follow-through window after a trigger |
 
 ### Status (display only, no alerts)
 
-| Status | Score | Meaning |
-|--------|-------|---------|
-| QUIET | — | Setup source not active, nothing to do |
-| WATCH | ≥ 3 | Setup active, watching for a 15m structure event |
-| SETUP | ≥ 5 | Structure event (sweep, sweep hold or BOS) + score ≥ 5 |
-| **TRIGGER** | **≥ 7** | **Structure event + score ≥ 7** |
+| Status | Meaning |
+|--------|---------|
+| QUIET | Setup source not active, nothing to do |
+| WATCH | Setup active, watching for a 15m structure event |
+| SETUP | Structure event, no behaviour or follow-through yet |
+| **TRIGGER** | **Structure event + behaviour or follow-through** |
 
 ### Visual Elements
 
@@ -514,8 +514,8 @@ If both setup sources are left on their default (`close`), they count as not con
 |-----|---------|
 | Header | Vein Exec + Status (QUIET/WATCH/SETUP/TRIGGER) |
 | Setup Bias | BULL/BEAR/MIXED/QUIET + setup score |
-| Micro Score | X / 10 with color coding |
-| Components | Set \| Str \| Beh \| Tmp breakdown |
+| Set \| Str | Setup and structure role on/off (signal direction) |
+| Beh \| Tmp | Behaviour and tempo role on/off (signal direction) |
 | Interpretation | Plain-language explanation of current state |
 | Signal | BULL ENTRY active / BEAR ENTRY active / — |
 | 4H Zone | Distance to nearest relevant 4H zone in ATR |

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.0 — 2026-11-17
+- The weighted signal quality score (volatility 0.5, volume 0.3, trend 0.2, confluence halving) is removed. RDP entries and the SSA gate now use one explicit filter condition: enough volatility, plus a volume confirmation or a trend slope (`volOk and (volGate or trendScore > 0.2)`); the volume part passes when the volume filter is off or the symbol has no real trade volume. With the default Confluence Filter settings this is the same decision as before. Users who had changed Confluence Filter / Confluence Threshold can see different entries; the SSA gate previously used its own 0.60 minimum, which at default settings made the same decision
+- Removed inputs: Confluence Filter, Confluence Threshold, SSA Min Signal Quality, SSA Show pending marker (the pending markers could never appear)
+- SSA status table: Quality row removed. Alert builder: condition "Quality OK" is now "Filter OK". Pine-log export: `quality=` field replaced by `filter=true/false`
+
 ## v1.2.0 — 2026-11-17
 - RDP entry tiers A/B removed: an entry now fires on the regime start itself (confirmation bars, filter and HTF gate, one entry per regime). Entries that were previously held back below the Tier B thresholds now fire, so entries can come more often; the `LOWQ` labels, the A/B quality label next to the bar and the A/B status text are gone
 - Removed inputs: Tier A/B Min Confidence / HTF Agreement / Signal Quality, Alert Confidence Min, Confidence Meters, Signal Strength, Strength Dot Position / Offset / Color, Playbook Line; SSA: Strong Min Confidence / HTF / Quality, Enable Super tier and its three requirements, SSA entries require RDP Tier B+, SSA Entry Tier Gate, SSA Signal Display, Strong shows plus markers

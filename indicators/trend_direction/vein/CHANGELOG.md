@@ -9,6 +9,7 @@
 - `vein_reversal_score`, `vein_exhaustion`: without real volume the MFI points are no longer moved to RSI (RSI was counted twice). The setup/exhaustion maximum is lower on such symbols; thresholds are unchanged, so fewer setups reach them there. Instruments with real volume are unaffected. `vein_reversal_score`: comment on the confirmation maximum corrected
 
 ### Removed
+- `vein_execution` v0.2.0→0.3.0 — **micro score removed:** the role-weighted micro score (Setup 3 · Structure 4 · Behaviour 2 · Tempo 1), the "Entry Min Micro Score" input, the "X / 10" table row and the "Micro Score" / component score data-window plots are gone. An entry now needs a structure trigger (sweep, sweep hold or micro BOS) AND an active setup on that side AND (behaviour candle OR follow-through). Status: TRIGGER = structure event + behaviour or follow-through, SETUP = structure event only, WATCH = setup active. The table shows the four roles as on/off; the data window shows them as 1/0. Entries and status can change. Alert texts are unchanged
 - `vein_execution` v0.1.9→0.2.0 — **status is display only:** the "Bull Trigger", "Bear Trigger" and "Micro Setup" alerts are removed; QUIET/WATCH/SETUP/TRIGGER stay as table status and background tint. Entry and Invalidation alerts are unchanged. Saved Trigger/Micro Setup alerts no longer exist
 - `vein_execution` v0.1.9→0.2.0 — HL/LH pivot-order shifts no longer count in the micro score; the structure role now consists of sweep, sweep hold and micro BOS (each a third). Scores, status and entries can change
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.7.0 — 2026-11-17
+- The 0–7 pullback heat score is removed. The pullback-continuation gate now uses an explicit condition: RSI reset, long when `RSI < 45`, short when `RSI > 55`. ATR expansion, ATR distance, wick pressure and BB breach no longer count toward pullback heat; ATR expansion alone used to mark a pullback as hot, so continuation signals can come less often than in v1.6.0. A custom "Pullback Heat Score" value is dropped
+- Removed input: "Pullback Heat Score"
+- Dashboard: the `PB Heat` column shows Yes / – for the pullback heat condition instead of "x / 7"
+- Reversal signals and alerts are unchanged
+
 ## v1.6.0 — 2026-11-17
 - The dashboard's score column is now labelled "PB Heat": the 0–7 points it shows feed only the pullback-continuation gate, not the reversal signal. "Show Score Table" is renamed "Show Dashboard Table"; header, README and description no longer present the 0–7 score as the basis of the reversal signal. Signals and alerts are unchanged
 

@@ -1,4 +1,4 @@
-# Commodity Heat Reversal v1.4.3
+# Commodity Heat Reversal v1.7.0
 
 Mean-reversion reversal and pullback-continuation signal indicator for commodity futures (designed for 4H). It checks for an overextended, exhausted move — RSI extreme or Bollinger Band breach, a rejection wick, and stretch from MA50 or ATR expansion — and fires a long or short signal when all of them are present and a bar-close confirmation triggers.
 
@@ -7,7 +7,7 @@ The indicator also tracks an optional higher-timeframe EMA bias. When a heat set
 ## Features
 
 - **Reversal heat** — ATR distance to MA50 and ATR expansion (0–2), required on top of the exhaustion and wick-rejection gates
-- **Pullback heat score** — long and short points (0–7) from ATR distance (2), ATR expansion (2), RSI extreme (1), wick pressure (1), BB breach (1); used only by the pullback-continuation gate
+- **Pullback heat** — explicit condition for the pullback-continuation gate: RSI reset
 - **Confirmation gate** — signal requires close beyond previous bar's range or MA9
 - **Quality gate** — selectable Early / Balanced / Strict confirmation plus same-direction cooldown
 - **Countertrend handling** — show, mark, or hide weak non-extreme countertrend reversals
@@ -16,20 +16,23 @@ The indicator also tracks an optional higher-timeframe EMA bias. When a heat set
 - **Pullback continuation** — optional diamond signals when a heat pullback resolves back in aligned local/HTF trend
 - **Selectable MA smoothing** — EMA / RMA / SMA / WMA / HMA / JMA (default HMA) for all MAs
 - **SL/TP overlay** — swing-high/low stop + MA20 mean-reversion target drawn on signal bars
-- **Dashboard** — table showing the current long/short pullback heat (`PB Heat`, x / 7), active signal, trend direction, HTF bias, RSI
+- **Dashboard** — table showing whether long/short pullback heat is present (`PB Heat`, Yes / –), active signal, trend direction, HTF bias, RSI
 - **Alerts** — alert conditions for reversal, pullback-continuation, and any signal
 
-## Pullback heat score
+## Reversal gates
 
-| Component | Points | Short condition | Long condition |
-|-----------|--------|-----------------|----------------|
-| ATR distance | 2 | `close > ma50 + 2.5×atr14` | `close < ma50 − 2.5×atr14` |
-| ATR expansion | 2 | `atr14 > atr50 × 1.5` | same |
-| RSI extreme | 1 | `rsi > 72` | `rsi < 28` |
-| Wick pressure | 1 | upper wick > 35% of candle range | lower wick > 35% |
-| BB breach | 1 | `close > bbUpper` | `close < bbLower` |
+Reversal signals require the exhaustion gate (RSI > 72 / < 28 or a close outside the 2σ Bollinger Band) and the wick-rejection gate (rejection wick > 35% of the candle range), plus **reversal heat** from the two stretch components that are not gates: ATR distance to MA50 (`close` beyond `ma50 ± 2.5×atr14`) and ATR expansion (`atr14 > atr50 × 1.5`), 0–2. Default reversal heat threshold: 1 (distance or expansion). Extreme threshold (for counter-trend override): 2 (both).
 
-Reversal signals require the exhaustion gate (RSI extreme or BB breach) and the wick-rejection gate, plus **reversal heat** from the two stretch components that are not gates: ATR distance to MA50 and ATR expansion (0–2). Default reversal heat threshold: 1 (distance or expansion). Extreme threshold (for counter-trend override): 2 (both). The 0–7 pullback heat score above does not enter the reversal signal; it feeds the pullback-continuation gate and the `PB Heat` column of the dashboard.
+## Pullback heat
+
+The pullback-continuation gate uses an explicit condition:
+
+| Side | Condition |
+|------|-----------|
+| Long | `rsi < 45` |
+| Short | `rsi > 55` |
+
+The setup already requires price on the trend side of the MA50 and a touch of the MA20/MA50, so a stretch condition against the MA50 could never hold there; RSI reset is the only heat condition. The `PB Heat` column of the dashboard shows whether the condition holds on the current bar.
 
 ## Quality Gate
 
@@ -51,10 +54,10 @@ Weak countertrend reversals can be displayed in three modes:
 
 Continuation signals are separate from the original reversal signals:
 
-- **Long PB** — MA20 above rising MA50, HTF up bias, recent MA20/MA50 pullback with heat or RSI reset, then bullish close above MA9 / prior high
-- **Short PB** — MA20 below falling MA50, HTF down bias, recent MA20/MA50 pullback with heat or RSI reset, then bearish close below MA9 / prior low
+- **Long PB** — MA20 above rising MA50, HTF up bias, recent MA20/MA50 pullback with pullback heat, then bullish close above MA9 / prior high
+- **Short PB** — MA20 below falling MA50, HTF down bias, recent MA20/MA50 pullback with pullback heat, then bearish close below MA9 / prior low
 
-Default pullback heat threshold: 2/7. Default lookback: 12 bars. Default PB cooldown: 8 bars.
+Default lookback: 12 bars. Default PB cooldown: 8 bars.
 
 ## Stop / Take-Profit
 

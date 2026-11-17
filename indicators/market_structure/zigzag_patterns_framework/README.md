@@ -10,7 +10,7 @@ ZigZag pivot engine with pattern detection on confirmed pivots: simple ABC corre
 - Triangle detection on the last 5 alternating pivots: symmetrical (highs down + lows up), rising (highs flat + lows up), falling (lows flat + highs down)
 - Wolfe wedge heuristic: contracting alternating 5-pivot sequence with point-5 overshoot and time spacing, EPA projection line (1→4)
 - 1-2-3 reversal (Sperandeo) detection: Point 1 (trend extreme) → Point 2 (retracement) → Point 3 (failed continuation), gated by a mandatory prior-trend precondition; confirmed by a later close-through of Point 2's level
-- Alert on every newly confirmed pivot, plus 1-2-3 Long/Short reversal alerts
+- Alert on every newly confirmed pivot, plus "1-2-3 Bullish" / "1-2-3 Bearish" reversal alerts (messages `ZPF · 1-2-3 BULL · …` / `ZPF · 1-2-3 BEAR · …`)
 - Drawing object caps to stay within TradingView limits
 
 ## 1-2-3 Reversal (Sperandeo)

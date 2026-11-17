@@ -8,7 +8,7 @@ Volume/spread-based Wyckoff schematic detector. Identifies accumulation and dist
 - Schematic #1 (Spring/UTAD) and Schematic #2 (no Spring/UTAD, direct SOS/SOW)
 - Full event set: PS/PSY, SC, BC, AR, ST, Spring, Test, SOS, LPS, UTAD, SOW, LPSY
 - Pivot-confirmed LPS and LPSY structure markers (volume checked on the pivot bar; confirmed `Pivot Length` bars after the pivot)
-- Range quality score (0–100) with label
+- Range score (0–100), shown as a raw number without grade words
 - Phase-anchored VWAP (AVWAP) as value-area proxy
 - Multi-timeframe bias via configurable HTF (EMA level + slope, computed inside `request.security`)
 - No Supply / No Demand / Volume Dry-Up markers
@@ -33,3 +33,5 @@ LPS and LPSY are pivot-confirmed: the label sits on the pivot bar, but the event
 - Phase transitions: Accumulation / Distribution / Markup / Markdown started
 - Events: Spring, UTAD, Test, SOS, SOW, SOSB breakout, SOWB breakdown, LPS, LPSY, Climax (Effort vs Result)
 - Combined events: Spring + Test confirmed, UTAD + Test confirmed, HTF/LTF aligned
+
+Alert messages name the event only (e.g. `WYS · SPRING · …`, `WYS · MARKUP STARTED · …`), without LONG/SHORT.

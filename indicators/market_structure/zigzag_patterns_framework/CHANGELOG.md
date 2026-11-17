@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.4.0 — 2026-11-17
+- Alerts: "1-2-3 Long" / "1-2-3 Short" are renamed "1-2-3 Bullish" / "1-2-3 Bearish"; messages read "ZPF · 1-2-3 BULL · …" / "ZPF · 1-2-3 BEAR · …" instead of LONG/SHORT. Existing 1-2-3 alerts must be recreated
+
 ## v1.3.0 — 2026-11-17
 - Removed (1-2-3): the "Q" quality number on the break label (points for retracement, Point-3 failure and break strength) — the label reads "1-2-3 Long" / "1-2-3 Short"
 - 1-2-3: new inputs "1-2-3 min retrace" / "1-2-3 max retrace" (defaults 0.382 / 0.886, same as before); the 1-2-3 setup no longer shares the ABC retrace inputs

@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.6.0 / v4.4.0 — 2026-11-17
+The remaining point and grade gates are removed. The Entry V2 trigger stays; around it only the explicit optional filters remain. Breaking: inputs are gone, and v4 entries change frequency. With the old default (2 of 3 evidence points) entries the context points used to block now fire, so expect more entries. Re-check on the chart and re-run the strategy backtest.
+
+- **Final Signal Gate removed** (v4, v4 strategy). The evidence-point count (quality context, trend alignment, heat at or above a threshold) no longer gates entries. An entry now fires on the Entry V2 trigger when the optional Quality Gate does not veto it and the optional Trend Filter (both default off) lets it through
+- **Heat out of the entry gate** (v4, v4 strategy). The heat score has no directional component (all its parts are magnitudes), so it cannot confirm a long or a short. It stays as a display in the matrix and as the threshold for the Early Reversal markers
+- **Inputs removed** (v4, v4 strategy): Entry Heat Evidence (min), Final Signal Gate (strictness). The "Entry Context Gate" group is gone
+- **Legacy strong/moderate signal removed** (v3). The precision-score classification (Strategy A–D thresholds, confidence downgrade, break-pullback-continuation timing, cooldown, structure and candle filters behind it) fed only the DECISION and Confidence cells; it drew no labels and had no alerts. It is removed with everything that only fed it
+- **DECISION shows the consensus** (v3). It shows the direction plus the multi-timeframe consensus value ("Bull +0.62", "Bear -0.40", "Neutral" inside ±0.20) instead of STRONG BUY / Moderate Buy. Full mode shows it in the row that held Confidence; compact mode shows Heat alone instead of "Heat|Conf"
+- **Timeframe rows without grade words** (v3). The TF1–TF3 action rows show direction plus value instead of STRONG BUY / BUY / SELL / STRONG SELL
+- **Confidence removed** (v3). The confidence level (HIGH/MEDIUM/LOW) and the hidden "Signal Confidence" plot are gone
+- **Inputs removed** (v3): the Signal Quality group (Enable Quality Gate, ATR Contract/Expand Threshold, Volume Low/High Threshold, Block Entries on Low Volume, Block Trend Signals in Range, Allow Mean-Reversion in Range). In v3 they only filtered the removed legacy signal, never Entry V2
+- **Divergence out of the market bias band** (v3). The bias score reads Flow, Momentum, Trend, Volatility and Structure; its range is now -0.9 to +0.9 (not renormalised). The band switch thresholds (0.15 / 0.05) are unchanged. The Divergence row in the matrix stays as display
+- No alerts removed
+
 ## v3.5.0 / v4.3.0 — 2026-11-17
 Entry V2 stays the signal; the strength score and the grade/quality outputs around it are removed. Breaking: inputs and alerts are gone, and entries can come more often where the strength threshold used to block them (and less often where it used to let them through without momentum). Re-check on the chart and re-run the strategy backtest.
 

@@ -1,17 +1,17 @@
 //@version=6
 // ============================================================================
 // Tweezer & Kangaroo Zones [WavesUnchained]
-// Version: 3.3.0
+// Version: 3.4.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
-// Modular pattern detection with zone scoring, structure context, and first-retest signals
+// Modular pattern detection with zone ranking, structure context, and first-retest signals
 //
 // Features:
 //   ✓ Tweezer pattern detection with TF sensitivity
 //   ✓ Kangaroo tail (pin bar) detection
 //   ✓ Dynamic supply/demand zones
-//   ✓ 5-component zone scoring (0-100)
+//   ✓ 5-component internal zone ranking (Top-N selection)
 //   ✓ Zone freshness decay & Top-N filtering
 //   ✓ Structure context (HH/HL/LH/LL swing detection)
 //   ✓ Pattern weighting (Tweezer vs Kangaroo)
@@ -138,9 +138,8 @@ structLookback    = input.int(20, "Swing Lookback", minval=5, maxval=50, group="
 structBonus       = input.float(10.0, "Structure Bonus (0-20)", minval=0, maxval=20, group="Structure Context")
 requireAfterSwing = input.bool(false, "Only after swing point", group="Structure Context")
 
-// Zone Scoring (5-Component System)
-useZoneScore      = input.bool(true, "Enable Zone Scoring", group="Zone Scoring")
-zoneScoreMin      = input.float(50.0, "Min Zone Score (0-100)", minval=0, maxval=100, group="Zone Scoring")
+// Zone Ranking (5-component internal score, used only to pick the Top N zones)
+useZoneScore      = input.bool(true, "Enable Zone Ranking (Top N)", group="Zone Scoring", tooltip="Ranks active zones internally and highlights only the Top N; the others are dimmed. The ranking does not create, remove or label zones and does not affect retest signals.")
 zoneScoreTopN     = input.int(5, "Show Top N Zones", minval=1, maxval=20, group="Zone Scoring")
 zoneHalfLife      = input.int(80, "Freshness Half-Life (bars)", minval=10, maxval=500, group="Zone Scoring")
 zoneMaxTouches    = input.int(4, "Max Touches before weak", minval=1, maxval=10, group="Zone Scoring")
@@ -149,11 +148,8 @@ zoneLookback      = input.int(100, "Lookback for extremes", minval=20, maxval=50
 // Zone Classification & Labels
 showZoneLabels    = input.bool(true, "Show Zone Labels", group="Zone Labels")
 showTooltips      = input.bool(true, "Show Tooltips", group="Zone Labels")
-showOnlyAB        = input.bool(false, "Show only A/B Zones", group="Zone Labels")
-gradeAMin         = input.float(75.0, "Grade A: Min Score", minval=50, maxval=100, group="Zone Labels")
-gradeBMin         = input.float(55.0, "Grade B: Min Score", minval=30, maxval=80, group="Zone Labels")
-reversalBonus     = input.float(15.0, "Reversal Bonus", minval=0, maxval=30, group="Zone Labels")
-continuationPenalty = input.float(10.0, "Continuation Penalty", minval=0, maxval=30, group="Zone Labels")
+reversalBonus     = input.float(15.0, "Reversal Bonus", minval=0, maxval=30, group="Zone Scoring")
+continuationPenalty = input.float(10.0, "Continuation Penalty", minval=0, maxval=30, group="Zone Scoring")
 
 // Panels
 useHTFPanel     = input.bool(false, "Show HTF Stack Panel", group="Panels")
@@ -544,7 +540,7 @@ var int[]  zBornBar  = array.new<int>()
 var bool[] zActive   = array.new<bool>()
 var bool[] zRetested = array.new<bool>()
 // Zone Scoring Arrays
-var float[] zScore     = array.new<float>()  // Total score (0-100)
+var float[] zScore     = array.new<float>()  // Internal ranking score (0-100), Top-N only
 var float[] zRejection = array.new<float>()  // Rejection quality (0-1)
 var float[] zExtreme   = array.new<float>()  // Extreme proximity (0-1)
 var float[] zImpulse   = array.new<float>()  // Impulse before (0-1)
@@ -555,7 +551,6 @@ var float[] zScoreMult  = array.new<float>()     // Pattern weight (× height fa
 var float[] zStructPts  = array.new<float>()     // Structure bonus kept for score updates
 var int[]   zPatternBar = array.new<int>()       // Last bar a pattern created/reinforced the zone
 var string[] zZoneType = array.new<string>()     // "R" for Reversal, "C" for Continuation
-var string[] zGrade = array.new<string>()        // "A", "B", "C" Ranking
 var label[] zLabels = array.new<label>()         // Zone labels with tooltips
 
 //==================== Zone Score Functions ====================//
@@ -634,41 +629,27 @@ f_calc_clean(_touches) =>
 f_calc_zone_score(_rejection, _extreme, _impulse, _fresh, _clean) =>
     30.0 * _rejection + 25.0 * _extreme + 20.0 * _impulse + 15.0 * _fresh + 10.0 * _clean
 
-// Alpha for score-based visualization
-f_get_zone_alpha(_score) =>
-    baseAlpha = 85
-    scoreBonus = math.min(30.0, _score * 0.3)
-    int(baseAlpha - scoreBonus)
+// Zone fill (direction only)
+f_zone_bg(_isSupply) =>
+    _isSupply ? color.new(#FF4444, 80) : color.new(#44FF88, 80)
 
 // Zone Type: Reversal vs Continuation
 f_classify_zone_type(_isSupply, _extreme, _impulse) =>
     isReversal = _extreme >= 0.6 and _impulse >= 0.5
     isReversal ? "R" : "C"
 
-// Calculate grade: A/B/C
-f_calc_grade(_score, _touches) =>
-    if _score >= gradeAMin and _touches <= 1
-        "A"
-    else if _score >= gradeBMin
-        "B"
-    else
-        "C"
-
 // Build tooltip for zone
-f_build_tooltip(_isSupply, _zoneType, _patternType, _grade, _score, _rejection, _extreme, _impulse, _fresh, _clean, _touches, _age, _top, _bot) =>
+f_build_tooltip(_isSupply, _zoneType, _patternType, _rejection, _extreme, _impulse, _fresh, _clean, _touches, _age, _top, _bot) =>
     zoneDir = _isSupply ? "Supply (S)" : "Demand (D)"
     zoneTypeStr = _zoneType == "R" ? "Reversal" : "Continuation"
     patternStr = _patternType == "K" ? "Kangaroo (K)" : "Tweezer (T)"
-    gradeStr = _grade == "A" ? "A = Premium" : _grade == "B" ? "B = Good" : "C = Context"
 
     header = zoneDir + " Zone\n"
     header += "Type: " + zoneTypeStr + "\n"
     header += "Pattern: " + patternStr + "\n"
-    header += "Grade: " + gradeStr + "\n"
-    header += "Score: " + str.tostring(_score, "#.0") + "/100\n"
     header += "─────────────────\n"
 
-    breakdown = "SCORE BREAKDOWN\n"
+    breakdown = "ZONE MEASURES (0-1)\n"
     breakdown += "Rejection: " + str.tostring(_rejection, "#.00") + "\n"
     breakdown += "Extreme: " + str.tostring(_extreme, "#.00") + "\n"
     breakdown += "Impulse: " + str.tostring(_impulse, "#.00") + "\n"
@@ -684,40 +665,27 @@ f_build_tooltip(_isSupply, _zoneType, _patternType, _grade, _score, _rejection, 
     zoneInfo += "Bottom: " + str.tostring(_bot, "#.00") + "\n"
     zoneInfo += "─────────────────\n"
 
-    tradingHint = "TRADING\n"
-    if _grade == "A"
-        tradingHint += "★ Best: First retest\n"
-    else if _grade == "B"
-        tradingHint += "◆ Good: Wait for confirmation\n"
-    else
-        tradingHint += "○ Context only\n"
-
+    tradingHint = ""
     if _isSupply
         tradingHint += "Invalidation: Close > " + str.tostring(_top, "#.00") + "\n"
     else
         tradingHint += "Invalidation: Close < " + str.tostring(_bot, "#.00") + "\n"
 
     legend = "─────────────────\n"
-    legend += "LABEL: Grade Dir Pattern Score\n"
-    legend += "A/B/C = Quality Grade\n"
+    legend += "LABEL: Dir Pattern\n"
     legend += "S/D = Supply/Demand\n"
     legend += "K/T = Kangaroo/Tweezer"
 
     header + breakdown + zoneInfo + tradingHint + legend
 
 // Label text for zone (short)
-f_build_label_text(_grade, _isSupply, _patternType, _score) =>
+f_build_label_text(_isSupply, _patternType) =>
     dir = _isSupply ? "S" : "D"
-    _grade + " " + dir + " " + _patternType + " " + str.tostring(_score, "#")
+    dir + " " + _patternType
 
-// Label color based on grade
-f_get_label_color(_grade, _isSupply) =>
-    if _grade == "A"
-        _isSupply ? color.new(#E53935, 0) : color.new(#00897B, 0)
-    else if _grade == "B"
-        _isSupply ? color.new(#EF5350, 15) : color.new(#26A69A, 15)
-    else
-        _isSupply ? color.new(#E57373, 30) : color.new(#4DB6AC, 30)
+// Label color by direction
+f_get_label_color(_isSupply) =>
+    _isSupply ? color.new(#EF5350, 15) : color.new(#26A69A, 15)
 
 //==================== Zone Helper Functions ====================//
 
@@ -808,9 +776,7 @@ f_merge_zone(_idx, _newTop, _newBot, _newRejection, _newExtreme, _newImpulse, _p
     box.set_top(b, mergedTop)
     box.set_bottom(b, mergedBot)
 
-    alpha = f_get_zone_alpha(newScore)
-    newBgColor = isSup ? color.new(color.from_gradient(newScore, 0, 100, #FF4444, #FF0000), alpha) : color.new(color.from_gradient(newScore, 0, 100, #44FF88, #00FF00), alpha)
-    box.set_bgcolor(b, newBgColor)
+    box.set_bgcolor(b, f_zone_bg(isSup))
 
 //==================== Zone Creation ====================//
 
@@ -857,65 +823,56 @@ f_new_zone(_isSupply, _top, _bot, _patternType, _patternStrength) =>
             baseScore := baseScore * (0.7 + 0.3 * hScore)
             initScore = baseScore * patternMult + structScore
 
-            if useZoneScore and initScore < zoneScoreMin
-                if shouldLog and logZoneCreation
-                    log.info(str.format("ZONE_REJECTED_SCORE | {0,date,yyyy-MM-dd HH:mm} | type={1} | pattern={2} | top={3,number,#.##} | bot={4,number,#.##} | score={5,number,#.##} | minScore={6,number,#.##} | rejection={7,number,#.##} | extreme={8,number,#.##} | impulse={9,number,#.##}",
-                        time, _isSupply ? "SUPPLY" : "DEMAND", _patternType, _top, _bot, initScore, zoneScoreMin, rejection, extreme, impulse))
-                false
+            borderStyle = zoneStyle == "Dashed" ? line.style_dashed : zoneStyle == "Dotted" ? line.style_dotted : line.style_solid
+            borderWidth = 2
+
+            bgColor = f_zone_bg(_isSupply)
+
+            b = box.new(bar_index, _top, bar_index+zoneExtendBars, _bot, border_color=colActiveBrd, border_width=borderWidth, border_style=borderStyle, bgcolor=bgColor)
+            array.push(boxes, b)
+            array.push(zTop, _top)
+            array.push(zBot, _bot)
+            array.push(zSupply, _isSupply)
+            array.push(zBornBar, bar_index)
+            array.push(zActive, true)
+            array.push(zRetested, false)
+            array.push(zScore, initScore)
+            array.push(zRejection, rejection)
+            array.push(zExtreme, extreme)
+            array.push(zImpulse, impulse)
+            array.push(zTouches, 0)
+            array.push(zLastTouchBar, bar_index)
+            array.push(zPatternType, _patternType)
+            array.push(zScoreMult, patternMult * (0.7 + 0.3 * hScore))
+            array.push(zStructPts, structScore)
+            array.push(zPatternBar, bar_index)
+
+            zType = f_classify_zone_type(_isSupply, extreme, impulse)
+            adjustedScore = zType == "R" ? initScore + reversalBonus : initScore - continuationPenalty
+            adjustedScore := math.max(0, math.min(100, adjustedScore))
+            array.set(zScore, array.size(zScore) - 1, adjustedScore)
+
+            array.push(zZoneType, zType)
+
+            if shouldLog and logZoneCreation
+                log.info(str.format("ZONE_CREATED | {0,date,yyyy-MM-dd HH:mm} | type={1} | pattern={2} | zoneType={3} | rankScore={4,number,#.##} | top={5,number,#.##} | bot={6,number,#.##} | rejection={7,number,#.##} | extreme={8,number,#.##} | impulse={9,number,#.##} | structBonus={10,number,#.##}",
+                    time, _isSupply ? "SUPPLY" : "DEMAND", _patternType, zType, adjustedScore, _top, _bot, rejection, extreme, impulse, structScore))
+
+            if showZoneLabels
+                lblText = f_build_label_text(_isSupply, _patternType)
+                lblY = _isSupply ? _top : _bot
+
+                lblStyle = _isSupply ? label.style_label_down : label.style_label_up
+                lblColor = f_get_label_color(_isSupply)
+
+                tooltipText = showTooltips ? f_build_tooltip(_isSupply, zType, _patternType, rejection, extreme, impulse, 1.0, 1.0, 0, 0, _top, _bot) : ""
+
+                lbl = label.new(bar_index, lblY, lblText, style=lblStyle, color=lblColor, textcolor=color.white, size=size.small, tooltip=tooltipText)
+                array.push(zLabels, lbl)
             else
-                borderStyle = zoneStyle == "Dashed" ? line.style_dashed : zoneStyle == "Dotted" ? line.style_dotted : line.style_solid
-                borderWidth = 2
+                array.push(zLabels, na)
 
-                alpha = useZoneScore ? f_get_zone_alpha(initScore) : 85
-                bgColor = _isSupply ? color.new(color.from_gradient(initScore, 0, 100, #FF4444, #FF0000), alpha) : color.new(color.from_gradient(initScore, 0, 100, #44FF88, #00FF00), alpha)
-
-                b = box.new(bar_index, _top, bar_index+zoneExtendBars, _bot, border_color=colActiveBrd, border_width=borderWidth, border_style=borderStyle, bgcolor=bgColor)
-                array.push(boxes, b)
-                array.push(zTop, _top)
-                array.push(zBot, _bot)
-                array.push(zSupply, _isSupply)
-                array.push(zBornBar, bar_index)
-                array.push(zActive, true)
-                array.push(zRetested, false)
-                array.push(zScore, initScore)
-                array.push(zRejection, rejection)
-                array.push(zExtreme, extreme)
-                array.push(zImpulse, impulse)
-                array.push(zTouches, 0)
-                array.push(zLastTouchBar, bar_index)
-                array.push(zPatternType, _patternType)
-                array.push(zScoreMult, patternMult * (0.7 + 0.3 * hScore))
-                array.push(zStructPts, structScore)
-                array.push(zPatternBar, bar_index)
-
-                zType = f_classify_zone_type(_isSupply, extreme, impulse)
-                adjustedScore = zType == "R" ? initScore + reversalBonus : initScore - continuationPenalty
-                adjustedScore := math.max(0, math.min(100, adjustedScore))
-                array.set(zScore, array.size(zScore) - 1, adjustedScore)
-
-                grade = f_calc_grade(adjustedScore, 0)
-                array.push(zZoneType, zType)
-                array.push(zGrade, grade)
-
-                if shouldLog and logZoneCreation
-                    log.info(str.format("ZONE_CREATED | {0,date,yyyy-MM-dd HH:mm} | type={1} | pattern={2} | grade={3} | zoneType={4} | score={5,number,#.##} | top={6,number,#.##} | bot={7,number,#.##} | rejection={8,number,#.##} | extreme={9,number,#.##} | impulse={10,number,#.##} | structBonus={11,number,#.##}",
-                        time, _isSupply ? "SUPPLY" : "DEMAND", _patternType, grade, zType, adjustedScore, _top, _bot, rejection, extreme, impulse, structScore))
-
-                if showZoneLabels and (not showOnlyAB or grade != "C")
-                    lblText = f_build_label_text(grade, _isSupply, _patternType, adjustedScore)
-                    lblY = _isSupply ? _top : _bot
-
-                    lblStyle = _isSupply ? label.style_label_down : label.style_label_up
-                    lblColor = f_get_label_color(grade, _isSupply)
-
-                    tooltipText = showTooltips ? f_build_tooltip(_isSupply, zType, _patternType, grade, adjustedScore, rejection, extreme, impulse, 1.0, 1.0, 0, 0, _top, _bot) : ""
-
-                    lbl = label.new(bar_index, lblY, lblText, style=lblStyle, color=lblColor, textcolor=color.white, size=size.small, tooltip=tooltipText)
-                    array.push(zLabels, lbl)
-                else
-                    array.push(zLabels, na)
-
-                true
+            true
 
 //==================== Zone Update ====================//
 
@@ -944,7 +901,8 @@ f_update_zones() =>
                     lastTouchBar = array.get(zLastTouchBar, i)
                     debounceOK = (bar_index - lastTouchBar) >= 3
 
-                    if potentialTouch and debounceOK
+                    bool touchedNow = potentialTouch and debounceOK
+                    if touchedNow
                         currTouches = array.get(zTouches, i)
                         array.set(zTouches, i, currTouches + 1)
                         array.set(zLastTouchBar, i, bar_index)
@@ -966,26 +924,14 @@ f_update_zones() =>
                     newScore := math.max(0, math.min(100, newScore))
                     array.set(zScore, i, newScore)
 
-                    newGrade = f_calc_grade(newScore, touches)
-                    oldGrade = array.get(zGrade, i)
-                    array.set(zGrade, i, newGrade)
-
-                    alpha = f_get_zone_alpha(newScore)
-                    newBgColor = isSup ? color.new(color.from_gradient(newScore, 0, 100, #FF4444, #FF0000), alpha) : color.new(color.from_gradient(newScore, 0, 100, #44FF88, #00FF00), alpha)
-                    box.set_bgcolor(b, newBgColor)
-
-                    if showZoneLabels and oldGrade != newGrade
+                    // Refresh the label tooltip when a new touch is counted
+                    if showZoneLabels and showTooltips and touchedNow
                         lbl = array.get(zLabels, i)
                         if not na(lbl)
                             patternType = array.get(zPatternType, i)
                             age = bar_index - bornBar
-                            lblText = f_build_label_text(newGrade, isSup, patternType, newScore)
-                            label.set_text(lbl, lblText)
-                            label.set_color(lbl, f_get_label_color(newGrade, isSup))
-
-                            if showTooltips
-                                tooltipText = f_build_tooltip(isSup, zType, patternType, newGrade, newScore, rejection, extreme, impulse, fresh, clean, touches, age, top_, bot_)
-                                label.set_tooltip(lbl, tooltipText)
+                            tooltipText = f_build_tooltip(isSup, zType, patternType, rejection, extreme, impulse, fresh, clean, touches, age, top_, bot_)
+                            label.set_tooltip(lbl, tooltipText)
 
 // Top-N Filtering
 f_apply_topn_filter() =>
@@ -1024,6 +970,7 @@ f_apply_topn_filter() =>
                 idx = array.get(activeIndices, i)
                 b = array.get(boxes, idx)
                 box.set_border_color(b, colActiveBrd)
+                box.set_bgcolor(b, f_zone_bg(array.get(zSupply, idx)))
 
 //==================== Zone Creation from Patterns ====================//
 
@@ -1280,7 +1227,7 @@ if useHTFPanel and barstate.islast
         table.cell(stack, 1, 6, str.format("Active: {0} | TopN: {1}", activeCount, zoneScoreTopN), text_color=tc, text_size=size.small)
         table.cell(stack, 0, 7, str.format("Top 3: {0,number,#0.0}", array.get(topScores, 0)), text_color=#ff6f00, text_size=size.small)
         table.cell(stack, 1, 7, str.format("{0,number,#0.0} | {1,number,#0.0}", array.get(topScores, 1), array.get(topScores, 2)), text_color=tc, text_size=size.small)
-        table.cell(stack, 0, 8, str.format("MinScore: {0,number,#0.0}", zoneScoreMin), text_color=tc, text_size=size.small)
+        table.cell(stack, 0, 8, "", text_color=tc, text_size=size.small)
         table.cell(stack, 1, 8, str.format("Decay: {0} bars", zoneHalfLife), text_color=tc, text_size=size.small)
 
 

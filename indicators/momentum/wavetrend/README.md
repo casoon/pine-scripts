@@ -109,7 +109,7 @@ The optional "Gate: Volume Conviction" (External Confirmations group, off by def
 | Percentile | Extension D: oscillator percentile rank in recent history |
 | Wave | Extension D: peak/trough structure (accelerating / fading) |
 | Correction | Extension D: pullback depth as % of last wave amplitude |
-| Bias | Composite directional read of oscillator side, momentum, cross, divergence and trend strength (regime adds ±1 only, its direction is already in the oscillator side), shown as Strong Bull … Strong Bear |
+| Bias | Composite directional read of oscillator side, momentum, cross and trend strength (regime adds ±1 only, its direction is already in the oscillator side), shown as Strong Bull … Strong Bear |
 | Compare | Optional: WaveTrend zone of a second symbol (OB / OS / Bull / Bear) |
 
 ## Bug Fixes vs. Source
