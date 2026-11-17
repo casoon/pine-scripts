@@ -11,7 +11,7 @@ Liquidity sweep reversal detector with HTF trend confluence. A signal fires when
 - Spike filter — blocks sweeps deeper than N×ATR (real breakdowns, not reversals)
 - Structural SL: sweep low/high plus configurable ATR noise buffer; TP as R-multiple of actual risk
 - HTF trend filter via dual EMA on a configurable timeframe (last closed HTF bar, no repaint)
-- Configurable Reclaim MA (EMA / RMA / SMA / WMA / HMA / JMA)
+- Reclaim MA (EMA, configurable length)
 - Price structure labels (HH / HL / LH / LL) at confirmed pivots (optional)
 - Outcome tracking: signal label turns blue when no follow-through within N bars
 - Cooldown gate per direction to suppress signal chasing

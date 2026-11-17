@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.0 — 2026-11-17
+- **Breaking:** "Consensus Type" offers EMA (default), SMA and WMA; RMA, HMA and VWMA are removed. Saved chart settings that used a removed option must be re-selected
+
 ## v1.0.1 — 2026-08-26
 - Made dominance directionally consistent across all four pressure engines
 - Confirmed exhaustion and divergence signals at bar close and moved divergence markers from the historical pivot to the actual confirmation bar

@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.2.0 — 2026-11-17
+- **Breaking:** the smoothing "Mode" selection and the JMA Phase / Power inputs are removed; the total score keeps its original core JMA with phase 50 / power 2 (Plan 38)
+
 ## v2.1.1 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
 

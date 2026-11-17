@@ -35,7 +35,7 @@ Five triggers are available, each independently toggleable:
 | Candle Sweep | Low violates swing low, close recovers | High violates swing high, close recovers |
 | MA / Momentum | Close crosses above MA + MACD hist rising | Close crosses below MA + MACD hist falling |
 
-MA type for the reclaim line is configurable (EMA / RMA / SMA / WMA / HMA / JMA, default RMA). JMA Phase and Power are exposed when JMA is selected.
+The reclaim line is an RMA (fixed core, no type selection).
 
 ## Signal Modes
 

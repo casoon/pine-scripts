@@ -14,7 +14,7 @@ The indicator also tracks an optional higher-timeframe EMA bias. When a heat set
 - **Trend filter** — optional MA200 direction filter with configurable override at extreme reversal heat
 - **HTF bias** — optional higher-timeframe EMA direction and slope context
 - **Pullback continuation** — optional diamond signals when a heat pullback resolves back in aligned local/HTF trend
-- **Selectable MA smoothing** — EMA / RMA / SMA / WMA / HMA / JMA (default HMA) for all MAs
+- **HMA smoothing** for all MAs (fixed core, no type selection)
 - **SL/TP overlay** — swing-high/low stop + MA20 mean-reversion target drawn on signal bars
 - **Dashboard** — table showing whether long/short pullback heat is present (`PB Heat`, Yes / –), active signal, trend direction, HTF bias, RSI
 - **Alerts** — alert conditions for reversal, pullback-continuation, and any signal

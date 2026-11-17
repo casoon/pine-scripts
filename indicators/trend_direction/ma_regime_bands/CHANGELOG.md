@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.0 — 2026-11-17
+- **Breaking:** "MA Type" offers DEMA (default), EMA and SMA; TEMA and JMA are removed. Saved chart settings that used a removed option must be re-selected
+
 ## v1.0.3 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

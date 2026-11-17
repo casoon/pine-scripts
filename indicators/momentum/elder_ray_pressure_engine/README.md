@@ -5,7 +5,7 @@ A research framework built on Alexander Elder's Bull Power / Bear Power concept 
 ## Features
 
 - Four pressure engines: **Classic Elder** (High/Low vs. consensus, can be simultaneously positive/negative), **Directional Elder** (excursion clamped to its own side only), **True Range Elder** (gap-aware, includes previous close), **Close-Weighted Elder** (directional excursion scaled by where the bar closed within its range)
-- Selectable consensus line: EMA / RMA / SMA / WMA / HMA / VWMA, on any source
+- Selectable consensus line: EMA / SMA / WMA, on any source
 - Normalization: Raw, ATR, Average Range, Percent of consensus, or RMS — makes pressure comparable across instruments and volatility regimes
 - Net pressure, gross pressure, and signed dominance (-1..+1, consistent across all four engines)
 - Separately toggleable pressure impulse and acceleration (first and second change of net pressure)
@@ -25,7 +25,7 @@ These three axes are deliberately orthogonal inputs, not a single fixed formula,
 | Axis | Options |
 |---|---|
 | Engine | Classic Elder · Directional Elder · True Range Elder · Close-Weighted Elder |
-| Consensus | EMA · RMA · SMA · WMA · HMA · VWMA |
+| Consensus | EMA · SMA · WMA |
 | Normalization | Raw · ATR · Average Range · Percent · RMS |
 
 ## Exhaustion vs. extreme

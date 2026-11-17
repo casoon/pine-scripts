@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v1.9.0 — 2026-11-17
+
+### Removed
+- **Reclaim MA type selection** and the JMA Phase / Power inputs; the Reclaim MA is always EMA, the original core (Plan 38). The strategy (v1.8.0) drops the same inputs
+
 ## v1.8.0 — 2026-11-17
 
 ### Removed

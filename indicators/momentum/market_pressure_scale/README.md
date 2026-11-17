@@ -72,9 +72,9 @@ Top-right panel (Show Table toggle, default off):
 
 **Main** — Normalisation window, ATR / BB lengths, BB multiplier, Volume MA, S/R Lookback
 
-**Bias** — MA type (EMA / RMA / SMA / WMA / HMA / JMA), Fast length (default 9), Slow length (default 21)
+**Bias** — HMA (fixed core), Fast length (default 9), Slow length (default 21)
 
-**Smoothing** — applied to both output curves; type (EMA / RMA / SMA / WMA / HMA / JMA) + length; JMA Phase + Power
+**Smoothing** — applied to both output curves; EMA (fixed core) + length
 
 **Signal Markers** — master toggle + individual toggle per marker
 

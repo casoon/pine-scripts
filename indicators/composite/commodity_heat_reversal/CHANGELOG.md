@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.8.0 — 2026-11-17
+- **Breaking:** the "MA Type" selection and the JMA Phase / Power inputs are removed; all MAs use the original core HMA. The type changed signal density, not quality (Plan 38)
+
 ## v1.7.0 — 2026-11-17
 - The 0–7 pullback heat score is removed. The pullback-continuation gate now uses an explicit condition: RSI reset, long when `RSI < 45`, short when `RSI > 55`. ATR expansion, ATR distance, wick pressure and BB breach no longer count toward pullback heat; ATR expansion alone used to mark a pullback as hot, so continuation signals can come less often than in v1.6.0. A custom "Pullback Heat Score" value is dropped
 - Removed input: "Pullback Heat Score"

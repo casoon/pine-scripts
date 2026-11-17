@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.6.0 — 2026-11-17
+- **Breaking:** the Bias "Type" and Smoothing "Type" selections and the JMA Phase / Power inputs are removed. Bias keeps its original core HMA, the output smoothing its original core EMA (Plan 38)
+
 ## v2.5.0 — 2026-11-17
 - Reversal no longer uses a weighted score (exhaustion × 0.45 + wick × 0.30 + Setup × 0.25, crossing 60). It now fires when Impulse exhaustion reaches a minimum AND the bar is a rejection candle at the range extreme (wick against the extreme plus a close in the reversal direction), once per entry into that condition. Setup Pressure no longer takes part. New inputs `Reversal: Min Exhaustion` (25) and `Reversal: Min Rejection Wick %` (30). Reversal markers and alerts can fire on different bars than before, more or less often depending on the market
 - Move Strength is described as what it is (composite of compression depth, range-edge location and ADX) instead of an "expected magnitude of the eventual move"; the calculation is unchanged

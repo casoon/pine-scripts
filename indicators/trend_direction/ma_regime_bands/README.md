@@ -4,7 +4,7 @@ Regime overlay that classifies the market as Bull, Bear, or Neutral using the al
 
 ## Features
 
-- Three configurable MAs (SMA, EMA, DEMA, TEMA, JMA) — default 21 / 55 / 89
+- Three configurable MAs (DEMA, EMA, SMA) — default 21 / 55 / 89
 - Regime classification on confirmed closes: Bull (close above all MAs), Bear (close below all MAs), Neutral otherwise
 - Trend-strength gate: regime only triggers when the MA spread / ATR exceeds a minimum threshold
 - Three strength-normalization modes: Off (fixed threshold), By MA Type (threshold scaled per MA type), Auto (threshold scaled by current vs. long-run average MA slope)

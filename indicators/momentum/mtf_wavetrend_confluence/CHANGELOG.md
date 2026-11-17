@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.9.0 — 2026-11-17
+- **Breaking:** "WT Smoothing" and the JMA Phase / Power inputs are removed; WT1 always uses the original EMA. HMA, SuperSmoother and JMA Approx changed signal density, not quality (Plan 38)
+
 ## v0.8.0 — 2026-11-17
 - Breaking: grade removed (depth + Wave + Tide + Wave-StochRSI + divergence point) together with the Min Grade gate. The signal is the Ripple cross out of the zone with depth or exhaustion: a cross out of the deep extreme fires immediately, a shallow zone cross after the exhaustion pullback. Crosses that used to stay below Min Grade (default 2) now fire, so signals can come more often
 - Removed inputs: `MTF grading (Wave + Tide)`, `Min Grade`, `Wave StochRSI in grade`, `Divergence adds to grade`, `Divergence Window`, the six StochRSI inputs. `Divergence ★ premium marker` is now `Show Divergence` (display only)

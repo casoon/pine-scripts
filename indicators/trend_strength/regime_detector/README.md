@@ -14,7 +14,7 @@ MA-zone based trend regime overlay with an adaptive core engine, higher-timefram
 - **Multi-timeframe gate** — three higher timeframes (auto-stacked from the chart TF) vote with configurable weights; signals require a minimum weighted agreement
 - **Advanced filters** — volatility (static/adaptive/dynamic ATR%), optional volume filter, market-condition classification, combined into one explicit filter condition
 - **Profile presets** — Smart, Futures, Spot, ETF, Crypto parameter sets
-- **MA Overlay Zones** — optional regime-gated entry/SL zones from an MA fan (SMA/EMA/DEMA/TEMA/JMA)
+- **MA Overlay Zones** — optional regime-gated entry/SL zones from an MA fan (DEMA/EMA/SMA)
 - **SSA layer** — signal engine (Trend/Reversal mode) or RDP-event driven entries, Fair Value Trail, trend bias band, ATR clouds
 - **Trade management** — TP/SL boxes with risk/reward ratio, trailing stop (FVT/Cloud/Line source), time stop
 - **Alert builder** — up to 7 chainable conditions (AND/OR) including external series inputs

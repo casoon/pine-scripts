@@ -1,5 +1,8 @@
 # Changelog
 
+## Smoothing choice reduced (v2) — 2026-11-17
+- `market_tradability_engine_v2` v2.6.0→2.7.0 — **Breaking:** "Baseline Type" offers EMA (default) and T3 (slower, fewer crosses, misses more turns); SMA, RMA, WMA, SuperSmoother, KAMA, JMA Approx and the JMA Phase / Power inputs are removed. Saved chart settings that used a removed option must be re-selected. `MTE2 CONFIG` logs modelVersion 2.7.0
+
 ## One input per family (v2) — 2026-11-17
 - `market_tradability_engine_v2` v2.5.5→2.6.0: Structure's trend quality is the efficiency-ratio rank alone (baseline-cross rarity, ADX, slope and directional-consistency ranks removed); Acceptance is baseline slope (0.68) plus bar acceptance (0.32) (baseline displacement, DI dominance, directional consistency and range position removed); Energy no longer repeats the efficiency rank and weights volatility expansion, acceleration and candle commitment 3:2:2. A single rank spreads wider than a blend of five, and the thresholds of the Reactivity presets are not recalibrated, so states can change. The `MTE2 CAL` log drops the five trend sub-component fields
 ## Breakout alerts removed (v1) — 2026-11-17

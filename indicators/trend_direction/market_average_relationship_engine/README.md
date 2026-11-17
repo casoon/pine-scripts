@@ -4,7 +4,7 @@ Evaluates the relationship between price and one consistently selected moving-av
 
 ## Features
 
-- One MA family at a time (EMA, SMA, WMA, HMA, VWMA, RMA, DEMA, TEMA, ALMA), freely settable length and source — no JMA, since an unlicensed approximation would misrepresent the proprietary Jurik implementation
+- One MA family at a time (EMA, SMA or WMA), freely settable length and source — no JMA, since an unlicensed approximation would misrepresent the proprietary Jurik implementation
 - Six diagnostic scores, each 0–100: **Trend** (MA slope + price side + persistence of both + price efficiency + direction agreement), **Respect** (historical hit rate of price reactions around the MA, confidence-weighted by sample count), **Extension** (ATR distance from the MA blended with statistical rarity vs. its own history), **Compression** (share of recent bars near the MA + ATR contraction), **Acceleration** (separation velocity + MA-slope acceleration + return acceleration), **Exhaustion** (extension gated by efficiency decay, opposing wicks, stalled progress, and fading acceleration)
 - Relationship oscillator (−100..+100): signed Trend quality reduced by an Extension/Exhaustion quality penalty — extension and exhaustion degrade relationship quality but do not flip its sign
 - Twelve-state classification: MA Compression, Healthy/Developing Bullish/Bearish, Bullish/Bearish Acceleration, Bullish/Bearish Do Not Chase, Bullish/Bearish Exhaustion Risk, Neutral/Unstructured

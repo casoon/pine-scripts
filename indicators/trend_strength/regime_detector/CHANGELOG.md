@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.4.0 — 2026-11-17
+- **Breaking:** the MA Overlay Zones "MA Type" offers DEMA (default), EMA and SMA; TEMA and JMA are removed. Saved chart settings that used a removed option must be re-selected
+
 ## v1.3.0 — 2026-11-17
 - The weighted signal quality score (volatility 0.5, volume 0.3, trend 0.2, confluence halving) is removed. RDP entries and the SSA gate now use one explicit filter condition: enough volatility, plus a volume confirmation or a trend slope (`volOk and (volGate or trendScore > 0.2)`); the volume part passes when the volume filter is off or the symbol has no real trade volume. With the default Confluence Filter settings this is the same decision as before. Users who had changed Confluence Filter / Confluence Threshold can see different entries; the SSA gate previously used its own 0.60 minimum, which at default settings made the same decision
 - Removed inputs: Confluence Filter, Confluence Threshold, SSA Min Signal Quality, SSA Show pending marker (the pending markers could never appear)

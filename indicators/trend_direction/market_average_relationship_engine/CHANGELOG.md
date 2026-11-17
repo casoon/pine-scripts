@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.5.0 — 2026-11-17
+- **Breaking:** "MA family" offers EMA (default), SMA and WMA; HMA, VWMA, RMA, DEMA, TEMA and ALMA are removed. The family changed where the average sits, not what the relationship to it means. Saved chart settings that used a removed option must be re-selected. The strategy (v1.4.0) has the same list
+
 ## v1.4.0 — 2026-11-17
 - Divergence alerts removed: "MARE · Bullish divergence" and "MARE · Bearish divergence" are gone, divergence no longer triggers "MARE · Any event", and the input `Price/relationship divergence` (Alerts group) is removed. Divergence is detected from price pivots, so it stays a chart/pane marker only
 - The standalone strategy clone drops the same unused alert input; its entries never used divergence

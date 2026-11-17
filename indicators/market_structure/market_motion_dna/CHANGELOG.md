@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.6.0 — 2026-11-17
+- **Breaking:** "Support MA type" offers EMA (default), SMA and WMA; RMA and HMA are removed. Saved chart settings that used a removed option must be re-selected
+
 ## v1.5.2 — 2026-10-02
 - Corrected the "Merge consecutive legs into one coherent wave" tooltip and script header: they still described the v1.5.0 rule (re-scoring the whole span to decide absorption); they now describe the structural Zigzag-extreme rule the code actually uses since v1.5.1. Removed the unused per-leg classification left over from v1.5.0
 - "Minimum score separation" tooltip now explains that Impulse and Correction always sum to 100, so the separation is 2 × (score − 50) and the setting only binds when set above 2 × (threshold − 50) — with the default 62 thresholds the default 18 has no additional effect

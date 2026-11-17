@@ -7,7 +7,7 @@ Multi-timeframe StochRSI confluence scorer. Computes a per-timeframe StochRSI sc
 - Per-TF StochRSI score with exhaustion dampening (score reduced when K and D are both deep in the extreme zone without a fresh counter-cross)
 - Pair confluence: lower/higher TF weighted blend, sync bonus when both agree, conflict penalty when they oppose
 - Weighted total across up to 5 configurable TF pairs (each pair toggleable and weightable)
-- Smoothed total score — EMA / RMA / SMA / WMA / HMA / JMA (default JMA)
+- Smoothed total score — JMA (fixed core, no type selection)
 - TF Agreement Index: directional consensus across all 6 TFs in steps of ±33.3
 - Bias / Quality / Timing state engine — a single dashboard readout derived from the scores above (see below)
 - Signal markers: threshold-crossing Long/Short (fires on entry into the zone) with optional confirmed-bar gate and minimum-agreement filter
