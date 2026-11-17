@@ -1,39 +1,49 @@
 # WaveTrend v4 — Strategy Backtest Assessment
 
-> ⚠️ **STALE — pending re-validation.** The run below (`test92`) was measured on strategy
-> **v4.21**. The shipped file is **v4.91**. Gate configuration, thresholds and exit handling
-> changed in between — v4.90 changed the exit model itself (trailing stop replaces the fixed TP
-> and stays armed). Re-run on NatGas before relying on any figure here.
+> ⚠️ **NOT MEASURED — v5.0 has no backtest.** v5.0 (2026-11-17) removed every entry gate that
+> was tuned on the NatGas window (test92–test166) and reduced the inputs from 268 to 61. The run
+> recorded below (`test92`) was measured on **v4.21** with a gate stack that no longer exists. No
+> figure in this file describes the shipped script.
 
-**Instrument:** CAPITALCOM:NATURALGAS
-**Strategy file:** `wavetrend_v4_strategy.pine` (standalone, v4.91)
-**Assessment date:** 2026-09-08 (results measured 2026-05-04 on v4.21)
+**Instrument:** CAPITALCOM:NATURALGAS (historical runs only)
+**Strategy file:** `wavetrend_v4_strategy.pine` (standalone, v5.0)
+**Assessment date:** 2026-11-17 (last measurement 2026-05-04 on v4.21)
 
 ---
 
-## Signal Logic
+## Signal Logic (v5.0)
 
 | Signal | Expression |
 |---|---|
-| Long | WT cross below the oversold level, all active gates passed |
-| Short | WT cross above the overbought level, all active gates passed |
-| SL type | Trailing (ATR envelope) + break-even |
+| Long | `crossover(wt1, wt2)` and `wt1 ≤ −level` (level per timeframe: 15M 10, 1H 20, 4H 5, 1D 20) |
+| Short | `crossunder(wt1, wt2)` and `wt1 ≥ +level` — same level, mirrored |
+| Stop | ATR × 1.5 from the fill, frozen ATR of the signal bar |
+| Exit | Break-even at 1R, trailing stop from 2R (replaces the fixed target), structural exit from 2–3R; `Fixed` mode = ATR target + stop + time limit |
+| Filters | Session, date range, cooldown, losing-streak limit, max drawdown — all off by default |
 
-Gate configuration at the time of `test92`:
+The per-timeframe levels, target multiples and structural-exit thresholds are carried over
+from v4.93 unchanged. They were also set on the NatGas window and are part of what a first
+run has to test, not a calibrated result.
 
-| Gate | Setting |
+### Removed in v5.0
+
+| Removed | Why |
 |---|---|
-| StochRSI | on |
-| ATR Rank | on — 1H 35–85, 4H 30–90, 1D 20–95 |
-| BB Expansion | on — compression recently + expanding now |
-| Chop | on — max 58 |
-| Pivot Proximity | off |
-| Liquidity Sweep | off |
-| Structural Exit | off |
+| Quality gates A, D, H, J, K, L, M (per-TF/per-direction block bands) | Iterated against one NatGas window (test141–166); several fire on a single TF and side only — asymmetry without a situation that explains it |
+| Gate B2 (15M needs 1H OS/OB), Gate C (HTF exhaustion), Gate G (counter-trend range, 15M/1H only), Gate I (StochRSI persistence) | Same window; B2/G hard-coded to specific timeframes |
+| Exits E (fail-fast) and F (no-follow), 1H only, and the Grind Engine | Hard-coded to 1H from in-sample logs |
+| OS/OB depth cap on 1D (±48) | Derived from in-sample setup classification |
+| StochRSI gate, ATR rank, BB expansion, chop, pivot proximity, liquidity sweep filters | Default off since v4.2x; the `test92` stack that used them was close to selection-neutral |
+| Separate OS and OB inputs per TF | Replaced by one symmetric level per TF (defaults were already mirrored) |
+
+None of these gates was ever checked outside the window it was tuned on (Plan 34, Phase 2 never
+ran). With no new test data coming, the decision rule from Plan 34 — "OOS contradicts or is
+neutral → gate off" — cannot be met in the gates' favour, so they are removed rather than kept
+switched off.
 
 ---
 
-## Backtest Runs
+## Historical run (v4.21 — not this script)
 
 ### test92 — v4.21, NatGas
 
@@ -43,49 +53,20 @@ Gate configuration at the time of `test92`:
 | 4H | 54 | 11% | 0.67 | -15.3 | -30.7 |
 | 1D | 5 | 20% | 2.32 | +9.8 | -11.1 |
 
-The 1D row is n = 5 — reported for completeness only, it carries no information about the
-signal. The 4H short leg was the dominant loss block (WR 7%, avg R −0.39 over 41 trades).
-
----
-
-## Key Findings
-
-**What worked:**
-- On 1H the gate stack produced a strongly positive expectancy within the tested window.
-
-**What remains weak:**
-- **The gates are close to selection-neutral.** Pivot-to-pivot baseline analysis
-  (`scripts/analyze_gates.py`, section 0) found 2687 theoretically available trades at
-  avg R +2.75 across the window. The strategy caught 55 of them (2%) at avg R +2.89. All
-  gates together block 94% of WT crosses while selecting barely better than the market
-  average — the cost is enormous and the benefit marginal.
-- 4H is outright unprofitable, driven by the short side.
-- Three gate hypotheses (late-entry, low-ATR-noise, stale-structure) were designed, built and
-  measured, and **all three were discarded** — each removed good and bad trades in similar
-  proportion. The lesson recorded from that round: hypotheses derived from aggregates across
-  timeframe and direction mask the per-bucket patterns that actually matter, and a gate
-  blocking under ~5% of signals cannot move the result at all.
+Gate stack at the time: StochRSI on, ATR rank on (1H 35–85, 4H 30–90, 1D 20–95), BB expansion
+on, chop max 58, structural exit off. The 1D row is n = 5 and carries no information. Pivot-to-
+pivot analysis on the same window found the gate stack blocked 94% of WT crosses while selecting
+barely better than the market average (2687 available moves, 55 caught).
 
 ---
 
 ## Verdict
 
-**Rating:** Not ready — only measured in the window it was tuned on (previously: Promising)
+**Rating:** Not ready — v5.0 not backtested; earlier runs measured a different script, only in
+the window it was tuned on.
 
-The rating is carried over from the project record and is **not** confirmed by the data in this
-file. What `test92` actually shows is one profitable timeframe (1H), one outright unprofitable
-one (4H), and no usable sample on 1D. The 1H result rests on a gate stack that the
-pivot-to-pivot baseline shows to be barely more selective than the market average, and the file
-is 68 minor versions past the measurement.
-
-**Open gap:** the root README previously carried a "PF 3.07, NatGas 1D" figure for this
-strategy. No run in the repo reproduces it — `test92` measured PF 2.32 on 1D at n = 5. Either a
-later run exists outside the repo record, or the figure drifted. It has been removed from the
-README until a run backs it.
-
-**Next steps:**
-1. Re-run v4.91 on NatGas 15M/1H/4H/1D — the current numbers describe a different script. The earlier exit tests (test121 trailing, test124–126 structural exit) could not fire on 15M/1H/1D because the TP limit filled first; they need repeating on v4.91
-2. Address the 4H short leg specifically rather than tuning shared thresholds
-3. Work the exit side before adding further entry gates — capture rate, not selectivity, is
-   where this strategy loses (the repo's own "Fundament vor Feintuning" principle)
-4. Second instrument before any rating above "Not ready"
+**What a first run of v5.0 has to show** (when data exists again):
+1. Signal vs. random baseline (built-in table) per side, `Fixed` exit mode, on NatGas and on at
+   least one instrument the defaults were not set on
+2. `Existing` vs. `Fixed` exit on the same entries — the dynamic exits must beat the fixed one
+3. Cost table with spread and financing set; a result that flips under stress ×1.5 does not carry

@@ -1,22 +1,28 @@
 //@version=6
 // ============================================================================
 // WaveTrend v4 [WavesUnchained] — Strategy (standalone)
-// Version: 4.93
+// Version: 5.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
-// WT oscillator cross at OS/OB extremes — entry, ATR stop/target, break-even.
-// Optional gates: StochRSI, ATR rank, BB expansion, chop, pivot proximity, sweep.
+// WT oscillator cross at OS/OB extremes — entry, ATR stop, break-even, trailing
+// and structural exit. No entry gates beyond the cross itself.
 //
 // Features:
-//   ✓ WT cross below OS level → long; above OB level → short
+//   ✓ WT cross below −level → long; above +level → short (one symmetric level per TF)
 //   ✓ ATR frozen at signal bar; SL/TP set from fill price + frozen ATR
 //   ✓ Break-even confirmed on close from next bar only (calc_on_order_fills)
 //   ✓ Hard 1-bar post-exit cooldown prevents same-bar re-entry after fill
-//   ✓ Exit reason logged from exit_comment (tp / sl / be / trail / struct)
+//   ✓ Exit reason logged from exit_comment (tp / sl / be / trail / struct / time)
 //   ✓ Session filter, date range, max drawdown, max intraday loss, losing streak limit
 //   ✓ Diagnostic logs: WT4 PIVOT, WT4 BLOCKED, WT4 ENTRY, WT4 REAL EXIT
 //
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
 // ============================================================================
 
 strategy("WaveTrend v4 [WavesUnchained] — Strategy",
@@ -38,40 +44,21 @@ if barstate.islast and not chart.is_standard
 
 // ─── Inputs ──────────────────────────────────────────────────────────────────
 g_wt      = "WaveTrend"
-g_srsi    = "Stochastic RSI"
 g_risk    = "Risk"
 g_be      = "Break-Even"
 g_strat   = "Strategy"
 g_pivot   = "Pivots"
-g_quality = "Quality Gates (data-driven)"
 g_filters = "Filters"
 g_div     = "Divergences"
 
 chLen   = input.int(10,    "Channel Length",         minval=1,              group=g_wt)
 avgLen  = input.int(21,    "Average Length",         minval=1,              group=g_wt)
 sigLen  = input.int(4,     "Signal Smoothing",       minval=1,              group=g_wt)
-osLevel15M   = input.float(-10, "OS Level 15M (long)",  step=1,                group=g_wt,
-     tooltip="RTC analysis: WT depth < 10 correlates with bad 15M setups (good=17.3, bad=6.4). Requires |wt1| ≥ 10.")
-osLevel1H    = input.float(-20, "OS Level 1H  (long)",  step=1,                group=g_wt)
-osLevel4H    = input.float(-5,  "OS Level 4H  (long)",  step=1,                group=g_wt)
-osLevel1D    = input.float(-20, "OS Level 1D  (long)",  step=1,                group=g_wt)
-obLevel15M   = input.float(10,  "OB Level 15M (short)", step=1,                group=g_wt)
-obLevel1H    = input.float(20,  "OB Level 1H  (short)", step=1,                group=g_wt)
-obLevel4H    = input.float(5,   "OB Level 4H  (short)", step=1,                group=g_wt)
-obLevel1D    = input.float(20,  "OB Level 1D  (short)", step=1,                group=g_wt)
-// Upper depth cap: block entries that are too deep into OS/OB (Reversal-Type B filter for 4H/1D)
-osFloor4H    = input.float(-999, "OS Floor 4H (long cap)",  step=1, group=g_wt,
-     tooltip="4H long only when wt1 ≥ this value. Blocks entries too deep in OS. Set to -999 to disable (default).")
-osFloor1D    = input.float(-48,  "OS Floor 1D (long cap)",  step=1, group=g_wt,
-     tooltip="1D long only when wt1 ≥ this value. RTC analysis: |wt1| > 48 correlates with bad 1D setups (WT Extreme good=27%, bad=43%).")
-obFloor4H    = input.float(999,  "OB Floor 4H (short cap)", step=1, group=g_wt,
-     tooltip="4H short only when wt1 ≤ this value. Set to 999 to disable (default).")
-obFloor1D    = input.float(48,   "OB Floor 1D (short cap)", step=1, group=g_wt,
-     tooltip="1D short only when wt1 ≤ this value. RTC analysis: |wt1| > 48 correlates with bad 1D setups.")
-// Grind Engine: disable noFollow for deep 1H entries (abs_wt1 ≥ threshold) — B-type trades
-useGrindEngine  = input.bool(false, "Grind Engine: no noFollow for deep 1H entries", group=g_wt,
-     tooltip="When abs(wt1) at entry ≥ Grind abs(wt1) min, disables noFollow for that trade. Tested negative (test142) — keep off.")
-grindAbsWt1Min  = input.float(60,   "  Grind abs(wt1) min (1H)",                    group=g_wt, step=5)
+lvl15M  = input.float(10,  "Extreme Level 15M", minval=0, step=1, group=g_wt,
+     tooltip="Long when WT crosses up at or below −level, short when it crosses down at or above +level. One level for both sides.")
+lvl1H   = input.float(20,  "Extreme Level 1H",  minval=0, step=1, group=g_wt)
+lvl4H   = input.float(5,   "Extreme Level 4H",  minval=0, step=1, group=g_wt)
+lvl1D   = input.float(20,  "Extreme Level 1D",  minval=0, step=1, group=g_wt)
 smooth15M    = "RMA"  // fixed core (Plan 38: no smoothing choice)
 smooth1H     = "HMA"  // fixed core (Plan 38: no smoothing choice)
 smooth4H     = "JMA"  // fixed core (Plan 38: no smoothing choice)
@@ -79,26 +66,14 @@ smooth1D     = "SMA"  // fixed core (Plan 38: no smoothing choice)
 jmaPhase     = 50  // JMA tuning fixed (Plan 38)
 jmaPower     = 2.0  // JMA tuning fixed (Plan 38)
 
-srsiRsiLen   = input.int(14,   "RSI Length",        minval=1,               group=g_srsi)
-srsiStochLen = input.int(14,   "Stoch Length",      minval=1,               group=g_srsi)
-srsiKSmooth  = input.int(3,    "K Smooth",          minval=1,               group=g_srsi)
-srsiDSmooth  = input.int(3,    "D Smooth",          minval=1,               group=g_srsi)
-srsiOsLevel  = input.float(20, "OS Level",           step=1,                 group=g_srsi)
-srsiObLevel  = input.float(80, "OB Level",           step=1,                 group=g_srsi)
-srsiPersist  = input.int(5,    "Trend Block (Bars stuck at OS/OB)", minval=1, group=g_srsi,
-     tooltip="Block entry if K has been at OS/OB for this many consecutive bars — signals a trend, not a reversal.")
-useSrsiGate  = input.bool(false, "Use StochRSI Gate",                          group=g_srsi)
-
 atrLen  = input.int(14,    "ATR Length",  minval=1,                         group=g_risk)
 slMult  = input.float(1.5, "SL (ATR×)",  minval=0.1, step=0.1,             group=g_risk,
      tooltip="Stop-Loss multiplier (= risk = 1R). Same across all TFs.")
-tpMult15M = input.float(3.0, "TP 15M (ATR×)",  minval=0.1, step=0.1,        group=g_risk)
-tpMult1H  = input.float(3.0, "TP 1H  (ATR×)",  minval=0.1, step=0.1,        group=g_risk,
-     tooltip="1H reagiert empfindlich auf TP-Erhöhung (test119: 3.5 → -0.13 avgR).")
-tpMult4H  = input.float(4.0, "TP 4H  (ATR×)",  minval=0.1, step=0.1,        group=g_risk,
-     tooltip="4H pivot moves laufen oft >2R — moderate Erhöhung erlaubt mehr Capture.")
-tpMult1D  = input.float(4.0, "TP 1D  (ATR×)",  minval=0.1, step=0.1,        group=g_risk,
-     tooltip="1D pivot moves sind groß — höherer TP lohnt sich (test119: +0.10/+0.20 avgR).")
+tpMult15M = input.float(3.0, "TP 15M (ATR×)",  minval=0.1, step=0.1,        group=g_risk,
+     tooltip="Fixed target. Placed only when the trailing stop is off or Exit Mode is Fixed.")
+tpMult1H  = input.float(3.0, "TP 1H  (ATR×)",  minval=0.1, step=0.1,        group=g_risk)
+tpMult4H  = input.float(4.0, "TP 4H  (ATR×)",  minval=0.1, step=0.1,        group=g_risk)
+tpMult1D  = input.float(4.0, "TP 1D  (ATR×)",  minval=0.1, step=0.1,        group=g_risk)
 
 enableBE = input.bool(true,  "Enable Break-Even Stop",                      group=g_be)
 beTrigR  = input.float(1.0,  "Trigger (R×)", minval=0.1, step=0.1,         group=g_be)
@@ -119,7 +94,7 @@ dirMode       = input.string("Both", "Trade Direction",
      options=["Both", "Long Only", "Short Only"],                            group=g_strat)
 cooldown      = input.int(0, "Cooldown Bars After Exit", minval=0,           group=g_strat)
 exitMode      = input.string("Existing", "Exit Mode", options=["Existing", "Fixed"], group=g_strat,
-     tooltip="Existing: break-even, trailing, structural, fail-fast and no-follow exits as configured. Fixed: only the ATR stop (Risk group), the ATR target of the timeframe and the time limit below; all dynamic exits are off. Use Fixed as the comparison for the dynamic exits on the same entries.")
+     tooltip="Existing: break-even, trailing and structural exit as configured. Fixed: only the ATR stop (Risk group), the ATR target of the timeframe and the time limit below; all dynamic exits are off. Use Fixed as the comparison for the dynamic exits on the same entries.")
 fxTimeBars    = input.int(24, "Fixed: Time Limit (Bars)", minval=1,          group=g_strat,
      tooltip="Fixed mode only. Closes the position at the next bar open after this many bars held.")
 _fx = exitMode == "Fixed"
@@ -131,248 +106,7 @@ structMinR4H  = input.float(2.5,  "  Struct Exit Min Profit 4H (R×)", minval=0.
 structMinR1D  = input.float(3.0,  "  Struct Exit Min Profit 1D (R×)", minval=0.0, step=0.1, group=g_strat)
 
 pivLen = input.int(5, "Pivot Length", minval=2, maxval=20,                   group=g_pivot,
-     tooltip="Bars on each side to confirm a swing high/low.")
-
-// ─── Quality Gates (data-driven) ─────────────────────────────────────────────
-// Inputs in alphabetical order A → I.
-
-// A — atrRank Mid-Band Killer (per TF, per dir)
-// Blocks entries when atrRank falls in a "loser-cluster" band identified from log
-// analysis. Defaults derived from test108 data (NatGas baseline). Set lo == hi to
-// disable the filter for that TF/dir pair.
-useGateA            = input.bool(true, "GateA — ATR Rank Block Zone", group=g_quality,
-     tooltip="Block entries when atrRank falls in the specified zone (per TF/dir). " +
-             "Set lo == hi to disable for that TF/dir pair. " +
-             "15M defaults from test141; 1H long defaults from test151 log analysis (bad bucket [40,60) atrRank, WR=14% avgR=-0.28 → block [40,65)).")
-gateA_15M_long_lo   = input.float(30, "[A] 15M long  block atrRank in [",  inline="A_15M_long",  group=g_quality, step=1)
-gateA_15M_long_hi   = input.float(50, ", )",                                inline="A_15M_long",  group=g_quality, step=1)
-gateA_15M_short_lo  = input.float(30, "[A] 15M short block atrRank in [",  inline="A_15M_short", group=g_quality, step=1)
-gateA_15M_short_hi  = input.float(50, ", )",                                inline="A_15M_short", group=g_quality, step=1)
-gateA_1H_long_lo    = input.float(40, "[A] 1H  long  block atrRank in [",  inline="A_1H_long",   group=g_quality, step=1)
-gateA_1H_long_hi    = input.float(65, ", )",                                inline="A_1H_long",   group=g_quality, step=1)
-gateA_1H_short_lo   = input.float(0,  "[A] 1H  short block atrRank in [",  inline="A_1H_short",  group=g_quality, step=1)
-gateA_1H_short_hi   = input.float(60, ", )",                                inline="A_1H_short",  group=g_quality, step=1)
-gateA_4H_long_lo    = input.float(20, "[A] 4H  long  block atrRank in [",  inline="A_4H_long",   group=g_quality, step=1)
-gateA_4H_long_hi    = input.float(40, ", )",                                inline="A_4H_long",   group=g_quality, step=1)
-gateA_4H_short_lo   = input.float(30, "[A] 4H  short block atrRank in [",  inline="A_4H_short",  group=g_quality, step=1)
-gateA_4H_short_hi   = input.float(60, ", )",                                inline="A_4H_short",  group=g_quality, step=1)
-gateA_1D_long_lo    = input.float(20, "[A] 1D  long  block atrRank in [",  inline="A_1D_long",   group=g_quality, step=1)
-gateA_1D_long_hi    = input.float(40, ", )",                                inline="A_1D_long",   group=g_quality, step=1)
-gateA_1D_short_lo   = input.float(40, "[A] 1D  short block atrRank in [",  inline="A_1D_short",  group=g_quality, step=1)
-gateA_1D_short_hi   = input.float(60, ", )",                                inline="A_1D_short",  group=g_quality, step=1)
-
-// B — Regular Divergence Required
-// Long requires a recent regular bullish divergence (price LL + WT HL).
-// Short requires a recent regular bearish divergence (price HH + WT LH).
-useGateB            = input.bool(false, "GateB — Regular Divergence Required", group=g_quality,
-     tooltip="Long: requires a regular bullish divergence (price Lower Low + WT Higher Low) within last N bars. " +
-             "Short: requires a regular bearish divergence (price Higher High + WT Lower High) within last N bars. " +
-             "N is per-timeframe.")
-maxDivBars15M       = input.int(30, "  Max bars since divergence 15M",  minval=1, group=g_quality)
-maxDivBars1H        = input.int(20, "  Max bars since divergence 1H",   minval=1, group=g_quality)
-maxDivBars4H        = input.int(10, "  Max bars since divergence 4H",   minval=1, group=g_quality)
-maxDivBars1D        = input.int(5,  "  Max bars since divergence 1D",   minval=1, group=g_quality)
-
-// C — HTF Exhaustion Filter
-// Block entries when the next-higher TF's WT is already in extreme zone.
-// Mapping: 15M→1H, 1H→4H, 4H→1D, 1D→1W.
-useGateC            = input.bool(true, "C: HTF Exhaustion Filter", group=g_quality,
-     tooltip="Block entries when higher-TF WaveTrend is already in OB/OS extreme. " +
-             "Prevents 'late entry into exhausted move'. " +
-             "OB threshold blocks LONG, OS threshold blocks SHORT.")
-htfObLevel15M       = input.float(45,  "  15M: HTF (1H) OB block long ≥",  step=1, group=g_quality)
-htfOsLevel15M       = input.float(-45, "  15M: HTF (1H) OS block short ≤", step=1, group=g_quality)
-htfObLevel1H        = input.float(45,  "  1H:  HTF (4H) OB block long ≥",  step=1, group=g_quality)
-htfOsLevel1H        = input.float(-45, "  1H:  HTF (4H) OS block short ≤", step=1, group=g_quality)
-htfObLevel4H        = input.float(45,  "  4H:  HTF (1D) OB block long ≥",  step=1, group=g_quality)
-htfOsLevel4H        = input.float(-45, "  4H:  HTF (1D) OS block short ≤", step=1, group=g_quality)
-htfObLevel1D        = input.float(45,  "  1D:  HTF (1W) OB block long ≥",  step=1, group=g_quality)
-htfOsLevel1D        = input.float(-45, "  1D:  HTF (1W) OS block short ≤", step=1, group=g_quality)
-
-// D — bbWidthRank Band Killer (per TF, per dir)
-// Defaults from test115: 4H long/short [60, 90); others disabled.
-useGateD            = input.bool(true, "D: bbWidthRank Band Killer", group=g_quality,
-     tooltip="Block entries when bbWidthRank is in the bad mid-band (per TF/dir). " +
-             "Set lo == hi to disable for that TF/dir pair. " +
-             "Default: 4H long/short [60, 90). 1H disabled — test145: threshold 45 blocked more winners than losers (WR 37%→26.5%).")
-gateD_15M_long_lo   = input.float(0,  "15M long  block bbWidthRank in [", inline="D_15M_long",  group=g_quality, step=1)
-gateD_15M_long_hi   = input.float(0,  ", )",                              inline="D_15M_long",  group=g_quality, step=1)
-gateD_15M_short_lo  = input.float(0,  "15M short block bbWidthRank in [", inline="D_15M_short", group=g_quality, step=1)
-gateD_15M_short_hi  = input.float(0,  ", )",                              inline="D_15M_short", group=g_quality, step=1)
-gateD_1H_long_lo    = input.float(0,  "1H  long  block bbWidthRank in [", inline="D_1H_long",   group=g_quality, step=1)
-gateD_1H_long_hi    = input.float(0,  ", )",                              inline="D_1H_long",   group=g_quality, step=1)
-gateD_1H_short_lo   = input.float(0,  "1H  short block bbWidthRank in [", inline="D_1H_short",  group=g_quality, step=1)
-gateD_1H_short_hi   = input.float(0,  ", )",                              inline="D_1H_short",  group=g_quality, step=1)
-gateD_4H_long_lo    = input.float(60, "4H  long  block bbWidthRank in [", inline="D_4H_long",   group=g_quality, step=1)
-gateD_4H_long_hi    = input.float(90, ", )",                              inline="D_4H_long",   group=g_quality, step=1)
-gateD_4H_short_lo   = input.float(60, "4H  short block bbWidthRank in [", inline="D_4H_short",  group=g_quality, step=1)
-gateD_4H_short_hi   = input.float(90, ", )",                              inline="D_4H_short",  group=g_quality, step=1)
-gateD_1D_long_lo    = input.float(0,  "1D  long  block bbWidthRank in [", inline="D_1D_long",   group=g_quality, step=1)
-gateD_1D_long_hi    = input.float(0,  ", )",                              inline="D_1D_long",   group=g_quality, step=1)
-gateD_1D_short_lo   = input.float(0,  "1D  short block bbWidthRank in [", inline="D_1D_short",  group=g_quality, step=1)
-gateD_1D_short_hi   = input.float(0,  ", )",                              inline="D_1D_short",  group=g_quality, step=1)
-
-// E — Fail-Fast Exit (post-entry, hardcoded 1H only)
-useFailFast         = input.bool(true, "E: Fail-Fast Exit (1H only)", group=g_quality,
-     tooltip="Close trade if within N bars after entry the position is already X R adverse. " +
-             "Cuts immediate-reversal trades fast. Active only on 1H timeframe.")
-failFastBars        = input.int(1,    "  Fail-fast bars",          minval=1, maxval=5, group=g_quality)
-failFastR           = input.float(-0.35, "  Fail-fast adverse R",  step=0.05, group=g_quality)
-
-// F — No-Follow Exit (post-entry, hardcoded 1H only)
-useNoFollow         = input.bool(true, "F: No-Follow Exit (1H only)", group=g_quality,
-     tooltip="At bar N == window: if progressR < requiredR → exit (single check). " +
-             "Hardcoded to 1H — empirically destructive on other TFs.")
-nftWindow           = input.int(3,    "  Window bars",                  minval=1, group=g_quality)
-nftRequiredR        = input.float(0.25, "  Required R at window end",   step=0.05, group=g_quality)
-
-// G — Trend-aware Counter-Trend Range Filter
-// Hardcoded ON for: 15M (long+short), 1H (long+short).
-// Hardcoded OFF for: 4H + 1D — Gate G blockt dort echte Reversal-Winner (test117).
-// Trend uses TF-specific smoothing mode (matches WT smoothing per TF).
-useGateG            = input.bool(true, "G: Counter-Trend Range Filter (15M+1H only)", group=g_quality,
-     tooltip="Filters only counter-trend entries on 15M and 1H. " +
-             "Hardcoded OFF on 4H and 1D (verified test117). " +
-             "Trend = TF-specific smoothing (fast vs slow length).")
-gTrendFastLen       = input.int(20, "  Trend smoothing fast length", minval=1, group=g_quality)
-gTrendSlowLen       = input.int(50, "  Trend smoothing slow length", minval=1, group=g_quality)
-gRangeLen           = input.int(20, "  Local range length",     minval=2, group=g_quality)
-gMaxRangePosLong    = input.float(0.30, "  Max range pos for counter-trend long",   step=0.05, minval=0.0, maxval=1.0, group=g_quality)
-gMinRangePosShort   = input.float(0.70, "  Min range pos for counter-trend short",  step=0.05, minval=0.0, maxval=1.0, group=g_quality)
-
-// H — Chop Band Killer (per TF, per dir)
-// Default: 15M short [40, 50) only.
-useGateH            = input.bool(true, "H: Chop Band Killer", group=g_quality,
-     tooltip="Block entries when Choppiness Index is in a bad mid-band (per TF/dir). " +
-             "Set lo == hi to disable for that TF/dir pair. " +
-             "Defaults: 15M short [40, 50), 1H long [30, 40). " +
-             "Low chop = trending market = WT reversals fail on 1H long (test163: chop<40 n=49 avgR=-0.008 vs chop>=40 avgR=+0.31).")
-gateH_15M_long_lo   = input.float(0,  "15M long  block chop in [",     inline="H_15M_long",  group=g_quality, step=1)
-gateH_15M_long_hi   = input.float(0,  ", )",                            inline="H_15M_long",  group=g_quality, step=1)
-gateH_15M_short_lo  = input.float(40, "15M short block chop in [",     inline="H_15M_short", group=g_quality, step=1)
-gateH_15M_short_hi  = input.float(50, ", )",                            inline="H_15M_short", group=g_quality, step=1)
-gateH_1H_long_lo    = input.float(30, "1H  long  block chop in [",     inline="H_1H_long",   group=g_quality, step=1)
-gateH_1H_long_hi    = input.float(40, ", )",                            inline="H_1H_long",   group=g_quality, step=1)
-gateH_1H_short_lo   = input.float(50, "1H  short block chop in [",     inline="H_1H_short",  group=g_quality, step=1)
-gateH_1H_short_hi   = input.float(60, ", )",                            inline="H_1H_short",  group=g_quality, step=1)
-gateH_4H_long_lo    = input.float(30, "4H  long  block chop in [",     inline="H_4H_long",   group=g_quality, step=1)
-gateH_4H_long_hi    = input.float(40, ", )",                            inline="H_4H_long",   group=g_quality, step=1)
-gateH_4H_short_lo   = input.float(0,  "4H  short block chop in [",     inline="H_4H_short",  group=g_quality, step=1)
-gateH_4H_short_hi   = input.float(0,  ", )",                            inline="H_4H_short",  group=g_quality, step=1)
-gateH_1D_long_lo    = input.float(0,  "1D  long  block chop in [",     inline="H_1D_long",   group=g_quality, step=1)
-gateH_1D_long_hi    = input.float(0,  ", )",                            inline="H_1D_long",   group=g_quality, step=1)
-gateH_1D_short_lo   = input.float(0,  "1D  short block chop in [",     inline="H_1D_short",  group=g_quality, step=1)
-gateH_1D_short_hi   = input.float(0,  ", )",                            inline="H_1D_short",  group=g_quality, step=1)
-
-// I — srsi Extension Killer (per TF, per dir)
-// Threshold = 0 disables. Defaults from test115: 4H long ≥ 8, 4H short ≥ 3.
-useGateI            = input.bool(true, "I: srsi Extension Killer", group=g_quality,
-     tooltip="Block entries when StochRSI has been stuck at OS/OB for too many bars. " +
-             "Threshold = 0 disables per TF/dir.")
-gateI_15M_long      = input.int(0, "15M long  block if srsiOsBars >=", minval=0, group=g_quality)
-gateI_15M_short     = input.int(0, "15M short block if srsiObBars >=", minval=0, group=g_quality)
-gateI_1H_long       = input.int(0, "1H  long  block if srsiOsBars >=", minval=0, group=g_quality)
-gateI_1H_short      = input.int(0, "1H  short block if srsiObBars >=", minval=0, group=g_quality)
-gateI_4H_long       = input.int(8, "4H  long  block if srsiOsBars >=", minval=0, group=g_quality)
-gateI_4H_short      = input.int(3, "4H  short block if srsiObBars >=", minval=0, group=g_quality)
-gateI_1D_long       = input.int(0, "1D  long  block if srsiOsBars >=", minval=0, group=g_quality)
-gateI_1D_short      = input.int(0, "1D  short block if srsiObBars >=", minval=0, group=g_quality)
-
-useGateB2    = input.bool(true, "B2: 1H-Confluence for 15M (HTF OS/OB required)", group=g_quality,
-     tooltip="15M Long only when 1H wt1 ≤ b2OsLevel; 15M Short only when 1H wt1 ≥ b2ObLevel. " +
-             "No-op on 1H/4H/1D. Stricter threshold than osLevel/obLevel — filters neutral-1H trades.")
-b2OsLevel = input.float(-30.0, "  B2 1H OS threshold (long)",  step=1.0, group=g_quality,
-     tooltip="1H wt1 must be ≤ this value for 15M longs. Default -20 (stricter than osLevel -5).")
-b2ObLevel = input.float( 30.0, "  B2 1H OB threshold (short)", step=1.0, group=g_quality,
-     tooltip="1H wt1 must be ≥ this value for 15M shorts. Default +20 (stricter than obLevel +5).")
-
-// J — srsiD Zone Killer (per TF, per dir)
-// Zone lo >= hi disables. Block when srsiD falls in [lo, hi).
-// For longs: high srsiD = StochRSI not deep enough in OS = bad reversal quality.
-useGateJ           = input.bool(true, "J: srsiD Zone Killer", group=g_quality,
-     tooltip="Block when srsiD falls in [lo, hi). Zone lo >= hi disables per TF/dir.")
-gateJ_15M_long_lo  = input.float(0,   "15M long  block srsiD in [",  inline="J_15M_long",  group=g_quality, step=1)
-gateJ_15M_long_hi  = input.float(0,   ", )",                          inline="J_15M_long",  group=g_quality, step=1)
-gateJ_15M_short_lo = input.float(0,   "15M short block srsiD in [",  inline="J_15M_short", group=g_quality, step=1)
-gateJ_15M_short_hi = input.float(0,   ", )",                          inline="J_15M_short", group=g_quality, step=1)
-gateJ_1H_long_lo   = input.float(0,   "1H  long  block srsiD in [",  inline="J_1H_long",   group=g_quality, step=1)
-gateJ_1H_long_hi   = input.float(0,   ", )",                          inline="J_1H_long",   group=g_quality, step=1)
-gateJ_1H_short_lo  = input.float(0,   "1H  short block srsiD in [",  inline="J_1H_short",  group=g_quality, step=1)
-gateJ_1H_short_hi  = input.float(0,   ", )",                          inline="J_1H_short",  group=g_quality, step=1)
-gateJ_4H_long_lo   = input.float(50,  "4H  long  block srsiD in [",  inline="J_4H_long",   group=g_quality, step=1)
-gateJ_4H_long_hi   = input.float(100, ", )",                          inline="J_4H_long",   group=g_quality, step=1)
-gateJ_4H_short_lo  = input.float(0,   "4H  short block srsiD in [",  inline="J_4H_short",  group=g_quality, step=1)
-gateJ_4H_short_hi  = input.float(0,   ", )",                          inline="J_4H_short",  group=g_quality, step=1)
-gateJ_1D_long_lo   = input.float(0,   "1D  long  block srsiD in [",  inline="J_1D_long",   group=g_quality, step=1)
-gateJ_1D_long_hi   = input.float(0,   ", )",                          inline="J_1D_long",   group=g_quality, step=1)
-gateJ_1D_short_lo  = input.float(0,   "1D  short block srsiD in [",  inline="J_1D_short",  group=g_quality, step=1)
-gateJ_1D_short_hi  = input.float(0,   ", )",                          inline="J_1D_short",  group=g_quality, step=1)
-
-// K — wt1 Zone Killer (per TF, per dir)
-// Zone lo >= hi disables. Block when wt1 falls in [lo, hi).
-// For shorts: shallow OB (low wt1) = insufficient momentum = bad reversal.
-useGateK           = input.bool(true, "K: wt1 Zone Killer", group=g_quality,
-     tooltip="Block when wt1 falls in [lo, hi). Zone lo >= hi disables per TF/dir.")
-gateK_15M_long_lo  = input.float(0,   "15M long  block wt1 in [",  inline="K_15M_long",  group=g_quality, step=1)
-gateK_15M_long_hi  = input.float(0,   ", )",                        inline="K_15M_long",  group=g_quality, step=1)
-gateK_15M_short_lo = input.float(0,   "15M short block wt1 in [",  inline="K_15M_short", group=g_quality, step=1)
-gateK_15M_short_hi = input.float(0,   ", )",                        inline="K_15M_short", group=g_quality, step=1)
-gateK_1H_long_lo   = input.float(0,   "1H  long  block wt1 in [",  inline="K_1H_long",   group=g_quality, step=1)
-gateK_1H_long_hi   = input.float(0,   ", )",                        inline="K_1H_long",   group=g_quality, step=1)
-gateK_1H_short_lo  = input.float(60,  "1H  short block wt1 in [",  inline="K_1H_short",  group=g_quality, step=1)
-gateK_1H_short_hi  = input.float(80,  ", )",                        inline="K_1H_short",  group=g_quality, step=1)
-gateK_4H_long_lo   = input.float(0,   "4H  long  block wt1 in [",  inline="K_4H_long",   group=g_quality, step=1)
-gateK_4H_long_hi   = input.float(0,   ", )",                        inline="K_4H_long",   group=g_quality, step=1)
-gateK_4H_short_lo  = input.float(40,  "4H  short block wt1 in [",  inline="K_4H_short",  group=g_quality, step=1)
-gateK_4H_short_hi  = input.float(50,  ", )",                        inline="K_4H_short",  group=g_quality, step=1)
-gateK_1D_long_lo   = input.float(0,   "1D  long  block wt1 in [",  inline="K_1D_long",   group=g_quality, step=1)
-gateK_1D_long_hi   = input.float(0,   ", )",                        inline="K_1D_long",   group=g_quality, step=1)
-gateK_1D_short_lo  = input.float(0,   "1D  short block wt1 in [",  inline="K_1D_short",  group=g_quality, step=1)
-gateK_1D_short_hi  = input.float(0,   ", )",                        inline="K_1D_short",  group=g_quality, step=1)
-
-// L — Pivot Staleness Killer (per TF, per dir)
-// Zone lo >= hi disables. For longs: block when highPivBars in [lo, hi).
-// For shorts: block when lowPivBars in [lo, hi).
-// Rationale: if opposite-direction pivot is too far away, structure is absent.
-useGateL           = input.bool(true, "L: Pivot Staleness Killer", group=g_quality,
-     tooltip="Longs: block when highPivBars in [lo,hi). Shorts: block when lowPivBars in [lo,hi). lo>=hi disables.")
-gateL_15M_long_lo  = input.float(20,  "15M long  block highPivBars in [",  inline="L_15M_long",  group=g_quality, step=1)
-gateL_15M_long_hi  = input.float(30,  ", )",                               inline="L_15M_long",  group=g_quality, step=1)
-gateL_15M_short_lo = input.float(0,   "15M short block lowPivBars in [",   inline="L_15M_short", group=g_quality, step=1)
-gateL_15M_short_hi = input.float(0,   ", )",                               inline="L_15M_short", group=g_quality, step=1)
-gateL_1H_long_lo   = input.float(0,   "1H  long  block highPivBars in [",  inline="L_1H_long",   group=g_quality, step=1)
-gateL_1H_long_hi   = input.float(0,   ", )",                               inline="L_1H_long",   group=g_quality, step=1)
-gateL_1H_short_lo  = input.float(0,   "1H  short block lowPivBars in [",   inline="L_1H_short",  group=g_quality, step=1)
-gateL_1H_short_hi  = input.float(0,   ", )",                               inline="L_1H_short",  group=g_quality, step=1)
-gateL_4H_long_lo   = input.float(0,   "4H  long  block highPivBars in [",  inline="L_4H_long",   group=g_quality, step=1)
-gateL_4H_long_hi   = input.float(0,   ", )",                               inline="L_4H_long",   group=g_quality, step=1)
-gateL_4H_short_lo  = input.float(0,   "4H  short block lowPivBars in [",   inline="L_4H_short",  group=g_quality, step=1)
-gateL_4H_short_hi  = input.float(0,   ", )",                               inline="L_4H_short",  group=g_quality, step=1)
-gateL_1D_long_lo   = input.float(0,   "1D  long  block highPivBars in [",  inline="L_1D_long",   group=g_quality, step=1)
-gateL_1D_long_hi   = input.float(0,   ", )",                               inline="L_1D_long",   group=g_quality, step=1)
-gateL_1D_short_lo  = input.float(0,   "1D  short block lowPivBars in [",   inline="L_1D_short",  group=g_quality, step=1)
-gateL_1D_short_hi  = input.float(0,   ", )",                               inline="L_1D_short",  group=g_quality, step=1)
-
-// M — srsiK Zone Killer (per TF, per dir)
-// Zone lo >= hi disables. Block when srsiK falls in [lo, hi).
-useGateM           = input.bool(true, "M: srsiK Zone Killer", group=g_quality,
-     tooltip="Block when srsiK falls in [lo, hi). Zone lo >= hi disables per TF/dir.")
-gateM_15M_long_lo  = input.float(0,   "15M long  block srsiK in [",  inline="M_15M_long",  group=g_quality, step=1)
-gateM_15M_long_hi  = input.float(0,   ", )",                          inline="M_15M_long",  group=g_quality, step=1)
-gateM_15M_short_lo = input.float(0,   "15M short block srsiK in [",  inline="M_15M_short", group=g_quality, step=1)
-gateM_15M_short_hi = input.float(0,   ", )",                          inline="M_15M_short", group=g_quality, step=1)
-gateM_1H_long_lo   = input.float(0,   "1H  long  block srsiK in [",  inline="M_1H_long",   group=g_quality, step=1)
-gateM_1H_long_hi   = input.float(0,   ", )",                          inline="M_1H_long",   group=g_quality, step=1)
-gateM_1H_short_lo  = input.float(70,  "1H  short block srsiK in [",  inline="M_1H_short",  group=g_quality, step=1)
-gateM_1H_short_hi  = input.float(80,  ", )",                          inline="M_1H_short",  group=g_quality, step=1)
-gateM_4H_long_lo   = input.float(0,   "4H  long  block srsiK in [",  inline="M_4H_long",   group=g_quality, step=1)
-gateM_4H_long_hi   = input.float(0,   ", )",                          inline="M_4H_long",   group=g_quality, step=1)
-gateM_4H_short_lo  = input.float(0,   "4H  short block srsiK in [",  inline="M_4H_short",  group=g_quality, step=1)
-gateM_4H_short_hi  = input.float(0,   ", )",                          inline="M_4H_short",  group=g_quality, step=1)
-gateM_1D_long_lo   = input.float(0,   "1D  long  block srsiK in [",  inline="M_1D_long",   group=g_quality, step=1)
-gateM_1D_long_hi   = input.float(0,   ", )",                          inline="M_1D_long",   group=g_quality, step=1)
-gateM_1D_short_lo  = input.float(0,   "1D  short block srsiK in [",  inline="M_1D_short",  group=g_quality, step=1)
-gateM_1D_short_hi  = input.float(0,   ", )",                          inline="M_1D_short",  group=g_quality, step=1)
+     tooltip="Bars on each side to confirm a swing high/low. Used for the pivot log and the entry label only.")
 
 useSession    = input.bool(false,  "Session Filter",                         group=g_filters)
 sessionInput  = input.session("0000-2345", "Session",                        group=g_filters)
@@ -385,38 +119,6 @@ useMaxIntraDD = input.bool(false,  "Max Intraday Loss",                      gro
 maxIntraDD    = input.float(5.0,   "Max Intraday Loss (%)", minval=1, step=1, group=g_filters)
 useLossStreak = input.bool(false,  "Losing Streak Limit",                    group=g_filters)
 maxLossStreak = input.int(5,       "Max Consecutive Losses", minval=1,       group=g_filters)
-useAtrRankGate = input.bool(false, "Use ATR Rank Gate",                        group=g_filters)
-atrPctLen     = input.int(100,     "  ATR Percentile Length",    minval=10,  group=g_filters)
-minAtrRank15M = input.float(35,   "  Min ATR Rank 15M",          step=1,     group=g_filters)
-maxAtrRank15M = input.float(85,   "  Max ATR Rank 15M",          step=1,     group=g_filters)
-minAtrRank1H  = input.float(35,   "  Min ATR Rank 1H",           step=1,     group=g_filters)
-maxAtrRank1H  = input.float(85,   "  Max ATR Rank 1H",           step=1,     group=g_filters)
-minAtrRank4H  = input.float(30,   "  Min ATR Rank 4H",           step=1,     group=g_filters)
-maxAtrRank4H  = input.float(90,   "  Max ATR Rank 4H",           step=1,     group=g_filters)
-minAtrRank1D  = input.float(20,   "  Min ATR Rank 1D",           step=1,     group=g_filters)
-maxAtrRank1D  = input.float(95,   "  Max ATR Rank 1D",           step=1,     group=g_filters)
-useBBExpGate  = input.bool(false, "Use BB Expansion Gate",                    group=g_filters)
-bbLen         = input.int(20,     "  BB Width Length",           minval=1,   group=g_filters)
-bbMult        = input.float(2.0,  "  BB Mult",                   step=0.1,   group=g_filters)
-useChopGate   = input.bool(false, "Use Chop Gate",                            group=g_filters)
-chopLen       = input.int(14,     "  Chop Length",               minval=1,   group=g_filters)
-maxChop       = input.float(58,   "  Max Chop",                  step=0.5,   group=g_filters)
-usePivotProx  = input.bool(false, "Use Pivot Proximity",                     group=g_filters)
-maxPivBars15M = input.int(15,     "  Max Bars From Pivot 15M",  minval=1,   group=g_filters)
-maxPivBars1H  = input.int(12,     "  Max Bars From Pivot 1H",   minval=1,   group=g_filters)
-maxPivBars4H  = input.int(9,      "  Max Bars From Pivot 4H",   minval=1,   group=g_filters)
-maxPivBars1D  = input.int(5,      "  Max Bars From Pivot 1D",   minval=1,   group=g_filters)
-maxDistAtr    = input.float(1.2,  "Max Distance From Pivot (ATR×)", step=0.1, group=g_filters)
-useSweepGate          = input.bool(false, "Use Liquidity Sweep Gate",          group=g_filters)
-sweepLookback15M      = input.int(10,  "  Sweep Lookback 15M", minval=1,     group=g_filters)
-sweepLookback1H       = input.int(8,   "  Sweep Lookback 1H",  minval=1,      group=g_filters)
-sweepLookback4H       = input.int(6,   "  Sweep Lookback 4H",  minval=1,      group=g_filters)
-sweepLookback1D       = input.int(4,   "  Sweep Lookback 1D",  minval=1,      group=g_filters)
-sweepValidBars15M     = input.int(4,   "  Sweep Valid Bars 15M", minval=1,    group=g_filters)
-sweepValidBars1H      = input.int(5,   "  Sweep Valid Bars 1H", minval=1,     group=g_filters)
-sweepValidBars4H      = input.int(8,   "  Sweep Valid Bars 4H", minval=1,     group=g_filters)
-sweepValidBars1D      = input.int(12,  "  Sweep Valid Bars 1D", minval=1,     group=g_filters)
-useSweepAsHardGate1D  = input.bool(false, "  Daily Sweep as Hard Gate",       group=g_filters)
 
 showDiv     = input.bool(true,  "Show Divergences",   group=g_div)
 divSrc      = input.string("Wave Trend", "Source",    group=g_div, options=["Wave Trend", "Signal", "Histogram"])
@@ -466,20 +168,6 @@ _ci         = _d != 0 ? (hlc3 - _esa) / (0.015 * _d) : 0.0
 wt1         = f_smooth(_ci, avgLen, _smoothMode)
 wt2         = ta.sma(wt1, sigLen)
 
-// ─── Stochastic RSI ──────────────────────────────────────────────────────────
-_rsi      = ta.rsi(close, srsiRsiLen)
-_stoch    = ta.stoch(_rsi, _rsi, _rsi, srsiStochLen)
-srsiK     = ta.sma(_stoch, srsiKSmooth)
-srsiD     = ta.sma(srsiK,  srsiDSmooth)
-
-var int _srsiOsBars = 0
-var int _srsiObBars = 0
-_srsiOsBars := srsiK <= srsiOsLevel ? _srsiOsBars + 1 : 0
-_srsiObBars := srsiK >= srsiObLevel ? _srsiObBars + 1 : 0
-
-srsiLongOk  = not useSrsiGate or (srsiK > srsiD and _srsiOsBars <= srsiPersist)
-srsiShortOk = not useSrsiGate or (srsiK < srsiD and _srsiObBars <= srsiPersist)
-
 // ─── Pivots ───────────────────────────────────────────────────────────────────
 _phVal   = ta.pivothigh(high, pivLen, pivLen)
 _plVal   = ta.pivotlow(low,  pivLen, pivLen)
@@ -493,30 +181,8 @@ if _phFound
 if _plFound
     _lastLowBar  := bar_index - pivLen
 
-lastPivHigh = ta.valuewhen(_phFound, high[pivLen], 0)
-lastPivLow  = ta.valuewhen(_plFound, low[pivLen],  0)
-
 barsSinceHighPiv = not na(_lastHighBar) ? bar_index - _lastHighBar : na
 barsSinceLowPiv  = not na(_lastLowBar)  ? bar_index - _lastLowBar  : na
-
-// ─── Regular Divergence detection (uses WT value at pivot bars) ──────────────
-// Bullish divergence: price makes Lower Low while WT makes Higher Low → momentum
-// weakens as price falls → reversal-up setup.
-// Bearish divergence: price makes Higher High while WT makes Lower High → momentum
-// weakens as price rises → reversal-down setup.
-wtAtLastLow   = ta.valuewhen(_plFound, wt1[pivLen],  0)
-wtAtPrevLow   = ta.valuewhen(_plFound, wt1[pivLen],  1)
-priceAtPrevLow  = ta.valuewhen(_plFound, low[pivLen], 1)
-
-wtAtLastHigh  = ta.valuewhen(_phFound, wt1[pivLen], 0)
-wtAtPrevHigh  = ta.valuewhen(_phFound, wt1[pivLen], 1)
-priceAtPrevHigh = ta.valuewhen(_phFound, high[pivLen], 1)
-
-regularBullDiv = _plFound and not na(wtAtPrevLow)  and not na(priceAtPrevLow)  and wtAtLastLow  > wtAtPrevLow  and lastPivLow  < priceAtPrevLow
-regularBearDiv = _phFound and not na(wtAtPrevHigh) and not na(priceAtPrevHigh) and wtAtLastHigh < wtAtPrevHigh and lastPivHigh > priceAtPrevHigh
-
-barsSinceBullDiv = ta.barssince(regularBullDiv)
-barsSinceBearDiv = ta.barssince(regularBearDiv)
 
 // ─── Divergence visualization (oscillator-pivot based) ───────────────────────
 // Custom pivot detection: right side strict > (peak confirmed), left side >= (flat
@@ -561,22 +227,6 @@ hidBullDivCond = showDiv and plotHidBull and _divPlFound and not na(ta.valuewhen
 
 // ─── ATR ─────────────────────────────────────────────────────────────────────
 atrVal  = ta.atr(atrLen)
-atrRank = ta.percentrank(atrVal, atrPctLen)
-
-// ─── Choppiness Index ────────────────────────────────────────────────────────
-_trSum     = math.sum(ta.tr(true), chopLen)
-_chopRange = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
-chop       = _chopRange > 0 ? 100 * math.log10(_trSum / _chopRange) / math.log10(chopLen) : 100.0
-chopGate   = not useChopGate or chop < maxChop
-
-// ─── Bollinger Band width expansion ──────────────────────────────────────────
-bbBasis             = ta.sma(close, bbLen)
-bbDev               = bbMult * ta.stdev(close, bbLen)
-bbWidth             = math.abs(bbBasis) > syminfo.mintick ? (2.0 * bbDev) / math.abs(bbBasis) : na
-bbWidthRank         = ta.percentrank(bbWidth, 100)
-compressionRecently = ta.lowest(bbWidthRank, 20) < 20
-expandingNow        = bbWidthRank > bbWidthRank[1] and bbWidthRank > 30
-volExpansionGate    = not useBBExpGate or (compressionRecently and expandingNow)
 
 // ─── Filters ─────────────────────────────────────────────────────────────────
 _inSession   = not useSession  or not na(time(timeframe.period, sessionInput))
@@ -595,158 +245,13 @@ _streakBlocked := useLossStreak and _lossStreak >= maxLossStreak
 _tfSec       = timeframe.in_seconds()
 _tfOk        = _tfSec == 900 or _tfSec == 3600 or _tfSec == 14400 or _tfSec == 86400
 _tpMult      = _tfSec == 900 ? tpMult15M    : _tfSec == 3600 ? tpMult1H    : _tfSec == 14400 ? tpMult4H    : tpMult1D
-_osLevel     = _tfSec == 900 ? osLevel15M   : _tfSec == 3600 ? osLevel1H   : _tfSec == 14400 ? osLevel4H   : osLevel1D
-_obLevel     = _tfSec == 900 ? obLevel15M   : _tfSec == 3600 ? obLevel1H   : _tfSec == 14400 ? obLevel4H   : obLevel1D
-_osFloor     = _tfSec == 14400 ? osFloor4H : _tfSec == 86400 ? osFloor1D : -999.0
-_obFloor     = _tfSec == 14400 ? obFloor4H : _tfSec == 86400 ? obFloor1D : +999.0
-_minAtrRank  = _tfSec == 900 ? minAtrRank15M : _tfSec == 3600 ? minAtrRank1H : _tfSec == 14400 ? minAtrRank4H : minAtrRank1D
-_maxAtrRank  = _tfSec == 900 ? maxAtrRank15M : _tfSec == 3600 ? maxAtrRank1H : _tfSec == 14400 ? maxAtrRank4H : maxAtrRank1D
-_volOk       = not useAtrRankGate or (atrRank >= _minAtrRank and atrRank <= _maxAtrRank)
-
-_canTrade = _inSession and _inDateRange and not _streakBlocked and _tfOk and _volOk and volExpansionGate and chopGate
-
-_maxPivBars    = _tfSec == 900 ? maxPivBars15M : _tfSec == 3600 ? maxPivBars1H : _tfSec == 14400 ? maxPivBars4H : maxPivBars1D
-pivotLongGate  = not usePivotProx or (not na(barsSinceLowPiv)  and barsSinceLowPiv  <= _maxPivBars)
-pivotShortGate = not usePivotProx or (not na(barsSinceHighPiv) and barsSinceHighPiv <= _maxPivBars)
-
-distFromLowAtr     = not na(lastPivLow)  ? math.abs(close - lastPivLow)  / atrVal : na
-distFromHighAtr    = not na(lastPivHigh) ? math.abs(close - lastPivHigh) / atrVal : na
-pivotDistLongGate  = not usePivotProx or (not na(distFromLowAtr)  and distFromLowAtr  <= maxDistAtr)
-pivotDistShortGate = not usePivotProx or (not na(distFromHighAtr) and distFromHighAtr <= maxDistAtr)
-
-// ─── Liquidity Sweep Gate ────────────────────────────────────────────────────
-_sweepLookback  = _tfSec == 900 ? sweepLookback15M  : _tfSec == 3600 ? sweepLookback1H  : _tfSec == 14400 ? sweepLookback4H  : sweepLookback1D
-_sweepValidBars = _tfSec == 900 ? sweepValidBars15M : _tfSec == 3600 ? sweepValidBars1H : _tfSec == 14400 ? sweepValidBars4H : sweepValidBars1D
-
-rawSweptLow  = not na(lastPivLow)  and ta.lowest(low,  _sweepLookback) < lastPivLow  and close > lastPivLow
-rawSweptHigh = not na(lastPivHigh) and ta.highest(high, _sweepLookback) > lastPivHigh and close < lastPivHigh
-
-sweepLongContext  = not na(ta.barssince(rawSweptLow))  and ta.barssince(rawSweptLow)  <= _sweepValidBars
-sweepShortContext = not na(ta.barssince(rawSweptHigh)) and ta.barssince(rawSweptHigh) <= _sweepValidBars
-
-_dailyBypass = _tfSec == 86400 and not useSweepAsHardGate1D
-sweepLongGate  = not useSweepGate or _dailyBypass or sweepLongContext
-sweepShortGate = not useSweepGate or _dailyBypass or sweepShortContext
-
-// ─── Gate A — atrRank Mid-Band Killer (per TF, per dir) ──────────────────────
-_gateA_long_lo  = _tfSec == 900 ? gateA_15M_long_lo  : _tfSec == 3600 ? gateA_1H_long_lo  : _tfSec == 14400 ? gateA_4H_long_lo  : gateA_1D_long_lo
-_gateA_long_hi  = _tfSec == 900 ? gateA_15M_long_hi  : _tfSec == 3600 ? gateA_1H_long_hi  : _tfSec == 14400 ? gateA_4H_long_hi  : gateA_1D_long_hi
-_gateA_short_lo = _tfSec == 900 ? gateA_15M_short_lo : _tfSec == 3600 ? gateA_1H_short_lo : _tfSec == 14400 ? gateA_4H_short_lo : gateA_1D_short_lo
-_gateA_short_hi = _tfSec == 900 ? gateA_15M_short_hi : _tfSec == 3600 ? gateA_1H_short_hi : _tfSec == 14400 ? gateA_4H_short_hi : gateA_1D_short_hi
-
-// Trade is OK (passes gate) if: gate disabled, atrRank is na, lo==hi (disabled per TF),
-// or atrRank is OUTSIDE the bad band [lo, hi).
-gateALongOk  = not useGateA or na(atrRank) or _gateA_long_lo  >= _gateA_long_hi  or atrRank < _gateA_long_lo  or atrRank >= _gateA_long_hi
-gateAShortOk = not useGateA or na(atrRank) or _gateA_short_lo >= _gateA_short_hi or atrRank < _gateA_short_lo or atrRank >= _gateA_short_hi
-
-// ─── Gate D — bbWidthRank Band Killer (per TF, per dir) ──────────────────────
-_gateD_long_lo  = _tfSec == 900 ? gateD_15M_long_lo  : _tfSec == 3600 ? gateD_1H_long_lo  : _tfSec == 14400 ? gateD_4H_long_lo  : gateD_1D_long_lo
-_gateD_long_hi  = _tfSec == 900 ? gateD_15M_long_hi  : _tfSec == 3600 ? gateD_1H_long_hi  : _tfSec == 14400 ? gateD_4H_long_hi  : gateD_1D_long_hi
-_gateD_short_lo = _tfSec == 900 ? gateD_15M_short_lo : _tfSec == 3600 ? gateD_1H_short_lo : _tfSec == 14400 ? gateD_4H_short_lo : gateD_1D_short_lo
-_gateD_short_hi = _tfSec == 900 ? gateD_15M_short_hi : _tfSec == 3600 ? gateD_1H_short_hi : _tfSec == 14400 ? gateD_4H_short_hi : gateD_1D_short_hi
-
-gateDLongOk  = not useGateD or na(bbWidthRank) or _gateD_long_lo  >= _gateD_long_hi  or bbWidthRank < _gateD_long_lo  or bbWidthRank >= _gateD_long_hi
-gateDShortOk = not useGateD or na(bbWidthRank) or _gateD_short_lo >= _gateD_short_hi or bbWidthRank < _gateD_short_lo or bbWidthRank >= _gateD_short_hi
-
-// ─── Gate H — Chop Band Killer (per TF, per dir) ─────────────────────────────
-_gateH_long_lo  = _tfSec == 900 ? gateH_15M_long_lo  : _tfSec == 3600 ? gateH_1H_long_lo  : _tfSec == 14400 ? gateH_4H_long_lo  : gateH_1D_long_lo
-_gateH_long_hi  = _tfSec == 900 ? gateH_15M_long_hi  : _tfSec == 3600 ? gateH_1H_long_hi  : _tfSec == 14400 ? gateH_4H_long_hi  : gateH_1D_long_hi
-_gateH_short_lo = _tfSec == 900 ? gateH_15M_short_lo : _tfSec == 3600 ? gateH_1H_short_lo : _tfSec == 14400 ? gateH_4H_short_lo : gateH_1D_short_lo
-_gateH_short_hi = _tfSec == 900 ? gateH_15M_short_hi : _tfSec == 3600 ? gateH_1H_short_hi : _tfSec == 14400 ? gateH_4H_short_hi : gateH_1D_short_hi
-
-gateHLongOk  = not useGateH or na(chop) or _gateH_long_lo  >= _gateH_long_hi  or chop < _gateH_long_lo  or chop >= _gateH_long_hi
-gateHShortOk = not useGateH or na(chop) or _gateH_short_lo >= _gateH_short_hi or chop < _gateH_short_lo or chop >= _gateH_short_hi
-
-// ─── Gate I — srsi Extension Killer (per TF, per dir) ────────────────────────
-_gateI_long_thresh  = _tfSec == 900 ? gateI_15M_long  : _tfSec == 3600 ? gateI_1H_long  : _tfSec == 14400 ? gateI_4H_long  : gateI_1D_long
-_gateI_short_thresh = _tfSec == 900 ? gateI_15M_short : _tfSec == 3600 ? gateI_1H_short : _tfSec == 14400 ? gateI_4H_short : gateI_1D_short
-
-gateILongOk  = not useGateI or _gateI_long_thresh  == 0 or _srsiOsBars < _gateI_long_thresh
-gateIShortOk = not useGateI or _gateI_short_thresh == 0 or _srsiObBars < _gateI_short_thresh
-
-// ─── Gate J — srsiD Zone Killer (per TF, per dir) ────────────────────────────
-_gateJ_long_lo  = _tfSec == 900 ? gateJ_15M_long_lo  : _tfSec == 3600 ? gateJ_1H_long_lo  : _tfSec == 14400 ? gateJ_4H_long_lo  : gateJ_1D_long_lo
-_gateJ_long_hi  = _tfSec == 900 ? gateJ_15M_long_hi  : _tfSec == 3600 ? gateJ_1H_long_hi  : _tfSec == 14400 ? gateJ_4H_long_hi  : gateJ_1D_long_hi
-_gateJ_short_lo = _tfSec == 900 ? gateJ_15M_short_lo : _tfSec == 3600 ? gateJ_1H_short_lo : _tfSec == 14400 ? gateJ_4H_short_lo : gateJ_1D_short_lo
-_gateJ_short_hi = _tfSec == 900 ? gateJ_15M_short_hi : _tfSec == 3600 ? gateJ_1H_short_hi : _tfSec == 14400 ? gateJ_4H_short_hi : gateJ_1D_short_hi
-
-gateJLongOk  = not useGateJ or na(srsiD) or _gateJ_long_lo  >= _gateJ_long_hi  or srsiD < _gateJ_long_lo  or srsiD >= _gateJ_long_hi
-gateJShortOk = not useGateJ or na(srsiD) or _gateJ_short_lo >= _gateJ_short_hi or srsiD < _gateJ_short_lo or srsiD >= _gateJ_short_hi
-
-// ─── Gate K — wt1 Zone Killer (per TF, per dir) ──────────────────────────────
-_gateK_long_lo  = _tfSec == 900 ? gateK_15M_long_lo  : _tfSec == 3600 ? gateK_1H_long_lo  : _tfSec == 14400 ? gateK_4H_long_lo  : gateK_1D_long_lo
-_gateK_long_hi  = _tfSec == 900 ? gateK_15M_long_hi  : _tfSec == 3600 ? gateK_1H_long_hi  : _tfSec == 14400 ? gateK_4H_long_hi  : gateK_1D_long_hi
-_gateK_short_lo = _tfSec == 900 ? gateK_15M_short_lo : _tfSec == 3600 ? gateK_1H_short_lo : _tfSec == 14400 ? gateK_4H_short_lo : gateK_1D_short_lo
-_gateK_short_hi = _tfSec == 900 ? gateK_15M_short_hi : _tfSec == 3600 ? gateK_1H_short_hi : _tfSec == 14400 ? gateK_4H_short_hi : gateK_1D_short_hi
-
-gateKLongOk  = not useGateK or _gateK_long_lo  >= _gateK_long_hi  or wt1 < _gateK_long_lo  or wt1 >= _gateK_long_hi
-gateKShortOk = not useGateK or _gateK_short_lo >= _gateK_short_hi or wt1 < _gateK_short_lo or wt1 >= _gateK_short_hi
-
-// ─── Gate L — Pivot Staleness Killer (per TF, per dir) ───────────────────────
-_gateL_long_lo  = _tfSec == 900 ? gateL_15M_long_lo  : _tfSec == 3600 ? gateL_1H_long_lo  : _tfSec == 14400 ? gateL_4H_long_lo  : gateL_1D_long_lo
-_gateL_long_hi  = _tfSec == 900 ? gateL_15M_long_hi  : _tfSec == 3600 ? gateL_1H_long_hi  : _tfSec == 14400 ? gateL_4H_long_hi  : gateL_1D_long_hi
-_gateL_short_lo = _tfSec == 900 ? gateL_15M_short_lo : _tfSec == 3600 ? gateL_1H_short_lo : _tfSec == 14400 ? gateL_4H_short_lo : gateL_1D_short_lo
-_gateL_short_hi = _tfSec == 900 ? gateL_15M_short_hi : _tfSec == 3600 ? gateL_1H_short_hi : _tfSec == 14400 ? gateL_4H_short_hi : gateL_1D_short_hi
-
-gateLLongOk  = not useGateL or na(barsSinceHighPiv) or _gateL_long_lo  >= _gateL_long_hi  or barsSinceHighPiv < _gateL_long_lo  or barsSinceHighPiv >= _gateL_long_hi
-gateLShortOk = not useGateL or na(barsSinceLowPiv)  or _gateL_short_lo >= _gateL_short_hi or barsSinceLowPiv  < _gateL_short_lo or barsSinceLowPiv  >= _gateL_short_hi
-
-// ─── Gate M — srsiK Zone Killer (per TF, per dir) ────────────────────────────
-_gateM_long_lo  = _tfSec == 900 ? gateM_15M_long_lo  : _tfSec == 3600 ? gateM_1H_long_lo  : _tfSec == 14400 ? gateM_4H_long_lo  : gateM_1D_long_lo
-_gateM_long_hi  = _tfSec == 900 ? gateM_15M_long_hi  : _tfSec == 3600 ? gateM_1H_long_hi  : _tfSec == 14400 ? gateM_4H_long_hi  : gateM_1D_long_hi
-_gateM_short_lo = _tfSec == 900 ? gateM_15M_short_lo : _tfSec == 3600 ? gateM_1H_short_lo : _tfSec == 14400 ? gateM_4H_short_lo : gateM_1D_short_lo
-_gateM_short_hi = _tfSec == 900 ? gateM_15M_short_hi : _tfSec == 3600 ? gateM_1H_short_hi : _tfSec == 14400 ? gateM_4H_short_hi : gateM_1D_short_hi
-
-gateMlongOk  = not useGateM or na(srsiK) or _gateM_long_lo  >= _gateM_long_hi  or srsiK < _gateM_long_lo  or srsiK >= _gateM_long_hi
-gateMShortOk = not useGateM or na(srsiK) or _gateM_short_lo >= _gateM_short_hi or srsiK < _gateM_short_lo or srsiK >= _gateM_short_hi
-
-// ─── Gate B — Regular Divergence Required (per TF) ───────────────────────────
-_maxDivBars = _tfSec == 900 ? maxDivBars15M : _tfSec == 3600 ? maxDivBars1H : _tfSec == 14400 ? maxDivBars4H : maxDivBars1D
-gateBLongOk  = not useGateB or (not na(barsSinceBullDiv) and barsSinceBullDiv <= _maxDivBars)
-gateBShortOk = not useGateB or (not na(barsSinceBearDiv) and barsSinceBearDiv <= _maxDivBars)
-
-// ─── Gate C — HTF Exhaustion Filter ──────────────────────────────────────────
-// Map current TF to one-step-up HTF
-_htfPeriod = _tfSec == 900 ? "60" : _tfSec == 3600 ? "240" : _tfSec == 14400 ? "D" : _tfSec == 86400 ? "W" : "60"
-// Fetch HTF wt1. wt1's smoothing depends on timeframe.in_seconds() so it auto-resolves
-// to the HTF's smoothing mode when evaluated in HTF context.
-htfWt1 = request.security(syminfo.tickerid, _htfPeriod, wt1, barmerge.gaps_off, barmerge.lookahead_off)
-
-_htfObLvl = _tfSec == 900 ? htfObLevel15M : _tfSec == 3600 ? htfObLevel1H : _tfSec == 14400 ? htfObLevel4H : htfObLevel1D
-_htfOsLvl = _tfSec == 900 ? htfOsLevel15M : _tfSec == 3600 ? htfOsLevel1H : _tfSec == 14400 ? htfOsLevel4H : htfOsLevel1D
-
-gateCLongOk  = not useGateC or na(htfWt1) or htfWt1 < _htfObLvl
-gateCShortOk = not useGateC or na(htfWt1) or htfWt1 > _htfOsLvl
-
-// B2 — 1H-Confluence for 15M: only trade 15M when 1H wt1 is in OS (long) or OB (short).
-// htfWt1 on 15M = 1H wt1 (fetched above). No-op on all other TFs.
-gateB2LongOk  = not useGateB2 or _tfSec != 900 or (not na(htfWt1) and htfWt1 <= b2OsLevel)
-gateB2ShortOk = not useGateB2 or _tfSec != 900 or (not na(htfWt1) and htfWt1 >= b2ObLevel)
-
-// ─── Gate G — Trend-aware Counter-Trend Range Filter ─────────────────────────
-// Active ONLY on 15M and 1H. On 4H/1D Gate G blocks real reversal winners (test117).
-_gateG_active_tf = _tfSec == 900 or _tfSec == 3600
-// Use TF-specific smoothing (matches WT smoothing — sensitive on fast TFs, stable on slow)
-_gFast = f_smooth(close, gTrendFastLen, _smoothMode)
-_gSlow = f_smooth(close, gTrendSlowLen, _smoothMode)
-_gTrendUp   = _gFast > _gSlow
-_gTrendDown = _gFast < _gSlow
-
-_gRangeLow  = ta.lowest(low,  gRangeLen)
-_gRangeHigh = ta.highest(high, gRangeLen)
-_gRangePos  = (close - _gRangeLow) / math.max(_gRangeHigh - _gRangeLow, syminfo.mintick)
-
-// Long is COUNTER-trend when trend is down → require low range pos.
-// Long WITH trend (uptrend) → bypass filter (pullback continuation).
-// Outside active TFs (4H, 1D), gate always passes.
-gateGLongOk  = not useGateG or not _gateG_active_tf or _gTrendUp   or _gRangePos <= gMaxRangePosLong
-gateGShortOk = not useGateG or not _gateG_active_tf or _gTrendDown or _gRangePos >= gMinRangePosShort
+_level       = _tfSec == 900 ? lvl15M       : _tfSec == 3600 ? lvl1H       : _tfSec == 14400 ? lvl4H       : lvl1D
+_osLevel     = -_level
+_obLevel     = _level
 
 // ─── Signals ─────────────────────────────────────────────────────────────────
-_wtLongRaw  = ta.crossover(wt1, wt2)  and wt1 <= _osLevel and wt1 >= _osFloor
-_wtShortRaw = ta.crossunder(wt1, wt2) and wt1 >= _obLevel and wt1 <= _obFloor
-longSignal  = _wtLongRaw  and srsiLongOk
-shortSignal = _wtShortRaw and srsiShortOk
+longSignal  = ta.crossover(wt1, wt2)  and wt1 <= _osLevel
+shortSignal = ta.crossunder(wt1, wt2) and wt1 >= _obLevel
 
 canLong  = dirMode != "Short Only"
 canShort = dirMode != "Long Only"
@@ -776,7 +281,6 @@ varip int _lastExitBar = na
 // Frozen at signal bar — used for SL/TP and exit log
 var float _pendingLongAtr    = na
 var float _pendingShortAtr   = na
-var float _tradeAbsWt1       = na  // abs(wt1) at entry signal bar — used by Grind Engine
 var int   _pendingLowPivBars  = na
 var int   _pendingHighPivBars = na
 
@@ -950,37 +454,6 @@ if useStructExit and not _fx
     if strategy.position_size < 0 and _potentialLow and _shortProfitR >= _structMinR
         strategy.close("Short", comment="struct")
 
-// ─── Post-entry quality exits (E, F) ─────────────────────────────────────────
-// E — Fail-Fast: cut quickly if trade is immediately adverse (1H only)
-// Skip the entry bar itself (_barsInTrade > 0): wait for at least one new bar
-// before evaluating adverse move.
-_failFastActive = useFailFast and not _fx and _tfSec == 3600
-if _failFastActive and strategy.position_size > 0 and not na(_longRisk) and _longRisk > 0
-    _barsInTrade = bar_index - strategy.opentrades.entry_bar_index(0)
-    _adverseR    = (close - strategy.position_avg_price) / _longRisk
-    if _barsInTrade > 0 and _barsInTrade <= failFastBars and _adverseR <= failFastR
-        strategy.close("Long", comment="failfast")
-
-if _failFastActive and strategy.position_size < 0 and not na(_shortRisk) and _shortRisk > 0
-    _barsInTrade = bar_index - strategy.opentrades.entry_bar_index(0)
-    _adverseR    = (strategy.position_avg_price - close) / _shortRisk
-    if _barsInTrade > 0 and _barsInTrade <= failFastBars and _adverseR <= failFastR
-        strategy.close("Short", comment="failfast")
-
-// F — No-Follow Exit: SINGLE check at window end. Hardcoded to 1H only.
-_isGrindTrade     = useGrindEngine and not na(_tradeAbsWt1) and _tradeAbsWt1 >= grindAbsWt1Min
-_noFollowActiveTF = _tfSec == 3600 and not _isGrindTrade
-if useNoFollow and not _fx and _noFollowActiveTF and strategy.position_size > 0 and not na(_longRisk) and _longRisk > 0
-    _barsInTrade = bar_index - strategy.opentrades.entry_bar_index(0)
-    _progressR   = (close - strategy.position_avg_price) / _longRisk
-    if _barsInTrade == nftWindow and _progressR < nftRequiredR
-        strategy.close("Long", comment="noFollow")
-
-if useNoFollow and not _fx and _noFollowActiveTF and strategy.position_size < 0 and not na(_shortRisk) and _shortRisk > 0
-    _barsInTrade = bar_index - strategy.opentrades.entry_bar_index(0)
-    _progressR   = (strategy.position_avg_price - close) / _shortRisk
-    if _barsInTrade == nftWindow and _progressR < nftRequiredR
-        strategy.close("Short", comment="noFollow")
 
 // ─── Pivot event log (validator reference) ───────────────────────────────────
 // Logs confirmed pivots as reference points. WT signals use barsSinceLowPiv /
@@ -1006,12 +479,10 @@ _cooldownOk = na(_lastExitBar) or (
      bar_index > _lastExitBar and
      (cooldown == 0 or (bar_index - _lastExitBar) > cooldown))
 
-f_blockReason(wtRaw, srsiOk, cooldownOk, inSession, inDateRange, tfOk, volOk, bbExpOk, chopOk, pivBarsOk, pivDistOk, sweepOk, gateAOk, gateBOk, gateCOk, gateDOk, gateGOk, gateHOk, gateIOk, gateB2Ok, gateJOk, gateKOk, gateLOk, gateMOk) =>
+f_blockReason(sig, cooldownOk, inSession, inDateRange, tfOk, streakBlocked) =>
     string _r = ""
-    if wtRaw
-        if not srsiOk
-            _r := "srsi"
-        else if not cooldownOk
+    if sig
+        if not cooldownOk
             _r := "cooldown"
         else if not inSession
             _r := "session"
@@ -1019,113 +490,46 @@ f_blockReason(wtRaw, srsiOk, cooldownOk, inSession, inDateRange, tfOk, volOk, bb
             _r := "dateRange"
         else if not tfOk
             _r := "tf"
-        else if not volOk
-            _r := "atrRank"
-        else if not bbExpOk
-            _r := "bbExpansion"
-        else if not chopOk
-            _r := "chop"
-        else if not pivBarsOk
-            _r := "pivotBars"
-        else if not pivDistOk
-            _r := "pivotDist"
-        else if not sweepOk
-            _r := "sweep"
-        else if not gateAOk
-            _r := "gateA"
-        else if not gateBOk
-            _r := "gateB"
-        else if not gateCOk
-            _r := "gateC"
-        else if not gateDOk
-            _r := "gateD"
-        else if not gateGOk
-            _r := "gateG"
-        else if not gateHOk
-            _r := "gateH"
-        else if not gateIOk
-            _r := "gateI"
-        else if not gateB2Ok
-            _r := "gateB2"
-        else if not gateJOk
-            _r := "gateJ"
-        else if not gateKOk
-            _r := "gateK"
-        else if not gateLOk
-            _r := "gateL"
-        else if not gateMOk
-            _r := "gateM"
+        else if streakBlocked
+            _r := "lossStreak"
     _r
 
-_blockLong  = f_blockReason(_wtLongRaw,  srsiLongOk,  _cooldownOk, _inSession, _inDateRange, _tfOk, _volOk, volExpansionGate, chopGate, pivotLongGate,  pivotDistLongGate,  sweepLongGate,  gateALongOk,  gateBLongOk,  gateCLongOk,  gateDLongOk,  gateGLongOk,  gateHLongOk,  gateILongOk,  gateB2LongOk,  gateJLongOk,  gateKLongOk,  gateLLongOk,  gateMlongOk)
-_blockShort = f_blockReason(_wtShortRaw, srsiShortOk, _cooldownOk, _inSession, _inDateRange, _tfOk, _volOk, volExpansionGate, chopGate, pivotShortGate, pivotDistShortGate, sweepShortGate, gateAShortOk, gateBShortOk, gateCShortOk, gateDShortOk, gateGShortOk, gateHShortOk, gateIShortOk, gateB2ShortOk, gateJShortOk, gateKShortOk, gateLShortOk, gateMShortOk)
-
-// Gate-flags string for full visibility of which Quality Gates passed/failed.
-// Allows offline simulation: "what if Gate X were off?" — read all flags from BLOCKED log.
-// T = passed, F = blocked. Only A-I quality gates included (cooldown/session etc. are baseline).
-f_flags(a, b, c, d, g, h, i, b2, j, k, l, m) =>
-    sa = a ? "T" : "F"
-    sb = b ? "T" : "F"
-    sc = c ? "T" : "F"
-    sd = d ? "T" : "F"
-    sg = g ? "T" : "F"
-    sh = h ? "T" : "F"
-    si = i ? "T" : "F"
-    sb2 = b2 ? "T" : "F"
-    sj = j ? "T" : "F"
-    sk = k ? "T" : "F"
-    sl = l ? "T" : "F"
-    sm = m ? "T" : "F"
-    "A=" + sa + "|B=" + sb + "|C=" + sc + "|D=" + sd + "|G=" + sg + "|H=" + sh + "|I=" + si + "|B2=" + sb2 + "|J=" + sj + "|K=" + sk + "|L=" + sl + "|M=" + sm
-_gatesLong  = f_flags(gateALongOk,  gateBLongOk,  gateCLongOk,  gateDLongOk,  gateGLongOk,  gateHLongOk,  gateILongOk,  gateB2LongOk,  gateJLongOk,  gateKLongOk,  gateLLongOk,  gateMlongOk)
-_gatesShort = f_flags(gateAShortOk, gateBShortOk, gateCShortOk, gateDShortOk, gateGShortOk, gateHShortOk, gateIShortOk, gateB2ShortOk, gateJShortOk, gateKShortOk, gateLShortOk, gateMShortOk)
+_blockLong  = f_blockReason(longSignal,  _cooldownOk, _inSession, _inDateRange, _tfOk, _streakBlocked)
+_blockShort = f_blockReason(shortSignal, _cooldownOk, _inSession, _inDateRange, _tfOk, _streakBlocked)
 
 if canLong and strategy.position_size == 0 and _blockLong != ""
-    log.info(str.format('WT4 BLOCKED | dir=long | reason={0} | bar={1} | wt1={2} | srsiK={3} | srsiD={4} | srsiOsBars={5} | atrRank={6} | chop={7} | bbWidthRank={8} | sweepCtx={9} | lowPivBars={10} | distLowAtr={11} | gates={12} | close={13} | atr={14} | tf={15}',
+    log.info(str.format('WT4 BLOCKED | dir=long | reason={0} | bar={1} | wt1={2} | lowPivBars={3} | close={4} | atr={5} | tf={6}',
          _blockLong, bar_index,
          str.tostring(wt1, '#.##'),
-         str.tostring(srsiK, '#.##'), str.tostring(srsiD, '#.##'), _srsiOsBars,
-         str.tostring(atrRank, '#.#'), str.tostring(chop, '#.#'), str.tostring(bbWidthRank, '#.#'),
-         sweepLongContext,
          str.tostring(barsSinceLowPiv),
-         str.tostring(distFromLowAtr, '#.##'),
-         _gatesLong,
          str.tostring(close, format.mintick),
          str.tostring(atrVal, format.mintick),
          timeframe.period))
 
 if canShort and strategy.position_size == 0 and _blockShort != ""
-    log.info(str.format('WT4 BLOCKED | dir=short | reason={0} | bar={1} | wt1={2} | srsiK={3} | srsiD={4} | srsiObBars={5} | atrRank={6} | chop={7} | bbWidthRank={8} | sweepCtx={9} | highPivBars={10} | distHighAtr={11} | gates={12} | close={13} | atr={14} | tf={15}',
+    log.info(str.format('WT4 BLOCKED | dir=short | reason={0} | bar={1} | wt1={2} | highPivBars={3} | close={4} | atr={5} | tf={6}',
          _blockShort, bar_index,
          str.tostring(wt1, '#.##'),
-         str.tostring(srsiK, '#.##'), str.tostring(srsiD, '#.##'), _srsiObBars,
-         str.tostring(atrRank, '#.#'), str.tostring(chop, '#.#'), str.tostring(bbWidthRank, '#.#'),
-         sweepShortContext,
          str.tostring(barsSinceHighPiv),
-         str.tostring(distFromHighAtr, '#.##'),
-         _gatesShort,
          str.tostring(close, format.mintick),
          str.tostring(atrVal, format.mintick),
          timeframe.period))
 
-_longEntry  = longSignal  and canLong  and strategy.position_size == 0 and not _exitLockThisBar and _cooldownOk and _canTrade and pivotLongGate  and pivotDistLongGate  and sweepLongGate  and gateALongOk  and gateBLongOk  and gateCLongOk  and gateDLongOk  and gateGLongOk  and gateHLongOk  and gateILongOk  and gateB2LongOk  and gateJLongOk  and gateKLongOk  and gateLLongOk  and gateMlongOk
-_shortEntry = shortSignal and canShort and strategy.position_size == 0 and not _exitLockThisBar and _cooldownOk and _canTrade and pivotShortGate and pivotDistShortGate and sweepShortGate and gateAShortOk and gateBShortOk and gateCShortOk and gateDShortOk and gateGShortOk and gateHShortOk and gateIShortOk and gateB2ShortOk and gateJShortOk and gateKShortOk and gateLShortOk and gateMShortOk
+_canTrade = _inSession and _inDateRange and not _streakBlocked and _tfOk
+_longEntry  = longSignal  and canLong  and strategy.position_size == 0 and not _exitLockThisBar and _cooldownOk and _canTrade
+_shortEntry = shortSignal and canShort and strategy.position_size == 0 and not _exitLockThisBar and _cooldownOk and _canTrade
 
 if _longEntry
-    _pendingLongAtr    := atrVal
+    _pendingLongAtr     := atrVal
     _pendingLowPivBars  := barsSinceLowPiv
     _pendingHighPivBars := barsSinceHighPiv
-    _tradeAbsWt1       := math.abs(wt1)
-    log.info(str.format('WT4 ENTRY | dir=long | bar={0} | wt1={1} | wt2={2} | osLevel={3} | srsiK={4} | srsiD={5} | srsiOsBars={6} | lowPivBars={7} | highPivBars={8} | atr={9} | signalSL={10} | signalTP={11} | atrRank={12} | chop={13} | bbWidthRank={14} | sweepCtx={15} | distLowAtr={16} | wt1Delta={17} | tpMult={18} | tf={19}',
+    log.info(str.format('WT4 ENTRY | dir=long | bar={0} | wt1={1} | wt2={2} | osLevel={3} | lowPivBars={4} | highPivBars={5} | atr={6} | signalSL={7} | signalTP={8} | wt1Delta={9} | tpMult={10} | tf={11}',
          bar_index, str.tostring(wt1, '#.##'), str.tostring(wt2, '#.##'), _osLevel,
-         str.tostring(srsiK, '#.##'), str.tostring(srsiD, '#.##'), _srsiOsBars,
          str.tostring(barsSinceLowPiv), str.tostring(barsSinceHighPiv),
          str.tostring(atrVal, format.mintick),
          str.tostring(close - slMult * atrVal, format.mintick),
          str.tostring(close + _tpMult * atrVal, format.mintick),
-         str.tostring(atrRank, '#.#'), str.tostring(chop, '#.#'), str.tostring(bbWidthRank, '#.#'),
-         sweepLongContext,
-         str.tostring(distFromLowAtr, '#.##'), str.tostring(wt1 - wt1[1], '#.##'), str.tostring(_tpMult, '#.#'),
+         str.tostring(wt1 - wt1[1], '#.##'), str.tostring(_tpMult, '#.#'),
          timeframe.period))
     strategy.entry("Long", strategy.long)
 
@@ -1133,20 +537,15 @@ if _shortEntry
     _pendingShortAtr    := atrVal
     _pendingLowPivBars  := barsSinceLowPiv
     _pendingHighPivBars := barsSinceHighPiv
-    _tradeAbsWt1       := math.abs(wt1)
-    log.info(str.format('WT4 ENTRY | dir=short | bar={0} | wt1={1} | wt2={2} | obLevel={3} | srsiK={4} | srsiD={5} | srsiObBars={6} | lowPivBars={7} | highPivBars={8} | atr={9} | signalSL={10} | signalTP={11} | atrRank={12} | chop={13} | bbWidthRank={14} | sweepCtx={15} | distHighAtr={16} | wt1Delta={17} | tpMult={18} | tf={19}',
+    log.info(str.format('WT4 ENTRY | dir=short | bar={0} | wt1={1} | wt2={2} | obLevel={3} | lowPivBars={4} | highPivBars={5} | atr={6} | signalSL={7} | signalTP={8} | wt1Delta={9} | tpMult={10} | tf={11}',
          bar_index, str.tostring(wt1, '#.##'), str.tostring(wt2, '#.##'), _obLevel,
-         str.tostring(srsiK, '#.##'), str.tostring(srsiD, '#.##'), _srsiObBars,
          str.tostring(barsSinceLowPiv), str.tostring(barsSinceHighPiv),
          str.tostring(atrVal, format.mintick),
          str.tostring(close + slMult * atrVal, format.mintick),
          str.tostring(close - _tpMult * atrVal, format.mintick),
-         str.tostring(atrRank, '#.#'), str.tostring(chop, '#.#'), str.tostring(bbWidthRank, '#.#'),
-         sweepShortContext,
-         str.tostring(distFromHighAtr, '#.##'), str.tostring(wt1 - wt1[1], '#.##'), str.tostring(_tpMult, '#.#'),
+         str.tostring(wt1 - wt1[1], '#.##'), str.tostring(_tpMult, '#.#'),
          timeframe.period))
     strategy.entry("Short", strategy.short)
-
 // ─── Exit log ────────────────────────────────────────────────────────────────
 varip int _lastLoggedTrade = 0
 if strategy.closedtrades > _lastLoggedTrade
@@ -1214,8 +613,7 @@ if showSignals and _longEntry
               + '   TP ~'   + str.tostring(close + _tpMult * atrVal, format.mintick)
               + '\n────────────'
               + '\nLow pivot:  ' + str.tostring(barsSinceLowPiv)  + ' bars ago'
-              + '\nHigh pivot: ' + str.tostring(barsSinceHighPiv) + ' bars ago'
-              + '\nATR rank: ' + str.tostring(atrRank, '#.#') + '  Chop: ' + str.tostring(chop, '#.#'))
+              + '\nHigh pivot: ' + str.tostring(barsSinceHighPiv) + ' bars ago')
 
 // ─── Divergence plots ─────────────────────────────────────────────────────────
 _nc = color.new(color.white, 100)
@@ -1243,8 +641,7 @@ if showSignals and _shortEntry
               + '   TP ~'   + str.tostring(close - _tpMult * atrVal, format.mintick)
               + '\n────────────'
               + '\nHigh pivot: ' + str.tostring(barsSinceHighPiv) + ' bars ago'
-              + '\nLow pivot:  ' + str.tostring(barsSinceLowPiv)  + ' bars ago'
-              + '\nATR rank: ' + str.tostring(atrRank, '#.#') + '  Chop: ' + str.tostring(chop, '#.#'))
+              + '\nLow pivot:  ' + str.tostring(barsSinceLowPiv)  + ' bars ago')
 
 // ============================================================================
 // CFD cost model (display only)

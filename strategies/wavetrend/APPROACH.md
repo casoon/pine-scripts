@@ -2,6 +2,15 @@
 
 Stand: 2026-05-20 | Datenbasis: test151–166 | Symbol: CAPITALCOM:NATURALGAS | test167 pending
 
+> **Abgeschlossen (2026-11-17, Strategie v5.0).** Die hier beschriebene Methode — Gate-Zonen pro
+> TF/Richtung aus Bucket-Auswertungen desselben NatGas-Fensters — ist beendet. Alle so entstandenen
+> Gates (A, B, B2, C, D, E, F, G, H, I, J, K, L, M), die StochRSI-Bedingung, die 1D-Tiefenkappe, die
+> Grind Engine und die alten Filter (ATR-Rang, BB-Expansion, Chop, Pivot-Nähe, Sweep) sind aus der
+> Strategie entfernt: sie wurden nie außerhalb des Anpassungsfensters geprüft, mehrere waren
+> richtungs- oder TF-fest kodiert, und es kommen keine neuen Testdaten (siehe Plan 34, 39).
+> Übrig ist der Kern: WT-Cross an einer symmetrischen Extrem-Schwelle je TF, ATR-Stop, Break-Even,
+> Trailing, Struktur-Exit. Das Dokument bleibt als Protokoll der Iterationen stehen.
+
 ---
 
 ## Ziel

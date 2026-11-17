@@ -184,7 +184,7 @@ Ratings: **Not ready** (PF < 1.15 or Return/DD < 1.5) · **Promising** (PF ≥ 1
 
 | Strategy | Basisindikator | SL-Typ | Rating | Notiz |
 |---|---|---|---|---|
-| [wavetrend_v4_strategy](strategies/wavetrend/) | WaveTrend v4 | Trailing | Not ready | **stale**: gemessen auf v4.21, Datei ist v4.90. Gates blocken 94% der Crosses bei kaum besserer Selektion als der Marktdurchschnitt |
+| [wavetrend_v4_strategy](strategies/wavetrend/) | WaveTrend v4 | Trailing | Not ready | v5.0 (2026-11-17): In-Sample-Gates aus test152–166, StochRSI- und Altfilter entfernt, eine symmetrische Extrem-Schwelle je TF (268 → 61 Eingaben). Ungemessen — keine Zahl gilt für diese Fassung |
 | [chandelier_flip_radar_strategy](strategies/chandelier_flip_radar/) | Chandelier Flip Radar | Trailing | Not ready | Im Fenster beide Richtungen profitabel, nur dort gemessen — **stale**: Werte vor dem v1.6-Ratchet-Fix, neu zu validieren |
 | [smooth_trend_radar_strategy](strategies/smooth_trend_radar/) | Smooth Trend Radar | Fixed TP | Not ready | Long-Seite ohne Zufallsbasis; Short-Seite durch NatGas-Bull-Bias strukturell schwach — **stale**: Werte von vor dem Resync auf Indikator v3.4.0 |
 | [oscillator_divergence_zones_strategy](strategies/oscillator_divergence_zones/) | Oscillator Divergence Zones | Pivot ATR | Not ready | Short-Entry verzögert durch `pivRight` |
