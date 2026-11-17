@@ -36,7 +36,7 @@ So the read is "*when* this regime breaks, where does it go?" — the current st
 The indicator shows **two axes**, and they rest on very different sample sizes:
 
 - **Timing (robust)** — Persistence and **Maturity** are computed from *every* in-state bar, so they are well-sampled even when exits are rare.
-- **Exit direction (usually thin)** — the exit distribution (Bull/Bear/Neutral) hangs on the handful of times the state actually ended, so on sticky states it is statistically weak. The readout shows the exit count and flags "below min sample" / "sample OK" against the Minimum Exit Sample input.
+- **Exit direction (usually thin)** — the exit distribution (Bull/Bear/Neutral) hangs on the handful of times the state actually ended, so on sticky states it is statistically weak. The readout shows the exit count n; below the Minimum Exit Sample (default 40) the distribution is not shown, only n. Next to it stands the base rate: where the exits of all states went over the same lookback — a state's distribution only says something where it differs from that.
 
 **Maturity** is the coiled-spring gauge. Under a geometric dwell model the typical dwell of a state is `1 / (1 − Persistence)`; the current dwell divided by that typical value says how stretched the state is versus its own history:
 
@@ -59,7 +59,7 @@ All alerts respect the "Alerts only on bar close (confirmed)" toggle (default on
 
 ## Plot
 
-The **Resolution Bias** line — `P(Bull) − P(Bear)`, centred at 0 — is drawn as a **stepline**: it only changes value when the state exits, so it visibly holds flat rather than reading as a continuously evolving curve. It is the historical exit statistic for whichever regime is active right now, computed from past data only. Line colour follows the sign (green above zero, red below) and turns grey while the current state has fewer past exits than the Minimum Exit Sample, so a thin count never reads as bold as a sampled one.
+The **Resolution Bias** line — `P(Bull) − P(Bear)`, centred at 0 — is drawn as a **stepline**: it only changes value when the state exits, so it visibly holds flat rather than reading as a continuously evolving curve. It is the historical exit statistic for whichever regime is active right now, computed from past data only. Line colour follows the sign (green above zero, red below); the line is not drawn while the current state has fewer past exits than the Minimum Exit Sample.
 
 The pane **background** tints only Compression and Chaos — the two neutral/extreme states — not all six, so trend/weak changes no longer flicker the pane. Its intensity scales with **Maturity** (`dwellRatio`): a fresh squeeze is barely tinted, an overdue one reads clearly more saturated, making the "how stretched is this regime" statement visible on its own.
 
@@ -70,9 +70,9 @@ The pane **background** tints only Compression and Chaos — the two neutral/ext
 - EMA slope normalized by ATR — scale-free up/down context across instruments
 - Exit-conditional transition counts, source-matched on a Compression-flavor context state, with Laplace smoothing
 - Persistence + Maturity gauge — the timing axis, separate from the thin exit-direction axis
-- Resolution Bias stepline, coloured by sign and greyed while the exit sample is below the minimum
+- Resolution Bias stepline, coloured by sign and hidden while the exit sample is below the minimum
 - In-pane readout, Compression/Chaos background tinted by Maturity, state-change and extended-state alerts, debug log on state changes
 
 ## Readout
 
-In-pane label at the last bar: a headline with the current state and bars in state, a **Timing** line (Maturity rating · ratio · typical dwell), a **Past exits** line (Bull/Bear/Neutral distribution and the most frequent exit destination), and a **Sample** line (exit count with a below-min-sample flag, Persistence). The text turns amber only for an Extended/Overdue state. A tooltip explains each field and the resolution-not-forecast framing.
+In-pane label at the last bar: a headline with the current state and bars in state, a **Timing** line (Maturity rating · ratio · typical dwell), a **Past exits** line (Bull/Bear/Neutral distribution with n and the most frequent exit destination, or only n below the minimum), an **Any state** line (base rate of all exits in the lookback, with n) and Persistence. The text turns amber only for an Extended/Overdue state. A tooltip explains each field and the resolution-not-forecast framing.

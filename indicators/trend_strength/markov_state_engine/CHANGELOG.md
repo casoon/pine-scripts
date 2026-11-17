@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v1.7.0 — 2026-11-17
+
+### Added
+- **Base rate:** the readout shows where the exits of all states went over the same lookback ("Any state", with n) next to the current state's exit distribution
+
+### Changed
+- **Thin samples hidden:** below the Minimum Exit Sample (40) the exit distribution and the Resolution Bias line are not shown at all instead of greyed; the readout shows only n. The separate "Sample" line is gone
+
 ## v1.6.0 — 2026-11-17
 Rebuilt as a display: the script shows the current state and the historical exit statistic; it no longer issues directional verdicts. **Existing alerts must be recreated** — the alert set changed.
 
