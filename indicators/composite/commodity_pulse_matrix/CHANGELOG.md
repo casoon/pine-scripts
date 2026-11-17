@@ -1,5 +1,20 @@
 # Changelog
 
+## v3.5.0 / v4.3.0 — 2026-11-17
+Entry V2 stays the signal; the strength score and the grade/quality outputs around it are removed. Breaking: inputs and alerts are gone, and entries can come more often where the strength threshold used to block them (and less often where it used to let them through without momentum). Re-check on the chart and re-run the strategy backtest.
+
+- **Entry V2 condition is now explicit** (v3, v4, v4 strategy). The strength score (momentum + trend alignment with a 0.3 floor + zone proximity with a 0.5 floor, against a density threshold) is replaced by a readable rule: an entry trigger (breakout, pullback, continuation) fires when momentum points in its direction (RSI above 50 for longs, below 50 for shorts) and the volatility-stop bias does not point against it. An entry against that bias counts as counter-trend and fires only when "Allow Counter-Trend Entries" is on (no longer with raised thresholds). The momentum condition now also applies near support/resistance
+- **RSI and WaveTrend extreme boosts removed** (v3, v4, v4 strategy). They added strength at RSI/WT1 extremes, which pulled entries towards the opposite of the momentum condition
+- **Inputs removed** (v3, v4, v4 strategy): Signal Density, the Signal Boost group (RSI/WT Extreme Boost, Boost Amounts, Strength Threshold). v4: "Use Divergence Zones" (Early Reversal). The RSI/WT1 extreme thresholds moved to the Early Reversal group (v4), where they still select extreme readings. Entry Heat Evidence and Final Signal Gate now sit in the "Entry Context Gate" group (v4)
+- **Strength upgrades removed** (v3, v4, v4 strategy). A same-direction entry no longer fires because its strength rose. v4 keeps re-entries after the cooldown on a fresh trigger; v3 emits on direction changes only
+- **Early "BPC" circles removed** (v3, v4, v4 strategy). They showed entries above a lower strength threshold, which no longer exists
+- **Alerts removed**: Strong Buy, Strong Sell, Moderate Buy, Moderate Sell, High Quality Setup (v3); Early Reversal Long/Short Candidate, A-Setup Long/Short, High Quality Setup (v4). Entry V2, weakness, exhaustion and mean-reversion alerts stay
+- **A-Setup marker removed** (v3, v4, v4 strategy). The ★ marker and the "★ A-SETUP" matrix status depended on the removed strength score. Early Reversal markers stay as display (v4)
+- **Entry labels without strength** (v3). The "Strength %" tooltip line and the strength-based transparency are gone; trend and mean-reversion labels use full color
+- **Divergence no longer feeds scores** (v3, v4, v4 strategy). v3: weight 0 in the 6-category aggregate (was 1.4). v3 and v4: no longer part of the heat confluence component, the "divergence confirmed" heat setup status or the diamond-zone threshold easing; v4: no longer early-reversal evidence. The Divergence row in the matrix and the divergence-zone lines stay as display
+- Matrix, heat and confidence stay as display. v3: the bottom-area mode "Signal Quality" is renamed "Category Magnitude"
+- v4, v4 strategy: removed an unused internal type
+
 ## v3.4.2 / v4.2.2 — 2026-11-17
 Bug fixes. Signal frequency and scores change - re-check on the chart and re-run the strategy backtest.
 

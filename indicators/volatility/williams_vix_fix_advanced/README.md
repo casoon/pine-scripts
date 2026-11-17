@@ -8,7 +8,6 @@ Synthetic fear gauge (Williams VIX Fix) with dual-direction signals, StdDev and 
 - **Bearish WVF** — `(High − Lowest(Close, N)) / Lowest(Close, N) × 100`: mirror for top detection (complacency spike)
 - **Dual spike bands** — StdDev upper band and percentile threshold; spike detected when WVF crosses either (both toggleable)
 - **Stall/absorption** — when WVF surges but price barely moves (thin wick, not genuine fear), the signal is marked as absorbed/weak; computed independently for the bullish and bearish side
-- **Spike Quality (0–100)** — how far a spike pushed past its own StdDev band and context EMA, penalized when stall/absorption is active
 - **Reclaim** — marks the bar where price reclaims the recent range within N bars of a non-absorbed spike; the actionable signal, versus the spike itself which only flags an extreme
 - **Context line (D-line)** — EMA of the fast WVF; acts as a signal line showing the smoothed fear baseline
 - **Divergence wedge** — fills the gap between fast WVF and the context EMA when they move in opposite directions
@@ -36,10 +35,6 @@ A spike fires when WVF crosses either band (individual toggles, OR logic). Defau
 
 When `WVF − WVF[N] > stallWVFMin` AND `|price change over N bars| < stallFlatATR × ATR`, the spike is marked as absorbed. This catches thin wicks that trigger the fear gauge mechanically without genuine price pressure behind them. The bearish side uses its own `Bear-WVF − Bear-WVF[N]` change against the same price-flatness check, so a bull-side stall never suppresses a bear spike or vice versa.
 
-## Spike Quality
-
-`quality = min(100, spikeExcess × 50 + ctxExcess × 25 + (stall ? 0 : 25))`, where `spikeExcess = min(1, max(0, WVF / band − 1))` (capped, so the band depth contributes at most 50 points) and `ctxExcess = max(0, WVF / contextEMA − 1)` (mirrored for the bearish side). The quality of the most recent spike is captured and carried into the Reclaim label.
-
 ## Reclaim
 
-Within `Spike Recency Window` bars of a non-absorbed spike (`spikeStrong`/`bSpikeStrong`), a Reclaim fires the first bar close breaks back above the prior `Reclaim Confirmation Length`-bar high (long) or below the prior low (short). `Min Spike Quality for Reclaim` (default 0 = disabled) can require the originating spike to have scored above a threshold before the reclaim is marked.
+Within `Spike Recency Window` bars of a non-absorbed spike (`spikeStrong`/`bSpikeStrong`), a Reclaim fires the first bar close breaks back above the prior `Reclaim Confirmation Length`-bar high (long) or below the prior low (short).

@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // MIDAS 2.0 [WavesUnchained]
-// Version: 2.7.4
+// Version: 2.8.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
@@ -18,7 +18,7 @@
 //   ✓ Topfinder / bottomfinder accelerated curve with closed-form auto-fit
 //   ✓ Fit-qualified exhaustion read (developing / mature / late / passed + reaction)
 //   ✓ Stretched-from-value and reclaim-after-stretch context markers (no BUY/SELL)
-//   ✓ Reclaim Quality Score (0-4): close strength, volume, structure break, TBF exhaustion
+//   ✓ Reclaim invalidation event: close back through the inner band against the reclaim
 //   ✓ Value-zone fills, semantic event colors, and persistent live context badge
 //   ✓ Active / Full visual modes with a role-separated Trend · Location · Exhaustion read
 //   ✓ Backpainted vs Confirmed anchor display mode for auto swing anchors
@@ -94,13 +94,13 @@ g_disp = "5 · Display"
 visualMode = input.string("Active", "Visual mode", options=["Active", "Full"], group=g_disp,
      tooltip="Active shows the complete current anchor episode only, including its origin. Full restores every historical episode, the TBF curve, and historical events.")
 showMarkers = input.bool(true, "Show context markers", group=g_disp,
-     tooltip="Stretch, MIDAS reclaim, and confirmed TBF price-reaction markers. Setup-level context, not hard entries.")
+     tooltip="Stretch, MIDAS reclaim, reclaim invalidation, and confirmed TBF price-reaction markers. Setup-level context, not hard entries.")
 reclaimLook = input.int(10, "Reclaim: stretch lookback", minval=1, group=g_disp,
      tooltip="A MIDAS reclaim only fires if price was stretched past the inner band within this many bars before reclaiming the curve.")
-reclaimVolLen    = input.int(20, "Reclaim: volume avg length", minval=1, group=g_disp)
-reclaimStructLen = input.int(5, "Reclaim: structure-break lookback", minval=1, group=g_disp)
-reclaimCloseLocationMin = input.float(0.6, "Reclaim: minimum close-location ratio", minval=0.5, maxval=1.0, step=0.05, group=g_disp,
-     tooltip="Required close position within the complete candle range (low to high), not within the body. The Reclaim Quality Score remains an annotation and does not gate the marker.")
+reclaimVolLen    = input.int(20, "Reclaim: volume avg length", minval=1, group=g_disp,
+     tooltip="Average used for the volume ratio shown in the reclaim tooltip. Display only.")
+reclaimStructLen = input.int(5, "Reclaim: structure-break lookback", minval=1, group=g_disp,
+     tooltip="Lookback for the structure-break readout in the reclaim tooltip. Display only.")
 markersOnBarClose = input.bool(true, "Context markers only on bar close", group=g_disp,
      tooltip="Prevents stretch, reclaim, TBF phase, and exhaustion-reaction markers from appearing intrabar and disappearing before the candle closes. The live context itself still updates intrabar.")
 showLiveContext = input.bool(true, "Show live context badge", group=g_disp,
@@ -353,9 +353,7 @@ var float tbfPendingD = na
 var float tbfPendingShift = na
 var int tbfPendingConfirmations = 0
 var bool tbfFitReactionSeen = false
-var int tbfFitBestReactionScore = 0
 var bool tbfEpisodeReactionSeen = false
-var int tbfEpisodeBestReactionScore = 0
 
 if anchorPulse or tbfDirectionChanged
     tbfD := na
@@ -368,9 +366,7 @@ if anchorPulse or tbfDirectionChanged
     tbfPendingShift := na
     tbfPendingConfirmations := 0
     tbfFitReactionSeen := false
-    tbfFitBestReactionScore := 0
     tbfEpisodeReactionSeen := false
-    tbfEpisodeBestReactionScore := 0
 
 // Re-fit on a confirmed same-direction swing that sits after the launch
 float fitT  = na
@@ -451,7 +447,6 @@ if doFit
                 unstableCandidateObserved := true
         if fitAccepted and fitMaterialChange
             tbfFitReactionSeen := false
-            tbfFitBestReactionScore := 0
     else if dbg and barstate.isconfirmed
         // why the fit was rejected — distinguishes "already passed / no acceleration" from "degenerate"
         string why = na(Dcand) ? "den=0" : Dcand <= cumV ? "D<=d (already passed / no acceleration)" : Dcand >= cumV * 50 ? "D>50·d (degenerate)" : "fit too early"
@@ -478,23 +473,21 @@ bool tbfWarn    = tbfState == "late"
 bool tbfLateNew = tbfWarn and not tbfWarn[1]
 bool tbfPassedNew = tbfState == "passed" and tbfState[1] != "passed"
 
-// Price reaction is separate from projection progress. Persistent events are
-// confirmed by default; the live context may still move intrabar.
+// Price reaction is separate from projection progress. The trigger is the return
+// through the inner band; candle shape and displacement are tooltip readouts only.
+// Persistent events are confirmed by default; the live context may still move intrabar.
 bool markerOk = not markersOnBarClose or barstate.isconfirmed
 float tbfClosePos = high > low ? (close - low) / (high - low) : 0.5
 bool tbfReactionCandle = tbfTop ? close < open and tbfClosePos <= 0.35 : close > open and tbfClosePos >= 0.65
 float tbfReactionBody = math.abs(close - open)
 bool tbfReactionStructure = tbfTop ? close < low[1] and tbfReactionBody >= devATR * 0.5 : close > high[1] and tbfReactionBody >= devATR * 0.5
 bool tbfReactionBand = tbfTop ? ta.crossunder(close, upper1) : ta.crossover(close, lower1)
-int tbfReactionScore = (tbfReactionCandle ? 1 : 0) + (tbfReactionStructure ? 1 : 0) + (tbfReactionBand ? 1 : 0)
 bool tbfAdvanced = tbfState == "late" or tbfState == "passed"
-bool tbfReactionQualified = enableTBF and tbfAdvanced and tbfReactionScore >= 2 and markerOk
+bool tbfReactionQualified = enableTBF and tbfAdvanced and tbfReactionBand and markerOk
 bool tbfReactionNew = tbfReactionQualified and not tbfFitReactionSeen
 if tbfReactionQualified
     tbfFitReactionSeen := true
-    tbfFitBestReactionScore := math.max(tbfFitBestReactionScore, tbfReactionScore)
     tbfEpisodeReactionSeen := true
-    tbfEpisodeBestReactionScore := math.max(tbfEpisodeBestReactionScore, tbfReactionScore)
 bool tbfStale = not na(progress) and progress >= tbfStaleProgress and not tbfFitReactionSeen
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -519,33 +512,35 @@ bool stretchBelow = markerOk and rawStretchBelow
 bool reclaimUp = markerOk and rawReclaimUp
 bool reclaimDn = markerOk and rawReclaimDn
 
-// Reclaim Quality Score (0-4) — context annotation only, does not gate the marker/alert:
-// strong candle close, volume above average, small structure break, TBF
-// late/passed bonus. The prior stretch is NOT scored: it is already a required
-// condition of every reclaim (rawReclaimUp/Dn), so it would add a constant +1.
+// Raw readouts for the reclaim tooltip only — no score, no gate.
 avgVol        = ta.sma(vol, reclaimVolLen)
-volAboveAvg   = not na(vol) and vol > 0 and not na(avgVol) and vol > avgVol
+float volRatio = not na(vol) and vol > 0 and not na(avgVol) and avgVol > 0 ? vol / avgVol : na
 barRange      = high - low
 closeLocation = barRange > 0 ? (close - low) / barRange : 0.5
-strongCloseUp = closeLocation >= reclaimCloseLocationMin
-strongCloseDn = (1 - closeLocation) >= reclaimCloseLocationMin
 structBreakUp = close > ta.highest(high[1], reclaimStructLen)
 structBreakDn = close < ta.lowest(low[1], reclaimStructLen)
-bool tbfExhausted = (tbfState == "late" or tbfState == "passed") and not tbfStale
-bool tbfSupportsBullishReclaim = not tbfTop and tbfExhausted
-bool tbfSupportsBearishReclaim = tbfTop and tbfExhausted
+string reclaimVolText = na(volRatio) ? "n/a" : str.tostring(volRatio, "0.00") + "× avg"
 
-reclaimUpScore = (strongCloseUp ? 1 : 0) + (volAboveAvg ? 1 : 0) + (structBreakUp ? 1 : 0) + (tbfSupportsBullishReclaim ? 1 : 0)
-reclaimDnScore = (strongCloseDn ? 1 : 0) + (volAboveAvg ? 1 : 0) + (structBreakDn ? 1 : 0) + (tbfSupportsBearishReclaim ? 1 : 0)
-
-var int    lastReclaimScore = na
+// Reclaim invalidation: after a bullish reclaim, a close back below the inner lower
+// band ends it (bearish: close back above the inner upper band). One event per reclaim;
+// a new anchor episode or the opposite reclaim also ends the tracked reclaim.
+var int    reclaimActiveDir = 0
 var string lastReclaimDir   = na
-if reclaimUp
-    lastReclaimScore := reclaimUpScore
+bool rawReclaimFailUp = reclaimActiveDir == 1 and not anchorPulse and not na(lower1) and close < lower1
+bool rawReclaimFailDn = reclaimActiveDir == -1 and not anchorPulse and not na(upper1) and close > upper1
+if anchorPulse
+    reclaimActiveDir := 0
+    lastReclaimDir   := na
+else if rawReclaimFailUp or rawReclaimFailDn
+    reclaimActiveDir := 0
+if rawReclaimUp
+    reclaimActiveDir := 1
     lastReclaimDir   := "▲"
-if reclaimDn
-    lastReclaimScore := reclaimDnScore
+if rawReclaimDn
+    reclaimActiveDir := -1
     lastReclaimDir   := "▼"
+bool reclaimFailUp = markerOk and rawReclaimFailUp
+bool reclaimFailDn = markerOk and rawReclaimFailDn
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PLOTS
@@ -744,8 +739,6 @@ if anchorPulse and activeMode and volumeIsReal
     activeAnchorLabel := na
     while array.size(activeMarkerLabels) > 0
         label.delete(array.pop(activeMarkerLabels))
-    lastReclaimScore := na
-    lastReclaimDir := na
     if showAnchor
         int activeAnchorX = isPivotMode and backpainted ? bar_index - anchorRight : bar_index
         float activeAnchorY = isPivotMode and backpainted ? src[anchorRight] : src
@@ -775,38 +768,46 @@ if activeMode and showMarkers and stretchBelow
     if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
         label.delete(array.shift(activeMarkerLabels))
 
-// plotshape's text arg must be a const string, so the dynamic Reclaim Quality
-// Score is rendered via label.new instead (shape/position match the old markers)
+// Reclaim markers via label.new so the tooltip can carry the raw bar readouts
 if showMarkers and reclaimUp
     string reclaimUpClass = bias == 1 ? "Trend-aligned continuation reclaim" : "Counter-bias transition reclaim"
-    string reclaimUpTip = "Bullish MIDAS reclaim · " + reclaimUpClass + " · quality " + str.tostring(reclaimUpScore) + "/4\n" +
-         "Strong close: " + (strongCloseUp ? "yes" : "no") + " · Volume: " + (volAboveAvg ? "yes" : "no") +
-         "\nStructure break: " + (structBreakUp ? "yes" : "no") + " · Bottomfinder aligned: " + (tbfSupportsBullishReclaim ? "yes" : "no")
-    label reclaimUpLabel = label.new(bar_index, low, "R " + str.tostring(reclaimUpScore) + "/4", yloc=yloc.belowbar,
-         style=label.style_label_up, color=color.new(colUp, reclaimUpScore >= 3 ? 0 : reclaimUpScore >= 1 ? 20 : 45),
-         textcolor=color.white, size=reclaimUpScore >= 3 ? size.small : size.tiny, tooltip=reclaimUpTip)
+    string reclaimUpTip = "Bullish MIDAS reclaim · " + reclaimUpClass + "\n" +
+         "Close location: " + str.tostring(closeLocation * 100, "0") + "% of range · Volume: " + reclaimVolText +
+         "\nStructure break (" + str.tostring(reclaimStructLen) + " bars): " + (structBreakUp ? "yes" : "no") + " · TBF: " + tbfState +
+         "\nInvalidated by a close back below the inner lower band."
+    label reclaimUpLabel = label.new(bar_index, low, "R", yloc=yloc.belowbar,
+         style=label.style_label_up, color=color.new(colUp, 0),
+         textcolor=color.white, size=size.small, tooltip=reclaimUpTip)
     if activeMode
         array.push(activeMarkerLabels, reclaimUpLabel)
         if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
             label.delete(array.shift(activeMarkerLabels))
 if showMarkers and reclaimDn
     string reclaimDnClass = bias == -1 ? "Trend-aligned continuation reclaim" : "Counter-bias transition reclaim"
-    string reclaimDnTip = "Bearish MIDAS reclaim · " + reclaimDnClass + " · quality " + str.tostring(reclaimDnScore) + "/4\n" +
-         "Strong close: " + (strongCloseDn ? "yes" : "no") + " · Volume: " + (volAboveAvg ? "yes" : "no") +
-         "\nStructure break: " + (structBreakDn ? "yes" : "no") + " · Topfinder aligned: " + (tbfSupportsBearishReclaim ? "yes" : "no")
-    label reclaimDnLabel = label.new(bar_index, high, "R " + str.tostring(reclaimDnScore) + "/4", yloc=yloc.abovebar,
-         style=label.style_label_down, color=color.new(colDn, reclaimDnScore >= 3 ? 0 : reclaimDnScore >= 1 ? 20 : 45),
-         textcolor=color.white, size=reclaimDnScore >= 3 ? size.small : size.tiny, tooltip=reclaimDnTip)
+    string reclaimDnTip = "Bearish MIDAS reclaim · " + reclaimDnClass + "\n" +
+         "Close location: " + str.tostring(closeLocation * 100, "0") + "% of range · Volume: " + reclaimVolText +
+         "\nStructure break (" + str.tostring(reclaimStructLen) + " bars): " + (structBreakDn ? "yes" : "no") + " · TBF: " + tbfState +
+         "\nInvalidated by a close back above the inner upper band."
+    label reclaimDnLabel = label.new(bar_index, high, "R", yloc=yloc.abovebar,
+         style=label.style_label_down, color=color.new(colDn, 0),
+         textcolor=color.white, size=size.small, tooltip=reclaimDnTip)
     if activeMode
         array.push(activeMarkerLabels, reclaimDnLabel)
         if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
             label.delete(array.shift(activeMarkerLabels))
+if showMarkers and (reclaimFailUp or reclaimFailDn)
+    string reclaimFailTip = reclaimFailUp ? "Bullish MIDAS reclaim invalidated: close back below the inner lower band." : "Bearish MIDAS reclaim invalidated: close back above the inner upper band."
+    label reclaimFailLabel = label.new(bar_index, reclaimFailUp ? low : high, "✗", yloc=reclaimFailUp ? yloc.belowbar : yloc.abovebar,
+         style=label.style_none, textcolor=color.new(color.gray, 20), size=size.small, tooltip=reclaimFailTip)
+    if activeMode
+        array.push(activeMarkerLabels, reclaimFailLabel)
+        if array.size(activeMarkerLabels) > MAX_ACTIVE_MARKERS
+            label.delete(array.shift(activeMarkerLabels))
 if showMarkers and tbfReactionNew
-    string reactionTip = (tbfTop ? "TOPFINDER" : "BOTTOMFINDER") + " PRICE REACTION · " + str.tostring(tbfReactionScore) + "/3\n" +
+    string reactionTip = (tbfTop ? "TOPFINDER" : "BOTTOMFINDER") + " PRICE REACTION · return through inner band\n" +
          "Rejection candle: " + (tbfReactionCandle ? "yes" : "no") + " · ATR displacement: " + (tbfReactionStructure ? "yes" : "no") +
-         "\nReturn through inner band: " + (tbfReactionBand ? "yes" : "no") +
-         "\nThe projection is advanced and price has reacted. This confirms exhaustion risk, not a reversal entry."
-    label reactionLabel = label.new(bar_index, tbfTop ? high : low, "EXH " + str.tostring(tbfReactionScore) + "/3",
+         "\nThe projection is advanced and price has returned through the inner band. This confirms exhaustion risk, not a reversal entry."
+    label reactionLabel = label.new(bar_index, tbfTop ? high : low, "EXH",
          yloc=tbfTop ? yloc.abovebar : yloc.belowbar,
          style=tbfTop ? label.style_label_down : label.style_label_up,
          color=color.new(colTBF, 0), textcolor=color.white, size=size.tiny, tooltip=reactionTip)
@@ -846,7 +847,7 @@ trendVal   = na(midas) ? "n/a" : (close > midas ? "above" : "below") + " value" 
 trendRead  = na(midas) ? "n/a" : close > midas ? "buyers since launch" : "sellers since launch"
 
 tbfStr     = not enableTBF ? "off" : na(progress) ? "no fit" : tbfState + " " + str.tostring(progress * 100, "0") + "%"
-tbfRead    = not enableTBF ? "off" : tbfState == "no fit" ? "no accelerated fit" : tbfStale ? "stale fit · await refit" : tbfPendingConfirmations > 0 ? tbfFitQuality + " active · candidate 1/2" : tbfFitReactionSeen ? "fit reaction " + str.tostring(tbfFitBestReactionScore) + "/3" : tbfEpisodeReactionSeen ? "episode reacted earlier" : tbfState == "developing" ? "early · " + tbfFitQuality : tbfState == "mature" ? "usable · " + tbfFitQuality : "await price reaction"
+tbfRead    = not enableTBF ? "off" : tbfState == "no fit" ? "no accelerated fit" : tbfStale ? "stale fit · await refit" : tbfPendingConfirmations > 0 ? tbfFitQuality + " active · candidate 1/2" : tbfFitReactionSeen ? "fit reaction" : tbfEpisodeReactionSeen ? "episode reacted earlier" : tbfState == "developing" ? "early · " + tbfFitQuality : tbfState == "mature" ? "usable · " + tbfFitQuality : "await price reaction"
 
 ageRead    = na(age) ? "n/a" : age < 2 * anchorRight ? "fresh (thin)" : "established"
 anchorDelayNote = (isPivotMode and backpainted) ? " (drawn " + str.tostring(anchorRight) + "b back)" : ""
@@ -866,7 +867,7 @@ string liveSignedDistance = na(normalizedDistance) ? "n/a" : (normalizedDistance
 string tbfDirectionTag = tbfTop ? "TOP ↑" : "BOTTOM ↓"
 string tbfQualityTag = tbfFitQuality == "stable" ? "STABLE" : "PROVISIONAL"
 string tbfCandidateTag = tbfPendingConfirmations > 0 ? " · CANDIDATE 1/2" : ""
-string tbfAdvancedEvidence = tbfFitReactionSeen ? "FIT REACTION " + str.tostring(tbfFitBestReactionScore) + "/3" : tbfEpisodeReactionSeen ? "EPISODE REACTION " + str.tostring(tbfEpisodeBestReactionScore) + "/3" : "NO REACTION"
+string tbfAdvancedEvidence = tbfFitReactionSeen ? "FIT REACTION" : tbfEpisodeReactionSeen ? "EPISODE REACTION" : "NO REACTION"
 string liveTrendValue = not anchorActive ? "— WAITING FOR MANUAL ANCHOR" : na(midas) ? "— WARMING UP" :
      liveRangeStructure ? "↔ RANGE AROUND MIDAS" :
      liveBullStructure ? "↑ ABOVE RISING MIDAS" :
@@ -886,7 +887,7 @@ string liveExhaustionValue = not enableTBF ? "— OFF" : na(progress) ? "— NO 
 string liveNextValue = not anchorActive ? "WAIT UNTIL MANUAL ANCHOR TIME" : na(midas) ? "WAIT FOR ACTIVE MIDAS CONTEXT" :
      tbfStale ? "WAIT FOR NEW STABLE TBF FIT" :
      tbfAdvanced and tbfFitReactionSeen ? (tbfTop ? "WAIT FOR MIDAS LOSS TO CONFIRM REVERSION" : "WAIT FOR MIDAS RECLAIM TO CONFIRM REVERSION") :
-     tbfAdvanced ? "WAIT FOR EXH 2/3 PRICE REACTION" :
+     tbfAdvanced ? "WAIT FOR RETURN THROUGH INNER BAND" :
      liveLocationExtreme ? "WAIT FOR CLOSE BACK INSIDE OUTER BAND" :
      liveLocationStretched and liveBullStructure ? "WAIT FOR PULLBACK INTO INNER VALUE BAND" :
      liveLocationStretched and liveBearStructure ? "WAIT FOR RALLY INTO INNER VALUE BAND" :
@@ -902,8 +903,8 @@ string liveNextLine = "NEXT · " + liveNextValue
 string liveDetailedText = liveTrendLine + "\n" + liveLocationLine + "\n" + liveExhaustionLine + "\n" + liveNextLine
 string liveTrendCompact = not anchorActive ? "— ANCHOR PENDING" : liveRangeStructure ? "↔ RANGE" : liveBullStructure ? "↑ TREND" : liveBearStructure ? "↓ TREND" : "↕ TRANSITION"
 string liveLocationCompact = na(normalizedDistance) ? "LOCATION · —" : liveLocationExtreme ? "LOCATION · !! " + liveSignedDistance : liveLocationStretched ? "LOCATION · ! " + liveSignedDistance : "LOCATION · VALUE " + liveSignedDistance
-string liveExhaustionCompact = not enableTBF ? "EXHAUSTION · OFF" : na(progress) ? "EXHAUSTION · NO FIT" : tbfStale ? tbfDirectionTag + " · STALE " + str.tostring(progress * 100, "0") + "%" : tbfDirectionTag + " · " + str.tostring(progress * 100, "0") + "% · " + (tbfFitReactionSeen ? "REACTION " + str.tostring(tbfFitBestReactionScore) + "/3" : "NO REACTION")
-string liveNextCompact = not anchorActive ? "ANCHOR TIME" : tbfStale ? "STABLE REFIT" : tbfAdvanced and tbfFitReactionSeen ? (tbfTop ? "MIDAS LOSS" : "MIDAS RECLAIM") : tbfAdvanced ? "EXH 2/3 REACTION" : liveLocationExtreme ? "CLOSE INSIDE OUTER BAND" : liveLocationStretched ? "RETURN TO INNER BAND" : liveRangeStructure ? "INNER BAND TEST" : liveBullStructure ? "PULLBACK TO MIDAS" : liveBearStructure ? "RALLY TO MIDAS" : "PRICE + SLOPE ALIGN"
+string liveExhaustionCompact = not enableTBF ? "EXHAUSTION · OFF" : na(progress) ? "EXHAUSTION · NO FIT" : tbfStale ? tbfDirectionTag + " · STALE " + str.tostring(progress * 100, "0") + "%" : tbfDirectionTag + " · " + str.tostring(progress * 100, "0") + "% · " + (tbfFitReactionSeen ? "REACTION" : "NO REACTION")
+string liveNextCompact = not anchorActive ? "ANCHOR TIME" : tbfStale ? "STABLE REFIT" : tbfAdvanced and tbfFitReactionSeen ? (tbfTop ? "MIDAS LOSS" : "MIDAS RECLAIM") : tbfAdvanced ? "INNER BAND RETURN" : liveLocationExtreme ? "CLOSE INSIDE OUTER BAND" : liveLocationStretched ? "RETURN TO INNER BAND" : liveRangeStructure ? "INNER BAND TEST" : liveBullStructure ? "PULLBACK TO MIDAS" : liveBearStructure ? "RALLY TO MIDAS" : "PRICE + SLOPE ALIGN"
 string liveCompactText = liveTrendCompact + " · " + liveLocationCompact + "\n" + liveExhaustionCompact + "\nNEXT · " + liveNextCompact
 string liveContextText = liveBadgeMode == "Detailed" ? liveDetailedText : liveBadgeMode == "Tooltip only" ? "MIDAS · INFO" : liveCompactText
 color liveContextCol = color.new(color.gray, 20)
@@ -923,7 +924,7 @@ string tbfFitProgressText = na(tbfFitProgress) ? "n/a" : str.tostring(tbfFitProg
 string tbfPendingText = tbfPendingConfirmations > 0 ? "candidate 1/2 · D=" + str.tostring(tbfPendingD, "0") + " · shift=" + str.tostring(tbfPendingShift * 100, "0") + "%" : "none"
 string tbfRemainingText = na(remainingVolume) ? "n/a" : str.tostring(remainingVolume, "0")
 string tbfBarsText = na(approxBarsRemaining) ? "n/a" : "~" + str.tostring(approxBarsRemaining, "0") + " bars at episode-average volume"
-string tbfReactionDetail = tbfFitReactionSeen ? "Current-fit reaction confirmed " + str.tostring(tbfFitBestReactionScore) + "/3: at least two of rejection candle, ATR-sized displacement, and inner-band transition occurred." : tbfEpisodeReactionSeen ? "No reaction on the current fit; this anchor episode reacted earlier at " + str.tostring(tbfEpisodeBestReactionScore) + "/3." : "No qualifying 2/3 price reaction yet. Projection progress alone does not confirm a turn."
+string tbfReactionDetail = tbfFitReactionSeen ? "Current-fit reaction confirmed: price returned through the inner band while the projection was late/passed." : tbfEpisodeReactionSeen ? "No reaction on the current fit; this anchor episode reacted earlier." : "No return through the inner band yet. Projection progress alone does not confirm a turn."
 string liveTbfDetail = not enableTBF ? "TBF is disabled, so exhaustion timing is not evaluated." :
      na(progress) ? "No valid forward topfinder/bottomfinder projection. Exhaustion timing is unavailable; this is not evidence that the move must continue." :
      (tbfTop ? "Topfinder for the active up-leg." : "Bottomfinder for the active down-leg.") +
@@ -932,9 +933,9 @@ string liveTbfDetail = not enableTBF ? "TBF is disabled, so exhaustion timing is
      "\nPending fit: " + tbfPendingText + " · history: " + tbfHistoryMode + "." +
      "\nRemaining projected volume: " + tbfRemainingText + " · rough time translation: " + tbfBarsText + "." +
      "\n" + tbfReactionDetail
-string liveChangeDetail = (tbfAdvanced and not tbfFitReactionSeen ? "Exhaustion confirmation: wait for an EXH n/3 current-fit reaction.\n" : "") +
-     (liveBearStructure ? "Bullish change: price reclaims MIDAS after a lower-band stretch (green R n/4).\nBearish continuation context: a rally rejects the falling MIDAS." :
-     liveBullStructure ? "Bearish change: price loses MIDAS after an upper-band stretch (red R n/4).\nBullish continuation context: a pullback holds the rising MIDAS." :
+string liveChangeDetail = (tbfAdvanced and not tbfFitReactionSeen ? "Exhaustion confirmation: wait for an EXH reaction (return through the inner band) on the current fit.\n" : "") +
+     (liveBearStructure ? "Bullish change: price reclaims MIDAS after a lower-band stretch (green R; a close back below the inner lower band invalidates it).\nBearish continuation context: a rally rejects the falling MIDAS." :
+     liveBullStructure ? "Bearish change: price loses MIDAS after an upper-band stretch (red R; a close back above the inner upper band invalidates it).\nBullish continuation context: a pullback holds the rising MIDAS." :
      "Directional change: price and MIDAS slope align on the same side. A reclaim label adds trigger-level evidence.")
 string liveAnchorDetail = na(age) ? "n/a" : str.tostring(age) + " bars" + anchorDelayNote
 string volumeAvailabilityText = na(volumeAvailability) ? "n/a" : str.tostring(volumeAvailability * 100, "0") + "%"
@@ -1023,10 +1024,10 @@ if showTable and barstate.islast and volumeIsReal
         table.cell(t, 1, 6, volumeAvailabilityText + " available", text_color=not na(volumeAvailability) and volumeAvailability < 0.95 ? colStretch : tc, text_size=size.small)
         table.cell(t, 2, 6, volumeQuality, text_color=tc, text_size=size.small)
 
-        table.cell(t, 0, 7, "Reclaim Q", text_color=tc, text_size=size.small)
-        table.cell(t, 1, 7, na(lastReclaimScore) ? "n/a" : str.tostring(lastReclaimScore) + "/4 " + lastReclaimDir,
-             text_color=na(lastReclaimScore) ? tc : (lastReclaimDir == "▲" ? colUp : colDn), text_size=size.small)
-        table.cell(t, 2, 7, na(lastReclaimScore) ? "—" : (lastReclaimScore >= 3 ? "high quality" : lastReclaimScore >= 1 ? "medium" : "weak"), text_color=tc, text_size=size.small)
+        table.cell(t, 0, 7, "Last reclaim", text_color=tc, text_size=size.small)
+        table.cell(t, 1, 7, na(lastReclaimDir) ? "n/a" : lastReclaimDir,
+             text_color=na(lastReclaimDir) ? tc : (lastReclaimDir == "▲" ? colUp : colDn), text_size=size.small)
+        table.cell(t, 2, 7, na(lastReclaimDir) ? "—" : reclaimActiveDir != 0 ? "active" : "invalidated", text_color=tc, text_size=size.small)
 
         table.cell(t, 0, 8, "", bgcolor=color.new(color.gray, 80))
         table.cell(t, 1, 8, "", bgcolor=color.new(color.gray, 80))
@@ -1045,9 +1046,11 @@ alertcondition(alertOk and rawStretchAbove, "Stretched above value", "MIDAS · S
 alertcondition(alertOk and rawStretchBelow, "Stretched below value", "MIDAS · STRETCHED BELOW VALUE · {{ticker}} {{interval}}")
 alertcondition(alertOk and rawReclaimUp, "MIDAS bullish reclaim", "MIDAS · BULLISH RECLAIM · {{ticker}} {{interval}}")
 alertcondition(alertOk and rawReclaimDn, "MIDAS bearish reclaim", "MIDAS · BEARISH RECLAIM · {{ticker}} {{interval}}")
+alertcondition(alertOk and rawReclaimFailUp, "MIDAS bullish reclaim invalidated", "MIDAS · BULLISH RECLAIM INVALIDATED · {{ticker}} {{interval}}")
+alertcondition(alertOk and rawReclaimFailDn, "MIDAS bearish reclaim invalidated", "MIDAS · BEARISH RECLAIM INVALIDATED · {{ticker}} {{interval}}")
 alertcondition(alertOk and (tbfLateNew), "TBF late move", "MIDAS · TBF LATE MOVE · {{ticker}} {{interval}}")
 alertcondition(alertOk and (tbfPassedNew), "TBF projection passed", "MIDAS · TBF PROJECTION PASSED · {{ticker}} {{interval}}")
-alertcondition(alertOk and (tbfReactionNew), "TBF price reaction", "MIDAS · TBF PRICE REACTION 2/3+ · {{ticker}} {{interval}}")
+alertcondition(alertOk and (tbfReactionNew), "TBF price reaction", "MIDAS · TBF PRICE REACTION · {{ticker}} {{interval}}")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEBUG
@@ -1070,5 +1073,5 @@ if dbg and barstate.isconfirmed
     if tbfPassedNew
         log.info("MIDAS TBF PASSED progress={0} fit={1}", str.tostring(progress, "0.00"), tbfFitQuality)
     if tbfReactionNew
-        log.info("MIDAS TBF REACTION dir={0} score={1}/3 candle={2} displacement={3} band={4}",
-             tbfTop ? "top" : "bot", tbfReactionScore, tbfReactionCandle, tbfReactionStructure, tbfReactionBand)
+        log.info("MIDAS TBF REACTION dir={0} candle={1} displacement={2}",
+             tbfTop ? "top" : "bot", tbfReactionCandle, tbfReactionStructure)

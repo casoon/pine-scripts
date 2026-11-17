@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.3.0 — 2026-11-17
+- Removed: the confluence score on zone retests and its gate — inputs `Min Score BUY` / `Min Score SELL` are gone, as are the panel rows "Raw", "BUY N", "SELL N", "Min", "Filters", "RV/Thin" and the hidden exports `confluenceScoreRaw`, `buyScoreNorm0_10`, `sellScoreNorm0_10`, `binaryBuyFilter`, `binarySellFilter`
+- Retest signal is now the first zone retest plus one side-specific condition: new input `Require HTF trend in signal direction` (default on) — BUY only with the last closed HTF bar above its EMA, SELL only below it. Retest signals can come more often than with the score gate
+- Pattern labels without a zone are colored by direction only; new hidden export `htfDirection`; panel shows the signal-HTF side
+
 ## v3.2.2 — 2026-11-17
 - Fix: all higher-timeframe values (regime gate, HTF stack, Supertrend/MOST HTF) now use the last closed HTF bar, so they no longer repaint intrabar
 - Fix: HTF stack and regime points count per side — a SELL retest scores bearish timeframes and a down-regime, a BUY retest bullish timeframes and an up-regime (before, both sides scored the bullish stack and any regime)

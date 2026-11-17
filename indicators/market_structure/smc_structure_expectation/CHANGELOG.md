@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.0 — 2026-11-17
+- Removed: the OB priority score (points for displacement, FVG, volume, location, alignment, leg strength) and its HIGH/MED/LOW classes — dashboard, bar coloring and logs no longer show it
+- Alerts merged: "HIGH Priority Bullish/Bearish Setup" and "Bullish/Bearish Confirmation" are replaced by one "Bullish BOS + OB" / "Bearish BOS + OB" alert per direction (BOS with the OB it created on that bar); messages without LONG/SHORT. Input `Only HIGH Priority OB Alerts` removed — BOS+OB alerts can come more often than with the HIGH filter on
+- Bar Color Mode "BOS + OB Priority" renamed to "BOS + OB" (colors by active OB direction); Multi-Layer uses one intensity for an active OB
+- Dashboard "Order Blocks" shows direction and displacement (ATR) of the active OB
+- Debug input `Log Level` removed (it filtered by priority)
+
 ## v1.1.7 — 2026-11-17
 - Fix: BOS+OB alerts only fire when the Order Block was created by the BOS on the same bar — before, any older OB still on the chart could attach to a new BOS
 

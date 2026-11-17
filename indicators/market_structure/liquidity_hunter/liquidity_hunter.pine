@@ -1,28 +1,27 @@
 //@version=6
 // ============================================================================
 // Liquidity Hunter [WavesUnchained]
-// Version: 3.5.3
+// Version: 3.6.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
-// Focused premium liquidity tool.
+// Focused liquidity tool.
 //
 // Features:
 //   ✓ Ranks equal highs/lows by quality score (touches, age, ATR distance)
 //   ✓ Separates true sweeps (wick-reject) from breakout acceptance
 //   ✓ Wick-quality + close-position stop hunt detection (not just red candle + volume)
-//   ✓ Reclaim scoring with structural (micro-BOS) and regime/premium-discount bonuses
 //   ✓ Fair Value Gaps (3-candle imbalance) as magnet zones
 //   ✓ Optional level-flip: broken levels re-tracked as opposite-side zones
 //   ✓ Event priority on chart: one marker per bar (Exhaustion > Hunt > Reclaim > Sweep > Breakout)
 //   ✓ Reduces chart clutter to the few levels that matter
-//   ✓ Session-aware scoring and tighter alerts
+//   ✓ Optional regime / premium-discount and session readouts (dashboard only)
 //   ✓ Momentum Hybrid: qualifies sweeps/hunts with WaveTrend + MFI extremes (Exhaustion Events)
 //
 // Data Contract:
 //   Price:     REQUIRED   chart symbol
 //   Volume:    OPTIONAL   real trade volume only — volume gates pass through,
-//                         volume score contributes 0 (neutral), MFI bonus is withheld
+//                         MFI readout shows n/a
 //   OI:        NO
 //   Reference: NO
 //   Verdict:   CFD-degraded
@@ -45,18 +44,18 @@ maxTrackedLevels   = input.int(30,     "Max Tracked Levels / Side",      group=g
 maxLevelAge        = input.int(400,    "Max Level Age (bars)",           group=g1, minval=50, maxval=1500)
 maxLevelDistance   = input.float(8.0,  "Max Level Distance (ATR)",       group=g1, minval=1.0, maxval=20.0, step=0.5)
 
-var g2 = "Premium Events"
+var g2 = "Events"
 enableSweeps       = input.bool(true,  "Show Sweep Markers",             group=g2)
 enableReclaims     = input.bool(true,  "Show Reclaim Labels",            group=g2)
 minSweepAtr        = input.float(0.05, "Minimum Sweep Depth (ATR)",      group=g2, minval=0.0, maxval=1.0, step=0.01)
 reclaimBars        = input.int(3,      "Reclaim Window (bars)",          group=g2, minval=1, maxval=10)
 minCloseBackAtr    = input.float(0.10, "Minimum Close-Back Distance (ATR)", group=g2, minval=0.02, maxval=1.5, step=0.01)
 minVolumeRatio     = input.float(1.2,  "Minimum Volume Ratio",           group=g2, minval=0.5, maxval=5.0, step=0.1)
-maxEventsDisplay   = input.int(6,      "Max Premium Events",             group=g2, minval=1, maxval=20)
+maxEventsDisplay   = input.int(6,      "Max Events Shown",             group=g2, minval=1, maxval=20)
 
 var g_hunt = "Stop Hunts"
 enableStopHunts    = input.bool(true,  "Detect Stop Hunts",              group=g_hunt,
-     tooltip="Same-bar sweep: wick through known level + volume spike + wick/close-position reversal — premium signal")
+     tooltip="Same-bar sweep: wick through known level + volume spike + wick/close-position reversal")
 huntVolMultiplier  = input.float(1.5,  "Volume Spike Multiplier",        group=g_hunt, minval=1.0, maxval=5.0, step=0.1)
 huntWickRatioMin   = input.float(0.45, "Min Rejection Wick Ratio",       group=g_hunt, minval=0.2, maxval=0.8, step=0.05,
      tooltip="Rejection wick length as a share of the bar's full range (independent of the level price). Higher = stricter rejection candle shape required.")
@@ -74,10 +73,9 @@ showGapLabels      = input.bool(true,  "Show FVG Labels",                group=g
 
 var g_ctx = "Regime Context"
 enableRegimeContext = input.bool(false, "Enable Regime / Premium-Discount Context", group=g_ctx,
-     tooltip="Adds range-vs-trend regime and premium/discount range location as a score bonus to reclaim events (and to the dashboard). Informational quality layer only — never gates or blocks a signal.")
+     tooltip="Shows range-vs-trend regime and premium/discount range location in the dashboard. Display only — never gates or blocks an event.")
 regimeLookback     = input.int(50,     "Regime Lookback (bars)",         group=g_ctx, minval=20, maxval=200)
 erTrendThreshold   = input.float(0.35, "Trend Efficiency Threshold",     group=g_ctx, minval=0.10, maxval=0.90, step=0.05)
-contextBonusMax    = input.float(12.0, "Max Context Bonus (score pts)",  group=g_ctx, minval=0.0, maxval=25.0, step=1.0)
 
 var g_flip = "Level Lifecycle"
 enableLevelFlip    = input.bool(false, "Flip Broken Levels into Opposite Zone", group=g_flip,
@@ -134,7 +132,6 @@ type LiquidityEvent
     int   eventBar
     float eventPrice
     int   direction
-    float score
     float levelPrice
     float volumeRatio
 
@@ -183,7 +180,7 @@ lowerWickRatio = (math.min(open, close) - low) / barRange
 closePosition  = (close - low) / barRange
 
 // Regime Context (#9): range-vs-trend regime + premium/discount range location.
-// Informational quality layer — feeds a bounded score bonus, never a gate.
+// Dashboard display only — never a gate.
 rangeHigh       = ta.highest(high, regimeLookback)
 rangeLow        = ta.lowest(low, regimeLookback)
 rangeMid        = (rangeHigh + rangeLow) / 2
@@ -213,52 +210,6 @@ f_level_score(_touches, _ageBars, _distAtr) =>
     agePenalty  = math.min(_ageBars / maxLevelAge, 1.0) * 18.0
     distPenalty = math.min(_distAtr, maxLevelDistance) * 7.0
     math.max(0.0, touchScore + 18.0 - agePenalty - distPenalty)
-
-f_context_bonus(_isBearish, _inPremium, _isTrending, _trendUp, _maxBonus) =>
-    // Range/trend regime + premium-discount location as bounded evidence —
-    // never a gate. Bearish reclaims score higher from premium / range-reject /
-    // downtrend-aligned; bullish reclaims mirror from discount / uptrend-aligned.
-    bonus = 0.0
-    if _isBearish and _inPremium
-        bonus += _maxBonus * 0.5
-    if not _isBearish and not _inPremium
-        bonus += _maxBonus * 0.5
-    if not _isTrending
-        bonus += _maxBonus * 0.5
-    else if _isBearish and not _trendUp
-        bonus += _maxBonus * 0.5
-    else if not _isBearish and _trendUp
-        bonus += _maxBonus * 0.5
-    math.min(_maxBonus, bonus)
-
-f_event_score(_touches, _wickAtr, _closeBackAtr, _volRatio, _sessionBoost, _wtOsc, _mfi, _isBearish, _useMomentum, _structBonus, _ctxBonus, _volumeIsReal) =>
-    touchScore = math.min(_touches, 5) * 12.0
-    wickScore  = math.min(_wickAtr, 1.5) * 18.0
-    closeScore = math.min(_closeBackAtr, 1.5) * 24.0
-    // A volScore of 0 is not "unknown", it means volume was at or below
-    // average. Without real volume the component contributes 0 (neutral) — the
-    // other components are not scaled up to stand in for missing evidence.
-    volScore   = _volumeIsReal ? math.max(0.0, math.min(_volRatio, 3.0) - 1.0) * 12.0 : 0.0
-
-    // Optional WaveTrend and MFI exhaustion bonuses — momentum is a quality
-    // layer only; it never gates the event and is disabled unless the user
-    // opts in via the Momentum Hybrid toggle.
-    wtBonus = 0.0
-    mfiBonus = 0.0
-    if _useMomentum
-        if _isBearish and _wtOsc > lhWtExtThr
-            wtBonus := 10.0
-        else if not _isBearish and _wtOsc < -lhWtExtThr
-            wtBonus := 10.0
-        // MFI is volume-derived — withhold the bonus rather than award it on a
-        // value computed from price-update counts.
-        if _volumeIsReal and _isBearish and _mfi > 80.0
-            mfiBonus := 10.0
-        else if _volumeIsReal and not _isBearish and _mfi < 20.0
-            mfiBonus := 10.0
-
-    coreScore = touchScore + wickScore + closeScore + volScore
-    math.min(100.0, coreScore + _sessionBoost + wtBonus + mfiBonus + _structBonus + _ctxBonus)
 
 // ============================================================================
 // LEVEL REGISTRY
@@ -372,8 +323,6 @@ bslBreakout        = false
 sslBreakout        = false
 bearishReclaim     = false
 bullishReclaim     = false
-bearishReclaimScore = 0.0
-bullishReclaimScore = 0.0
 bslHunt            = false
 sslHunt            = false
 
@@ -383,8 +332,6 @@ var array<StopHunt> stopHunts = array.new<StopHunt>()
 // next bar — the breakout bar that created it must not also sweep/reclaim it.
 for lvl in bslLevels
     if lvl.touches >= minTouches and lvl.pivotBar < bar_index
-        wickAtr      = atr14 > 0 ? math.max(0.0, high - lvl.price) / atr14 : 0.0
-        closeBackAtr = atr14 > 0 ? math.max(0.0, lvl.price - close) / atr14 : 0.0
         touched      = high >= lvl.price + sweepAbs
         if not lvl.swept and touched
             lvl.swept    := true
@@ -415,19 +362,12 @@ for lvl in bslLevels
             lvl.reclaimed    := true
             lvl.reclaimDir   := -1
             bearishReclaim   := true
-            sessionBoost     = inSession ? 10.0 : 0.0
-            structBonus      = close < low[1] ? 10.0 : 0.0
-            ctxBonus         = enableRegimeContext ? f_context_bonus(true, inPremiumZone, isTrending, trendUp, contextBonusMax) : 0.0
-            eventScore       = f_event_score(lvl.touches, wickAtr, closeBackAtr, volRatio, sessionBoost, lhWtOsc, lhMfi, true, enableExhaustion, structBonus, ctxBonus, volumeIsReal)
-            bearishReclaimScore := math.max(bearishReclaimScore, eventScore)
-            array.unshift(recentEvents, LiquidityEvent.new(bar_index, high, -1, eventScore, lvl.price, volRatio))
+            array.unshift(recentEvents, LiquidityEvent.new(bar_index, high, -1, lvl.price, volRatio))
             if array.size(recentEvents) > maxEventsDisplay
                 array.pop(recentEvents)
 
 for lvl in sslLevels
     if lvl.touches >= minTouches and lvl.pivotBar < bar_index
-        wickAtr      = atr14 > 0 ? math.max(0.0, lvl.price - low) / atr14 : 0.0
-        closeBackAtr = atr14 > 0 ? math.max(0.0, close - lvl.price) / atr14 : 0.0
         touched      = low <= lvl.price - sweepAbs
         if not lvl.swept and touched
             lvl.swept    := true
@@ -451,12 +391,7 @@ for lvl in sslLevels
             lvl.reclaimed    := true
             lvl.reclaimDir   := 1
             bullishReclaim   := true
-            sessionBoost     = inSession ? 10.0 : 0.0
-            structBonus      = close > high[1] ? 10.0 : 0.0
-            ctxBonus         = enableRegimeContext ? f_context_bonus(false, inPremiumZone, isTrending, trendUp, contextBonusMax) : 0.0
-            eventScore       = f_event_score(lvl.touches, wickAtr, closeBackAtr, volRatio, sessionBoost, lhWtOsc, lhMfi, false, enableExhaustion, structBonus, ctxBonus, volumeIsReal)
-            bullishReclaimScore := math.max(bullishReclaimScore, eventScore)
-            array.unshift(recentEvents, LiquidityEvent.new(bar_index, low, 1, eventScore, lvl.price, volRatio))
+            array.unshift(recentEvents, LiquidityEvent.new(bar_index, low, 1, lvl.price, volRatio))
             if array.size(recentEvents) > maxEventsDisplay
                 array.pop(recentEvents)
 
@@ -543,13 +478,13 @@ for lvl in sslLevels
 nearPrimaryBsl = not na(primaryBslPrice) and atr14 > 0 and (primaryBslPrice - close) / atr14 <= alertDistanceAtr
 nearPrimarySsl = not na(primarySslPrice) and atr14 > 0 and (close - primarySslPrice) / atr14 <= alertDistanceAtr
 
-recentBullScore = 0.0
-recentBearScore = 0.0
+recentBullCount = 0
+recentBearCount = 0
 for evt in recentEvents
     if evt.direction == 1
-        recentBullScore := math.max(recentBullScore, evt.score)
+        recentBullCount += 1
     if evt.direction == -1
-        recentBearScore := math.max(recentBearScore, evt.score)
+        recentBearCount += 1
 
 // ============================================================================
 // VISUALS
@@ -567,12 +502,12 @@ bgcolor(armedBgColor, title="Armed Liquidity")
 // globally across both sides, not per-direction, so a bar never shows a
 // low-priority marker on one side while a higher-priority event fires on the
 // other (e.g. a plain SSL sweep marker next to a BSL hunt on the same bar).
-// Hunt, Reclaim and Exhaustion are premium events — they get a proper label
+// Hunt, Reclaim and Exhaustion get a proper label
 // with a hover tooltip (drawn further below, at barstate.islast) instead of a
 // bare plotshape marker, and each one's label suppresses the lower-priority
 // ones on the same bar regardless of direction (see the "superseded" checks
 // below). Sweep/Breakout stay as minimal, unlabeled markers — ambient
-// context, not a premium event.
+// context.
 bearSweepShow      = enableSweeps and bslSweep
 bearBreakoutShow   = enableSweeps and bslBreakout
 bearHuntShow       = enableStopHunts and bslHunt
@@ -716,13 +651,12 @@ if barstate.islast
                 if not supersededByHunt and not supersededByExhaustion
                     evtCol  = evt.direction == 1 ? bullReclaimColor : bearReclaimColor
                     evtStyl = evt.direction == 1 ? label.style_label_up : label.style_label_down
-                    array.push(drawLabels, label.new(evt.eventBar, evt.eventPrice, str.format("R {0}", str.tostring(evt.score, "#")),
+                    array.push(drawLabels, label.new(evt.eventBar, evt.eventPrice, "R",
                          style=evtStyl, color=evtCol, textcolor=color.white, size=size.small,
-                         tooltip=str.format("{0} Reclaim\nSwept the {1} level, then closed back through it — the sweep got rejected.\nLevel: {2}\nScore: {3} / 100\nVolume: x{4}",
+                         tooltip=str.format("{0} Reclaim\nSwept the {1} level, then closed back through it — the sweep got rejected.\nLevel: {2}\nVolume: x{3}",
                              evt.direction == 1 ? "Bullish" : "Bearish",
                              evt.direction == 1 ? "SSL" : "BSL",
                              str.tostring(evt.levelPrice, format.mintick),
-                             str.tostring(evt.score, "#"),
                              str.tostring(evt.volumeRatio, "#.##"))))
 
     // --- Stop Hunt Labels ---
@@ -778,9 +712,9 @@ if showDashboard and barstate.islast
     // the signal path — sweeps, reclaims, hunts and alerts never read it.
     biasValue = 0
     // A reclaim on this bar is already in recentEvents — count it once (+2), not
-    // again via the recent-score term.
-    biasValue += bullishReclaim ? 2 : recentBullScore >= 65 ? 1 : 0
-    biasValue -= bearishReclaim ? 2 : recentBearScore >= 65 ? 1 : 0
+    // again via the recent-event term.
+    biasValue += bullishReclaim ? 2 : recentBullCount > 0 ? 1 : 0
+    biasValue -= bearishReclaim ? 2 : recentBearCount > 0 ? 1 : 0
     biasValue += primarySslScore > primaryBslScore and nearPrimarySsl ? 1 : 0
     biasValue -= primaryBslScore > primarySslScore and nearPrimaryBsl ? 1 : 0
     biasText  = biasValue >= 2 ? "Bullish" : biasValue <= -2 ? "Bearish" : "Neutral"
@@ -816,13 +750,13 @@ if showDashboard and barstate.islast
     lastEventColor = muted
     if array.size(recentEvents) > 0
         evt           = array.get(recentEvents, 0)
-        lastEventText := str.format("{0} {1}", evt.direction == 1 ? "Bull" : "Bear", str.tostring(evt.score, "#"))
+        lastEventText := str.format("{0} Reclaim", evt.direction == 1 ? "Bull" : "Bear")
         lastEventColor := evt.direction == 1 ? bullReclaimColor : bearReclaimColor
 
     r += 1
     table.cell(dash, 0, r, "Last Event",   text_color=muted, text_size=size.small)
     table.cell(dash, 1, r, lastEventText,  text_color=color.white, bgcolor=color.new(lastEventColor, 15), text_size=size.small)
-    table.cell(dash, 2, r, str.format("Bull {0} | Bear {1}", str.tostring(recentBullScore, "#"), str.tostring(recentBearScore, "#")),
+    table.cell(dash, 2, r, str.format("Bull {0} | Bear {1}", recentBullCount, recentBearCount),
          text_color=muted, text_size=size.small)
 
     string liqStateText  = "Idle"
@@ -930,11 +864,7 @@ alertcondition(alertOk and (bslBreakout), "BSL Breakout", "LQH · BUY-SIDE BREAK
 alertcondition(alertOk and (sslBreakout), "SSL Breakout", "LQH · SELL-SIDE BREAKOUT · {{ticker}} {{interval}}")
 alertcondition(alertOk and (bslHunt), "BSL Stop Hunt", "LQH · BUY-SIDE STOP HUNT · {{ticker}} {{interval}}")
 alertcondition(alertOk and (sslHunt), "SSL Stop Hunt", "LQH · SELL-SIDE STOP HUNT · {{ticker}} {{interval}}")
-alertcondition(alertOk and (bearishReclaim), "Bearish Reclaim", "LQH · BEARISH RECLAIM SHORT · {{ticker}} {{interval}}")
-alertcondition(alertOk and (bullishReclaim), "Bullish Reclaim", "LQH · BULLISH RECLAIM LONG · {{ticker}} {{interval}}")
-alertcondition(alertOk and (bearishReclaim and bearishReclaimScore >= 65),
-     "Premium Bearish Reclaim", "LQH · PREMIUM BEARISH RECLAIM SHORT · {{ticker}} {{interval}}")
-alertcondition(alertOk and (exhaustionBear), "WT Exhaustion Context Bear", "LQH · BUY-SIDE SWEEP WT EXHAUSTION SHORT · {{ticker}} {{interval}}")
-alertcondition(alertOk and (exhaustionBull), "WT Exhaustion Context Bull", "LQH · SELL-SIDE SWEEP WT EXHAUSTION LONG · {{ticker}} {{interval}}")
-alertcondition(alertOk and (bullishReclaim and bullishReclaimScore >= 65),
-     "Premium Bullish Reclaim", "LQH · PREMIUM BULLISH RECLAIM LONG · {{ticker}} {{interval}}")
+alertcondition(alertOk and (bearishReclaim), "Bearish Reclaim", "LQH · BEARISH RECLAIM · {{ticker}} {{interval}}")
+alertcondition(alertOk and (bullishReclaim), "Bullish Reclaim", "LQH · BULLISH RECLAIM · {{ticker}} {{interval}}")
+alertcondition(alertOk and (exhaustionBear), "WT Exhaustion Context Bear", "LQH · BUY-SIDE SWEEP AT WT EXTREME · {{ticker}} {{interval}}")
+alertcondition(alertOk and (exhaustionBull), "WT Exhaustion Context Bull", "LQH · SELL-SIDE SWEEP AT WT EXTREME · {{ticker}} {{interval}}")

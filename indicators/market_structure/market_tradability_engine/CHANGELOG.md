@@ -1,5 +1,9 @@
 # Changelog
 
+## Breakout alerts removed (v1) — 2026-11-17
+- `market_tradability_engine` v1.3.6→1.4.0: removed the alerts "MTE: Bullish Breakout" / "MTE: Bearish Breakout" and the BREAKOUT line of the dynamic alerts. v1 measures the breakout against the rolling range high/low of the previous bars, not a boundary frozen when the balance formed, so it is kept as a regime state and chart marker only (markers renamed "Bullish/Bearish Range Breakout"); the balance-bound breakout alert is in v2
+- `market_tradability_engine` v1.3.6→1.4.0: header, README and description describe BREAKOUT as what the code checks instead of "departure from the balance"
+
 ## Bug fixes — 2026-11-17
 - `market_tradability_engine` v1.3.5→1.3.6: all alert conditions fire only on bar close
 - `market_tradability_engine` v1.3.5→1.3.6: without real volume, participation now counts as neutral (50) in the Tradability score instead of scaling the other components up to fill its share

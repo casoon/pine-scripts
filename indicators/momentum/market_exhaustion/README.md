@@ -1,17 +1,16 @@
 # Market Exhaustion
 
-MFI + StochRSI fusion in a single exhaustion panel. The MFI (optionally JMA-smoothed) provides volume-weighted flow context with adaptive or static OB/OS zones; the StochRSI K line provides timing. Long/short signals require both: MFI confirmed in (or crossing out of) its extreme zone plus a StochRSI cross of the OS/OB level. A higher-timeframe MFI adds bias context and can optionally gate signals. Regular divergences on the active oscillator are scored and drawn directly in the panel.
+MFI + StochRSI fusion in a single exhaustion panel. The MFI (optionally JMA-smoothed) provides volume-weighted flow context with adaptive or static OB/OS zones; the StochRSI K line provides timing. Long/short signals require both: MFI confirmed in (or crossing out of) its extreme zone plus a StochRSI cross of the OS/OB level. A higher-timeframe MFI adds bias context and can optionally gate signals. Regular divergences on the active oscillator are drawn directly in the panel as markers.
 
 ## Features
 
 - Adaptive MFI zones: dynamic OB/OS levels from a rolling lookback (fractions of the observed range) or static 80/20, with optional background highlights and band fill
-- Oscillator modes: MFI (default), CCI (tanh-mapped to 0–100), or MFI+CCI with selectable engine for divergence/score logic
+- Oscillator modes: MFI (default), CCI (tanh-mapped to 0–100), or MFI+CCI with selectable engine for divergence logic
 - StochRSI timing overlay with configurable OS/OB levels
 - Context + timing signals: MFI zone confirmation (configurable confirm bars) + StochRSI cross, optional HTF filter
 - Auto-HTF MFI context: automatic higher-timeframe selection (5m→15m, 15m→1H, 1H→4H, intraday→D, daily→M) or manual TF; bias label at the top of the panel
 - JMA smoothing: optional Jurik-style smoothing for MFI, StochRSI K, and HTF MFI
 - Regular divergences on the active oscillator, anchored on price pivots, with OS/OB area check, ATR swing filter, and direction tolerances
-- Divergence quality score (0–100) from ΔMFI, swing size, time span, post-pivot reaction, and sequence count — strong divergences drawn with thicker lines
 - Timeframe presets for divergence parameters (5m / 15m / 1H / 4H / 1D) with "More Signals" and "Conservative" profiles, or fully manual values
 - Optional candle coloring by HTF bias or signals
 - Alert conditions for long/short signals
@@ -24,11 +23,9 @@ MFI + StochRSI fusion in a single exhaustion panel. The MFI (optionally JMA-smoo
 | Long `L` | MFI oversold confirmed (or crossing back above the lower zone) AND StochRSI K crosses above the OS level, HTF filter permitting |
 | Short `S` | MFI overbought confirmed (or crossing back below the upper zone) AND StochRSI K crosses below the OB level, HTF filter permitting |
 
-## Divergence Scoring
+## Divergence Markers
 
-Score (0–100) is a weighted blend of five normalized components: MFI delta, swing size vs ATR, bars between pivots, price reaction after the pivot, and consecutive-divergence sequence — plus an optional HTF bias bonus. Lines with score ≥ the strong threshold are drawn thicker; the mid label shows the score (or "Bull/Bear Div" text).
-
-The reaction is measured from the pivot-bar close over the "Reaction window" bars after the pivot. A divergence is drawn as soon as its pivot is confirmed, with a provisional score (reaction pending, shown as "React: pending" in the tooltip). Once the reaction window has passed, the score, tooltip and line width are updated to their final values. The sequence count resets when a confirmed pivot is not a divergence of that direction. There are no divergence alerts; any alert built on the score has to fire at finalization, not at pivot confirmation.
+Divergences are a display only: a line between the two oscillator pivots, a "Bull Div" / "Bear Div" mid label and a ▲/▼ at the confirming pivot. They are drawn once, at pivot confirmation, and not changed afterwards. The mid-label tooltip shows the raw values: sequence count (consecutive divergences of the same direction; resets when a confirmed pivot is not one), ΔMFI between the pivots and bars between them. Divergences carry no score, do not feed the long/short signals and have no alerts.
 
 ## Data requirements
 

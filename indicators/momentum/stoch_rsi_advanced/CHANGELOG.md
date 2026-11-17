@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.4.0 — 2026-11-17
+- **Breaking:** Signal Quality removed — the "Show Signal Quality Labels" input and the 0-100 label per cross (zone depth + context + stall points) are gone. The cross from the zone, the midline cross and the strong/faded rendering stay; Signal Quality never gated a signal, so signal density does not change
+- **Breaking:** the faded "Bull/Bear Extreme (absorbed)" marker is split by its reason — "(stall)" when price did not follow the oscillator's move, "(counter)" when the cross runs against the trend context line (stall wins when both apply). Style settings saved for the old marker must be re-set
+- **Breaking:** the Bull/Bear Signal alerts ("CROSS OVERSOLD" / "CROSS OVERBOUGHT") now fire only while "Extreme Signals: require OB/OS zone" is on. With that filter off, the new "Bull/Bear Cross (any zone)" alerts fire instead, with the text "BULL CROSS" / "BEAR CROSS"
+
 ## v1.3.0 — 2026-11-17
 - **Breaking:** "Smoothing Type" now offers `SMA` (default, the original core) and `T3` (slower, fewer crosses, misses more turns). SMA/EMA/RMA/WMA are practically the same line, and the ranking of the other cores did not hold between periods — the choice only changed signal density, not quality. Removed: SuperSmoother, KAMA, JMA Approx and the JMA Phase / Power inputs. Saved chart settings that used a removed type must be re-selected
 

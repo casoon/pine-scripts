@@ -1,12 +1,11 @@
 # Reversal Engine Score v1
 
-Score-based liquidity sweep reversal detector with HTF trend confluence. A signal fires only when all mandatory gates pass on a confirmed bar and the optional quality score meets the per-direction minimum. Designed and tested for the 15M timeframe (optional lockout on other TFs).
+Liquidity sweep reversal detector with HTF trend confluence. A signal fires when all mandatory gates pass on a confirmed bar (plus the optional RSI filter, if enabled). Designed and tested for the 15M timeframe (optional lockout on other TFs).
 
 ## Features
 
 - Mandatory gate model — sweep + close position + body size + ATR corridor + HTF trend + spike filter must all pass
-- Quality score (0–1 optional condition) with per-direction thresholds (Long/Short configurable separately)
-- Optional quality condition mirrored per direction (RSI above 50 for longs, below 50 for shorts)
+- Optional filter "RSI confirms direction", mirrored per direction (RSI above 50 for longs, below 50 for shorts; default off)
 - Liquidity sweep detection: swing violation with recovery close on the same bar
 - ATR corridor filter — rejects both low-volatility noise and spike/news regimes
 - Spike filter — blocks sweeps deeper than N×ATR (real breakdowns, not reversals)
@@ -17,7 +16,7 @@ Score-based liquidity sweep reversal detector with HTF trend confluence. A signa
 - Outcome tracking: signal label turns blue when no follow-through within N bars
 - Cooldown gate per direction to suppress signal chasing
 - 15M-only lockout with orange background on other timeframes
-- Hidden strategy-ready plots: direction, score, entry, stop, take
+- Hidden strategy-ready plots: direction, entry, stop, take
 - Alert conditions for BUY / SELL / either
 
 ## Signal model
@@ -33,16 +32,16 @@ Score-based liquidity sweep reversal detector with HTF trend confluence. A signa
 | HTF trend | HTF fast EMA not below slow EMA (not bearish) |
 | Spike filter | Sweep depth ≤ ATR × spikeAtrMult |
 
-Shorts mirror all conditions, except the HTF gate (not bullish) and the optionals below.
+Shorts mirror all conditions, with the HTF gate reading "not bullish".
 
-**Optional quality point (0–1):**
+**Optional filter — RSI confirms direction (default off):**
 
-| Direction | +1 |
-|-----------|----|
+| Direction | Condition |
+|-----------|-----------|
 | Long | RSI > 50 |
 | Short | RSI < 50 |
 
-Quality tiers: A (1), C (0). Signals require `minQualityLong` / `minQualityShort` (both default 0 — quality is optional). Pivot structure (LL / HH) is shown in the tooltip only.
+When the filter is off, the RSI value is shown in the label tooltip only. Pivot structure (LL / HH) is shown in the tooltip only.
 
 ## SL / TP
 

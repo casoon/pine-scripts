@@ -1,6 +1,6 @@
 # WaveTrend [WavesUnchained]
 
-WaveTrend momentum oscillator with configurable cross signals, divergence detection, and an optional price-chart overlay. Four optional extensions address overextension, signal quality, wave persistence, and wave anatomy.
+WaveTrend momentum oscillator with configurable cross signals, divergence detection, and an optional price-chart overlay. Four optional extensions address overextension, oscillator slope, wave persistence, and wave anatomy.
 
 ## Features
 
@@ -8,7 +8,8 @@ WaveTrend momentum oscillator with configurable cross signals, divergence detect
 - Divergence detection — regular and hidden, bullish and bearish
 - Optional price-chart overlay with Top / Middle / Bottom placement (off by default)
 - Optional Compare Symbol — intermarket WaveTrend zone as a dashboard row (off by default)
-- Analytics dashboard with composite bias score
+- Analytics dashboard with composite directional bias
+- Long/Short signals from WT cross, zero-cross and sustained-trend (Persist) triggers, with optional gates
 - Extension A — Overextension duration
 - Extension B — Slope quality filter
 - Extension C — Zone persistence
@@ -48,7 +49,7 @@ Measures the rate of change of `wtOsc` over a configurable lookback (`slopeLen` 
 
 Counts consecutive bars with `wtOsc` above or below zero. When the count reaches the configured minimum, a "Sustained Bull / Bear" signal is shown in the dashboard. This identifies wave-riding conditions where counter-trend signals should be discounted.
 
-Persist signals fire while the oscillator is already on the trend side of zero, so the zone-visit, zone-hold and deep-extreme score components cannot score for them. A Persist signal scores at most 2 (percentile + divergence) and is therefore suppressed at Min Score ≥ 3.
+Persist signals fire on the first bar the sustained condition activates, provided the wave started from the opposite extreme (origin age), the opposite extreme is not too recent, and the oscillator is not already too deep in the zone (depth block). They carry no extra score gate.
 
 ### D — Wave Anatomy
 
@@ -108,7 +109,7 @@ The optional "Gate: Volume Conviction" (External Confirmations group, off by def
 | Percentile | Extension D: oscillator percentile rank in recent history |
 | Wave | Extension D: peak/trough structure (accelerating / fading) |
 | Correction | Extension D: pullback depth as % of last wave amplitude |
-| Bias | Composite score of oscillator side, momentum, cross, divergence and trend strength (regime adds ±1 only, its direction is already in the oscillator side), with confidence % of the maximum 6 |
+| Bias | Composite directional read of oscillator side, momentum, cross, divergence and trend strength (regime adds ±1 only, its direction is already in the oscillator side), shown as Strong Bull … Strong Bear |
 | Compare | Optional: WaveTrend zone of a second symbol (OB / OS / Bull / Bear) |
 
 ## Bug Fixes vs. Source

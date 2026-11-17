@@ -455,21 +455,19 @@ The Accumulation Phase answers: **"Should I even be watching for a reversal here
 
 ## 6. Vein Execution 15m (Overlay, 15m)
 
-Lean execution/timing module. Only activates when 4H says "interesting".
+Lean execution/timing module. Only activates when the connected setup source says "interesting".
 
-**Core rule:** 15m does NOT decide direction. It confirms or destroys what 4H suggests.
+**Core rule:** 15m does NOT decide direction. It confirms or destroys what the setup source suggests.
 
-### 4H Context (via request.security)
+### Setup context (external sources) and 4H reference levels
 
-The script pulls simplified 4H data:
-- Trend direction (EMA20 vs EMA50)
-- RSI / MFI levels
-- Simplified setup score
-- Last swing high/low as reference levels
+The setup scores are **external sources** ("Vein Module Inputs"), not a 4H request: connect Vein Reversal Score's `Bull Setup [dw]` / `Bear Setup [dw]` plots on the same chart. They are therefore computed on the chart timeframe. The two optional trend sources take any plot that is > 0 while the trend is up / down (Vein Trend has no such plot); they only feed the status-table hint.
 
-**Activation:** 15m only works when 4H setup score ≥ threshold (default: 2.0). Otherwise shows "QUIET".
+Only the reference levels come from the 4H timeframe via `request.security`: last swing high/low (pivots), EMA20 and RSI.
 
-The 4H scores come from the "Vein Module Inputs" sources. If both setup sources are left on their default (`close`), they count as not connected: the module stays QUIET and the table shows "4H sources not connected". The same applies to the two trend sources (treated as neutral).
+**Activation:** 15m only works when the connected setup score ≥ threshold (default: 2.0). Otherwise shows "QUIET".
+
+If both setup sources are left on their default (`close`), they count as not connected: the module stays QUIET and the table shows "Setup sources not connected". The same applies to the two trend sources (treated as neutral).
 
 **Entries** (off by default) need a 15m structure trigger plus a micro score ≥ Entry Min Micro Score (default 6.0, provisional).
 
@@ -477,28 +475,28 @@ The 4H scores come from the "Vein Module Inputs" sources. If both setup sources 
 
 | Bias | Meaning |
 |------|---------|
-| BULL | 4H has active bull setup, no bear |
-| BEAR | 4H has active bear setup, no bull |
+| BULL | Setup source has an active bull setup, no bear |
+| BEAR | Setup source has an active bear setup, no bull |
 | MIXED | Both sides active — 15m dampened |
-| QUIET | 4H below threshold — 15m inactive |
+| QUIET | Setup source below threshold — 15m inactive |
 
 ### Micro Score (0–10)
 
 | Component | Max | Source |
 |-----------|-----|--------|
-| **Setup** | 3 | 4H context: setup active (+1), setup strong (+1), near 4H zone (+1) |
-| **Structure** | 4 | 15m events: sweep (+1), sweep confirmed (+1), micro BOS (+1), HL/LH shift (+1) |
+| **Setup** | 3 | Connected setup score, scaled: reaches 3 at twice the activation threshold |
+| **Structure** | 4 | 15m events: sweep, sweep confirmed, micro BOS (each a third of the role); pivot-order HL/LH shifts are not scored |
 | **Behaviour** | 2 | Candle: rejection/engulfing (+1), range expansion + volume (+1) |
 | **Tempo** | 1 | Follow-through within 4 bars (+1) |
 
-### Status
+### Status (display only, no alerts)
 
 | Status | Score | Meaning |
 |--------|-------|---------|
-| QUIET | — | 4H not active, nothing to do |
-| WATCH | ≥ 3 | 4H active, watching for 15m structure |
-| SETUP | ≥ 5 | Micro structure forming |
-| **TRIGGER** | **≥ 7** | **Structure + behaviour confirmed — entry zone** |
+| QUIET | — | Setup source not active, nothing to do |
+| WATCH | ≥ 3 | Setup active, watching for a 15m structure event |
+| SETUP | ≥ 5 | Structure event (sweep, sweep hold or BOS) + score ≥ 5 |
+| **TRIGGER** | **≥ 7** | **Structure event + score ≥ 7** |
 
 ### Visual Elements
 
@@ -515,7 +513,7 @@ The 4H scores come from the "Vein Module Inputs" sources. If both setup sources 
 | Row | Content |
 |-----|---------|
 | Header | Vein Exec + Status (QUIET/WATCH/SETUP/TRIGGER) |
-| 4H Bias | BULL/BEAR/MIXED/QUIET + setup score |
+| Setup Bias | BULL/BEAR/MIXED/QUIET + setup score |
 | Micro Score | X / 10 with color coding |
 | Components | Set \| Str \| Beh \| Tmp breakdown |
 | Interpretation | Plain-language explanation of current state |
@@ -526,10 +524,10 @@ The 4H scores come from the "Vein Module Inputs" sources. If both setup sources 
 
 | Alert | Trigger |
 |-------|---------|
-| Bull/Bear Trigger | Micro status = TRIGGER |
 | Bull/Bear Entry | Entry signal fired |
 | Bull/Bear Invalidation | Entry invalidated |
-| Micro Setup | Status changes to SETUP |
+
+The QUIET/WATCH/SETUP/TRIGGER status is display only and has no alerts.
 
 ---
 
@@ -561,12 +559,12 @@ All tables follow consistent design:
 
 ## Alerts Summary
 
-### Recommended Alert Setup (3 alerts cover 90% of use)
+### Recommended Alert Setup
 
 | Alert | Source | Purpose |
 |-------|--------|---------|
 | **Bull/Bear Reversal Signal** | Vein Score (4H) | Structure event + follow-through |
-| **Bull/Bear Trigger** | Vein Execution (15m) | "Now it's getting concrete" |
+| **Bull/Bear Entry** | Vein Execution (15m) | "Now it's getting concrete" (enable entries) |
 | **Bull/Bear Invalidation** | Vein Score (4H) | "Cancel — signal failed" |
 
 ### Full Alert List
@@ -582,10 +580,8 @@ All tables follow consistent design:
 | Score | Bull/Bear Trap | Failed reversal → opposite continuation |
 | Zones | Support/Resist Relevant | Zone within 1 ATR, Reach ≥ 60 |
 | Zones | Likely Hold/Break | Hold or Break ≥ 60 |
-| Execution | Bull/Bear Trigger | 15m status = TRIGGER |
 | Execution | Bull/Bear Entry | Entry signal confirmed |
 | Execution | Bull/Bear Invalidation | Entry invalidated |
-| Execution | Micro Setup | 15m status = SETUP |
 | Accum | Developing/Mature | Phase state change |
 | Accum | Breakout/Breakdown Ready | Structure shifting |
 

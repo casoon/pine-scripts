@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.6.0 — 2026-11-17
+- The dashboard's score column is now labelled "PB Heat": the 0–7 points it shows feed only the pullback-continuation gate, not the reversal signal. "Show Score Table" is renamed "Show Dashboard Table"; header, README and description no longer present the 0–7 score as the basis of the reversal signal. Signals and alerts are unchanged
+
 ## v1.5.1 — 2026-11-17
 - Fix: the HTF bias reads the last closed higher-timeframe bar, so it no longer changes while the higher-timeframe bar is still forming
 - Fix: the HTF bias can no longer be up and down at the same time. Close vs EMA and EMA slope each vote; when they disagree the bias is neutral and neither side counts as HTF-aligned

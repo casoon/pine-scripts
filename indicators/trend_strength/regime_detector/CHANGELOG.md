@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.0 — 2026-11-17
+- RDP entry tiers A/B removed: an entry now fires on the regime start itself (confirmation bars, filter and HTF gate, one entry per regime). Entries that were previously held back below the Tier B thresholds now fire, so entries can come more often; the `LOWQ` labels, the A/B quality label next to the bar and the A/B status text are gone
+- Removed inputs: Tier A/B Min Confidence / HTF Agreement / Signal Quality, Alert Confidence Min, Confidence Meters, Signal Strength, Strength Dot Position / Offset / Color, Playbook Line; SSA: Strong Min Confidence / HTF / Quality, Enable Super tier and its three requirements, SSA entries require RDP Tier B+, SSA Entry Tier Gate, SSA Signal Display, Strong shows plus markers
+- SSA Strong/Super tiers removed; the SSA long/short event stays. SSA Entry Source is now "SSA Engine" or "RDP Entries"; without the tier gate SSA events can come more often (mainly in Scalping mode)
+- Removed alerts: RDP Any High Confidence, SSA Strong Long/Short, SSA Super Long/Short. The alert builder drops the conditions SSA Strong Long/Short and RDP Tier A/B+ (new defaults: SSA Long, RDP Bull Regime); the webhook message drops the `Q=` field
+- Info panel: Tier, Signal Quality and Action (playbook) rows removed; SSA table: Tier row removed
+- Fix: the SSA table in compact mode no longer writes one row past its end when every row is filled
+
 ## v1.1.8 — 2026-11-17
 - HTF agreement now reads the last closed higher-timeframe bar (no repaint); the HTF gate, tiers, SSA and MA zones no longer change while the HTF bar is still forming
 - RDP entries: after a band exit, a new entry in the same direction needs a new regime start; the same ongoing regime no longer re-enters after the cooldown

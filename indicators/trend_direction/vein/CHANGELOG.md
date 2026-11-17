@@ -3,11 +3,17 @@
 ## [Unreleased]
 
 ### Changed
+- `vein_reversal_score` v0.4.0→0.4.1 — compile fix: the Bull/Bear score tooltips still referenced the removed quality values (CE10272 "Undeclared identifier bullQuality"); the "Quality" line and "Quality breakdown" section are removed from both tooltips
 - `vein_reversal_score` v0.3.0→0.4.0 — **signal back, without score sums:** "Bull/Bear Reversal Signal" (triangle markers + alerts) fires on the first follow-through bar after a structure event (Spring/Upthrust, BOS, confirmed climax) whose own confirmation reaches "Confirmation Required", while the opposite side is not confirmed. The Setup score and quality do not gate it. The existing Invalidation alert also covers signals. "Setup + Structure Event" alerts now fire once when the status is reached instead of every bar
 - `vein_reversal_score` v0.2.4→0.3.0 — **role: context display.** REVIEW and ACTION alerts, the hand-weighted "Quality" grade (table row, data window, "High Quality" diamonds) and the "Min Quality for ACTION Alert" input are removed. "Candidate" alerts are renamed "Setup + Structure Event". Setup, confirmation and status are calculated as before. Saved REVIEW/ACTION alerts no longer exist
 - `vein_reversal_score`, `vein_exhaustion`: without real volume the MFI points are no longer moved to RSI (RSI was counted twice). The setup/exhaustion maximum is lower on such symbols; thresholds are unchanged, so fewer setups reach them there. Instruments with real volume are unaffected. `vein_reversal_score`: comment on the confirmation maximum corrected
 
+### Removed
+- `vein_execution` v0.1.9→0.2.0 — **status is display only:** the "Bull Trigger", "Bear Trigger" and "Micro Setup" alerts are removed; QUIET/WATCH/SETUP/TRIGGER stay as table status and background tint. Entry and Invalidation alerts are unchanged. Saved Trigger/Micro Setup alerts no longer exist
+- `vein_execution` v0.1.9→0.2.0 — HL/LH pivot-order shifts no longer count in the micro score; the structure role now consists of sweep, sweep hold and micro BOS (each a third). Scores, status and entries can change
+
 ### Fixed
+- `vein_execution` v0.1.9→0.2.0 — texts: the TRIGGER line no longer claims "structure + behaviour confirmed" (it means structure event + micro score ≥ 7); "4H Setup" wording replaced by "Setup" because the setup score comes from an external source on the chart, not a 4H request (input "Min Setup Score to Activate", table row "Setup Bias"); source tooltips name existing plots (Vein Reversal Score "Bull/Bear Setup [dw]") instead of non-existent Vein Trend plots
 - `vein_trend` v0.2.3→0.2.4 — without real volume the MFI points are no longer moved to RSI (RSI was counted twice); the setup maximum is lower on such symbols, thresholds are unchanged
 - `vein_trend` v0.2.3→0.2.4 — the structure gate (1.5 of the confluence score) now needs a real structure event (Spring/Upthrust, BOS/CHoCH, confirmed climax) within the last 4 bars. Below Daily it was granted on every bar, so signals could pass the gate without any structure
 - `vein_trend` v0.2.3→0.2.4 — the unused "Strong Dominance Delta" input is removed (its tooltip named a candle state that does not exist)

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.11.0 — 2026-11-17
+- **Breaking:** Spike Quality removed — the 0–100 score (band excess + context excess + stall points) and the "Min Spike Quality for Reclaim" input are gone. Spike, absorbed spike and Reclaim stay; a Reclaim now fires after every non-absorbed spike in the recency window. With the default (0 = off) nothing changes; charts that had raised the threshold can see more Reclaim markers and alerts. The Reclaim tooltip no longer shows a quality value
+
 ## v1.10.0 — 2026-11-17
 - **Breaking:** "Smoothing Type" now offers `EMA` (default, the original core) and `T3` (slower, fewer crosses, misses more turns). SMA/EMA/RMA/WMA are practically the same line, and the ranking of the other cores did not hold between periods — the choice only changed signal density, not quality. Removed: SuperSmoother, KAMA, JMA Approx and the JMA Phase / Power inputs. Saved chart settings that used a removed type must be re-selected
 

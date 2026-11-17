@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.6.0 — 2026-11-17
+- Breaking: Reversion mode removed together with its signal classes — Momentum (buildup from StochRSI/RSI/WaveTrend, score reversal inside the alert window), Exhaustion (score divergence, failed-to-continue) and Structure (spring/upthrust absorption, Wyckoff spring/upthrust entries). Entries are the JMA cluster flip (former Trend mode) with its slope, score-jump, ATR-distance filters and cooldown. Removed input: `Mode`
+- Breaking: entry quality scoring removed (slope-based quality and the bonus/penalty model). Removed inputs: the whole "Quality Optimization" group, including `Min Quality for Entry` and `Log Quality Components`
+- Removed alerts: `Alert Long`, `Alert Short` (early warning). They fired in Trend mode too and only belonged to the reversion buildup. The yellow "A" labels are gone; entry labels read "T" and their tooltip no longer shows class, pattern or quality
+- Signal logs no longer contain class, quality, momentum/exhaustion/structure flags, pattern, alert window or score delta; the pre-pivot CSV drops the alert columns
+- `Use Wyckoff for Entry Signals` renamed to `Use Live-Ready Wyckoff Events`: it drives the Wyckoff bias and phase, not entries
+- Wyckoff events, order blocks, retests and the reversion zone are unchanged
+
 ## v2.5.2 — 2026-11-17
 - Fix: the Alert Long/Short (early warning) fires only on the bar its condition starts; a condition that persists no longer re-fires every 10 bars and moves the entry window start
 - Removed the unused reversion inputs "Extreme score for Reversion", "Return trigger" and "Deviation mult" — they had no effect

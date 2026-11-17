@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.8.0 — 2026-11-17
+- Breaking: grade removed (depth + Wave + Tide + Wave-StochRSI + divergence point) together with the Min Grade gate. The signal is the Ripple cross out of the zone with depth or exhaustion: a cross out of the deep extreme fires immediately, a shallow zone cross after the exhaustion pullback. Crosses that used to stay below Min Grade (default 2) now fire, so signals can come more often
+- Removed inputs: `MTF grading (Wave + Tide)`, `Min Grade`, `Wave StochRSI in grade`, `Divergence adds to grade`, `Divergence Window`, the six StochRSI inputs. `Divergence ★ premium marker` is now `Show Divergence` (display only)
+- Removed alerts: `TWR Long (high grade only)`, `TWR Short (high grade only)`. The combined `alert()` message carries the depth tier (deep extreme / zone) instead of grade, ★ and signal type
+- Price-chart markers: one Long/Short marker instead of high/low-grade pairs; labels show ▲/▼ without grade or ★; the tooltip shows depth tier, WT extreme, room and the Wave/Tide/Ripple phases
+- Phase map: Grade row removed; Wave and Tide stay as context. Follow-up hints now mark crosses out of the zone that did not fire (no exhaustion yet or in cooldown) — input renamed to `Show Blocked-Trigger Hints`
+- Logs no longer contain grade, ★, signal type or Wave-StochRSI
+
 ## v0.7.5 — 2026-11-17
 - Fix: Tide and Wave read the last closed higher-timeframe bar, so their phase, grade points and the signals built on them no longer change while the higher-timeframe bar is still forming. When a horizon equals the chart timeframe it now lags by one bar
 - Header and Min Grade tooltip corrected to match the code: the grade runs 0–6 (the divergence point included), and crosses below Min Grade are not shown

@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.4.0 — 2026-11-17
+- Divergence alerts removed: "MARE · Bullish divergence" and "MARE · Bearish divergence" are gone, divergence no longer triggers "MARE · Any event", and the input `Price/relationship divergence` (Alerts group) is removed. Divergence is detected from price pivots, so it stays a chart/pane marker only
+- The standalone strategy clone drops the same unused alert input; its entries never used divergence
+
 ## v1.3.3 — 2026-11-17
 - Fix: the respect gate (Pullback events and the Healthy Trend state) now needs a minimum number of evaluated MA touches — new input `Minimum respect samples` (default 3). Without samples the neutral respect score plus the stability component could pass `Minimum respect` on its own
 - The standalone strategy clone received the same fix

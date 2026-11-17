@@ -10,11 +10,10 @@ Four-layer Smart Money Concepts indicator. Builds context bottom-up: objective s
 - Layer 4 — Warnings: swing level breaks, early top/bottom (wick + RSI), visual only, no alerts
 - OB filter cascade: range-mismatch guard, segment extraction, displacement (timeframe-adaptive window and threshold), premium/discount location, size (hard limit or score penalty), optional volume and FVG filters
 - OB lifecycle: max one OB per direction, mitigation (penetration %), full invalidation, TTL, reaction-type tracking (Tap/Deep/Failure)
-- Priority scoring (0–100) from displacement, FVG, volume, location, structure alignment and leg strength
-- Bar coloring modes: Structure, Expectation, BOS + OB Priority, Multi-Layer, Alignment
+- Bar coloring modes: Structure, Expectation, BOS + OB, Multi-Layer, Alignment
 - JMA overlay (3 configurable lengths)
-- Debug logging with priority-based filtering and an OB rejection heatmap table
-- Alerts: HIGH-priority and standard bull/bear BOS+OB setups, OB mitigation
+- Debug logging (structure, BOS with alignment/leg-strength tags, OB lifecycle, reject reasons) and an OB rejection table
+- Alerts: one BOS+OB alert per direction (OB created by the BOS on that bar), OB mitigation
 
 ## Layers
 

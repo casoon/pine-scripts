@@ -4,6 +4,10 @@
 
 ### Changed
 - `wavetrend_v2`: smoothing tooltip no longer claims HMA has "~50% less lag"; comment and tooltip only, no calculation change
+- `wavetrend` v1.3.4→1.4.0 (2026-11-17), breaking: signal quality score removed (percentile, zone visit, zone hold, divergence, deep extreme) together with the Min Score gate. Long/Short signals fire on their trigger (WT cross, zero-cross, Persist) plus the enabled gates — crosses and Persist signals that used to fail Min Score now fire, so signals can come more often. Removed inputs: `Min Score — Long`, `Min Score — Short`, `Divergence Score Window`, `Divergence Type by Signal Source`, `Deep Extreme Multiplier`. Signal labels read L / S instead of the score; the tooltip keeps the raw readings (osc, slope, percentile, zone bars, correction). Debug logs and debug table no longer carry score or divergence ages
+- `wavetrend` v1.4.0: the `alert()` call on strong crosses ("strong cross below oversold threshold …") is removed — it was a second, ungated signal path next to the signal alerts. Use `WT Long Signal` / `WT Short Signal`
+- `wavetrend` v1.4.0: dashboard Bias no longer shows a confidence percentage
+- `wavetrend` v1.4.0: the Persist depth block scales the OB/OS threshold sign-safe; with Adaptive (Percentile) zones a threshold on the "wrong" side of zero no longer inverts the block. Fixed zones are unchanged
 
 ## Volume check — 2026-10-12
 - `wavetrend` v1.3.3→1.3.4: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets

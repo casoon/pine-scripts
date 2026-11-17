@@ -1,11 +1,11 @@
 //@version=6
 // ============================================================================
 // Tweezer & Kangaroo Zones [WavesUnchained]
-// Version: 3.2.2
+// Version: 3.3.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
-// Modular pattern detection with zone scoring, structure context, and confluence analysis
+// Modular pattern detection with zone scoring, structure context, and first-retest signals
 //
 // Features:
 //   ✓ Tweezer pattern detection with TF sensitivity
@@ -18,14 +18,14 @@
 //   ✓ Zone merge on overlap
 //   ✓ Session-aware profiles (RTH/ETH)
 //   ✓ HTF Stack panel with 3 timeframes
-//   ✓ Confluence scoring system (8 components)
-//   ✓ Supertrend & MOST integration
+//   ✓ Retest signal: first zone retest + HTF trend in signal direction (optional)
+//   ✓ Supertrend & MOST trend gate
 //   ✓ Performance metrics & evaluation
 //
 // Data Contract:
 //   Price:     REQUIRED   chart symbol
-//   Volume:    OPTIONAL   real trade volume only — pattern volume checks and
-//                         confluence Relative Volume component degrade to neutral
+//   Volume:    OPTIONAL   real trade volume only — pattern volume checks degrade
+//                         to neutral
 //   OI:        NO
 //   Reference: NO
 //   Verdict:   CFD-degraded
@@ -124,47 +124,13 @@ profileMode     = "Both"
 signalOnlyInSess = true
 rthTTLmult      = 1.0
 ethTTLmult      = 0.7
-rthRvSpike      = 1.30
-ethRvSpike      = 1.50
-rthZoneThinATR  = 0.6
-ethZoneThinATR  = 0.5
 rthChopSoft     = 55.0
 ethChopSoft     = 60.0
 rthChopHard     = 62.0
 ethChopHard     = 65.0
 
-// Signal Scoring (simplified)
-minScoreBuy  = input.float(5.0, "Min Score BUY", group="Signal Scoring")
-minScoreSell = input.float(5.0, "Min Score SELL", group="Signal Scoring")
-
-// Fixed score weights (sensible defaults)
-useRegime    = true
-useStack     = true
-useStruct    = true
-useRelVol    = true
-useChopAdv   = true
-useZoneThin  = true
-useST        = false
-useMOST      = false
-wRegime     = 2.0
-wStack      = 3.0
-wStruct     = 1.0
-wRelVol     = 1.0
-wChop       = 1.0
-wZoneThin   = 1.0
-wSupertrend = 1.0
-wMOST       = 1.0
-wPattern    = 1.5
-
-// ST/MOST scope uses Trend Gate settings
-stScope  = gateSTscope
-stTF     = gateSTtf
-mostScope = gateMOSTscope
-mostTF    = gateMOSTtf
-
-// Fixed label thresholds
-labelStrongTh = 8.0
-labelMidTh    = 6.0
+// Retest Signal
+signalRequireHTF = input.bool(true, "Require HTF trend in signal direction", group="Retest Signal", tooltip="BUY retests need the last closed HTF bar above its EMA, SELL retests below it (HTF and EMA length from Trend Detection).\nOff = every first retest signals (chop/session gates still apply).")
 
 // Structure Context
 useStructContext  = input.bool(true, "Enable Structure Context", group="Structure Context")
@@ -191,8 +157,6 @@ continuationPenalty = input.float(10.0, "Continuation Penalty", minval=0, maxval
 
 // Panels
 useHTFPanel     = input.bool(false, "Show HTF Stack Panel", group="Panels")
-
-signalRequireTrend = false
 
 // Visuals
 colSupply   = input.color(color.new(#FF4444, 85), "Supply zone", group="Colors")
@@ -302,8 +266,6 @@ inSession = useSession ? (profileMode=="Both" ? (inRTH or inETH) : (profileMode=
 newDay = ta.change(time("D")) != 0
 
 // Effective per-session thresholds
-effRvSpike     = useRTH ? rthRvSpike : ethRvSpike
-effZoneThinATR = useRTH ? rthZoneThinATR : ethZoneThinATR
 effChopSoft    = useRTH ? rthChopSoft : ethChopSoft
 effChopHard    = useRTH ? rthChopHard : ethChopHard
 zoneTTLAdj     = useRTH ? zoneTTL * rthTTLmult : zoneTTL * ethTTLmult
@@ -1109,7 +1071,7 @@ f_apply_topn_filter()
 // ============================================================================
 
 //==================== Trend Gate Module ====================//
-// Supertrend, MOST, EMA Gate, Confluence Score
+// Supertrend, MOST, EMA Gate, HTF signal direction
 
 //==================== Supertrend & MOST Functions ====================//
 
@@ -1133,14 +1095,6 @@ f_most_dir(len, mult) =>
         dir := 1
         longStop := close - mult*a
     dir
-
-//==================== Score Components ====================//
-
-// Supertrend directions (for scoring)
-stDirLocal = useST ? (stScope == "Local" or stScope == "Both" ? f_st_dir() : 0) : 0
-stDirHTF = useST and (stScope == "HTF" or stScope == "Both") ? request.security(syminfo.tickerid, stTF, f_st_dir()[1], lookahead = barmerge.lookahead_on) : 0
-mostDirLocal = useMOST ? (mostScope == "Local" or mostScope == "Both" ? f_most_dir(mostLen, mostMult) : 0) : 0
-mostDirHTF = useMOST and (mostScope == "HTF" or mostScope == "Both") ? request.security(syminfo.tickerid, mostTF, f_most_dir(mostLen, mostMult)[1], lookahead = barmerge.lookahead_on) : 0
 
 //==================== Gate Components ====================//
 
@@ -1166,79 +1120,24 @@ mostGateDn = gateUseMOST ? (gateMOSTscope == "Local" ? mostGateLocal < 0 : gateM
 trendUp = (not gateUseEMA or emaGateUp) and stGateUp and mostGateUp
 trendDn = (not gateUseEMA or emaGateDn) and stGateDn and mostGateDn
 
-//==================== Confluence Score (weighted + normalized) ====================//
+//==================== HTF Direction ====================//
 
-float baseScore = 0.0
-float baseMax = 0.0
-
-// Regime component — side-specific: BUY scores an up-regime, SELL a down-regime
-float regPtsBuy  = useRegime and trendUp ? wRegime : 0.0
-float regPtsSell = useRegime and trendDn ? wRegime : 0.0
-if useRegime
-    baseMax += wRegime
-
-// HTF Stack component
-// +1 above EMA, -1 below, 0 equal, na while the HTF has no data — so missing data counts for neither side
+// +1 above EMA, -1 below, 0 equal, na while the HTF has no data — missing data passes neither side
 f_tfDir(tf, len) => request.security(syminfo.tickerid, tf, math.sign(close - ta.ema(close, len))[1], lookahead = barmerge.lookahead_on)
+// HTF Stack (panel display only)
 d1 = f_tfDir(stackTF1, emaLen)
 d2 = f_tfDir(stackTF2, emaLen)
 d3 = f_tfDir(stackTF3, emaLen)
 s1 = d1 > 0
 s2 = d2 > 0
 s3 = d3 > 0
-// Side-specific: BUY counts bullish TFs, SELL counts bearish TFs
-stackPtsBuy  = (s1 ? 1 : 0) + (s2 ? 1 : 0) + (s3 ? 1 : 0)
-stackPtsSell = (d1 < 0 ? 1 : 0) + (d2 < 0 ? 1 : 0) + (d3 < 0 ? 1 : 0)
-if useStack
-    baseMax += wStack
-
-// Structure component (added in signal section)
-if useStruct
-    baseMax += wStruct
-
-// Relative Volume component
-// Dropped from both baseScore and baseMax (not just scored 0) when volume
-// isn't real, so this behaves the same as any other disabled component
-// instead of systematically lowering the achievable score on CFDs.
-rv = volume / math.max(1.0, ta.sma(volume, 20))
-if useRelVol and volumeIsReal
-    baseScore += rv >= effRvSpike ? wRelVol : 0
-    baseMax += wRelVol
-
-// Choppiness component
-if useChopAdv
-    baseScore += chop <= effChopSoft ? wChop : 0
-    baseMax += wChop
-
-// Zone Thin component (added in signal section)
-if useZoneThin
-    baseMax += wZoneThin
-
-// Helper for zone thin scoring
-zoneThinPts(_top, _bot) => (math.abs(_top - _bot) / atr) <= effZoneThinATR ? wZoneThin : 0
-
-// Supertrend/MOST in score
-if useST
-    baseMax += wSupertrend
-if useMOST
-    baseMax += wMOST
-
-// Pattern Strength component
-float patternStrength = na(tTopStrength) ? (na(tBotStrength) ? (na(ktBearStrength) ? (na(ktBullStrength) ? na : ktBullStrength) : ktBearStrength) : tBotStrength) : tTopStrength
-if not na(patternStrength)
-    baseScore += patternStrength * wPattern
-    baseMax += wPattern
-
-// Per-side totals: shared components + side-specific regime and HTF stack
-float baseScoreBuy  = baseScore + regPtsBuy  + (useStack ? wStack * stackPtsBuy  / 3.0 : 0.0)
-float baseScoreSell = baseScore + regPtsSell + (useStack ? wStack * stackPtsSell / 3.0 : 0.0)
+// Signal-side HTF trend (last closed HTF bar vs its EMA)
+htfDir = f_tfDir(trendTF, emaLen)
 
 //==================== Retest Signals ====================//
 
 var bool buySig = false
 var bool sellSig = false
-var float buyNorm = na
-var float sellNorm = na
 
 buySig := false
 sellSig := false
@@ -1264,37 +1163,17 @@ if array.size(boxes) > 0
             // being retested — the pattern bar always lies inside it.
             patternBarItself = array.get(zPatternBar, i) == bar_index
             inside = high >= bot_ and low <= top_ and not patternBarItself
-            trendCheckBuy = signalRequireTrend ? trendUp : true
-            trendCheckSell = signalRequireTrend ? trendDn : true
+            trendCheckBuy = signalRequireHTF ? htfDir > 0 : true
+            trendCheckSell = signalRequireHTF ? htfDir < 0 : true
             if inside and (not wasRet or not retestOnceOnly) and not hardBlocked and softGate and (inSession or not signalOnlyInSess)
                 // Buy signal (demand zone)
-                if not isSup and trendCheckBuy and (not useStruct or (low > lowestLow5Prev))
-                    stPtsBuy = useST ? ((stScope == "Local" ? stDirLocal > 0 : stScope == "HTF" ? stDirHTF > 0 : (stDirLocal > 0 and stDirHTF > 0)) ? wSupertrend : 0) : 0
-                    mostPtsBuy = useMOST ? ((mostScope == "Local" ? mostDirLocal > 0 : mostScope == "HTF" ? mostDirHTF > 0 : (mostDirLocal > 0 and mostDirHTF > 0)) ? wMOST : 0) : 0
-                    sideAdd = (useStruct ? wStruct : 0) + (useZoneThin ? zoneThinPts(top_, bot_) : 0) + stPtsBuy + mostPtsBuy
-                    sc = baseScoreBuy + sideAdd
-                    scMax = baseMax
-                    norm = scMax > 0 ? 10.0 * sc / scMax : na
-                    if sc >= minScoreBuy
-                        buySig := true
-                        buyNorm := norm
-                        array.set(zRetested, i, true)
+                if not isSup and trendCheckBuy and low > lowestLow5Prev
+                    buySig := true
+                    array.set(zRetested, i, true)
                 // Sell signal (supply zone)
-                if isSup and trendCheckSell and (not useStruct or (high < highestHigh5Prev))
-                    stPtsSell = useST ? ((stScope == "Local" ? stDirLocal < 0 : stScope == "HTF" ? stDirHTF < 0 : (stDirLocal < 0 and stDirHTF < 0)) ? wSupertrend : 0) : 0
-                    mostPtsSell = useMOST ? ((mostScope == "Local" ? mostDirLocal < 0 : mostScope == "HTF" ? mostDirHTF < 0 : (mostDirLocal < 0 and mostDirHTF < 0)) ? wMOST : 0) : 0
-                    sideAdd = (useStruct ? wStruct : 0) + (useZoneThin ? zoneThinPts(top_, bot_) : 0) + stPtsSell + mostPtsSell
-                    sc = baseScoreSell + sideAdd
-                    scMax = baseMax
-                    norm = scMax > 0 ? 10.0 * sc / scMax : na
-                    if sc >= minScoreSell
-                        sellSig := true
-                        sellNorm := norm
-                        array.set(zRetested, i, true)
-
-// Binary filters
-bool binBuyFilter = (baseScoreBuy >= minScoreBuy)
-bool binSellFilter = (baseScoreSell >= minScoreSell)
+                if isSup and trendCheckSell and high < highestHigh5Prev
+                    sellSig := true
+                    array.set(zRetested, i, true)
 
 
 // ============================================================================
@@ -1306,15 +1185,9 @@ bool binSellFilter = (baseScoreSell >= minScoreSell)
 
 //==================== Pattern Labels ====================//
 
-// Pattern label colors based on score strength
+// Pattern label colors by direction
 getPatternColor(isBullish) =>
-    score = isBullish ? baseScoreBuy : baseScoreSell
-    isStrong = not na(score) and score >= labelStrongTh
-    isMid = not na(score) and score >= labelMidTh
-    if isBullish
-        isStrong ? color.new(#006400, 0) : isMid ? color.new(#228B22, 0) : color.new(#32CD32, 0)
-    else
-        isStrong ? color.new(color.red, 0) : isMid ? color.new(color.red, 30) : color.new(color.red, 60)
+    isBullish ? color.new(#228B22, 0) : color.new(color.red, 30)
 
 // Pattern labels only when no zone was created (plotshape for simple positioning)
 plotshape(tTop and not tTopZoneCreated, title="Tweezer Top (no zone)", style=shape.labeldown, text="T", location=location.abovebar, color=getPatternColor(false), textcolor=color.white, size=size.tiny)
@@ -1330,11 +1203,7 @@ plot(sellSig ? 1 : 0, title="sellSignal", display=display.none)
 plot(trendUp ? 1 : 0, title="regimeUp", display=display.none)
 plot(trendDn ? 1 : 0, title="regimeDown", display=display.none)
 plot(chop, title="choppiness", display=display.none)
-plot(math.max(baseScoreBuy, baseScoreSell), title="confluenceScoreRaw", display=display.none)
-plot(buyNorm, title="buyScoreNorm0_10", display=display.none)
-plot(sellNorm, title="sellScoreNorm0_10", display=display.none)
-plot(binBuyFilter ? 1 : 0, title="binaryBuyFilter", display=display.none)
-plot(binSellFilter ? 1 : 0, title="binarySellFilter", display=display.none)
+plot(htfDir, title="htfDirection", display=display.none)
 
 //==================== Zone Score Helper ====================//
 
@@ -1376,7 +1245,7 @@ color hd = color.new(color.gray, 90)   // header row background
 
 var table stack = na
 if useHTFPanel and na(stack)
-    stack := table.new(position.top_right, 2, 14,
+    stack := table.new(position.top_right, 2, 9,
          bgcolor=color.new(color.white, 5),
          border_color=color.new(color.gray, 60),
          border_width=1,
@@ -1396,13 +1265,9 @@ if useHTFPanel and barstate.islast
     table.cell(stack, 1, 1, str.format("CHOP: {0,number,#0.0} (soft/hard {1}/{2})", chop, effChopSoft, effChopHard), text_color=tc, text_size=size.small)
     table.cell(stack, 1, 2, str.format("ATR%: {0,number,#0.2}%", atrPct * 100), text_color=tc, text_size=size.small)
     table.cell(stack, 1, 3, str.format("Sess: {0}", inSession ? (useRTH ? "RTH" : "ETH") : "OFF"), text_color=inSession ? #00c853 : #d50000, text_size=size.small)
-    table.cell(stack, 1, 4, str.format("RV≥ {0,number,#0.00}×  Thin<{1,number,#0.00}×ATR", effRvSpike, effZoneThinATR), text_color=tc, text_size=size.small)
-    table.cell(stack, 1, 5, str.format("Raw: B{0,number,#0.00} / S{1,number,#0.00}", baseScoreBuy, baseScoreSell), text_color=tc, text_size=size.small)
-    table.cell(stack, 1, 6, str.format("BUY N: {0}", na(buyNorm) ? "—" : str.format("{0,number,#0.0}", buyNorm)), text_color=tc, text_size=size.small)
-    table.cell(stack, 1, 7, str.format("SELL N: {0}", na(sellNorm) ? "—" : str.format("{0,number,#0.0}", sellNorm)), text_color=tc, text_size=size.small)
-    table.cell(stack, 1, 8, str.format("Gate: EMA={0} ST={1} MOST={2}", gateUseEMA ? "✔" : "✖", gateUseST ? "✔" : "✖", gateUseMOST ? "✔" : "✖"), text_color=tc, text_size=size.small)
-    table.cell(stack, 1, 9, str.format("Min: B{0} / S{1}", minScoreBuy, minScoreSell), text_color=tc, text_size=size.small)
-    table.cell(stack, 1, 10, str.format("Filters: B={0} S={1}", binBuyFilter ? "ON" : "OFF", binSellFilter ? "ON" : "OFF"), text_color=(binBuyFilter or binSellFilter) ? #00c853 : #d50000, text_size=size.small)
+    table.cell(stack, 1, 4, str.format("Gate: EMA={0} ST={1} MOST={2}", gateUseEMA ? "✔" : "✖", gateUseST ? "✔" : "✖", gateUseMOST ? "✔" : "✖"), text_color=tc, text_size=size.small)
+    table.cell(stack, 0, 5, "Signal HTF", text_color=tc, text_size=size.small)
+    table.cell(stack, 1, 5, signalRequireHTF ? str.format("{0}: {1}", trendTF, htfDir > 0 ? "BUY side" : htfDir < 0 ? "SELL side" : "—") : "OFF", text_color=tc, text_size=size.small)
     // Zone Scores
     if useZoneScore
         topScores = f_get_top_scores()
@@ -1411,12 +1276,12 @@ if useHTFPanel and barstate.islast
             for i = 0 to array.size(boxes) - 1
                 if array.get(zActive, i)
                     activeCount += 1
-        table.cell(stack, 0, 11, "Zone Scores", text_color=tc, text_size=size.small, bgcolor=hd)
-        table.cell(stack, 1, 11, str.format("Active: {0} | TopN: {1}", activeCount, zoneScoreTopN), text_color=tc, text_size=size.small)
-        table.cell(stack, 0, 12, str.format("Top 3: {0,number,#0.0}", array.get(topScores, 0)), text_color=#ff6f00, text_size=size.small)
-        table.cell(stack, 1, 12, str.format("{0,number,#0.0} | {1,number,#0.0}", array.get(topScores, 1), array.get(topScores, 2)), text_color=tc, text_size=size.small)
-        table.cell(stack, 0, 13, str.format("MinScore: {0,number,#0.0}", zoneScoreMin), text_color=tc, text_size=size.small)
-        table.cell(stack, 1, 13, str.format("Decay: {0} bars", zoneHalfLife), text_color=tc, text_size=size.small)
+        table.cell(stack, 0, 6, "Zone Scores", text_color=tc, text_size=size.small, bgcolor=hd)
+        table.cell(stack, 1, 6, str.format("Active: {0} | TopN: {1}", activeCount, zoneScoreTopN), text_color=tc, text_size=size.small)
+        table.cell(stack, 0, 7, str.format("Top 3: {0,number,#0.0}", array.get(topScores, 0)), text_color=#ff6f00, text_size=size.small)
+        table.cell(stack, 1, 7, str.format("{0,number,#0.0} | {1,number,#0.0}", array.get(topScores, 1), array.get(topScores, 2)), text_color=tc, text_size=size.small)
+        table.cell(stack, 0, 8, str.format("MinScore: {0,number,#0.0}", zoneScoreMin), text_color=tc, text_size=size.small)
+        table.cell(stack, 1, 8, str.format("Decay: {0} bars", zoneHalfLife), text_color=tc, text_size=size.small)
 
 
 

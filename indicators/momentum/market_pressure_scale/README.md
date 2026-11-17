@@ -32,7 +32,7 @@ A chop filter (ADX < 16 and DI+/DI− within 5 of each other while price sits in
 
 ## Move Strength
 
-Blue columns (Show Columns toggle, default on), plotted behind Setup/Impulse Pressure rather than as a full-pane background so they add information without washing out the two curves. Tracks the expected magnitude of the eventual move — not whether a setup exists, but how forceful the release is likely to be once it fires. Built from compression depth (energy stored), range-edge proximity (location), and ADX (trend confirmation), and suppressed to a third of its value while the Range Chop Filter is active. Colored in 5 opacity bands (near-invisible → faint → medium → strong → near-solid blue) rather than a continuous gradient, so consecutive bars read as a clear step change instead of a near-uniform tint. Also shown as a numeric 0–100 row in the dashboard table with the same banded cell color.
+Blue columns (Show Columns toggle, default on), plotted behind Setup/Impulse Pressure rather than as a full-pane background so they add information without washing out the two curves. A composite of compression depth, range-edge proximity, and ADX, damped to a third of its value while the Range Chop Filter is active. Colored in 5 opacity bands (near-invisible → faint → medium → strong → near-solid blue) rather than a continuous gradient, so consecutive bars read as a clear step change instead of a near-uniform tint. Also shown as a numeric 0–100 row in the dashboard table with the same banded cell color.
 
 ## Signal markers
 
@@ -42,18 +42,17 @@ Small labels in the oscillator panel with hover tooltips. Each marker is individ
 |---|---|---|
 | `FC` red | Setup drops below 52 without Impulse ever reaching 45, AND price falls back toward the middle of the range (25–75 %) | Failed Coil — breakout stalled, range continues |
 | `NI` red | Impulse > 70, Setup drops below 40, AND ADX < 25 | Naked Impulse — move without structural backing or trend confirmation |
-| `◆` green / red | Reversal score crosses 60 at a range extreme, confirmed by the trigger candle's close | Reversal — Impulse fading from its own recent high + rejection wick, weighted by Setup compression |
+| `◆` green / red | At a range extreme: Impulse exhaustion ≥ minimum AND a rejection candle | Reversal — Impulse faded from its own recent high + rejection candle against the extreme |
 
 ### Reversal
 
-A DMI-free counter-trend signal, built from the four-stage reversal pipeline (regime veto → exhaustion → confirmation → quality):
+A DMI-free counter-trend signal, built as regime veto → exhaustion → confirmation, all as plain conditions (no score):
 
 - **Regime veto** — only active at a genuine range extreme and outside chop (`reversalActive = validSetupZone and not chopMarket`)
-- **Exhaustion** — how far Impulse Pressure has faded from its own 10-bar high (only counts if that high was itself above 50)
-- **Confirmation** — a rejection wick against the extreme, sized relative to the bar's range, AND the trigger candle itself must close in the reversal's direction (a big wick that closes back toward the extreme doesn't count)
-- **Quality** — Setup Pressure (compression) reused as-is
+- **Exhaustion** — Impulse Pressure has faded from its own 10-bar high (only counted if that high was above 50) by at least `Reversal: Min Exhaustion` (default 25)
+- **Confirmation** — a rejection candle: wick against the extreme of at least `Reversal: Min Rejection Wick %` of the bar range (default 30), AND the candle closes in the reversal's direction in the outer 40 % of its range (a big wick that closes back toward the extreme doesn't count)
 
-The three scored components combine into one score per direction (`exhaustionScore × 0.45 + wickRatio × 0.30 + setupPressure × 0.25`), and the signal fires when that score crosses 60 on the correct side of the range with a confirming candle close (long only near the range low, short only near the range high). It never touches DMI, so it isn't exposed to the lag a DMI-based directional read would have at actual turning points.
+The signal fires on the first bar where all conditions hold on the correct side of the range (long only near the range low, short only near the range high). It never touches DMI, so it isn't exposed to the lag a DMI-based directional read would have at actual turning points.
 
 ## Dashboard table
 
@@ -81,4 +80,4 @@ Top-right panel (Show Table toggle, default off):
 
 **Move Strength** — Show Columns toggle (default on)
 
-**Debug** — "Log Reversal Context" toggle (default off): writes the full Reversal calculation (range position, chop state, Setup/Impulse, exhaustion, both wick ratios, both direction scores) to Pine Logs on every confirmed bar at a range extreme, so a specific historical bar can be inspected for why a Reversal signal did or didn't fire
+**Debug** — "Log Reversal Context" toggle (default off): writes the full Reversal calculation (range position, chop state, Setup/Impulse, exhaustion, both wick ratios) to Pine Logs on every confirmed bar at a range extreme, so a specific historical bar can be inspected for why a Reversal signal did or didn't fire

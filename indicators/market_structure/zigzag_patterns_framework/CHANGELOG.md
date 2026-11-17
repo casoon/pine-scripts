@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.0 — 2026-11-17
+- Removed (1-2-3): the "Q" quality number on the break label (points for retracement, Point-3 failure and break strength) — the label reads "1-2-3 Long" / "1-2-3 Short"
+- 1-2-3: new inputs "1-2-3 min retrace" / "1-2-3 max retrace" (defaults 0.382 / 0.886, same as before); the 1-2-3 setup no longer shares the ABC retrace inputs
+
 ## v1.2.1 — 2026-11-17
 - Fix (1-2-3): when a more extreme pivot replaces Point 3 and moves it beyond Point 1, the pending setup is dropped instead of staying armed
 - 1-2-3: new input "1-2-3 Max Wait for Break" (default 50 bars) — a setup that has not broken Point 2 within that window expires instead of firing a late trigger

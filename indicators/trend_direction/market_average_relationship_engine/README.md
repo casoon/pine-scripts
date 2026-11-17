@@ -1,6 +1,6 @@
 # Market–Average Relationship Engine
 
-Evaluates the relationship between price and one consistently selected moving-average family — the MA is treated as a market reference, not as a standalone crossover signal. Six diagnostic dimensions (Trend, Respect, Extension, Compression, Acceleration, Exhaustion) feed a bounded relationship oscillator and a set of confirmed events (pullback, momentum release, do-not-chase, exhaustion, relationship break, divergence, turn from extreme).
+Evaluates the relationship between price and one consistently selected moving-average family — the MA is treated as a market reference, not as a standalone crossover signal. Six diagnostic dimensions (Trend, Respect, Extension, Compression, Acceleration, Exhaustion) feed a bounded relationship oscillator and a set of confirmed events (pullback, momentum release, do-not-chase, exhaustion, relationship break, turn from extreme) plus divergence markers.
 
 ## Features
 
@@ -9,7 +9,7 @@ Evaluates the relationship between price and one consistently selected moving-av
 - Relationship oscillator (−100..+100): signed Trend quality reduced by an Extension/Exhaustion quality penalty — extension and exhaustion degrade relationship quality but do not flip its sign
 - Twelve-state classification: MA Compression, Healthy/Developing Bullish/Bearish, Bullish/Bearish Acceleration, Bullish/Bearish Do Not Chase, Bullish/Bearish Exhaustion Risk, Neutral/Unstructured
 - Confirmed event engine: Pullback (PB — trend + respect (with at least `Minimum respect samples` evaluated touches) + prior extension in the trend's direction + reaction candle + bounded exhaustion), Momentum Release (M — compression release with slope/acceleration/efficiency agreement), Do Not Chase (! — extension crosses the risk threshold, not a reversal signal), Relationship Broken (BR — sustained opposite-side acceptance + fading MA slope, not a single MA cross), per-family signal cooldown (counted from the last fired event of that family)
-- Divergence (D): regular bullish/bearish divergence between confirmed price pivots and the relationship oscillator at the matching prior pivot (price lower low vs. relationship higher low, or the mirror on highs) — an informational event, never a gate on the events above
+- Divergence (D): regular bullish/bearish divergence between confirmed price pivots and the relationship oscillator at the matching prior pivot (price lower low vs. relationship higher low, or the mirror on highs) — a marker only (no alert), never a gate on the events above
 - Turn From Extreme (T): fires when the relationship line has recently touched a deep low/high and is now confirmed rising/falling off it, pivot-free — reads as a new trend starting or an existing extended trend recognizably losing steam, depending on what preceded it
 - Optional MA line and event markers on the price chart (`force_overlay`) alongside the oscillator pane, all at `size.tiny`
 - Hover tooltips on every event marker with the full six-score readout, ATR distance, MA slope, and Respect sample count/hit rate; the tooltip carrier itself is fully transparent so it never draws a second, larger shape on top of the visible marker; all diagnostics additionally routed to the Data Window

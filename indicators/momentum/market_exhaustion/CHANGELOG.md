@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.0 — 2026-11-17
+- **Breaking:** divergence score removed. Divergences stay as display markers (line, "Bull Div"/"Bear Div" mid label, pivot marker) and are no longer rewritten after the pivot; the tooltip shows sequence count, ΔMFI and bar span instead of a score and a post-pivot "React" reading. All divergence lines have the same width
+- **Breaking:** removed inputs "Show score instead of text", "Strong score threshold", "Score scale", "Reaction window (bars)", "Reaction threshold (ATR frac)" and "Bias bonus (needs HTF bias)"; "Show mid score label" is now "Show mid label". Long/short signals and alerts are unchanged
+
 ## v1.2.3 — 2026-11-17
 - Fix: the HTF MFI line, bias label and HTF filter read the last closed higher-timeframe bar, so they no longer change while the higher-timeframe bar is still forming
 - Header text corrected: without real volume the long/short signals stay empty in every oscillator mode (they are built on MFI); only the CCI-mode divergences keep working

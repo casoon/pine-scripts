@@ -9,8 +9,8 @@ It is the exhaustion-aware sibling of [`anchored_vwap`](../anchored_vwap/): wher
 - MIDAS curve anchored at a **manual time**, **daily open**, or **auto swing** (last / low / high), re-seeded from the real pivot bar, not the lagging confirmation bar
 - **Volume-weighted σ bands**, **ATR bands**, or **Hybrid** (average of the two) at two configurable multiples, shown as quiet value/stretch zones or classic lines
 - **Topfinder / bottomfinder** accelerated curve with maturity-filtered, candidate-confirmed closed-form fits — live-honest **From Fit** history by default
-- **Qualified exhaustion read** (`no fit / developing / mature / late / passed`) from cumulative-volume progress `d/D`, followed by a separate 3-part price-reaction check
-- Bias-independent **stretched-from-value** and **reclaim-after-stretch** context markers, classified as trend-aligned or counter-bias; persistent markers are bar-close confirmed by default
+- **Qualified exhaustion read** (`no fit / developing / mature / late / passed`) from cumulative-volume progress `d/D`, followed by a separate price-reaction check (return through the inner band)
+- Bias-independent **stretched-from-value** and **reclaim-after-stretch** context markers, classified as trend-aligned or counter-bias, plus a **reclaim invalidation** event (close back through the inner band); persistent markers are bar-close confirmed by default
 - **Backpainted / Confirmed** anchor display mode — trade off a clean historical look against a live-honest anchor
 - Manual Time remains inactive before the selected timestamp; if it predates loaded history, the first available bar becomes the visible start
 - Episode-wide **volume quality** with an explicit **Per-bar fallback / Equal weight** policy instead of a current-bar-only status
@@ -24,8 +24,8 @@ It is the exhaustion-aware sibling of [`anchored_vwap`](../anchored_vwap/): wher
 
 **Data Contract verdict: `Exchange-only`.** The MIDAS curve is a cumulative *volume*-weighted
 average price — volume is not an add-on filter here, it is the weighting term in the curve's
-own formula, and the same applies to the topfinder/bottomfinder fit and the Reclaim Quality
-Score's volume component. On an instrument without real trade volume there is no valid MIDAS
+own formula, and the same applies to the topfinder/bottomfinder fit and the volume readout in
+the reclaim tooltip. On an instrument without real trade volume there is no valid MIDAS
 curve to compute; a script that produced one anyway would just be publishing a mislabeled
 close-price average.
 
@@ -58,7 +58,7 @@ choice.
 | **Location** | normalized distance from the MIDAS curve (σ / ATR / hybrid deviation), band zone |
 | **Exhaustion (Momentum)** | topfinder/bottomfinder `d/D` phase + fit stability |
 | **Trend** | price side + MIDAS slope in the live read; bias colours markers and picks top vs bottom only |
-| **Trigger / Setup** | stretched-from-value, MIDAS reclaim, and `EXH n/3` price-reaction markers (context, not entries) |
+| **Trigger / Setup** | stretched-from-value, MIDAS reclaim + invalidation, and `EXH` price-reaction markers (context, not entries) |
 | **Quality / Debug** | dashboard + `log.info` events |
 
 The bias is **not** a hard gate on the curve or the exhaustion read — it only colours markers and (for Manual/Daily anchors) picks topfinder vs bottomfinder. For Auto modes the TBF direction follows the anchor side: a swing-low anchor fits a **topfinder** (uptrend, fitted to higher lows), a swing-high anchor fits a **bottomfinder** (downtrend, fitted to lower highs). **Auto Last Swing** (default) anchors on whichever significant swing came last and takes its side automatically.
@@ -71,8 +71,9 @@ The bias is **not** a hard gate on the curve or the exhaustion read — it only 
 - **Purple line:** the current topfinder/bottomfinder curve; stronger purple means the fitted move is further advanced. Active mode defaults to **From Fit**, so the curve begins only where the current fit became known; **Retrospective** is explicitly analysis-only
 - **Right-edge live context:** Compact (default), Detailed, or Tooltip-only; the detailed view keeps three explicit state rows (`TREND`, `LOCATION`, `EXHAUSTION`) plus `NEXT`, which names the next observable trigger instead of repeating the state
 - **Amber dot:** a stretch rejection at the outer band; context only
-- **Green/red `R n/4`:** directional MIDAS reclaim after a prior stretch, with annotated quality
-- **Purple `EXH n/3`:** an advanced projection plus at least two separate price-reaction clues; exhaustion risk is confirmed, but this is still not a reversal entry
+- **Green/red `R`:** directional MIDAS reclaim after a prior stretch; the tooltip lists close location, volume vs. average, structure break and TBF phase as raw readouts
+- **Gray `✗`:** reclaim invalidated — close back below the inner lower band (bullish reclaim) or above the inner upper band (bearish reclaim)
+- **Purple `EXH`:** an advanced projection plus a return through the inner band; exhaustion risk is confirmed, but this is still not a reversal entry
 - **Orange `A`:** the active episode's anchor
 
 ## The MIDAS curve
@@ -118,7 +119,7 @@ The live read reports **progress `d/D`** in these phases:
 | `late` | `d/D ≥` warn threshold (default 85 %) — **advanced move, not a confirmed turn** (`LATE` marker) |
 | `passed` | `d/D ≥ 1` — reported as recently passed, beyond fit, or stale depending on overrun and reaction |
 
-Re-fitting on each new same-direction pullback keeps the projection current. Stable small refits retain the current reaction; materially new confirmed fits reset only their own reaction while the episode remembers earlier reactions. The reaction score checks rejection candle, ATR-sized displacement, and return through the inner band. At least 2/3 creates `EXH n/3`. A passed fit without a current-fit reaction becomes **stale** at the configured threshold (default 150%).
+Re-fitting on each new same-direction pullback keeps the projection current. Stable small refits retain the current reaction; materially new confirmed fits reset only their own reaction while the episode remembers earlier reactions. The reaction is the return through the inner band; rejection candle and ATR-sized displacement are shown in the tooltip only. A passed fit without a current-fit reaction becomes **stale** at the configured threshold (default 150%).
 
 ## Dashboard
 
@@ -128,12 +129,12 @@ When enabled, the default **Compact** dashboard mirrors the live context with Tr
 |---|---|---|
 | **Location** | normalized distance in σ / ATR / hybrid deviation (`hdev`) | `at value` / `stretched up·down` / `overextended up·down` |
 | **Band zone** | inside / U1–U2 / above U2 … | `at value` / `stretched` / `extreme` |
-| **Topfinder/Bottomfinder** | phase + `d/D` | fit quality, projection maturity, and whether price has reacted 2/3 |
+| **Topfinder/Bottomfinder** | phase + `d/D` | fit quality, projection maturity, and whether price has reacted |
 | **Trend** | above/below value + slope arrow | `buyers / sellers since launch` |
 | **Anchor** | bars since anchor (+ `drawn Xb back` if Backpainted) | `fresh (thin)` / `established` |
 | **Volume** | percentage of episode bars with reported volume | `volume-weighted` / `mostly volume-weighted` / `mixed fallback` / `equal-weight fallback` |
-| **Reclaim Q** | last reclaim's score, `0–4` + direction | `weak` / `medium` / `high quality` |
-| **Next** | — | next observable condition, e.g. inner-band test/return, TBF `EXH 2/3` reaction, or MIDAS reclaim/loss |
+| **Last reclaim** | direction of the last reclaim | `active` / `invalidated` |
+| **Next** | — | next observable condition, e.g. inner-band test/return, TBF `EXH` reaction, or MIDAS reclaim/loss |
 
 `NEXT` is not a new signal. It translates the current state into the next condition worth observing; no condition means no setup yet.
 
@@ -153,10 +154,10 @@ When enabled, the default **Compact** dashboard mirrors the live context with Tr
 - Auto-anchor modes re-anchor on the most recent **significant** swing (the `Anchor Swing` degree, default 20) — the origin of the current leg. A larger anchor degree keeps the curve on the current move rather than resetting on every minor wiggle (and avoids pinning it to the all-time extreme). The topfinder fits to the *smaller* `Fit Swing` pullbacks within that leg.
 - The running sums are re-seeded from the actual pivot bar (`Anchor Swing Right` back) only in **Backpainted** anchor display mode; the pivot only sets the **anchor origin** — it is not a trigger, grade gate, or dedup key (design skill §8). In **Confirmed** mode the curve instead starts flat at the bar the pivot is actually confirmed, so the anchor is never drawn earlier than it was live-knowable — at the cost of a less clean historical look.
 - **Volume missing/zero on an occasional bar of an otherwise valid exchange feed** (`na` or `≤ 0`) uses weight `1.0` only on the affected bar in the default **Per-bar fallback** mode. The hover and detailed dashboard report availability across the complete anchor episode and name mixed weighting explicitly. **Equal weight** deliberately uses weight `1.0` for every bar when reported volume is not meaningful. Neither mode is a substitute for real volume at the instrument level — see [Instrumente](#instrumente): when `syminfo.volumetype` itself is `tick`/`n/a` (CFDs, Forex, most indices), the whole curve is forced to `na` instead of falling back to either weighting mode.
-- **Reclaim Quality Score** (0–4): counts close location within the full candle range, volume, structure break, and only a direction-coherent TBF bonus (Bottomfinder for bullish reclaim, Topfinder for bearish reclaim). The prior stretch is not scored — every reclaim requires it. EMA bias classifies the reclaim but no longer blocks it.
+- **Reclaim tooltip readouts:** close location within the full candle range, volume vs. its average, structure break over the lookback, and the TBF phase — raw values, no score and no gate. EMA bias classifies the reclaim but does not block it. A close back through the inner band against the reclaim invalidates it (marker + alert).
 - **Auto EMA bias** only flips once price has closed on the new side of the EMA for `Auto EMA: min hold bars` consecutive bars (default 3), which reduces marker whipsaw in choppy phases; set it to 1 to restore the old immediate-flip behaviour.
 - MIDAS, bands, and TBF use a one-bar visual break at each re-anchor so independent launch episodes are never joined by a misleading diagonal connector.
 - **Active** mode retains a consistent 2,500 bars for MIDAS, zones, and canonical TBF statistics. The bounded active episode is redrawn on the last bar so Pine's realtime rollback cannot reduce it to a one-bar fragment. Previous clouds and marker IDs are bounded; at most 300 active marker labels are retained. **Full** restores every historical episode and `LATE`/`END` events.
 - The topfinder is hidden when no valid forward fit exists (`no fit` in the dashboard). This is **expected** in range-bound or non-accelerating markets: the topfinder/bottomfinder only projects *accelerated* (parabolic) legs, so it typically fits on higher timeframes / strong trends and correctly stays `no fit` in intraday ranges (verified on NatGas — daily legs fit and the exhaustion warnings land near the major 2021/2022/2025 tops, while 1h/15m ranges show `no fit`). Turn on **Debug log** to see why a fit was rejected (`D<=d` = projected end already passed / no acceleration).
 - **MIDAS (orange) crossing the TBF (purple) is not a signal.** They are different objects — a cumulative-VWAP level vs an accelerated projection — and they coincide at the launch by construction. What carries meaning is the *gap* between them: a TBF pulling far from MIDAS = strong acceleration (the move is outrunning its fair value); the two staying close = little acceleration. A literal crossover is just the projection passing through the level, not a turn.
-- Context markers remain deliberately secondary: stretch uses a small amber dot, directional reclaim labels use `R n/4`, and the rarer purple `EXH n/3` appears only after an advanced TBF phase and a qualifying price reaction. Persistent marker creation defaults to confirmed bars; alerts keep their separate bar-close setting.
+- Context markers remain deliberately secondary: stretch uses a small amber dot, directional reclaim labels use `R`, and the rarer purple `EXH` appears only after an advanced TBF phase and a return through the inner band. Persistent marker creation defaults to confirmed bars; alerts keep their separate bar-close setting.

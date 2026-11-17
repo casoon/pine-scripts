@@ -15,8 +15,7 @@ ROC Advanced ports the CCI Advanced context view onto a classic percentage Rate 
 - **Trend context line:** a slow ROC plotted faint behind the fast line; a cross against its side of zero is marked counter-trend
 - **Divergence wedge:** fills the area between fast ROC and the trend context only when they move in opposite directions
 - **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far ROC sits inside its own stretch zone, plus a mini bar
-- **Signal Quality:** optional 0-100 score next to each Bull/Bear Stretch marker — stretch-zone depth (50%) + context agreement (25%) + stall-free (25%)
-- **Alert conditions:** bull/bear cross from stretch zone; zero-cross up/down
+- **Alert conditions:** bull/bear cross from stretch zone ("Bull/Bear Signal", while the zone filter is on) or from any zone ("Bull/Bear Cross (any zone)", while it is off); zero-cross up/down
 
 ## Scale
 

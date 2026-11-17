@@ -1,7 +1,7 @@
 //@version=6
 // ============================================================================
 // Bayesian Trend Factor [WavesUnchained]
-// Version: 1.8.1
+// Version: 1.9.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
@@ -11,14 +11,14 @@
 // Evidence blocks:
 //   1. Direction     = linear-regression slope normalized by ATR
 //   2. Strength      = ADX + Efficiency Ratio + Regression R2
-//   3. Structure     = swing-based HH/HL or LL/LH structure
-//   4. Volatility    = ATR percentile with optimal regime zone
-//   5. Exhaustion    = overextension, acceleration, wick rejection
+//   3. Volatility    = ATR percentile with optimal regime zone
+//   4. Exhaustion    = overextension, acceleration, wick rejection
 //
 // Optional Pullback / Continuation module:
 //   - BTF trend + confidence define the allowed direction.
 //   - Pullback starts on a controlled move back to the EMA/Fair Path zone.
-//   - Continuation fires on reclaim, micro-BOS or rejection while structure holds.
+//   - Continuation fires on reclaim, micro-BOS or rejection while price holds the last
+//     confirmed swing low/high (pivot level only, not part of the factor).
 //
 // Optional Trend Candles module:
 //   - HAMA-style smoothed overlay candles.
@@ -37,12 +37,11 @@ lenReg    = input.int(34, "Regression Length", minval=10, group=groupCore)
 lenAtr    = input.int(14, "ATR Length", minval=5, group=groupCore)
 lenAdx    = input.int(14, "ADX Length", minval=5, group=groupCore)
 lenER     = input.int(20, "Efficiency Length", minval=5, group=groupCore)
-pivotLen  = input.int(4, "Structure Pivot Length", minval=2, maxval=20, group=groupCore)
+pivotLen  = input.int(4, "Swing Level Pivot Length", minval=2, maxval=20, group=groupCore, tooltip="Pivot length for the last confirmed swing low/high that a pullback must hold. Not part of the Trend Factor.")
 
 groupWeights = "Evidence Weights"
 wDirection   = input.float(1.25, "Direction Weight", minval=0.0, step=0.05, group=groupWeights)
 wStrength    = input.float(1.10, "Strength Weight", minval=0.0, step=0.05, group=groupWeights)
-wStructure   = input.float(1.30, "Structure Weight", minval=0.0, step=0.05, group=groupWeights)
 wVolatility  = input.float(0.85, "Volatility Quality Weight", minval=0.0, maxval=1.0, step=0.05, group=groupWeights)
 wExhaustion  = input.float(1.00, "Exhaustion Penalty Weight", minval=0.0, step=0.05, group=groupWeights)
 
@@ -62,21 +61,16 @@ strongThreshold = input.float(80.0, "Strong Trend Threshold", minval=50, maxval=
 confThreshold   = input.float(60.0, "Minimum Confidence", minval=0, maxval=100, group=groupThresholds)
 factorSmoothLen = input.int(2, "Factor Smoothing", minval=1, maxval=10, group=groupThresholds)
 strengthDirGate = input.float(0.15, "Min Direction For Strength Evidence", minval=0.0, maxval=1.0, step=0.01, group=groupThresholds)
-structureFreshBars = input.int(50, "Structure Freshness Bars", minval=10, maxval=300, group=groupThresholds)
 
 groupPullback = "Pullback / Continuation"
 enablePullback = input.bool(true, "Enable Pullback Signals", group=groupPullback)
 pbEmaLen       = input.int(13, "Pullback EMA Length", minval=3, group=groupPullback)
-pbRsiLen       = input.int(14, "Pullback RSI Length", minval=3, group=groupPullback)
 pbMinBars      = input.int(2, "Min Pullback Bars", minval=0, maxval=20, group=groupPullback)
 pbTimeout      = input.int(30, "Pullback Timeout", minval=5, maxval=100, group=groupPullback)
 pbCooldown     = input.int(5, "Continuation Cooldown", minval=0, maxval=50, group=groupPullback)
 pbImpulseLookback = input.int(20, "Impulse Reference Lookback", minval=5, maxval=100, group=groupPullback)
 pbMinDepthAtr  = input.float(0.25, "Min Pullback Depth (ATR)", minval=0.0, step=0.05, group=groupPullback)
 pbMaxDepthAtr  = input.float(1.75, "Max Pullback Depth (ATR)", minval=0.25, step=0.05, group=groupPullback)
-pbMinScore     = input.float(6.5, "Min Continuation Score", minval=1.0, maxval=10.0, step=0.5, group=groupPullback)
-pbRsiBullFloor = input.float(42.0, "Bull Pullback RSI Floor", minval=20.0, maxval=55.0, step=1.0, group=groupPullback)
-pbRsiBearCeil  = input.float(58.0, "Bear Pullback RSI Ceiling", minval=45.0, maxval=80.0, step=1.0, group=groupPullback)
 pbWickMin      = input.float(0.35, "Rejection Wick Ratio", minval=0.10, maxval=0.80, step=0.05, group=groupPullback)
 pbConfirmClose = input.bool(true, "Confirm Signals On Bar Close", group=groupPullback)
 showPbSignals  = input.bool(true, "Show Pullback / Continuation Marks", group=groupPullback)
@@ -193,48 +187,23 @@ strengthScore = (adxScore * 0.40) + (erScore * 0.35) + (r2Score * 0.25)
 strengthEvidence = dirAbs >= strengthDirGate ? strengthScore * math.sign(directionEvidence) : 0.0
 
 // ============================================================================
-// 3. Structure Evidence: Swing HH/HL or LL/LH
+// Swing Levels (pullback hold level only — not part of the Trend Factor)
 // ============================================================================
 
 ph = ta.pivothigh(high, pivotLen, pivotLen)
 pl = ta.pivotlow(low, pivotLen, pivotLen)
 
 var float lastHigh = na
-var float prevHigh = na
 var float lastLow  = na
-var float prevLow  = na
-var int lastStructureBar = na
 
 if not na(ph)
-    prevHigh := lastHigh
     lastHigh := ph
-    lastStructureBar := bar_index - pivotLen
 
 if not na(pl)
-    prevLow := lastLow
     lastLow := pl
-    lastStructureBar := bar_index - pivotLen
-
-hh = not na(lastHigh) and not na(prevHigh) and lastHigh > prevHigh
-lh = not na(lastHigh) and not na(prevHigh) and lastHigh < prevHigh
-hl = not na(lastLow) and not na(prevLow) and lastLow > prevLow
-ll = not na(lastLow) and not na(prevLow) and lastLow < prevLow
-
-bullStructure = (hh ? 0.5 : 0.0) + (hl ? 0.5 : 0.0)
-bearStructure = (ll ? 0.5 : 0.0) + (lh ? 0.5 : 0.0)
-structureAge = bar_index - nz(lastStructureBar, bar_index)
-structureFreshness = f_clamp(1.0 - structureAge / structureFreshBars, 0.25, 1.0)
-structureEvidence = (bullStructure - bearStructure) * structureFreshness
-
-// Extra live structure pressure:
-aboveLastLow  = not na(lastLow) and close > lastLow
-belowLastHigh = not na(lastHigh) and close < lastHigh
-structureEvidence += directionEvidence > 0 and aboveLastLow ? 0.15 : 0.0
-structureEvidence -= directionEvidence < 0 and belowLastHigh ? 0.15 : 0.0
-structureEvidence := f_clamp(structureEvidence, -1.0, 1.0)
 
 // ============================================================================
-// 4. Volatility Regime Evidence: ATR Percentile Zone
+// 3. Volatility Regime Evidence: ATR Percentile Zone
 // ============================================================================
 
 atrRankLen = 100
@@ -257,7 +226,7 @@ volatilityWeight = f_clamp(wVolatility, 0.0, 1.0)
 qualityMultiplier = (1.0 - volatilityWeight) + volatilityWeight * (0.65 + volOptimal * 0.35)
 
 // ============================================================================
-// 5. Exhaustion Evidence: Overextension / Acceleration / Wick Rejection
+// 4. Exhaustion Evidence: Overextension / Acceleration / Wick Rejection
 // ============================================================================
 
 fairPath = regNow
@@ -296,13 +265,11 @@ exhaustionEvidence = -exhaustionScore * math.sign(directionEvidence)
 // Convert evidence from [-1..+1] to an evidence score (0..1); no calibration against outcomes.
 pDirection  = 0.5 + directionEvidence * 0.45
 pStrength   = 0.5 + strengthEvidence * 0.35
-pStructure  = 0.5 + structureEvidence * 0.40
 pExhaustion = 0.5 + exhaustionEvidence * 0.35
 
 logOdds =
      f_logit(pDirection)  * wDirection +
      f_logit(pStrength)   * wStrength +
-     f_logit(pStructure)  * wStructure +
      f_logit(pExhaustion) * wExhaustion
 
 // Correlation / overconfidence brake.
@@ -310,8 +277,7 @@ logOdds =
 evidenceAgreement =
      (math.abs(directionEvidence) +
       math.abs(strengthEvidence) +
-      math.abs(structureEvidence) +
-      math.abs(exhaustionEvidence)) / 4.0
+      math.abs(exhaustionEvidence)) / 3.0
 confidenceBrake = 0.75 + evidenceAgreement * 0.25
 logOddsAdjusted = logOdds * confidenceBrake * qualityMultiplier
 
@@ -319,12 +285,12 @@ bullProb = f_sigmoid(logOddsAdjusted)
 bearProb = 1.0 - bullProb
 trendFactor = (bullProb - bearProb) * 100.0
 
-// Confidence: quality of evidence, not direction.
+// Confidence: quality of evidence, not direction. The positive terms are rescaled by
+// 90/66 so the ceiling stays at 90 after the pivot-structure term (24) was removed.
 confidence =
-     dirAbs * 24.0 +
-     strengthScore * 26.0 +
-     math.abs(structureEvidence) * 24.0 +
-     volOptimal * 16.0 -
+     (dirAbs * 24.0 +
+      strengthScore * 26.0 +
+      volOptimal * 16.0) * (90.0 / 66.0) -
      exhaustionScore * 16.0
 confidence := f_clamp(confidence, 0.0, 100.0)
 
@@ -373,7 +339,6 @@ bullTrendOk = enablePullback and isBull and confOk and bullProbFinal > bearProbF
 bearTrendOk = enablePullback and isBear and confOk and bearProbFinal > bullProbFinal and exhaustionScore < 0.80
 
 pbEma = ta.ema(close, pbEmaLen)
-pbRsi = ta.rsi(close, pbRsiLen)
 pbImpulseHigh = ta.highest(high[1], pbImpulseLookback)
 pbImpulseLow = ta.lowest(low[1], pbImpulseLookback)
 
@@ -444,18 +409,6 @@ bearPbTimeout = inBearPB and pbBarsIn >= pbTimeout
 bullPbTooDeep = inBullPB and bullPbDepthAtr > pbMaxDepthAtr
 bearPbTooDeep = inBearPB and bearPbDepthAtr > pbMaxDepthAtr
 
-pbTrendScore = f_norm01(math.abs(factorFinal), trendThreshold, strongThreshold) * 3.0
-pbDepthScore =
-     pbDepthAtr >= pbMinDepthAtr and pbDepthAtr <= pbMaxDepthAtr ? 2.0 :
-     pbDepthAtr > 0.0 and pbDepthAtr < pbMinDepthAtr ? 1.0 :
-     0.0
-pbStructureScore = (bullPbStructOk or bearPbStructOk) ? 2.0 : 0.0
-pbWeaknessScore =
-     (((inBullPB and pbRsi >= pbRsiBullFloor) or (inBearPB and pbRsi <= pbRsiBearCeil)) ? 1.0 : 0.0) +
-     (exhaustionScore <= 0.60 ? 1.0 : 0.0) +
-     (volOptimal >= 0.35 ? 1.0 : 0.0)
-pbContinuationScore = (inBullPB or inBearPB) ? f_clamp(pbTrendScore + pbDepthScore + pbStructureScore + pbWeaknessScore, 0.0, 10.0) : 0.0
-
 // Mature = old enough AND inside the depth band. Shallow pullbacks stay Armed;
 // pullbacks deeper than Max Pullback Depth are invalidated below.
 bullPbMature = inBullPB and pbBarsIn >= pbMinBars and bullPbDepthAtr >= pbMinDepthAtr and bullPbDepthAtr <= pbMaxDepthAtr
@@ -485,7 +438,6 @@ bullContinuationRaw =
      bullPbStructOk and
      not bullPbTimeout and
      bullContCooldownOk and
-     pbContinuationScore >= pbMinScore and
      (bullReclaim or bullMicroBos or bullPbReject)
 bearContinuationRaw =
      enablePullback and
@@ -493,7 +445,6 @@ bearContinuationRaw =
      bearPbStructOk and
      not bearPbTimeout and
      bearContCooldownOk and
-     pbContinuationScore >= pbMinScore and
      (bearReclaim or bearMicroBos or bearPbReject)
 
 bullContinuation = bullContinuationRaw and not bullContinuationRaw[1] and pbConfirmOk
@@ -612,7 +563,6 @@ plot(bullProbFinal * 100.0, "Bull Evidence Score", display=display.data_window)
 plot(bearProbFinal * 100.0, "Bear Evidence Score", display=display.data_window)
 plot(bullProb * 100.0, "Raw Bull Evidence Score", display=display.data_window)
 plot(bearProb * 100.0, "Raw Bear Evidence Score", display=display.data_window)
-plot(pbContinuationScore, "Continuation Score", display=display.data_window)
 plot(bullPbState, "Bull Pullback State", display=display.data_window)
 plot(bearPbState, "Bear Pullback State", display=display.data_window)
 plot(trendCandleClose, "Smoothed Candle Close", display=display.data_window)
@@ -652,7 +602,6 @@ if showScoreNow
          "Raw bull/bear evidence score: " + str.tostring(math.round(bullProb * 100.0)) + "% / " + str.tostring(math.round(bearProb * 100.0)) + "%\n" +
          "Direction: " + str.tostring(math.round(directionEvidence * 100.0)) + "\n" +
          "Strength: " + str.tostring(math.round(strengthScore * 100.0)) + "\n" +
-         "Structure: " + str.tostring(math.round(structureEvidence * 100.0)) + "\n" +
          "Vol quality: " + str.tostring(math.round(volOptimal * 100.0)) + "%\n" +
          "Quality multiplier: " + str.tostring(math.round(qualityMultiplier * 100.0)) + "%\n" +
          "Exhaustion: " + str.tostring(math.round(exhaustionScore * 100.0)) + "%\n" +
@@ -677,7 +626,7 @@ if showPbSignals and bullPBSetup
          "Factor: " + str.tostring(math.round(factorFinal)) + "\n" +
          "Confidence: " + str.tostring(math.round(confidence)) + "%\n" +
          "Vol quality: " + str.tostring(math.round(volOptimal * 100.0)) + "%\n" +
-         "Structure must hold above the last confirmed swing low.\n" +
+         "Price must hold above the last confirmed swing low.\n" +
          "Continuation still needs reclaim, micro-BOS or rejection confirmation."
     label.new(
          bar_index,
@@ -698,7 +647,7 @@ if showPbSignals and bearPBSetup
          "Factor: " + str.tostring(math.round(factorFinal)) + "\n" +
          "Confidence: " + str.tostring(math.round(confidence)) + "%\n" +
          "Vol quality: " + str.tostring(math.round(volOptimal * 100.0)) + "%\n" +
-         "Structure must hold below the last confirmed swing high.\n" +
+         "Price must hold below the last confirmed swing high.\n" +
          "Continuation still needs reclaim, micro-BOS or rejection confirmation."
     label.new(
          bar_index,
@@ -713,20 +662,20 @@ if showPbSignals and bearPBSetup
 
 if showPbSignals and bullContinuation
     bullContReason = bullReclaim ? "Pullback EMA reclaim" : bullMicroBos ? "One-bar micro-BOS" : bullPbReject ? "Rejection wick from pullback zone" : "Continuation confirmation"
+    bullContTag = bullReclaim ? "RECLAIM" : bullMicroBos ? "BOS" : "REJECT"
     bullContTooltip =
          "Bull continuation trigger\n" +
          "Reason: " + bullContReason + "\n" +
-         "Continuation score: " + str.tostring(math.round(pbContinuationScore)) + " / 10 (min " + str.tostring(pbMinScore) + ")\n" +
          "BTF factor: " + str.tostring(math.round(factorFinal)) + "\n" +
          "Confidence: " + str.tostring(math.round(confidence)) + "%\n" +
          "Pullback depth: " + str.tostring(math.round(pbDepthAtr * 100.0) / 100.0) + " ATR\n" +
-         "Structure: held above last confirmed swing low\n" +
+         "Swing level: held above last confirmed swing low\n" +
          "Exhaustion: " + str.tostring(math.round(exhaustionScore * 100.0)) + "%\n" +
          "Use as continuation context in the active BTF trend, not as a standalone signal."
     label.new(
          bar_index,
          low - atr * 0.70,
-         "CONT " + str.tostring(math.round(pbContinuationScore)),
+         bullContTag,
          style=label.style_label_up,
          textcolor=color.white,
          color=color.new(color.green, 0),
@@ -736,20 +685,20 @@ if showPbSignals and bullContinuation
 
 if showPbSignals and bearContinuation
     bearContReason = bearReclaim ? "Pullback EMA reclaim" : bearMicroBos ? "One-bar micro-BOS" : bearPbReject ? "Rejection wick from pullback zone" : "Continuation confirmation"
+    bearContTag = bearReclaim ? "RECLAIM" : bearMicroBos ? "BOS" : "REJECT"
     bearContTooltip =
          "Bear continuation trigger\n" +
          "Reason: " + bearContReason + "\n" +
-         "Continuation score: " + str.tostring(math.round(pbContinuationScore)) + " / 10 (min " + str.tostring(pbMinScore) + ")\n" +
          "BTF factor: " + str.tostring(math.round(factorFinal)) + "\n" +
          "Confidence: " + str.tostring(math.round(confidence)) + "%\n" +
          "Pullback depth: " + str.tostring(math.round(pbDepthAtr * 100.0) / 100.0) + " ATR\n" +
-         "Structure: held below last confirmed swing high\n" +
+         "Swing level: held below last confirmed swing high\n" +
          "Exhaustion: " + str.tostring(math.round(exhaustionScore * 100.0)) + "%\n" +
          "Use as continuation context in the active BTF trend, not as a standalone signal."
     label.new(
          bar_index,
          high + atr * 0.70,
-         "CONT " + str.tostring(math.round(pbContinuationScore)),
+         bearContTag,
          style=label.style_label_down,
          textcolor=color.white,
          color=color.new(color.red, 0),
@@ -761,7 +710,7 @@ if showPbSignals and bearContinuation
 // Dashboard
 // ============================================================================
 
-var table dash = table.new(position.top_right, 2, 14,
+var table dash = table.new(position.top_right, 2, 12,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -793,22 +742,18 @@ if showDashboard and barstate.islast
     table.cell(dash, 1, 5, str.tostring(math.round(directionEvidence * 100.0)), text_color=tc, text_size=size.small)
     table.cell(dash, 0, 6, "Strength", text_color=tc, text_size=size.small)
     table.cell(dash, 1, 6, str.tostring(math.round(strengthScore * 100.0)), text_color=tc, text_size=size.small)
-    table.cell(dash, 0, 7, "Structure", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 7, str.tostring(math.round(structureEvidence * 100.0)), text_color=tc, text_size=size.small)
-    table.cell(dash, 0, 8, "Exhaustion", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 8, str.tostring(math.round(exhaustionScore * 100.0)), text_color=tc, text_size=size.small)
-    table.cell(dash, 0, 9, "Pullback", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 9, pbState, text_color=tc, text_size=size.small)
-    table.cell(dash, 0, 10, "Cont Score", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 10, str.tostring(math.round(pbContinuationScore)), text_color=tc, text_size=size.small)
-    table.cell(dash, 0, 11, "Vol Quality", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 11, str.tostring(math.round(volOptimal * 100.0)) + "%", text_color=tc, text_size=size.small)
-    table.cell(dash, 0, 12, "Quality Mult", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 12, str.tostring(math.round(qualityMultiplier * 100.0)) + "%", text_color=tc, text_size=size.small)
-    table.cell(dash, 0, 13, "Dir Gate", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 13, dirGateActive ? "active" : "blocked", text_color=dirGateActive ? color.white : tc, bgcolor=dirGateActive ? #00c853 : color.new(color.gray, 80), text_size=size.small)
+    table.cell(dash, 0, 7, "Exhaustion", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(math.round(exhaustionScore * 100.0)), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 8, "Pullback", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 8, pbState, text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 9, "Vol Quality", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 9, str.tostring(math.round(volOptimal * 100.0)) + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 10, "Quality Mult", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 10, str.tostring(math.round(qualityMultiplier * 100.0)) + "%", text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 11, "Dir Gate", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 11, dirGateActive ? "active" : "blocked", text_color=dirGateActive ? color.white : tc, bgcolor=dirGateActive ? #00c853 : color.new(color.gray, 80), text_size=size.small)
 else if not showDashboard and barstate.islast
-    table.clear(dash, 0, 0, 1, 13)
+    table.clear(dash, 0, 0, 1, 11)
 
 // ============================================================================
 // Alerts

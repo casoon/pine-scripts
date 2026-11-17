@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.8.0 — 2026-11-17
+- Reclaim Quality Score (0–4) removed: reclaim labels read `R` instead of `R n/4`; the tooltip shows the raw readouts (close location in the bar range, volume vs. average, structure break, TBF phase). Input `Reclaim: minimum close-location ratio` removed; the dashboard row `Reclaim Q` is now `Last reclaim` (direction, active/invalidated)
+- New reclaim invalidation event: after a bullish reclaim, a close back below the inner lower band ends it (bearish: close back above the inner upper band). Small `✗` marker and two new alerts, "MIDAS bullish reclaim invalidated" / "MIDAS bearish reclaim invalidated"
+- TBF price reaction: the 0–3 reaction score and its 2-of-3 gate are removed. The `EXH` marker and the "TBF price reaction" alert now fire on the return through the inner band while the projection is late/passed; candle shape and ATR displacement are tooltip readouts only. Reactions without a band return no longer count, reactions with a band return alone now do. Labels and live-context texts drop the `n/3` figures
+
 ## v2.7.4 — 2026-11-17
 - Reclaim markers/alerts no longer fire on an anchor bar, where the curve jumps to the new anchor and a "cross" compared against the old episode; a stretch on an anchor bar no longer counts as the prior stretch
 

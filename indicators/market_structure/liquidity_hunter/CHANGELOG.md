@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.6.0 — 2026-11-17
+- Removed: the reclaim event score (touches, wick, close-back, volume, session, micro-BOS and regime points) — the reclaim label is now "R" without a number, its tooltip and the dashboard show no score; dashboard "Last Event" shows the last reclaim and the recent bull/bear reclaim counts
+- Removed: the alerts "Premium Bearish Reclaim" / "Premium Bullish Reclaim" and the input `Max Context Bonus (score pts)`; Regime Context and the session filter are dashboard readouts only
+- Alert messages name the event without a trade direction: "BEARISH RECLAIM", "BULLISH RECLAIM", "BUY-SIDE / SELL-SIDE SWEEP AT WT EXTREME"
+- Dashboard bias counts any reclaim in the event memory (before: only reclaims scoring ≥ 65)
+- Input group "Premium Events" renamed to "Events", "Max Premium Events" to "Max Events Shown"
+
 ## v3.5.3 — 2026-11-17
 - Fix: a level that only becomes eligible when its confirming pivot is detected (several bars after the pivot) no longer fires a late sweep/breakout on that bar if price already ran through it in between — such a level is marked as used up
 - Without real volume the volume component of the event score now counts as neutral (0) instead of scaling the other components up to fill its share

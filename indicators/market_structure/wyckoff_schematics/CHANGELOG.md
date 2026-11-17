@@ -1,5 +1,11 @@
 # Changelog
 
+## v4.11.0 — 2026-11-17
+- Removed: the setup score (points per event, "High Confidence" label) with its dashboard row, the inputs `Min Breakout Score (Markup/Markdown)`, `Show Only Quality Signals` and `Min Setup Score`, and the alerts "High Quality Accumulation Setup" / "High Quality Distribution Setup"
+- Markup/Markdown now flip on structure alone (Phase D, Spring/UTAD test, in-range SOS/SOW or LPS/LPSY, confirmed close beyond the range on volume) — Markup/Markdown and SOSB/SOWB can come more often than with the score gate; TEST/SOS/SOW/LPS/LPSY labels are no longer hidden by a score filter
+- LPS/LPSY alerts read "LPS CONFIRMED" / "LPSY CONFIRMED" instead of LONG/SHORT — they are pivot-confirmed structure markers
+- Dashboard: "Cause Target (~)" renamed to "Cause Projection (~)"
+
 ## v4.10.2 — 2026-11-17
 - Fix: the HTF bias now uses the last closed HTF bar, so it no longer repaints intrabar
 

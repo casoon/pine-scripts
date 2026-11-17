@@ -1,25 +1,25 @@
 # Commodity Heat Reversal v1.4.3
 
-Score-based mean-reversion reversal and pullback-continuation signal indicator for commodity futures (designed for 4H). It quantifies how much evidence points to an overextended, exhausted move — distance from MA50, ATR expansion, RSI extremes, wick pressure, and Bollinger Band breach — and fires a long or short signal when the score crosses a threshold and a bar-close confirmation triggers.
+Mean-reversion reversal and pullback-continuation signal indicator for commodity futures (designed for 4H). It checks for an overextended, exhausted move — RSI extreme or Bollinger Band breach, a rejection wick, and stretch from MA50 or ATR expansion — and fires a long or short signal when all of them are present and a bar-close confirmation triggers.
 
 The indicator also tracks an optional higher-timeframe EMA bias. When a heat setup happens as a pullback inside the higher-timeframe trend, it can mark a separate `PB` continuation signal instead of treating the move only as a local reversal.
 
 ## Features
 
-- **Dual Heat Score** — independent long and short scores (0–7 points each), built from five components
-- **Score components** — ATR distance to MA50 (2 pts), ATR expansion (2 pts), RSI extreme (1 pt), wick pressure (1 pt), BB breach (1 pt)
+- **Reversal heat** — ATR distance to MA50 and ATR expansion (0–2), required on top of the exhaustion and wick-rejection gates
+- **Pullback heat score** — long and short points (0–7) from ATR distance (2), ATR expansion (2), RSI extreme (1), wick pressure (1), BB breach (1); used only by the pullback-continuation gate
 - **Confirmation gate** — signal requires close beyond previous bar's range or MA9
 - **Quality gate** — selectable Early / Balanced / Strict confirmation plus same-direction cooldown
 - **Countertrend handling** — show, mark, or hide weak non-extreme countertrend reversals
-- **Trend filter** — optional MA200 direction filter with configurable override at extreme scores
+- **Trend filter** — optional MA200 direction filter with configurable override at extreme reversal heat
 - **HTF bias** — optional higher-timeframe EMA direction and slope context
 - **Pullback continuation** — optional diamond signals when a heat pullback resolves back in aligned local/HTF trend
 - **Selectable MA smoothing** — EMA / RMA / SMA / WMA / HMA / JMA (default HMA) for all MAs
 - **SL/TP overlay** — swing-high/low stop + MA20 mean-reversion target drawn on signal bars
-- **Score dashboard** — table showing current long/short score, active signal, trend direction, HTF bias, RSI
+- **Dashboard** — table showing the current long/short pullback heat (`PB Heat`, x / 7), active signal, trend direction, HTF bias, RSI
 - **Alerts** — alert conditions for reversal, pullback-continuation, and any signal
 
-## Scoring
+## Pullback heat score
 
 | Component | Points | Short condition | Long condition |
 |-----------|--------|-----------------|----------------|
@@ -29,7 +29,7 @@ The indicator also tracks an optional higher-timeframe EMA bias. When a heat set
 | Wick pressure | 1 | upper wick > 35% of candle range | lower wick > 35% |
 | BB breach | 1 | `close > bbUpper` | `close < bbLower` |
 
-Reversal signals require the exhaustion gate (RSI extreme or BB breach) and the wick-rejection gate, plus **reversal heat** from the two stretch components that are not gates: ATR distance to MA50 and ATR expansion (0–2). Default reversal heat threshold: 1 (distance or expansion). Extreme threshold (for counter-trend override): 2 (both). The 0–7 score above is kept for the dashboard and the pullback heat.
+Reversal signals require the exhaustion gate (RSI extreme or BB breach) and the wick-rejection gate, plus **reversal heat** from the two stretch components that are not gates: ATR distance to MA50 and ATR expansion (0–2). Default reversal heat threshold: 1 (distance or expansion). Extreme threshold (for counter-trend override): 2 (both). The 0–7 pullback heat score above does not enter the reversal signal; it feeds the pullback-continuation gate and the `PB Heat` column of the dashboard.
 
 ## Quality Gate
 

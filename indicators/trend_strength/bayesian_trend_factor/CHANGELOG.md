@@ -5,6 +5,14 @@
 ### Changed
 - **Naming:** "Probability" outputs are now called "Evidence Score" (data window, dashboard, README, TradingView description). The numbers are unchanged; they come from hand-weighted evidence and were never calibrated against outcomes
 
+### Removed
+- **Trend Factor (v1.9.0):** the swing-structure evidence block (HH/HL vs. LL/LH from confirmed pivots, weight 1.30) is no longer part of the factor or the confidence. Inputs `Structure Weight` and `Structure Freshness Bars` are gone; the dashboard and score-label tooltip drop the Structure row. Factor, state and confidence values change; the confidence ceiling stays at 90 because its remaining positive terms are rescaled
+- **Continuation (v1.9.0):** the continuation score (0..10) and its `Min Continuation Score` gate are gone, together with `Pullback RSI Length`, `Bull Pullback RSI Floor` and `Bear Pullback RSI Ceiling`, which only fed that score. A continuation now fires on its trigger (EMA reclaim, micro-BOS or rejection wick) from a mature pullback that holds the last swing level, so continuation signals can come more often. The data-window plot "Continuation Score" and the dashboard row "Cont Score" are removed
+
+### Changed
+- **Continuation label (v1.9.0):** the label shows the trigger (`RECLAIM`, `BOS`, `REJECT`) instead of `CONT n`
+- **Swing level (v1.9.0):** the pivot input is now called `Swing Level Pivot Length`; the last confirmed swing low/high is only the level a pullback must hold
+
 ### Fixed
 - **Pullback (v1.8.1):** a pullback only arms when its depth, measured from the impulse high/low, is within Max Pullback Depth (ATR). Before, a touch already deeper than the maximum armed and was invalidated on the same bar
 - **Pullback (v1.8.1):** no `PB` label and no Pullback Setup alert when the pullback is invalidated on its start bar

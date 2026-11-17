@@ -1,29 +1,28 @@
 //@version=6
 // ============================================================================
 // Wyckoff Schematics [WavesUnchained]
-// Version: 4.10.2
+// Version: 4.11.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
 // Volume/spread-based Wyckoff schematic detector with A–E phase heuristics,
 // event labeling (PS/PSY, SC, BC, AR, ST, Spring, Test, SOS, LPS, UTAD, SOW,
-// LPSY), confidence/range scoring, pivot-confirmed LPS/LPSY (pivot-bar volume),
-// multi-timeframe bias (EMA + slope), phase-anchored VWAP, and combined quality alerts.
+// LPSY), range scoring, pivot-confirmed LPS/LPSY structure markers (pivot-bar
+// volume), multi-timeframe bias (EMA + slope), phase-anchored VWAP, and event alerts.
 //
 // Features:
 //   ✓ Phases A–E within Accumulation and Distribution
 //   ✓ Schematic #1 (Spring/UTAD) and #2 (no Spring/UTAD, direct SOS/SOW)
 //   ✓ Full event set: PS/PSY, SC, BC, AR, ST, Spring, Test, SOS, LPS, UTAD, SOW, LPSY
-//   ✓ Pivot-confirmed LPS and LPSY detection
-//   ✓ Setup confidence score (0–100) with quality label
+//   ✓ Pivot-confirmed LPS and LPSY structure markers
 //   ✓ Range quality score (0–100) with quality label
 //   ✓ Phase-anchored VWAP (AVWAP) as value-area proxy
 //   ✓ Multi-timeframe bias via configurable HTF
 //   ✓ No Supply / No Demand / Volume Dry-Up detection
 //   ✓ Effort vs Result analysis (Wyckoff's 3rd Law)
-//   ✓ P&F-approximate Cause & Effect price targets
+//   ✓ P&F-approximate Cause & Effect price projection
 //   ✓ Relative strength vs configurable benchmark
-//   ✓ Combined quality alerts (Spring→Test, UTAD→Test, full sequence, HTF align)
+//   ✓ Combined event alerts (Spring→Test, UTAD→Test, HTF align)
 //
 // Data Contract:
 //   Price:     REQUIRED   chart symbol
@@ -50,7 +49,6 @@ int   rangeEstablishBars = input.int(20,   "Range Establish Bars",      minval=5
 float invalidationFactor = input.float(0.33, "Range Invalidation Factor", minval=0.2, maxval=2.0, step=0.1, group=g1, tooltip="Fraction of the range width beyond the opposite edge that invalidates a frozen schematic. 0.5 keeps broken schematics alive far too long; ~0.33 is tighter.")
 int   pivotLen           = input.int(3,    "Pivot Length (LPS/LPSY)",   minval=2,   maxval=10,   group=g1, tooltip="Bars left/right for pivot confirmation of LPS and LPSY events.")
 int   eventCooldownBars  = input.int(10,   "Event Cooldown Bars",       minval=1,   maxval=50,   group=g1)
-int   markupMinScore     = input.int(50,   "Min Breakout Score (Markup/Markdown)", minval=0, maxval=100, group=g1, tooltip="A confirmed range breakout only flips to Markup/Markdown when the schematic's setup score is at least this high. Raise it to demand cleaner structures, lower it to label more breakouts.")
 
 var g2 = "Display"
 bool showPhaseRanges      = input.bool(true,  "Show Phase Ranges",               group=g2)
@@ -92,10 +90,6 @@ string rsSymbol = input.symbol("SP:SPX", "Benchmark Symbol",         group=g3)
 var g4 = "Multi-Timeframe"
 string htfTF     = input.timeframe("D", "HTF Bias Timeframe", group=g4)
 int    htfEmaPer = input.int(20, "HTF EMA Period", minval=5, maxval=100, group=g4)
-
-var g5 = "Signal Mode"
-bool showOnlyQualitySignals = input.bool(false, "Show Only Quality Signals", group=g5, tooltip="When enabled, only entry/confirmation labels such as TEST, SOS, SOW, LPS and LPSY require the minimum setup score. Structure labels remain visible.")
-int  minSignalScore         = input.int(70,    "Min Setup Score (0–100)",   minval=0, maxval=100, group=g5)
 
 // ============================================================================
 // DATA VALIDITY
@@ -162,8 +156,6 @@ type WyckoffState
     float               effectExpected
     float               pfTarget
     int                 lastUpdateBar
-    int                 setupScore
-    string              setupQuality
     int                 rangeScore
     string              rangeQuality
     float               avwapPrice
@@ -183,7 +175,6 @@ type WyckoffConfig
     float invalidationFactor
     int   pivotLen
     int   eventCooldownBars
-    int   markupMinScore
 
 // ============================================================================
 // INITIALIZATION
@@ -192,11 +183,11 @@ type WyckoffConfig
 newWyckoffState() =>
     WyckoffState.new(na, na, array.new<WyckoffEvent>(), na, "NEUTRAL",
          0.0, 0.0, na, 0,
-         0, "Weak", 0, "Poor", na, 0.0, 0.0,
+         0, "Poor", na, 0.0, 0.0,
          "NEUTRAL", false, false)
 
 newWyckoffConfig() =>
-    WyckoffConfig.new(volumeLookback, climaxMultiplier, springThreshold, sosThreshold, 10, rangeEstablishBars, invalidationFactor, pivotLen, eventCooldownBars, markupMinScore)
+    WyckoffConfig.new(volumeLookback, climaxMultiplier, springThreshold, sosThreshold, 10, rangeEstablishBars, invalidationFactor, pivotLen, eventCooldownBars)
 
 newWyckoffPhase(string phaseName, string sub = "", string ae = "", string priorTrend = "UNKNOWN") =>
     WyckoffPhase.new(phaseName, sub, ae, "TBD",
@@ -365,19 +356,6 @@ phaseHasEvent(array<WyckoffEvent> events, string eventType, int startBar) =>
                 break
     result
 
-// Bar index of the first event of a given type on/after startBar, or -1 if absent.
-// Used for sequence validation: the canonical Wyckoff order (Spring → Test → SOS) must hold,
-// not just "the event exists somewhere".
-eventBar(array<WyckoffEvent> events, string eventType, int startBar) =>
-    result = -1
-    if array.size(events) > 0
-        for i = 0 to array.size(events) - 1
-            evt = array.get(events, i)
-            if evt.eventType == eventType and evt.bar >= startBar
-                result := evt.bar
-                break
-    result
-
 // recentVolDecline / pivLow3 / pivHigh3 are computed at global scope and passed in —
 // ta.* calls inside this conditionally-executed function would build inconsistent series.
 calcRangeScore(WyckoffPhase phase, float atrVal, int rangeDuration, bool recentVolDecline, float pivLow3, float pivHigh3) =>
@@ -423,88 +401,6 @@ calcRangeScore(WyckoffPhase phase, float atrVal, int rangeDuration, bool recentV
     // onto the full 0–100 range instead of silently capping the achievable score at 60.
     float rawMax = volumeIsReal ? 100.0 : 60.0
     int(math.round(math.min(score / rawMax * 100.0, 100.0)))
-
-calcSetupScore(WyckoffState state, float rsNorm, int rangeDuration) =>
-    score = 0
-    phase = state.currentPhase
-    if na(phase)
-        score
-    else
-        bool isTrendPhase = phase.name == "MARKUP" or phase.name == "MARKDOWN"
-        isAccum = phase.name == "ACCUMULATION" or phase.name == "MARKUP"
-        events = state.events
-        // In a trend phase the schematic that produced it lives in previousPhase — score the
-        // events from that range so the confirmed breakout (SOSB/SOWB) is credited there too.
-        int sb = isTrendPhase and not na(state.previousPhase) ? state.previousPhase.startBar : phase.startBar
-
-        // Resolve event bars once — directional aliases keep the logic symmetric.
-        arB    = eventBar(events, "AR", sb)
-        stB    = eventBar(events, "ST", sb)
-        springB = eventBar(events, isAccum ? "SPRING" : "UTAD", sb)
-        testB  = eventBar(events, "TEST", sb)
-        sosB   = eventBar(events, isAccum ? "SOS"  : "SOW",  sb)   // in-range strength/weakness
-        sosbB  = eventBar(events, isAccum ? "SOSB" : "SOWB", sb)   // confirmed breakout/breakdown
-        lpsB   = eventBar(events, isAccum ? "LPS"  : "LPSY", sb)
-
-        // Phase A events
-        if arB >= 0
-            score += 8
-        if stB >= 0
-            score += 8
-
-        // Phase B/C completion
-        if phase.phaseAE == "C" or phase.phaseAE == "D"
-            score += 5
-
-        // Spring / UTAD
-        if springB >= 0
-            score += 18
-
-        // Test — only credited when it follows the Spring/UTAD it is supposed to confirm.
-        if testB >= 0 and (springB < 0 or springB < testB)
-            score += 18
-
-        // SOS / SOW (in-range) — in a #1 schematic it must come after the Test; a #2 schematic
-        // has no Test, so the order check is vacuously satisfied (testB < 0).
-        if sosB >= 0 and (testB < 0 or testB < sosB)
-            score += 14
-
-        // Confirmed breakout / breakdown
-        if sosbB >= 0
-            score += 12
-
-        // LPS / LPSY
-        if lpsB >= 0
-            score += 10
-
-        // Canonical sequence intact — Spring → Test → SOS in order (Schematic #1),
-        // or a direct in-range SOS with no Spring/Test (Schematic #2). Rewards a clean
-        // structure beyond the sum of individual events.
-        bool seqIntact = false
-        if phase.schematicType == "#2"
-            seqIntact := sosB >= 0
-        else
-            seqIntact := springB >= 0 and testB >= 0 and sosB >= 0 and springB < testB and testB < sosB
-        if seqIntact
-            score += 8
-
-        // Relative strength alignment
-        if isAccum and not na(rsNorm) and rsNorm > 1.02
-            score += 8
-        else if not isAccum and not na(rsNorm) and rsNorm < 0.98
-            score += 8
-
-        // HTF alignment
-        if isAccum and state.htfBias == "BULLISH"
-            score += 8
-        else if not isAccum and state.htfBias == "BEARISH"
-            score += 8
-
-        // Range quality bonus
-        if state.rangeScore >= 60
-            score += 5
-
-        math.min(score, 100)
 
 scoreLabel(int score) =>
     score >= 80 ? "High Confidence" : score >= 60 ? "Strong" : score >= 40 ? "Moderate" : "Weak"
@@ -797,12 +693,10 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
     // it reads differently from the in-range strength shown earlier. A bare close > rangeHigh
     // is no longer enough (that fired on any random Phase-B range probe).
     // Phase D alone is too weak — require a confirmed internal structure (Spring/UTAD test,
-    // an in-range SOS/SOW, or a pivot-confirmed LPS/LPSY) and a non-trivial setup score.
-    // state.setupScore reflects the prior bar (scoring runs after this function), i.e. the
-    // quality of the schematic built up to the breakout — exactly the right gate.
-    bool canMarkup = currentPhase.phaseAE == "D" and state.setupScore >= config.markupMinScore
+    // an in-range SOS/SOW, or a pivot-confirmed LPS/LPSY).
+    bool canMarkup = currentPhase.phaseAE == "D"
          and (state.springConfirmed or phaseHasEvent(state.events, "SOS", currentPhase.startBar) or phaseHasEvent(state.events, "LPS", currentPhase.startBar))
-    bool canMarkdown = currentPhase.phaseAE == "D" and state.setupScore >= config.markupMinScore
+    bool canMarkdown = currentPhase.phaseAE == "D"
          and (state.utadConfirmed or phaseHasEvent(state.events, "SOW", currentPhase.startBar) or phaseHasEvent(state.events, "LPSY", currentPhase.startBar))
     if currentPhase.name == "ACCUMULATION" and rangeFrozen
         if barstate.isconfirmed and canMarkup and close > currentPhase.rangeHigh and (not volumeIsReal or volumeRatio >= 1.2)
@@ -888,7 +782,7 @@ identifyWyckoffPhase(WyckoffState state, float volumeAvg, float spreadAvg, float
         state.pfTarget      := pfApproxTarget(finalPhase.rangeLow, finalPhase.rangeHigh, rangeDuration, atrVal, finalPhase.name == "ACCUMULATION")
         state.effectExpected := math.abs(state.pfTarget - (finalPhase.name == "ACCUMULATION" ? finalPhase.rangeLow : finalPhase.rangeHigh))
 
-updateWyckoffAnalysis(WyckoffState state, float volumeAvg, float spreadAvg, float atrVal, float rsNorm, float pivLow, float pivHigh, WyckoffConfig config, string priorTrend, bool recentVolDecline, float pivLow3, float pivHigh3) =>
+updateWyckoffAnalysis(WyckoffState state, float volumeAvg, float spreadAvg, float atrVal, float pivLow, float pivHigh, WyckoffConfig config, string priorTrend, bool recentVolDecline, float pivLow3, float pivHigh3) =>
     identifyWyckoffPhase(state, volumeAvg, spreadAvg, atrVal, pivLow, pivHigh, config, priorTrend)
     // Scoring (computed after phase update)
     if not na(state.currentPhase)
@@ -898,11 +792,6 @@ updateWyckoffAnalysis(WyckoffState state, float volumeAvg, float spreadAvg, floa
         if nm == "ACCUMULATION" or nm == "DISTRIBUTION"
             state.rangeScore   := calcRangeScore(state.currentPhase, atrVal, rangeDuration, recentVolDecline, pivLow3, pivHigh3)
             state.rangeQuality := scoreLabel(state.rangeScore)
-        // Setup score also runs through Markup/Markdown so the confirmed breakout is credited
-        // (calcSetupScore scores the originating schematic via previousPhase in a trend phase).
-        if nm == "ACCUMULATION" or nm == "DISTRIBUTION" or nm == "MARKUP" or nm == "MARKDOWN"
-            state.setupScore   := calcSetupScore(state, rsNorm, rangeDuration)
-            state.setupQuality := scoreLabel(state.setupScore)
     state.lastUpdateBar := bar_index
 
 // ============================================================================
@@ -980,7 +869,7 @@ wyckoffState.htfBias := htfBias
 
 bool dataReady = not na(volumeAvg) and not na(spreadAvg) and not na(atrVal) and volumeAvg > 0 and spreadAvg > 0 and high > low and close > 0
 if dataReady
-    updateWyckoffAnalysis(wyckoffState, volumeAvg, spreadAvg, atrVal, rsNorm, pivLow, pivHigh, wyckoffConfig, priorTrend, recentVolDecline, pivLow3, pivHigh3)
+    updateWyckoffAnalysis(wyckoffState, volumeAvg, spreadAvg, atrVal, pivLow, pivHigh, wyckoffConfig, priorTrend, recentVolDecline, pivLow3, pivHigh3)
 
 // ============================================================================
 // VISUALIZATION
@@ -1093,9 +982,7 @@ if showEventLabels
     if array.size(recentEvents) > 0
         for i = 0 to array.size(recentEvents) - 1
             evt = array.get(recentEvents, i)
-            isEntryEvent = evt.eventType == "TEST" or evt.eventType == "SOS" or evt.eventType == "SOW" or evt.eventType == "LPS" or evt.eventType == "LPSY"
-            scoreOk      = not showOnlyQualitySignals or not isEntryEvent or wyckoffState.setupScore >= minSignalScore
-            if bar_index - evt.bar <= eventLookback and not evt.labeled and scoreOk
+            if bar_index - evt.bar <= eventLookback and not evt.labeled
                 eventColor = switch evt.eventType
                     "SC"     => color.new(color.green,  0)
                     "BC"     => color.new(color.red,    0)
@@ -1215,10 +1102,6 @@ if showDashboard and barstate.islast
         table.cell(dashboard, 1, 8, "", bgcolor=color.new(color.gray, 80))
 
         // Scoring
-        setupColor = wyckoffState.setupScore >= 80 ? color.new(#00c853, 0) : wyckoffState.setupScore >= 60 ? color.new(#ffd600, 0) : wyckoffState.setupScore >= 40 ? color.new(#ff6f00, 0) : tc
-        table.cell(dashboard, 0, 9,  "Setup Score",  text_color=tc,         text_size=size.small)
-        table.cell(dashboard, 1, 9,  str.tostring(wyckoffState.setupScore) + " / 100  " + wyckoffState.setupQuality, text_color=setupColor, text_size=size.small)
-
         rangeColor = wyckoffState.rangeScore >= 70 ? color.new(#00c853, 0) : wyckoffState.rangeScore >= 50 ? color.new(#ffd600, 0) : tc
         table.cell(dashboard, 0, 10, "Range Score", text_color=tc,          text_size=size.small)
         table.cell(dashboard, 1, 10, str.tostring(wyckoffState.rangeScore) + " / 100  " + wyckoffState.rangeQuality, text_color=rangeColor, text_size=size.small)
@@ -1240,7 +1123,7 @@ if showDashboard and barstate.islast
         table.cell(dashboard, 1, 13, avwapStr, text_color=tc, text_size=size.small)
 
         // P&F target
-        table.cell(dashboard, 0, 14, "Cause Target (~)", text_color=tc, text_size=size.small)
+        table.cell(dashboard, 0, 14, "Cause Projection (~)", text_color=tc, text_size=size.small)
         table.cell(dashboard, 1, 14, not na(wyckoffState.pfTarget) ? str.tostring(wyckoffState.pfTarget, "#.##") : "—", text_color=tc, text_size=size.small)
 
         table.cell(dashboard, 0, 15, "", bgcolor=color.new(color.gray, 80))
@@ -1291,7 +1174,6 @@ string _phaseName      = not na(wyckoffState.currentPhase) ? wyckoffState.curren
 string currentSubphase = not na(wyckoffState.currentPhase) ? wyckoffState.currentPhase.subphase : ""
 bool   _springConf     = wyckoffState.springConfirmed
 bool   _utadConf       = wyckoffState.utadConfirmed
-int    _setupScore     = wyckoffState.setupScore
 string _erRelationship = not na(wyckoffState.effortResult) ? wyckoffState.effortResult.relationship : "CONFIRMATION"
 float  _erStrength     = not na(wyckoffState.effortResult) ? wyckoffState.effortResult.strength     : 0.0
 
@@ -1336,26 +1218,20 @@ bool sowbDetected = currentSubphase == "SOWB" and currentSubphase[1] != "SOWB"
 alertcondition(alertOk and (sowbDetected), "SOWB Breakdown", "WYS · SOW BREAKDOWN SHORT · {{ticker}} {{interval}}")
 
 bool lpsDetected = currentSubphase == "LPS" and currentSubphase[1] != "LPS"
-alertcondition(alertOk and (lpsDetected), "LPS Detected", "WYS · LAST POINT OF SUPPORT LONG · {{ticker}} {{interval}}")
+alertcondition(alertOk and (lpsDetected), "LPS Detected", "WYS · LPS CONFIRMED · {{ticker}} {{interval}}")
 
 bool lpsyDetected = currentSubphase == "LPSY" and currentSubphase[1] != "LPSY"
-alertcondition(alertOk and (lpsyDetected), "LPSY Detected", "WYS · LAST POINT OF SUPPLY SHORT · {{ticker}} {{interval}}")
+alertcondition(alertOk and (lpsyDetected), "LPSY Detected", "WYS · LPSY CONFIRMED · {{ticker}} {{interval}}")
 
 bool climaxDetected = _erRelationship == "CLIMAX" and _erStrength >= 80 and _erRelationship[1] != "CLIMAX"
 alertcondition(alertOk and (climaxDetected), "Climax Detected", "WYS · CLIMAX · {{ticker}} {{interval}}")
 
-// Combined quality alerts
+// Combined event alerts
 bool springTestConfirmed = _springConf and not _springConf[1]
 alertcondition(alertOk and (springTestConfirmed), "Spring + Test Confirmed", "WYS · SPRING+TEST CONFIRMED LONG · {{ticker}} {{interval}}")
 
 bool utadTestConfirmed = _utadConf and not _utadConf[1]
 alertcondition(alertOk and (utadTestConfirmed), "UTAD + Test Confirmed", "WYS · UTAD+TEST CONFIRMED SHORT · {{ticker}} {{interval}}")
-
-bool highQualityAccum = not accumulationStarted and _phaseName == "ACCUMULATION" and _setupScore >= 75 and _setupScore[1] < 75
-alertcondition(alertOk and (highQualityAccum), "High Quality Accumulation Setup", "WYS · HIGH QUALITY ACCUMULATION LONG · {{ticker}} {{interval}}")
-
-bool highQualityDistrib = not distributionStarted and _phaseName == "DISTRIBUTION" and _setupScore >= 75 and _setupScore[1] < 75
-alertcondition(alertOk and (highQualityDistrib), "High Quality Distribution Setup", "WYS · HIGH QUALITY DISTRIBUTION SHORT · {{ticker}} {{interval}}")
 
 bool htfLtfAligned = (_phaseName == "ACCUMULATION" and wyckoffState.htfBias == "BULLISH") or (_phaseName == "DISTRIBUTION" and wyckoffState.htfBias == "BEARISH")
 bool htfAlignStart = htfLtfAligned and not htfLtfAligned[1]

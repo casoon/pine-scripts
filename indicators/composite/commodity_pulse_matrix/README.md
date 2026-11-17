@@ -2,16 +2,16 @@
 
 **TradingView:** https://de.tradingview.com/script/aJmdpe8H/
 
-Commodity Pulse Matrix v3 is a comprehensive multi-timeframe confluence indicator designed for commodity trading. It aggregates signals across multiple timeframes into a single scored matrix, giving traders a clear read on setup quality, market regime, and entry timing from a unified view on the chart.
+Commodity Pulse Matrix v3 is a comprehensive multi-timeframe confluence indicator designed for commodity trading. It aggregates signals across multiple timeframes into a single scored matrix, showing where the market stands across timeframes, the market regime, and chart-timeframe entry triggers in one view on the chart.
 
 ## Features
 
 - 6-Category Multi-Timeframe Scoring (Flow, Momentum, Trend, Volatility, Structure, Divergence)
-- Heat Score System (Setup quality 0-1)
+- Heat Score (multi-timeframe agreement display, 0-1)
 - Exhaustion Detection
 - MV Confluence (Momentum-Volume)
 - Diamond Zones (Support/Resistance)
-- Entry Timing (Break-Pullback-Continuation)
+- Entry Engine V2 (breakout, pullback, continuation with trend and momentum in direction)
 - Signal Quality Gate (ATR + Volume)
 - Market Regime Detection (BOS, CHoCH)
 - Matrix Table Visualization
@@ -26,9 +26,18 @@ Each bar is evaluated across six categories, each contributing to an overall con
 - **Trend** — Medium-to-long-term trend alignment across timeframes
 - **Volatility** — Market condition quality relative to ATR expansion/contraction
 - **Structure** — Market structure events (Break of Structure, Change of Character)
-- **Divergence** — Momentum-price divergence signals indicating potential reversals
+- **Divergence** — Momentum-price divergences, shown as a context row (weight 0 in the aggregate and the heat score)
 
-The matrix table displays these per-category scores across timeframes, along with a combined Heat Score (0–1) representing overall setup quality at a glance.
+The matrix table displays these per-category scores across timeframes, along with a Heat Score (0–1) that shows how far the timeframes and categories agree. Matrix, heat and confidence are display only and have no alerts.
+
+## Entry Engine V2
+
+An entry fires when one of the enabled triggers occurs — a breakout of the prior 8-bar range, a pullback to the fast JMA at support/resistance, or a continuation after a mini-pullback — and two conditions hold:
+
+- **Momentum in direction** — RSI above 50 for longs, below 50 for shorts
+- **Not against the bias** — a long is counter-trend when the volatility-stop bias is short (mirrored for shorts). A counter-trend entry and fires only when "Allow Counter-Trend Entries" is on
+
+Breakouts and continuations are off in ranging markets (ATR compression). An entry is shown when the direction changes; repeated entries in the same direction are de-duplicated.
 
 ## Modes
 

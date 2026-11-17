@@ -1,14 +1,14 @@
 //@version=6
 // ============================================================================
 // Market Pressure Scale [WavesUnchained]
-// Version: 2.4.5
+// Version: 2.5.0
 // Author: WavesUnchained
 // Build: 2026-11-17
 // ============================================================================
 // Two-component oscillator separating setup pressure (compression + S/R proximity)
 // from impulse pressure (range expansion + volume + body + trend), with phase
-// classification, a Move Strength column gauge for the expected magnitude
-// of the eventual move, and a DMI-free Reversal signal.
+// classification, a Move Strength column gauge (compression depth + range-edge
+// location + ADX), and a DMI-free Reversal signal.
 //
 // Features:
 //   ✓ Setup Pressure — ATR/BB compression, S/R proximity, volume drying up
@@ -16,10 +16,10 @@
 //   ✓ Range Chop Filter — ADX/DMI regime detection suppresses Failed Coil /
 //     Reversal signals inside dead mid-range chop
 //   ✓ Phase classification: Sideways/Chop / Impulse Running / Sideways / Neutral
-//   ✓ Move Strength — expected magnitude of the eventual move (compression depth +
-//     range-edge location + ADX), plotted as blue columns behind the two curves
-//   ✓ Reversal — Impulse exhaustion + rejection wick + candle confirmation at a
-//     range extreme, weighted by Setup compression; direction-native, does not rely on DMI
+//   ✓ Move Strength — composite of compression depth + range-edge location + ADX,
+//     plotted as blue columns behind the two curves
+//   ✓ Reversal — Impulse exhaustion above a threshold AND a rejection candle at a
+//     range extreme; direction-native, does not rely on DMI
 //   ✓ Failed Coil requires price to actually fall back toward the middle of the range
 //   ✓ Naked Impulse requires ADX to still be weak (a real trend doesn't count as "naked")
 //   ✓ Directional bias via configurable fast/slow MA cross
@@ -71,15 +71,19 @@ showFailed  = input.bool(true,  "  Failed Coil",    group=sigGR,
 showNaked   = input.bool(true,  "  Naked Impulse",  group=sigGR,
               tooltip="Impulse > 70 but Setup collapses below 40 — move running without structural backing.")
 showReversal = input.bool(true, "  Reversal",       group=sigGR,
-              tooltip="At a range extreme: the recent Impulse is fading from its own high AND there's a rejection wick against the extreme, weighted by Setup compression. Direction-native — does not use DMI.")
+              tooltip="At a range extreme: the recent Impulse has faded from its own high by at least the minimum exhaustion AND the bar is a rejection candle (wick against the extreme, close in the reversal direction). Direction-native — does not use DMI.")
+revExhMin    = input.float(25.0, "  Reversal: Min Exhaustion", minval=0, maxval=100, step=1, group=sigGR,
+              tooltip="Minimum drop of Impulse Pressure from its 10-bar high (only counted when that high was above 50).")
+revWickMin   = input.float(30.0, "  Reversal: Min Rejection Wick %", minval=0, maxval=100, step=5, group=sigGR,
+              tooltip="Minimum wick against the range extreme, in % of the bar range (lower wick at the range low, upper wick at the range high).")
 
 strengthGR    = "Move Strength"
 showStrengthBg = input.bool(true, "Show Columns", group=strengthGR,
-                 tooltip="Blue columns (5 opacity bands) tracking the expected magnitude of the eventual move: compression depth + range-edge location + ADX, suppressed while the Range Chop Filter is active. Plotted behind Setup/Impulse Pressure instead of a full-pane background.")
+                 tooltip="Blue columns (5 opacity bands): composite of compression depth + range-edge location + ADX, damped while the Range Chop Filter is active. Plotted behind Setup/Impulse Pressure instead of a full-pane background.")
 
 debugGR      = "Debug"
 showDebugLog = input.bool(false, "Log Reversal Context (Pine Logs)", group=debugGR,
-               tooltip="Writes two things to Pine Logs: 1) rangePos/chop/setup/impulse/exhaustion/wick/score on every confirmed bar at a range extreme, for diagnosing Reversal signals. 2) every raw ingredient (atr/volume/volRel/compression/srProximity/etc.) whenever Setup or Impulse Pressure comes back na, for diagnosing feeds whose volume series carries no usable turnover.")
+               tooltip="Writes two things to Pine Logs: 1) rangePos/chop/setup/impulse/exhaustion/wick on every confirmed bar at a range extreme, for diagnosing Reversal signals. 2) every raw ingredient (atr/volume/volRel/compression/srProximity/etc.) whenever Setup or Impulse Pressure comes back na, for diagnosing feeds whose volume series carries no usable turnover.")
 
 // Helpers
 clamp(x, lo, hi) =>
@@ -218,9 +222,8 @@ if showDebugLog and (na(setupPressure) or na(impulsePressure)) and barstate.isco
          " setup=" + str.tostring(setupPressure) +
          " impulse=" + str.tostring(impulsePressure))
 
-// Move Strength — expected magnitude of the eventual move once Setup releases:
-// compression depth (energy stored) + range-edge location + ADX (trend
-// confirmation), suppressed toward zero while chopMarket is active.
+// Move Strength — composite of compression depth + range-edge location + ADX,
+// damped while chopMarket is active.
 adxNorm      = clamp(adx / 50 * 100, 0, 100)
 moveStrength = compression * 0.45 + srProximity * 0.35 + adxNorm * 0.20
 moveStrength := chopMarket ? moveStrength * 0.35 : moveStrength
@@ -244,29 +247,28 @@ sigNaked    = impulsePressure > 70 and ta.crossunder(setupPressure, 40) and adx 
 if sigFailed or setupPressure < 40
     inCoil := false
 
-// Reversal — exhaustion of the move that got us here + rejection at a range
-// extreme (indicator-design §6.1: regime veto -> exhaustion -> confirmation ->
-// quality, combined as one score per direction instead of an AND-chain).
-// Direction-native: never touches DMI, so it isn't subject to the lag a
-// DMI-based directional read would have at turning points.
+// Reversal — exhaustion of the move that got us here AND a rejection candle at a
+// range extreme (regime veto -> exhaustion -> confirmation). No score: each part
+// is a readable condition. Direction-native: never touches DMI, so it isn't
+// subject to the lag a DMI-based directional read would have at turning points.
 impulseHigh10   = ta.highest(impulsePressure, 10)
 exhaustionScore = impulseHigh10 > 50 ? clamp(impulseHigh10 - impulsePressure, 0, 100) : 0
 
 lowerWickRatio = lowerWick / math.max(barRange, syminfo.mintick) * 100
 upperWickRatio = upperWick / math.max(barRange, syminfo.mintick) * 100
 
-reversalActive     = validSetupZone and not chopMarket
-reversalLongScore  = exhaustionScore * 0.45 + lowerWickRatio * 0.30 + setupPressure * 0.25
-reversalShortScore = exhaustionScore * 0.45 + upperWickRatio * 0.30 + setupPressure * 0.25
+reversalActive = validSetupZone and not chopMarket
+exhausted      = exhaustionScore >= revExhMin
 
-// Candle confirmation — the trigger bar itself must close in the direction of
-// the reversal, not just show a rejection wick, so a big wick that closes back
-// toward the extreme doesn't count
-bullReject = close > open and close > (low + barRange * 0.6)
-bearReject = close < open and close < (high - barRange * 0.6)
+// Rejection candle — a wick against the extreme AND a close in the direction of
+// the reversal, so a big wick that closes back toward the extreme doesn't count
+bullReject = lowerWickRatio >= revWickMin and close > open and close > (low + barRange * 0.6)
+bearReject = upperWickRatio >= revWickMin and close < open and close < (high - barRange * 0.6)
 
-sigReversalLong  = reversalActive and rangePosition < 20 and bullReject and ta.crossover(reversalLongScore,  60)
-sigReversalShort = reversalActive and rangePosition > 80 and bearReject and ta.crossover(reversalShortScore, 60)
+revLongCond  = reversalActive and rangePosition < 20 and exhausted and bullReject
+revShortCond = reversalActive and rangePosition > 80 and exhausted and bearReject
+sigReversalLong  = revLongCond  and not revLongCond[1]
+sigReversalShort = revShortCond and not revShortCond[1]
 
 // Kept as a short window rather than the single trigger bar, for the
 // dashboard's Action row (a one-bar-only flag reads as "nothing" most of the time)
@@ -281,9 +283,7 @@ if showDebugLog and validSetupZone and barstate.isconfirmed
          " impulseHigh10=" + str.tostring(impulseHigh10, "#.0") +
          " exhaustion=" + str.tostring(exhaustionScore, "#.0") +
          " lowerWickR=" + str.tostring(lowerWickRatio, "#.0") +
-         " upperWickR=" + str.tostring(upperWickRatio, "#.0") +
-         " longScore=" + str.tostring(reversalLongScore, "#.0") +
-         " shortScore=" + str.tostring(reversalShortScore, "#.0"))
+         " upperWickR=" + str.tostring(upperWickRatio, "#.0"))
 
 // Phase — priority order: Chop > Impulse > Sideways > Neutral
 phase = if chopMarket
@@ -331,13 +331,13 @@ if showMarkers
         label.new(bar_index, impulsePressure, "◆",
              style=label.style_label_up, color=color.new(#00c853, 15),
              textcolor=color.white, size=size.small,
-             tooltip="Reversal Long — Impulse fading from a recent high, rejection wick at range low, weighted by Setup compression.\nExhaustion + rejection, not DMI-based — an early counter-trend candidate.")
+             tooltip="Reversal Long — Impulse faded from a recent high (exhaustion " + str.tostring(exhaustionScore, "#") + ") and a rejection candle at the range low (lower wick " + str.tostring(lowerWickRatio, "#") + "% of range).\nExhaustion + rejection, not DMI-based — an early counter-trend candidate.")
 
     if showReversal and sigReversalShort
         label.new(bar_index, impulsePressure, "◆",
              style=label.style_label_down, color=color.new(#d50000, 15),
              textcolor=color.white, size=size.small,
-             tooltip="Reversal Short — Impulse fading from a recent high, rejection wick at range high, weighted by Setup compression.\nExhaustion + rejection, not DMI-based — an early counter-trend candidate.")
+             tooltip="Reversal Short — Impulse faded from a recent high (exhaustion " + str.tostring(exhaustionScore, "#") + ") and a rejection candle at the range high (upper wick " + str.tostring(upperWickRatio, "#") + "% of range).\nExhaustion + rejection, not DMI-based — an early counter-trend candidate.")
 
 // Table
 color tc = color.new(color.gray, 20)
@@ -389,7 +389,7 @@ if barstate.islast and showTable
     // Move Strength
     strengthTc      = moveStrength > 50 ? color.white : tc
     color strengthBg = f_strengthColor(moveStrength)
-    table.cell(t, 0, 6, "Move Str.", text_color=tc,        bgcolor=na,          text_size=size.small, tooltip="Expected magnitude of the eventual move: compression depth + range-edge proximity + ADX trend confirmation, suppressed during chop.")
+    table.cell(t, 0, 6, "Move Str.", text_color=tc,        bgcolor=na,          text_size=size.small, tooltip="Composite of compression depth + range-edge proximity + ADX, damped during chop.")
     table.cell(t, 1, 6, str.tostring(moveStrength, "#.0") + " / 100", text_color=strengthTc, bgcolor=strengthBg, text_size=size.small)
     table.cell(t, 2, 6, "",          text_color=tc,        bgcolor=na,          text_size=size.small)
 

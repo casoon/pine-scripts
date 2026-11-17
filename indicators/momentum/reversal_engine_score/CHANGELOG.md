@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## v1.8.0 — 2026-11-17
+
+### Removed
+- **Quality tier and quality thresholds.** The A/C tier was derived from a single RSI condition. Removed inputs: `Min. Qualität Long`, `Min. Qualität Short`; removed the hidden `Signal Score` plot; signal labels read "BUY" / "SELL" without a tier
+
+### Changed
+- The RSI condition is now an honestly named optional filter, `RSI confirms direction` (default off): RSI above 50 for longs, below 50 for shorts. With the default settings the signals are the same as before (the quality minimum defaulted to 0). The label tooltip shows the RSI value instead of a quality point
+- Input `Score am Signal anzeigen` renamed to `Signal-Label anzeigen`
+- The strategy file carries the same change; its entry log shows the RSI value and filter state instead of quality and tier
+
 ## v1.7.4 — 2026-11-17
 
 ### Fixed

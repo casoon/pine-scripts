@@ -16,8 +16,7 @@ TSI Advanced ports the CCI Advanced context view onto a True Strength Index core
 - **Trend context line:** a slow TSI plotted faint behind the fast line; a cross against its side of zero is marked counter-trend
 - **Divergence wedge:** fills the area between fast TSI and the trend context only when they move in opposite directions
 - **Sentiment Bar:** optional live label at the panel's right edge — a signed ±100 score for how far TSI sits inside its own stretch zone, plus a mini bar
-- **Signal Quality:** optional 0-100 score next to each Bull/Bear Extreme marker — stretch-zone depth (50%) + context agreement (25%) + stall-free (25%)
-- **Alert conditions:** bull/bear cross from stretch zone; zero-cross up/down
+- **Alert conditions:** bull/bear cross from stretch zone ("Bull/Bear Signal", while the zone filter is on) or from any zone ("Bull/Bear Cross (any zone)", while it is off); zero-cross up/down
 
 ## Scoring
 
@@ -25,7 +24,7 @@ The optional extreme filter requires the TSI line to have visited the negative o
 
 ## Cross Conviction
 
-TSI is slower and smoother than RSI or Williams %R, so this variant is aimed less at raw overbought/oversold reversal and more at cross quality. A cross contradicted by flat price or the slow TSI context remains visible, but renders weak/faded.
+TSI is slower and smoother than RSI or Williams %R, so this variant is aimed less at raw overbought/oversold reversal and more at whether price confirms a cross. A cross contradicted by flat price or the slow TSI context remains visible, but renders weak/faded.
 
 ## Trend Context
 
