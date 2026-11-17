@@ -1,6 +1,6 @@
 # Markov State Engine
 
-Markov State Engine classifies every bar into one of six market states and then treats those states as a first-order Markov chain. Over a lookback window it measures where the *current* state historically resolved **when it ended**, and turns that into a distribution over exit destinations. It is a **regime resolution map, not a price forecast** — the percentages describe how similar past states resolved, not a prediction of this instance. As a Quality/context layer (reversal-pipeline Stage 1) it never fires a raw trend trigger on its own; its directional output is a contextual bias, not a standalone entry.
+Markov State Engine classifies every bar into one of six market states and then treats those states as a first-order Markov chain. Over a lookback window it measures where the *current* state historically resolved **when it ended**, and turns that into a distribution over exit destinations. It is a **regime resolution map, not a price forecast** — the percentages describe how similar past states resolved, not a prediction of this instance. It is a display of where the market stands: it issues no entry signals or directional verdicts, and its alerts fire only on state-change events.
 
 ## States
 
@@ -17,9 +17,9 @@ Up/down context = close vs EMA plus EMA slope, normalized by ATR (`(ema − ema[
 
 The state is **debounced** (Min State Dwell): a raw classification must persist a few bars before it is committed, so 1–2 bar flutter does not inflate the Markov exit counts with noise.
 
-## Forecast — exit-conditional
+## Exit distribution — exit-conditional
 
-A first-order Markov chain on sticky regime states is diagonal-dominant: the most likely "next" state is almost always the *current* one, so a naive forecast just restates the present. To avoid that, the forecast is **exit-conditional** — self-transitions (state → same state) are excluded from the count and reported separately as **Persistence**. The remaining (exit) transitions over the lookback are Laplace-smoothed into destination probabilities, aggregated into:
+A first-order Markov chain on sticky regime states is diagonal-dominant: the most likely "next" state is almost always the *current* one, so a naive count just restates the present. To avoid that, the distribution is **exit-conditional** — self-transitions (state → same state) are excluded from the count and reported separately as **Persistence**. The remaining (exit) transitions over the lookback are Laplace-smoothed into destination probabilities, aggregated into:
 
 - **Exit → Bull** = Up Trend + Up Weak
 - **Exit → Bear** = Down Trend + Down Weak
@@ -27,25 +27,16 @@ A first-order Markov chain on sticky regime states is diagonal-dominant: the mos
 
 So the read is "*when* this regime breaks, where does it go?" — the current state is not a valid destination (its bucket is forced to 0). **Persistence** (= share of self-transitions) tells you how sticky the state is and pairs naturally with the Dwell counter: high persistence + long dwell = the regime is holding, no exit imminent.
 
-**Laplace smoothing (α)** adds a pseudo-count to each of the 5 valid destinations so a thin sample never reads a misleading 0% / 100%, and confidence degrades gracefully when data is sparse.
+**Laplace smoothing (α)** adds a pseudo-count to each of the 5 valid destinations so a thin sample never reads a misleading 0% / 100%; with few exits the distribution stays closer to even.
 
-**Context-conditioned matching for Compression.** Compression is not directionally uniform — a squeeze under a rising EMA and one under a falling EMA are different setups. The historical match that builds the row above is keyed on a `contextState` that splits Compression into bullish / bearish / neutral flavors (the same up/down context test used for state classification), so exit history is drawn only from analogous squeeze setups. Destination buckets, the visible state, and its label are unchanged — still the plain six-state model; only *which past bars count as a match* got more specific. This trades sample size for relevance: Compression's exit count is now smaller (split three ways), so its Reliability can be thinner than the other five states.
+**Context-conditioned matching for Compression.** Compression is not directionally uniform — a squeeze under a rising EMA and one under a falling EMA are different setups. The historical match that builds the row above is keyed on a `contextState` that splits Compression into bullish / bearish / neutral flavors (the same up/down context test used for state classification), so exit history is drawn only from analogous squeeze setups. Destination buckets, the visible state, and its label are unchanged — still the plain six-state model; only *which past bars count as a match* got more specific. This trades sample size for relevance: Compression's exit count is now smaller (split three ways), so its distribution is more often below the minimum exit sample than for the other five states.
 
-## Reliability — forecast quality
+## Two axes — timing vs exit direction
 
-A high directional probability is worthless if the sample is tiny or the distribution is near-uniform. **Reliability** combines two factors:
-
-- **Sample adequacy** — `min(1, exit samples / Reliable Sample Count)`
-- **Predictability** — `1 − normalized Shannon entropy` of the **directional 3-way** distribution (Bull / Bear / Neutral, normalized over `log 3`); one dominant direction → high predictability, an even split → near zero. It is measured 3-way on purpose: that is what Bias and Edge decide on, and a 6-bucket raw entropy would be structurally high (splitting Up Trend vs Up Weak never matters for direction) and would peg reliability near zero.
-
-Reliability = sample adequacy × predictability. An Edge requires both directional confidence *and* reliability. The reliability stays deliberately strict (entropy-based rather than a looser winner-margin): regime-exit distributions on most instruments are genuinely close to random, and a strict gauge keeps the readout from looking more certain than it is.
-
-## Two axes — timing vs direction
-
-The single most important thing to read off this indicator is that it has **two independent quality axes**, and they are *not* equally trustworthy:
+The indicator shows **two axes**, and they rest on very different sample sizes:
 
 - **Timing (robust)** — Persistence and **Maturity** are computed from *every* in-state bar, so they are well-sampled even when exits are rare.
-- **Direction (usually thin)** — the exit distribution (Bull/Bear/Neutral, Reliability) hangs on the handful of times the state actually ended, so on sticky states it is statistically weak. The readout flags this as "below min sample" / "sample OK".
+- **Exit direction (usually thin)** — the exit distribution (Bull/Bear/Neutral) hangs on the handful of times the state actually ended, so on sticky states it is statistically weak. The readout shows the exit count and flags "below min sample" / "sample OK" against the Minimum Exit Sample input.
 
 **Maturity** is the coiled-spring gauge. Under a geometric dwell model the typical dwell of a state is `1 / (1 − Persistence)`; the current dwell divided by that typical value says how stretched the state is versus its own history:
 
@@ -56,37 +47,32 @@ The single most important thing to read off this indicator is that it has **two 
 | 1.5–2.5× | Extended ⚠ |
 | ≥ 2.5× | Overdue ⚠ |
 
-"Overdue" is **descriptive** — unusually long versus history — not a claim that an exit is mechanically due (pure Markov dwell is memoryless; real regimes are semi-Markov, so an empirically stretched dwell is informative). An Extended/Overdue state fires the **Markov State Extended** alert.
+"Overdue" is **descriptive** — unusually long versus history — not a claim that an exit is mechanically due (pure Markov dwell is memoryless; real regimes are semi-Markov, so an empirically stretched dwell is informative). Entering Extended/Overdue fires the **MSE State Extended** alert.
 
-## Signals
+## Alerts
 
-Following the repo's signal-type separation:
+All alerts respect the "Alerts only on bar close (confirmed)" toggle (default on). They describe events, not trade calls:
 
-- **Bias** — a *stable* directional state for the exit. It flips only when the dominant exit probability leads the next-best by the Bias Flip Margin (hysteresis), so it does not flicker on score noise.
-- **Edge**, typed — when an exit lean clears both confidence and reliability and we are not already in that trend state. It is classified by the state it comes *out of*: **Reversal** (`R↑`/`R↓`, out of an opposing trend/weak state), **Breakout** (`B↑`/`B↓`, out of a neutral Compression/Chaos state — a resolution, not a continuation) or **Continuation** (`C↑`/`C↓`, out of the same-side weak state).
-- **Watch** (gray dots, off by default) — marks a *fresh* low-conviction lean. Off by default because the net line already shows the lean continuously. Visual only, never wired into logic.
-
-The readout `leanType` (Reversal / Breakout / Continuation) is informative even below the edge threshold.
+- **MSE State Changed** — the debounced state changed
+- **MSE State → Up Trend / Up Weak / Compression / Down Trend / Down Weak / Expansion/Chaos** — the state changed to that state
+- **MSE State Extended** — the current state's dwell entered Extended/Overdue
 
 ## Plot
 
-The **Resolution Bias** line — `P(Bull) − P(Bear)`, centred at 0 — is drawn as a **stepline**: it only changes value when the state exits, so it visibly holds flat rather than reading as a continuously evolving curve. It is neither lagging nor forward-looking — it is the historical exit statistic for whichever regime is active right now, computed from past data only. Line color is gated by actionability: bold green/red only once both Confidence and Reliability clear their thresholds, muted grey otherwise, so the color itself is the verdict. The fill between the line and zero additionally encodes **Reliability** as density: faint = thin/uncertain sample, solid = well-sampled and predictable.
+The **Resolution Bias** line — `P(Bull) − P(Bear)`, centred at 0 — is drawn as a **stepline**: it only changes value when the state exits, so it visibly holds flat rather than reading as a continuously evolving curve. It is the historical exit statistic for whichever regime is active right now, computed from past data only. Line colour follows the sign (green above zero, red below) and turns grey while the current state has fewer past exits than the Minimum Exit Sample, so a thin count never reads as bold as a sampled one.
 
-The pane **background** tints only Compression and Chaos — the two states worth watching for a resolution — not all six, so trend/weak changes no longer flicker the pane. Its intensity scales with **Maturity** (`dwellRatio`): a fresh squeeze is barely tinted, an overdue one reads clearly more saturated, making the "how stretched is this regime" statement visible on its own.
+The pane **background** tints only Compression and Chaos — the two neutral/extreme states — not all six, so trend/weak changes no longer flicker the pane. Its intensity scales with **Maturity** (`dwellRatio`): a fresh squeeze is barely tinted, an overdue one reads clearly more saturated, making the "how stretched is this regime" statement visible on its own.
 
 ## Features
 
 - Six-state regime classifier — extremes (Chaos/Compression) first, then trend/weak; debounced to kill flicker
 - Compression requires ATR Rank AND BB Width Rank agreement (dual squeeze check)
 - EMA slope normalized by ATR — scale-free up/down context across instruments
-- Exit-conditional Markov resolution, source-matched on a Compression-flavor context state, with Laplace smoothing
-- Persistence + Maturity (coiled-spring) gauge — the robust timing axis, separate from the thin direction axis
-- Entropy + sample-size Reliability gauge with a below-min-sample flag
-- Resolution Bias stepline, color-gated by actionability (confident AND reliable), with reliability-encoded fill density
-- Stable Bias with hysteresis; Reversal / Breakout / Continuation edge typing; visual-only Watch markers
-- Honest readout colour and text — green/red reliable direction · amber coiled state · grey/"No reliable direction" otherwise
-- In-pane readout, Compression/Chaos background tinted by Maturity, edge / regime-change / extended-state alerts and a debug log
+- Exit-conditional transition counts, source-matched on a Compression-flavor context state, with Laplace smoothing
+- Persistence + Maturity gauge — the timing axis, separate from the thin exit-direction axis
+- Resolution Bias stepline, coloured by sign and greyed while the exit sample is below the minimum
+- In-pane readout, Compression/Chaos background tinted by Maturity, state-change and extended-state alerts, debug log on state changes
 
 ## Readout
 
-In-pane label at the last bar, grouped into a headline plus three lines: a **Timing** line (Maturity rating · ratio · typical dwell), a **Direction** line (Bull/Bear/Neutral distribution and the likely exit destination), and a **Quality** line (Reliability, exits sampled with a below-min-sample flag, Persistence). The headline states the state and, only when both confidence and reliability clear their thresholds, the directional Bias and lean type — otherwise it reads "No reliable direction" so the text never implies more certainty than the color already shows. A tooltip explains each field, the two axes, and the resolution-not-forecast framing.
+In-pane label at the last bar: a headline with the current state and bars in state, a **Timing** line (Maturity rating · ratio · typical dwell), a **Past exits** line (Bull/Bear/Neutral distribution and the most frequent exit destination), and a **Sample** line (exit count with a below-min-sample flag, Persistence). The text turns amber only for an Extended/Overdue state. A tooltip explains each field and the resolution-not-forecast framing.

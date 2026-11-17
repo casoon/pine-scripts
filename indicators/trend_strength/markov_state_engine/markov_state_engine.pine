@@ -1,30 +1,33 @@
 //@version=6
 // ============================================================================
 // Markov State Engine [WavesUnchained]
-// Version: 1.5.1
+// Version: 1.6.0
 // Author: WavesUnchained
-// Build: 2026-10-02 00:00:00
+// Build: 2026-11-17
 // ============================================================================
 // Regime RESOLUTION map (not a price forecast): classifies every bar into one of
 // six market states (Up Trend, Up Weak, Compression, Down Trend, Down Weak,
-// Expansion/Chaos), then measures — from history — where SIMILAR states resolved
-// WHEN they ended. Self-transitions are reported separately as Persistence. It is
-// a Quality/context layer (reversal-pipeline Stage 1) — it never fires a raw
-// trend trigger on its own.
+// Expansion/Chaos), then counts — from history — where SIMILAR states went WHEN
+// they ended. Self-transitions are reported separately as Persistence. It is a
+// display of where the market stands; its only alerts are state-change events.
 //
 // Features:
 //   ✓ Six-state regime classifier — extremes first, then trend/weak; debounced to kill flicker
 //   ✓ Compression requires ATR Rank AND BB Width Rank agreement (dual squeeze check)
 //   ✓ EMA slope normalized by ATR — scale-free up/down context across instruments
-//   ✓ Exit-conditional Markov resolution, source-matched on a Compression-flavor context state
-//   ✓ Persistence + Maturity (coiled-spring) gauge: current dwell vs typical dwell = robust TIMING axis
-//   ✓ Reliability gauge = sample-size × directional (3-way) predictability + thin-sample flag
-//   ✓ Resolution Bias stepline (P(Bull)−P(Bear)), color-gated by actionability; fill density = reliability
-//   ✓ Compression/Chaos background tinted by Maturity (coiled squeeze reads more saturated)
-//   ✓ Stable Bias (hysteresis) + Reversal/Breakout/Continuation Edge typing / visual Watch markers
-//   ✓ Honest readout that lights up only when actionable (green/red reliable dir · amber coiled · grey otherwise)
-//   ✓ In-pane readout + debug log + extended-state alert
+//   ✓ Exit-conditional transition counts, source-matched on a Compression-flavor context state
+//   ✓ Persistence + Maturity gauge: current dwell vs typical dwell
+//   ✓ Resolution Bias stepline (P(Bull)−P(Bear)), greyed while the exit sample is thin
+//   ✓ Compression/Chaos background tinted by Maturity
+//   ✓ In-pane readout with raw exit distribution and sample size
+//   ✓ State-change alerts (any change, per target state) + extended-state alert
 //
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
 // ============================================================================
 
 indicator("Markov State Engine [WavesUnchained]", "MSE", format=format.price, precision=2, overlay=false, max_labels_count=500)
@@ -54,30 +57,20 @@ compRank    = input.float(35.0, "Compression: ATR/BB Width Rank below", minval=0
 slopeTh     = input.float(0.05, "EMA Slope Threshold (×ATR)", minval=0, step=0.01, group=g_th,
      tooltip="EMA slope (5-bar change) normalized by ATR must clear this to count as up/down context. Makes the slope test scale-free across instruments/prices.")
 
-g_mk = "3 · Markov Forecast"
+g_mk = "3 · Transition Statistics"
 lookback   = input.int(500, "Transition Lookback", minval=50, maxval=1500, group=g_mk,
      tooltip="How far back to count transitions out of the current state. Higher = more exit samples per state (six states share the window).")
 laplace    = input.float(1.0, "Laplace Smoothing α", minval=0.0, step=0.5, group=g_mk,
-     tooltip="Pseudo-count added to every successor. Stops tiny samples from reading 0%/100% and softly lowers confidence when data is thin.")
-minSamples = input.int(40, "Reliable Sample Count", minval=5, group=g_mk,
-     tooltip="EXIT transitions out of the current state needed before the forecast is treated as fully sampled. Set by how many exits a statement needs, not by how reachable the signal is: lowering it makes "reliable" easier to reach, not truer.")
+     tooltip="Pseudo-count added to every successor. Stops tiny samples from reading 0%/100%; with few exits the distribution stays closer to even.")
+minSamples = input.int(40, "Minimum Exit Sample", minval=5, group=g_mk,
+     tooltip="Exit transitions out of the current state below which the exit distribution is flagged \"below min sample\" and the Resolution Bias line is drawn grey.")
 minDwell   = input.int(2, "Min State Dwell (debounce)", minval=1, group=g_mk,
      tooltip="A raw classification must persist this many bars before it is committed as the state. Removes 1–2 bar flicker that would otherwise inflate the Markov exit counts with noise. 1 = no debounce.")
 
-g_sig = "4 · Signal"
-confTh     = input.float(55.0, "Directional Confidence ≥ (%)", minval=0, maxval=100, step=1, group=g_sig,
-     tooltip="Max of P(bull)/P(bear) must clear this for an Edge.")
-relTh      = input.float(40.0, "Reliability ≥ (%)", minval=0, maxval=100, step=1, group=g_sig,
-     tooltip="Forecast quality (samples × directional predictability). Below this no Edge fires.")
-biasMargin = input.float(8.0, "Bias Flip Margin (pp)", minval=0, step=1, group=g_sig,
-     tooltip="Dominant direction must lead the next-best by this many percentage points before the stable Bias flips (hysteresis).")
-
-g_disp = "5 · Display"
+g_disp = "4 · Display"
 showTable = input.bool(true,  "Show Readout",          group=g_disp)
 showBg    = input.bool(true,  "Color Background (Compression/Chaos, intensity = Maturity)", group=g_disp)
 showForecast = input.bool(true,  "Plot Resolution Bias Line", group=g_disp)
-showWatch    = input.bool(false, "Show Watch Markers", group=g_disp,
-     tooltip="Low-conviction directional lean. Off by default — the net forecast line already shows the lean continuously; this only marks when a fresh lean appears.")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -183,7 +176,7 @@ if state == 2
 // ─────────────────────────────────────────────────────────────────────────────
 // EXIT-CONDITIONAL MARKOV ROW FOR THE CURRENT STATE
 // Self-transitions (state→same state) are counted separately as Persistence; the
-// forecast is built from EXITS only — "when this regime breaks, where does it go?"
+// distribution is built from EXITS only — "when this regime breaks, where does it go?"
 // — so a sticky state no longer just restates itself. The source match uses
 // contextState (Compression split by directional flavor); the destination
 // buckets (toState) stay the visible 6-state model.
@@ -233,7 +226,7 @@ pBull    = p0 + p1
 pBear    = p3 + p4
 pNeutral = p2 + p5
 
-// Expected next state = argmax of the transition row
+// Most frequent exit destination = argmax of the transition row
 int   nextIdx = 0
 float nextP   = p0
 if p1 > nextP
@@ -252,78 +245,8 @@ if p5 > nextP
     nextP := p5
     nextIdx := 5
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FORECAST QUALITY  (Reliability = sample adequacy × predictability)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Predictability is measured on the DIRECTIONAL 3-way distribution (Bull / Bear /
-// Neutral) — that is what Bias and Edge actually decide on. A 5-bucket raw entropy
-// is structurally high (splitting Up Trend vs Up Weak never matters for
-// direction), which would peg reliability near zero; the 3-way view rises cleanly
-// when one direction dominates.
-f_term(p) =>
-    q = p / 100.0
-    q > 0 ? -q * math.log(q) : 0.0
-
-entropy      = f_term(pBull) + f_term(pBear) + f_term(pNeutral)
-predictability = f_clamp(1 - entropy / math.log(3), 0, 1)
-sampleFactor   = math.min(1.0, total / minSamples)
-reliability    = sampleFactor * predictability * 100
-
-directionalProb = math.max(pBull, math.max(pBear, pNeutral))
 netForecast     = pBull - pBear                              // -100..100, exit lean
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SIGNAL LAYER  (stable Bias + anticipated-transition Edge + visual Watch)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Bias is a held directional state — it only flips when the dominant probability
-// leads the next-best by the margin, so it does not flicker on score noise.
-var int bias = 0
-if pBull - math.max(pBear, pNeutral) >= biasMargin
-    bias := 1
-else if pBear - math.max(pBull, pNeutral) >= biasMargin
-    bias := -1
-else if pNeutral - math.max(pBull, pBear) >= biasMargin
-    bias := 0
-
-confident = directionalProb >= confTh
-reliable  = reliability >= relTh
-
-// Edge = forecast anticipates a transition INTO a trend state we are not in yet,
-// with enough confidence AND reliability. The held boolean is the momentum
-// window; the fresh-event marker keeps the chart clean.
-bullEdge = bias == 1 and confident and reliable and state != 0
-bearEdge = bias == -1 and confident and reliable and state != 3
-bullEdgeNew = bullEdge and not bullEdge[1]
-bearEdgeNew = bearEdge and not bearEdge[1]
-
-// Edge type — what the signal actually means, by the state it comes OUT of:
-//   Reversal     : out of the opposing trend/weak state
-//   Breakout     : out of a neutral state (Compression / Chaos) — nothing to
-//                  "continue", the move is a resolution out of equilibrium
-//   Continuation : out of the same-side weak state
-bullReversal     = bullEdge and (state == 3 or state == 4)
-bullBreakout     = bullEdge and (state == 2 or state == 5)
-bullContinuation = bullEdge and state == 1
-bearReversal     = bearEdge and (state == 0 or state == 1)
-bearBreakout     = bearEdge and (state == 2 or state == 5)
-bearContinuation = bearEdge and state == 4
-
-// Lean type for the readout (works even below the edge threshold).
-string leanType = "—"
-if bias == 1
-    leanType := (state == 3 or state == 4) ? "Reversal" : (state == 2 or state == 5) ? "Breakout" : "Continuation"
-else if bias == -1
-    leanType := (state == 0 or state == 1) ? "Reversal" : (state == 2 or state == 5) ? "Breakout" : "Continuation"
-
-// Watch = a FRESH directional lean that is not yet confident/reliable (visual only,
-// opt-in). Fresh-event so it never spams — the net forecast line carries the
-// continuous lean.
-watchBull = bias == 1 and not (confident and reliable)
-watchBear = bias == -1 and not (confident and reliable)
-watchBullNew = watchBull and bias[1] != 1
-watchBearNew = watchBear and bias[1] != -1
+thinSample      = total < minSamples                         // fewer exits than the sample floor
 
 regimeChanged = ta.change(state) != 0
 barsInState   = nz(ta.barssince(regimeChanged), 0)
@@ -356,32 +279,33 @@ extendedNew = (maturity == "Extended" or maturity == "Overdue") and not (maturit
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Resolution Bias (P(Bull) − P(Bear)) for the CURRENT state, centred at 0 —
-// above = exits resolve up, below = down. It is NOT a price forecast and it is
-// neither lagging nor forward-looking: it is the historical exit statistic for
-// the regime that is active right now. Stepline on purpose — the value only
-// changes when the state exits, so it holds flat rather than reading as a
-// continuously evolving curve. Color is gated by actionability: bold green/red
-// only once BOTH confidence and reliability clear their thresholds, muted grey
-// otherwise — so the line color itself is the verdict, not just the fill.
-actionable = confident and reliable
-color fcCol = actionable ? (netForecast >= 0 ? color.new(#00c853, 0) : color.new(#d50000, 0)) : color.new(color.gray, 55)
+// above = past exits of this state resolved up more often, below = down. It is NOT
+// a price forecast: it is the historical exit statistic for the regime that is
+// active right now. Stepline on purpose — the value only changes when the state
+// exits, so it holds flat rather than reading as a continuously evolving curve.
+// Colour follows the sign; it fades to grey while the exit sample is below the
+// Minimum Exit Sample, so a thin statistic never reads as bold as a sampled one.
+color fcCol = na
+if thinSample
+    fcCol := color.new(color.gray, 55)
+else if netForecast >= 0
+    fcCol := color.new(#00c853, 0)
+else
+    fcCol := color.new(#d50000, 0)
 pFc   = plot(showForecast ? netForecast : na, "Resolution Bias", color=fcCol, linewidth=2, style=plot.style_stepline)
 pZero = plot(showForecast ? 0 : na, "Zero", color=color.new(color.gray, 70), display=display.none)
 
-fillTransp = math.round(f_clamp(90 - reliability * 0.6, 30, 92))
-fillCol    = netForecast >= 0 ? color.new(#00c853, fillTransp) : color.new(#d50000, fillTransp)
-fill(pFc, pZero, color=showForecast ? fillCol : na, title="Resolution Bias (density = reliability)")
+fillCol = netForecast >= 0 ? color.new(#00c853, 85) : color.new(#d50000, 85)
+fill(pFc, pZero, color=showForecast ? fillCol : na, title="Resolution Bias Fill")
 
 hline(0,   "Zero",  color=color.new(color.gray, 50))
 hline(50,  "+50",   color=color.new(color.gray, 85))
 hline(-50, "−50",   color=color.new(color.gray, 85))
 
-// Background tints only the two neutral/extreme regimes (Compression, Chaos) —
-// the ones worth watching for a resolution — not all six states, so trend/weak
-// changes no longer flicker the pane. Intensity scales with Maturity/dwellRatio
-// (the robust, well-sampled axis): a fresh squeeze is barely tinted, an overdue
-// one reads clearly more saturated — the background makes the "how stretched is
-// this regime" statement on its own, without needing the label.
+// Background tints only the two neutral/extreme regimes (Compression, Chaos), not
+// all six states, so trend/weak changes do not flicker the pane. Intensity scales
+// with Maturity/dwellRatio: a fresh squeeze is barely tinted, an overdue one reads
+// clearly more saturated.
 bgIntensity = na(dwellRatio) ? 0.0 : f_clamp(dwellRatio / 2.5, 0, 1)   // 0 = fresh, 1 = at/beyond Overdue
 bgTransp    = math.round(96 - bgIntensity * 16)                        // 96 (faint) .. 80 (strongest)
 color bgCol = na
@@ -392,37 +316,31 @@ if showBg
         bgCol := color.new(#ff6f00, bgTransp)
 bgcolor(bgCol, title="Compression/Chaos Background (intensity = Maturity)")
 
-plotshape(bullEdgeNew and bullReversal,     "Bull Reversal Edge",     style=shape.triangleup,   location=location.bottom, color=color.new(#00c853, 0), size=size.tiny, text="R↑")
-plotshape(bullEdgeNew and bullBreakout,     "Bull Breakout Edge",     style=shape.triangleup,   location=location.bottom, color=color.new(#6a1b9a, 0), size=size.tiny, text="B↑")
-plotshape(bullEdgeNew and bullContinuation, "Bull Continuation Edge", style=shape.triangleup,   location=location.bottom, color=color.new(#00897b, 0), size=size.tiny, text="C↑")
-plotshape(bearEdgeNew and bearReversal,     "Bear Reversal Edge",     style=shape.triangledown, location=location.top,    color=color.new(#d50000, 0), size=size.tiny, text="R↓")
-plotshape(bearEdgeNew and bearBreakout,     "Bear Breakout Edge",     style=shape.triangledown, location=location.top,    color=color.new(#6a1b9a, 0), size=size.tiny, text="B↓")
-plotshape(bearEdgeNew and bearContinuation, "Bear Continuation Edge", style=shape.triangledown, location=location.top,    color=color.new(#e65100, 0), size=size.tiny, text="C↓")
-plotshape(showWatch and watchBullNew and not bullEdge, "Watch Bull", style=shape.circle, location=location.bottom, color=color.new(color.gray, 40), size=size.tiny)
-plotshape(showWatch and watchBearNew and not bearEdge, "Watch Bear", style=shape.circle, location=location.top,    color=color.new(color.gray, 40), size=size.tiny)
-
 // ─────────────────────────────────────────────────────────────────────────────
-// ALERTS
+// ALERTS — state-change events only
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="Alerts")
 bool alertOk = not alertsOnBarClose or barstate.isconfirmed
 
-alertcondition(alertOk and (bullEdgeNew),   "Markov Bullish Edge", "MSE · BULLISH EDGE · {{ticker}} {{interval}}")
-alertcondition(alertOk and (bearEdgeNew),   "Markov Bearish Edge", "MSE · BEARISH EDGE · {{ticker}} {{interval}}")
-alertcondition(alertOk and (regimeChanged), "Markov Regime Change","MSE · REGIME CHANGE · {{ticker}} {{interval}}")
-alertcondition(alertOk and (extendedNew),   "Markov State Extended","MSE · STATE EXTENDED · {{ticker}} {{interval}}")
+alertcondition(alertOk and regimeChanged,                "MSE State Changed",             "MSE · STATE CHANGED · {{ticker}} {{interval}}")
+alertcondition(alertOk and regimeChanged and state == 0, "MSE State → Up Trend",          "MSE · STATE CHANGED TO UP TREND · {{ticker}} {{interval}}")
+alertcondition(alertOk and regimeChanged and state == 1, "MSE State → Up Weak",           "MSE · STATE CHANGED TO UP WEAK · {{ticker}} {{interval}}")
+alertcondition(alertOk and regimeChanged and state == 2, "MSE State → Compression",       "MSE · STATE CHANGED TO COMPRESSION · {{ticker}} {{interval}}")
+alertcondition(alertOk and regimeChanged and state == 3, "MSE State → Down Trend",        "MSE · STATE CHANGED TO DOWN TREND · {{ticker}} {{interval}}")
+alertcondition(alertOk and regimeChanged and state == 4, "MSE State → Down Weak",         "MSE · STATE CHANGED TO DOWN WEAK · {{ticker}} {{interval}}")
+alertcondition(alertOk and regimeChanged and state == 5, "MSE State → Expansion/Chaos",   "MSE · STATE CHANGED TO EXPANSION/CHAOS · {{ticker}} {{interval}}")
+alertcondition(alertOk and extendedNew,                  "MSE State Extended",            "MSE · STATE EXTENDED · {{ticker}} {{interval}}")
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEBUG (§10) — why a signal came / why none
+// DEBUG — state changes with the exit statistic at that bar
 // ─────────────────────────────────────────────────────────────────────────────
 
-if barstate.isconfirmed and (bullEdgeNew or bearEdgeNew or regimeChanged)
-    log.info("MSE state={0} bias={1} expNext={2} pBull={3} pBear={4} pNeu={5} dirConf={6} rel={7} n={8} dwell={9}",
-         f_state_name(state), bias, f_state_name(nextIdx),
+if barstate.isconfirmed and regimeChanged
+    log.info("MSE state={0} from={1} expNext={2} pBull={3} pBear={4} pNeu={5} exits={6} persist={7}",
+         f_state_name(state), f_state_name(state[1]), f_state_name(nextIdx),
          str.tostring(pBull, "#.0"), str.tostring(pBear, "#.0"), str.tostring(pNeutral, "#.0"),
-         str.tostring(directionalProb, "#.0"), str.tostring(reliability, "#.0"),
-         str.tostring(total, "#"), str.tostring(barsInState, "#"))
+         str.tostring(total, "#"), str.tostring(persistence, "#.0"))
 
 // ─────────────────────────────────────────────────────────────────────────────
 // READOUT (in-pane label — no floating table, keeps the oscillator unobstructed)
@@ -433,42 +351,24 @@ color tc = color.new(color.gray, 20)
 var label infoLbl = na
 if showTable and barstate.islast
     label.delete(infoLbl)
-    biasTxt = bias == 1 ? "Bullish" : bias == -1 ? "Bearish" : "Neutral"
     coiled  = maturity == "Extended" or maturity == "Overdue"
     matMark = coiled ? " ⚠" : ""
-    // Honest color: the readout lights up ONLY when something is actionable —
-    // green/red for a reliable directional bias, amber for a coiled (extended)
-    // state where the robust TIMING signal matters, grey otherwise. The headline
-    // text mirrors the color exactly, so a reader without color still gets the
-    // same precise claim (never "Bullish" unless reliable + confident cleared).
-    color txtCol = tc
-    string headBias = "No reliable direction"
-    if reliable and bias == 1
-        txtCol := #00c853
-        headBias := "Bullish " + leanType + " Bias"
-    else if reliable and bias == -1
-        txtCol := #d50000
-        headBias := "Bearish " + leanType + " Bias"
-    else if coiled
-        txtCol := #ff6f00
-        headBias := "No reliable direction — " + maturity + matMark
-    string sampleTxt = total < minSamples ? "below min sample" : "sample OK"
+    color txtCol = coiled ? #ff6f00 : tc
+    string sampleTxt = thinSample ? "below min sample" : "sample OK"
     string matLine = "Timing:    —"
     if maturity != "—"
         matLine := "Timing:    " + maturity + matMark + "   ·   " + str.tostring(dwellRatio, "0.0") + "× typical dwell (" + str.tostring(barsInState, "#") + "/" + str.tostring(typicalDwell, "#") + " bars)"
-    txt = "MSE: " + f_state_name(state) + "   ·   " + headBias + "\n" +
+    txt = "MSE: " + f_state_name(state) + "   ·   " + str.tostring(barsInState, "#") + " bars in state\n" +
          matLine + "\n" +
-         "Direction: Bull " + str.tostring(pBull, "#.0") + "%   Bear " + str.tostring(pBear, "#.0") + "%   Neutral " + str.tostring(pNeutral, "#.0") + "%   ·   likely exit → " + f_state_name(nextIdx) + " (" + str.tostring(nextP, "#.0") + "%)\n" +
-         "Quality:   Reliability " + str.tostring(reliability, "#.0") + "%   ·   " + str.tostring(total, "#") + " exits (" + sampleTxt + ")   ·   Persistence " + str.tostring(persistence, "#.0") + "%"
+         "Past exits: Bull " + str.tostring(pBull, "#.0") + "%   Bear " + str.tostring(pBear, "#.0") + "%   Neutral " + str.tostring(pNeutral, "#.0") + "%   ·   most frequent exit → " + f_state_name(nextIdx) + " (" + str.tostring(nextP, "#.0") + "%)\n" +
+         "Sample:    " + str.tostring(total, "#") + " exits (" + sampleTxt + ")   ·   Persistence " + str.tostring(persistence, "#.0") + "%"
     tip = "Markov State Engine — a regime RESOLUTION map, not a price forecast.\n" +
-         "The percentages are how SIMILAR past states historically resolved when they ended — not a prediction of this instance.\n" +
-         "Two independent axes: TIMING (Maturity) is well-sampled and robust; DIRECTION (Bull/Bear/Neutral, Reliability) hangs on few exits and is usually thin.\n" +
-         "State: current regime classification (debounced).\n" +
-         "Headline bias: reads Bullish/Bearish only when BOTH confidence and reliability clear their thresholds — otherwise 'No reliable direction', even if a lean exists.\n" +
+         "The percentages are how SIMILAR past states resolved when they ended — a count over the lookback, not a prediction of this instance.\n" +
+         "State: current regime classification (debounced) and how many bars it has held.\n" +
          "Timing: current dwell vs the state's typical dwell (1/(1−Persistence)). Fresh < 0.75× · Mature · Extended ≥1.5× · Overdue ≥2.5×. 'Overdue' = unusually long vs history, NOT a claim an exit is due.\n" +
-         "Direction: exit-conditional probabilities (Bull/Bear/Neutral) and the single most likely next state.\n" +
-         "Quality: Reliability = sample adequacy × directional predictability. Exits = how many past exits the direction distribution is built on; 'below min sample' means fewer than the Reliable Sample Count input.\n" +
-         "Colour: green/red = reliable directional bias · amber = coiled (extended) state · grey = nothing reliable yet."
+         "Past exits: Laplace-smoothed exit distribution (Bull/Bear/Neutral) and the destination that occurred most often.\n" +
+         "Sample: how many past exits the distribution is built on; 'below min sample' = fewer than the Minimum Exit Sample input. Persistence = share of self-transitions.\n" +
+         "Colour: amber = Extended/Overdue state · grey otherwise."
     infoLbl := label.new(bar_index + 3, 0, txt,
          xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left,
          color=color.new(color.white, 8), textcolor=txtCol,

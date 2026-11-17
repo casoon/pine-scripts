@@ -1,26 +1,34 @@
 //@version=6
 // ============================================================================
 // Wolfe Wave Scanner Pro [WavesUnchained]
-// Version: 4.15
+// Version: 4.16
 // Author: WavesUnchained
-// Build: 2026-10-02 00:00:00
+// Build: 2026-11-17
 // ============================================================================
-// Searches a depth window of confirmed swings for every non-overlapping
-// valid 5-point Wolfe Wave wedge (not just the single highest-scoring one),
-// projects each one's dynamic EPA target, and tracks each independently until
-// the target is hit, the setup invalidates, or its ETA lifecycle expires.
+// Searches a depth window of confirmed swings for non-overlapping 5-point
+// Wolfe Wave wedges that pass every hard geometry rule, projects each one's
+// dynamic EPA level, and tracks each independently until the EPA is reached,
+// the pattern invalidates, or its ETA lifecycle expires. A display of the
+// geometry — no quality grade, no entry call; alerts are lifecycle events.
 //
 // Features:
 //   ✓ Best-of-window swing search across non-consecutive combinations, not
 //     just the literal last 5 swings
-//   ✓ Tracks multiple simultaneously valid, non-overlapping patterns at once
-//     (each with its own drawings and invalidation state), not just one
-//   ✓ Continuous 0-100 score: contraction, channel traversal,
-//     apex, directional P5-zone, risk/reward, timing, symmetry, leg purity
-//   ✓ EPA target projection from line 1-4 at the 1-3/2-4 apex time
-//   ✓ ACTIVE → PARTIAL/TARGET/INVALIDATED/EXPIRED lifecycle + alerts
-//   ✓ Near-miss candidate marker and score-breakdown debug table
+//   ✓ Validity from explicit hard rules only: structure, contraction, channel,
+//     boundary hold (swings and bars), leg purity, P5 zone, apex convergence
+//   ✓ Internal geometric rank (no grade shown) picks one pattern per P5
+//     anchor and decides between overlapping patterns
+//   ✓ Shows how old P5 is: detection lags P5 by the pivot delay and the search
+//   ✓ EPA projection from line 1-4 at the 1-3/2-4 apex time
+//   ✓ ACTIVE → 50% EPA / EPA REACHED / INVALIDATED / EXPIRED lifecycle + alerts
+//   ✓ Rule-breakdown debug table
 //
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
 // ============================================================================
 
 indicator("Wolfe Wave Scanner Pro [WavesUnchained]", overlay=true, max_lines_count=500, max_labels_count=500)
@@ -34,15 +42,11 @@ maxSwings         = input.int(80, "Max. gespeicherte Swings", minval=20, maxval=
 searchDepth       = input.int(16, "Suchbereich letzte Swings", minval=5, maxval=24)
 maxConcurrentPatterns = input.int(1, "Max. gleichzeitige Patterns", minval=1, maxval=8)
 
-minScore          = input.int(60, "Mindestqualität", minval=0, maxval=100)
 atrLen            = input.int(14, "ATR-Länge")
 p5InsideTolAtr    = input.float(0.75, "P5 max. innerhalb ATR", minval=0.1, maxval=2.0, step=0.05)
 p5OvershootTolAtr = input.float(1.0, "P5 max. Overshoot ATR", minval=0.1, maxval=3.0, step=0.05)
 swingBoundaryTolAtr = input.float(0.35, "Swing-Boundary-Toleranz ATR", minval=0.05, maxval=2.0, step=0.05)
 barBoundaryTolAtr = input.float(0.25, "Bar-Boundary-Toleranz ATR", minval=0.05, maxval=2.0, step=0.05)
-maxTargetDistance = input.float(8.0, "Max. Zielentfernung ATR-Multiple", minval=0.5, step=0.25)
-minRR             = input.float(1.5, "Mindest-Risk/Reward", minval=0.25, maxval=10.0, step=0.25)
-requireReward     = input.bool(false, "Reward als Pflichtfilter")
 invalidationAtr   = input.float(0.5, "Invalidierungs-Puffer ATR", minval=0.1, maxval=3.0, step=0.1)
 dynamicInvalidationBars = input.int(10, "Dynamische 1-3-Invalidierung (Bars)", minval=0, maxval=100)
 expiryBufferBars  = input.int(10, "Ablaufpuffer nach ETA (Bars)", minval=0, maxval=200)
@@ -51,9 +55,8 @@ invalidateOnClose = input.bool(true, "Invalidierung nur per Close (aus = Intraba
 
 showOldPatterns   = input.bool(false, "Abgeschlossene/ersetzte Patterns behalten")
 drawZigzag        = input.bool(true, "Interne ZigZag-Struktur zeichnen")
-showCandidate     = input.bool(true, "Kandidaten anzeigen")
 showLabels        = input.bool(true, "Punktlabels anzeigen")
-showScoreLabel    = input.bool(true, "Score-Label anzeigen")
+showInfoLabel     = input.bool(true, "Info-Label anzeigen (Richtung, P5-Alter, EPA@ETA)")
 showInvalidation  = input.bool(false, "Invalidierung anzeigen")
 showETA           = input.bool(true, "ETA anzeigen")
 lineAheadBars     = input.int(10, "Linien-Überstand (Bars)", minval=1, maxval=50)
@@ -61,11 +64,9 @@ lineAheadBars     = input.int(10, "Linien-Überstand (Bars)", minval=1, maxval=5
 bullCol           = input.color(color.lime, "Bullisch")
 bearCol           = input.color(color.red, "Bärisch")
 weakCol           = input.color(color.gray, "Nebenlinien")
-candidateCol      = input.color(color.new(color.orange, 0), "Kandidat")
 
 groupDebug        = "Debug"
-showDebug         = input.bool(false, "Score-Breakdown Debug-Tabelle", group=groupDebug)
-candidateThreshold = input.int(25, "Kandidat-Mindestscore (Watch)", minval=0, maxval=100, group=groupDebug)
+showDebug         = input.bool(false, "Regel-Breakdown Debug-Tabelle", group=groupDebug)
 enableLogging     = input.bool(false, "Pine-Logs aktivieren (Fehlersuche)", group=groupDebug)
 
 groupDash         = "Dashboard"
@@ -95,7 +96,7 @@ type Swing
 type Pattern
     bool valid
     bool bull
-    int score
+    int rank
     int x1
     int x2
     int x3
@@ -110,7 +111,6 @@ type Pattern
     float targetETA
     float invalidate
     float patternAtr
-    float riskReward
     float legPurityRatio
     float contractionRatio
     float widthStartAtr
@@ -135,21 +135,19 @@ type Pattern
     bool channelOk
     bool etaOk
     bool p5ZoneOk
-    bool rewardOk
     bool timingOk
     bool symmetryOk
     bool legPurityOk
     bool boundaryHoldOk
     bool barsInsideOk
-    int structureScore
-    int contractionScore
-    int channelScore
-    int etaScore
-    int p5Score
-    int rewardScore
-    int timingScore
-    int symmetryScore
-    int purityScore
+    int structurePts
+    int contractionPts
+    int channelPts
+    int etaPts
+    int p5Pts
+    int timingPts
+    int symmetryPts
+    int purityPts
 
 // A tracked, currently-live pattern owns its own drawing objects so it can
 // be cleaned up independently of every other tracked pattern.
@@ -168,8 +166,6 @@ type TrackedPattern
 // ============================================================================
 
 var swings = array.new<Swing>()
-var candidateLines = array.new_line()
-var candidateLabels = array.new_label()
 
 // Tracks the newest swing's bar index, not the array LENGTH. Once `swings`
 // hits its `maxSwings` cap, every push is paired with a shift, so the length
@@ -183,16 +179,15 @@ emptyPattern() =>
          na, na, na, na, na,
          na, na, na, na, na,
          na, na, na,
-         na, na, na,
+         na, na,
          na, na, na, na,
          false, false, na,
          na, na, na, na,
          na, 0, 0.0, na, 0.0, na, na,
-         false, false, false, false, false, false, false, false, false, false, true,
-         0, 0, 0, 0, 0, 0, 0, 0, 0)
+         false, false, false, false, false, false, false, false, false, true,
+         0, 0, 0, 0, 0, 0, 0, 0)
 
-// Single best-in-window candidate — kept for the dashboard, debug table and
-// near-miss candidate marker. Independent of `trackedPatterns` below, which
+// Single best-in-window candidate — kept for the debug table and log. Independent of `trackedPatterns` below, which
 // holds every distinct, non-overlapping VALID pattern found at once.
 var Pattern best = emptyPattern()
 
@@ -205,7 +200,7 @@ var table dash = table.new(position.top_right, 2, 7,
      frame_color=color.new(color.gray, 40),
      frame_width=1)
 
-var table dbgTable = table.new(position.bottom_right, 2, 17,
+var table dbgTable = table.new(position.bottom_right, 2, 16,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -218,12 +213,6 @@ color hd = color.new(color.gray, 90)
 // ============================================================================
 // Helpers
 // ============================================================================
-
-f_clear_candidate() =>
-    while array.size(candidateLines) > 0
-        line.delete(array.pop(candidateLines))
-    while array.size(candidateLabels) > 0
-        label.delete(array.pop(candidateLabels))
 
 f_log(string msg) =>
     if enableLogging
@@ -261,7 +250,7 @@ f_intersect_x(int ax1, float ay1, int ax2, float ay2, int bx1, float by1, int bx
 // both boundaries — same principle as `boundaryHoldOk` above, ported from a
 // reference indicator (Wedge and Flag Finder by Trendoscope) that validates
 // every bar's high/low, not just registered swings. Deliberately called ONCE
-// per i5 on only the single best-scoring combination found for it (see the
+// per i5 on only the single best-ranked combination found for it (see the
 // search loop below), never per combination — the combinatorial search
 // already evaluates tens of thousands of (i1,i2,i3,i4) combinations per i5,
 // so an O(bars) scan on every one of those would be prohibitively expensive.
@@ -313,7 +302,7 @@ f_add_swing(int x, float y, int dir) =>
 // [x1,x5] span. A Wolfe wave's point 1 can sit anywhere within the last
 // `searchDepth` swings, so two genuinely different completions (different,
 // well-separated point 5s) often still share the same early swings for
-// points 1-2 — comparing the full range let one wide, high-scoring pattern
+// points 1-2 — comparing the full range let one wide, high-ranked pattern
 // block every other candidate in the window until it invalidated, even once
 // a completely separate, more current wave had already formed. Direction
 // matters too: a bull and a bear pattern occupying the same bars are two
@@ -346,8 +335,8 @@ f_find_overlap_index(Pattern p) =>
                 idx := i
     idx
 
-// Index of the lowest-scoring currently tracked pattern — used to make room
-// for a new, non-overlapping, higher-scoring candidate once the cap is
+// Index of the lowest-ranked currently tracked pattern — used to make room
+// for a new, non-overlapping, higher-ranked candidate once the cap is
 // reached. Without this, the first `maxConcurrentPatterns` patterns that
 // happen not to invalidate for a long stretch permanently fill every slot,
 // silently discarding every new, better candidate found afterward (observed
@@ -356,28 +345,28 @@ f_find_overlap_index(Pattern p) =>
 f_find_weakest_index() =>
     n = array.size(trackedPatterns)
     idx = -1
-    minScoreSeen = 1000000
+    minRankSeen = 1000000
     if n > 0
         for i = 0 to n - 1
             tp = array.get(trackedPatterns, i)
-            if tp.p.score < minScoreSeen
-                minScoreSeen := tp.p.score
+            if tp.p.rank < minRankSeen
+                minRankSeen := tp.p.rank
                 idx := i
     idx
 
-// Index of the highest-scoring currently tracked pattern — used so the
-// dashboard's Bias/EPA/Invalidation reflect an actual tracked, live pattern
-// instead of the raw search candidate, which can be a lower-scoring near-miss
+// Index of the highest-ranked currently tracked pattern — used so the
+// dashboard's Pattern/EPA/Invalidation reflect an actual tracked, live pattern
+// instead of the raw search candidate, which can be an invalid best-in-window
 // (or a different pattern entirely) than what's really being tracked.
 f_find_best_active_index() =>
     n = array.size(trackedPatterns)
     idx = -1
-    maxScoreSeen = -1
+    maxRankSeen = -1
     if n > 0
         for i = 0 to n - 1
             tp = array.get(trackedPatterns, i)
-            if tp.p.score > maxScoreSeen
-                maxScoreSeen := tp.p.score
+            if tp.p.rank > maxRankSeen
+                maxRankSeen := tp.p.rank
                 idx := i
     idx
 
@@ -394,7 +383,7 @@ f_delete_tracked(TrackedPattern tp) =>
 // miss: if A overlaps B and B overlaps C, but A and C don't directly
 // overlap each other, all three could end up tracked at once even though
 // they visually occupy the same stretch. Checks every pair, keeping only
-// the higher-scoring one of each same-direction, overlapping pair.
+// the higher-ranked one of each same-direction, overlapping pair.
 f_dedupe_overlaps() =>
     n = array.size(trackedPatterns)
     if n > 1
@@ -404,7 +393,7 @@ f_dedupe_overlaps() =>
                 tpI = array.get(trackedPatterns, i)
                 tpJ = array.get(trackedPatterns, j)
                 if array.get(keep, i) and array.get(keep, j) and f_overlaps(tpI.p, tpJ.p)
-                    if tpI.p.score >= tpJ.p.score
+                    if tpI.p.rank >= tpJ.p.rank
                         array.set(keep, j, false)
                     else
                         array.set(keep, i, false)
@@ -416,7 +405,7 @@ f_dedupe_overlaps() =>
                 array.remove(trackedPatterns, i)
 
 // ============================================================================
-// Scoring Engine
+// Rule + Rank Engine
 // ============================================================================
 
 f_eval(Swing p1, Swing p2, Swing p3, Swing p4, Swing p5, int i1, int i2, int i3, int i4, int i5) =>
@@ -442,7 +431,7 @@ f_eval(Swing p1, Swing p2, Swing p3, Swing p4, Swing p5, int i1, int i2, int i3,
     // Core, non-negotiable shape: same-direction points trend towards the
     // reversal (lows declining for bull, highs rising for bear, across points
     // 1-3-5). Point 4's exact placement inside the 1-2 channel is a quality
-    // nicety, not part of "is this even a Wolfe-shaped wave" — scored
+    // nicety, not part of "is this even a Wolfe-shaped wave" — ranked
     // separately as channelOk so one strict sub-check can't zero out the
     // whole structure gate.
     bullStructure = bullSeq and y3 < y1 and y5 < y3
@@ -534,13 +523,6 @@ f_eval(Swing p1, Swing p2, Swing p3, Swing p4, Swing p5, int i1, int i2, int i3,
     targetETA = f_price(x1, y1, x4, y4, xiBounded)
 
     invalidate = isBull ? math.min(y5, line13At5) - patternAtr * invalidationAtr : isBear ? math.max(y5, line13At5) + patternAtr * invalidationAtr : na
-    risk = not na(invalidate) ? math.abs(y5 - invalidate) : 0.0
-    reward = math.abs(targetNow - y5)
-    rewardDirectionOk = (bullSeq and targetNow > y5) or (bearSeq and targetNow < y5)
-    targetDistanceOk = reward <= patternAtr * maxTargetDistance
-    riskReward = risk > 0 ? reward / risk : 0.0
-    rewardOk = rewardDirectionOk and targetDistanceOk and riskReward >= minRR
-    rewardQuality = rewardDirectionOk and targetDistanceOk ? f_clamp01(riskReward / 2.0) : 0.0
 
     t12 = x2 - x1
     t23 = x3 - x2
@@ -617,48 +599,45 @@ f_eval(Swing p1, Swing p2, Swing p3, Swing p4, Swing p5, int i1, int i2, int i3,
                     swingBoundaryViolationX := s.x
     swingBoundaryViolationAtr = patternAtr > 0 ? maxSwingViolationPrice / patternAtr : 1000000.0
 
-    structureScore = structureOk ? 20 : 0
-    contractionScore = int(math.round(15.0 * (contractionOk ? contractionQuality : contractionQuality * 0.50)))
-    channelScore = int(math.round(10.0 * f_clamp01(channelQuality)))
-    etaScore = int(math.round(10.0 * etaQuality))
-    p5Score = int(math.round(15.0 * (p5ZoneOk ? f_clamp01(p5Quality) : 0.0)))
-    rewardScore = int(math.round(15.0 * rewardQuality))
+    structurePts = structureOk ? 20 : 0
+    contractionPts = int(math.round(15.0 * (contractionOk ? contractionQuality : contractionQuality * 0.50)))
+    channelPts = int(math.round(10.0 * f_clamp01(channelQuality)))
+    etaPts = int(math.round(10.0 * etaQuality))
+    p5Pts = int(math.round(15.0 * (p5ZoneOk ? f_clamp01(p5Quality) : 0.0)))
     maxLegShare = float(maxLeg) / float(totalTime)
     timingQuality = timing ? f_clamp01((0.50 - maxLegShare) / 0.25) : 0.0
-    timingScore = int(math.round(5.0 * timingQuality))
-    symmetryScore = int(math.round(5.0 * (1.0 - f_clamp01(symmetryRatio / 0.45))))
-    purityScore = int(math.round(5.0 * purityQuality))
-    // The structure component is constant (20) for every pattern that passes
-    // the structureOk gate, so it is excluded from the score: it stays a gate and a
-    // debug readout only. The remaining components (80 points) are scaled to
-    // 0-100 so the score range and Mindestqualität keep their meaning.
-    rawScore = contractionScore + channelScore + etaScore + p5Score + rewardScore + timingScore + symmetryScore + purityScore
-    score = int(math.round(float(rawScore) * 100.0 / 80.0))
+    timingPts = int(math.round(5.0 * timingQuality))
+    symmetryPts = int(math.round(5.0 * (1.0 - f_clamp01(symmetryRatio / 0.45))))
+    purityPts = int(math.round(5.0 * purityQuality))
+    // Internal geometric rank (0-65): only decides which combination wins per
+    // P5 anchor and which of two overlapping patterns is kept. It is not a
+    // validity gate and is never shown as a grade — validity comes from the
+    // hard rules below. The structure component is constant for every pattern
+    // that passes structureOk, so it stays a gate and debug readout only.
+    rank = contractionPts + channelPts + etaPts + p5Pts + timingPts + symmetryPts + purityPts
 
     // valid requires an actual bull/bear structure, unbroken boundaries, a
     // directional point-5 test within its dedicated inside/overshoot limits,
     // leg purity, meaningful P4→P5 traversal, AND a wedge apex that
-    // actually converges ahead of point 5 — not just the seq-agnostic terms
-    // (contraction/timing/symmetry) reaching the score alone. p5ZoneOk and etaOk were
-    // previously scored but not gated, so two distinct bad cases could still validate:
+    // actually converges ahead of point 5. There is no rank threshold. p5ZoneOk and etaOk were
+    // previously ranked but not gated, so two distinct bad cases could still validate:
     // (1) a point 5 that blew straight through the boundary by several ATRs, and
     // (2) an apex that had already converged at/before point 5 (etaOk false) — whose
     // fallback projection (x5 + 2x pattern width) then extrapolated the same, already-
     // converged slopes further out and went deeply negative in price, drawing wildly
     // wrong lines shooting off into empty space (chart-confirmed: apex fallback landed
     // at a negative price). A wedge that doesn't converge ahead of point 5 isn't a
-    // completed Wolfe wave, regardless of how well the five points otherwise score.
+    // completed Wolfe wave, regardless of how well the five points otherwise rank.
     Pattern.new(
-         score >= minScore and structureOk and contractionOk and channelOk and boundaryHoldOk and legPurityOk and p5ZoneOk and etaOk and (not requireReward or rewardOk),
+         structureOk and contractionOk and channelOk and boundaryHoldOk and legPurityOk and p5ZoneOk and etaOk,
          isBull,
-         score,
+         rank,
          x1, x2, x3, x4, x5,
          y1, y2, y3, y4, y5,
          targetNow,
          targetETA,
          invalidate,
          patternAtr,
-         riskReward,
          maxSkippedLegRatio,
          contractionRatio,
          widthStartAtr,
@@ -678,8 +657,8 @@ f_eval(Swing p1, Swing p2, Swing p3, Swing p4, Swing p5, int i1, int i2, int i3,
          0.0,
          na,
          xiBounded,
-         structureOk, contractionOk, channelOk, etaOk, p5ZoneOk, rewardOk, timing, symmetryOk, legPurityOk, boundaryHoldOk, true,
-         structureScore, contractionScore, channelScore, etaScore, p5Score, rewardScore, timingScore, symmetryScore, purityScore)
+         structureOk, contractionOk, channelOk, etaOk, p5ZoneOk, timing, symmetryOk, legPurityOk, boundaryHoldOk, true,
+         structurePts, contractionPts, channelPts, etaPts, p5Pts, timingPts, symmetryPts, purityPts)
 
 // ============================================================================
 // Pattern drawing — builds one self-contained TrackedPattern
@@ -732,8 +711,11 @@ f_draw_pattern(Pattern p) =>
     f_label(objLabels, p.x4, p.y4, "4", weakCol, p.bull ? label.style_label_down : label.style_label_up)
     f_label(objLabels, p.x5, p.y5, "5", col, p5Style)
 
-    if showScoreLabel
-        txt = (p.bull ? "Bull Wolfe" : "Bear Wolfe") + "\nScore " + str.tostring(p.score) + "\nRR " + str.tostring(p.riskReward, "#.##") + "\nEPA@ETA " + str.tostring(p.targetETA, format.mintick)
+    // P5 age at detection: confirmed swings lag by pivotLen and P5 may sit
+    // several swings back in the search window, so the pattern is often found
+    // well after P5 formed. The label states that delay instead of hiding it.
+    if showInfoLabel
+        txt = (p.bull ? "Bull Wolfe" : "Bear Wolfe") + "\nP5 " + str.tostring(bar_index - p.x5) + " bars before detection" + "\nEPA@ETA " + str.tostring(p.targetETA, format.mintick)
         lb = label.new(p.x5, p.y5, txt, style=p5Style, color=col, textcolor=color.white)
         array.push(objLabels, lb)
 
@@ -763,7 +745,7 @@ if not na(pl)
 // combinatorially: since `swings` stores strictly alternating highs/lows,
 // any pick of 3 same-direction points (1,3,5) and 2 opposite-direction points
 // (2,4) in order is a valid alternating chain — not just the literal
-// previous 4 swings. Every i5's own best-scoring valid combination is kept,
+// previous 4 swings. Every i5's own best-ranked valid combination is kept,
 // not just the single overall best, so two genuinely separate Wolfe waves in
 // the same window can both surface.
 
@@ -826,16 +808,16 @@ if newSwing and sz >= 5
                                          i1, i2, i3, i4, i5)
                                     evalCount += 1
                                     structHits += candidate.structureOk ? 1 : 0
-                                    if candidate.score > localBestRawForI5.score
+                                    if candidate.rank > localBestRawForI5.rank
                                         localBestRawForI5 := candidate
-                                    // A higher-scoring shape that already
+                                    // A higher-ranked shape that already
                                     // fails structural gates must not hide a
-                                    // slightly lower-scoring valid setup for
+                                    // slightly lower-ranked valid setup for
                                     // the same point-5 anchor.
-                                    if candidate.valid and candidate.score > localBestForI5.score
+                                    if candidate.valid and candidate.rank > localBestForI5.rank
                                         localBestForI5 := candidate
 
-        if localBestForI5.score == 0
+        if localBestForI5.rank == 0
             localBestForI5 := localBestRawForI5
 
         // Run only once per i5, on the single winning combination — see
@@ -854,14 +836,14 @@ if newSwing and sz >= 5
         // Global best must see the exact same post-containment candidate that
         // is stored/tracked. Updating it inside the combination loop left the
         // dashboard showing a pre-validation winner.
-        if localBestForI5.score > localBest.score
+        if localBestForI5.rank > localBest.rank
             localBest := localBestForI5
 
         array.push(perI5Best, localBestForI5)
 
     best := localBest
     f_log("SEARCH sz=" + str.tostring(sz) + " evaluated=" + str.tostring(evalCount) + " structHits=" + str.tostring(structHits)
-         + " best.score=" + str.tostring(best.score) + " structureOk=" + str.tostring(best.structureOk)
+         + " best.rank=" + str.tostring(best.rank) + " structureOk=" + str.tostring(best.structureOk)
          + " bull=" + str.tostring(best.bull) + " valid=" + str.tostring(best.valid)
          + " p5Zone=" + str.tostring(best.p5ZoneOk) + " contraction=" + str.tostring(best.contractionOk)
          + " contractionRatio=" + str.tostring(best.contractionRatio, "#.###")
@@ -871,7 +853,7 @@ if newSwing and sz >= 5
          + " p4WidthAtr=" + str.tostring(best.p4WidthAtr, "#.##") + " channelWidthAt5Atr=" + str.tostring(best.channelWidthAt5Atr, "#.##")
          + " traversal45=" + str.tostring(best.traversal45, "#.##") + " p5OffsetAtr=" + str.tostring(best.p5OffsetAtr, "#.##")
          + " channel=" + str.tostring(best.channelOk) + " eta=" + str.tostring(best.etaOk)
-         + " reward=" + str.tostring(best.rewardOk) + " timing=" + str.tostring(best.timingOk)
+         + " timing=" + str.tostring(best.timingOk)
          + " symmetry=" + str.tostring(best.symmetryOk) + " legPurity=" + str.tostring(best.legPurityOk)
          + " purityRatio=" + str.tostring(best.legPurityRatio, "#.###")
          + " purityOffender=" + str.tostring(best.purityOffenderX) + " purityLeg=" + str.tostring(best.purityOffenderLeg)
@@ -879,39 +861,11 @@ if newSwing and sz >= 5
          + " swingViolationX=" + str.tostring(best.swingBoundaryViolationX) + " barsInside=" + str.tostring(best.barsInsideOk)
          + " barViolationAtr=" + str.tostring(best.barBoundaryViolationAtr, "#.##") + " barViolationX=" + str.tostring(best.barBoundaryViolationX))
 
-    // Lightweight candidate wedge for the current best-in-window, redrawn on
-    // every search regardless of whether it clears minScore — shows why a
-    // near-miss didn't fire without waiting for a confirmed pattern.
-    f_clear_candidate()
-    if showCandidate and best.structureOk and best.score >= candidateThreshold and not best.valid
-        // Same two boundaries a real pattern is drawn with (1-3 and 2-4) — the
-        // candidate previously showed 1-5/2-4, so it looked like a different
-        // shape than the pattern it was previewing.
-        candidateLine13At5 = f_price(best.x1, best.y1, best.x3, best.y3, best.x5)
-        candidateLine24At5 = f_price(best.x2, best.y2, best.x4, best.y4, best.x5)
-        candidateReason = ""
-        candidateReason := candidateReason + (not best.contractionOk ? "Kontraktion" : "")
-        candidateReason := candidateReason + (not best.channelOk ? (candidateReason == "" ? "" : " · ") + "Channel" : "")
-        candidateReason := candidateReason + (not best.etaOk ? (candidateReason == "" ? "" : " · ") + "Apex" : "")
-        candidateReason := candidateReason + (not best.p5ZoneOk ? (candidateReason == "" ? "" : " · ") + "P5" : "")
-        candidateReason := candidateReason + (not best.legPurityOk ? (candidateReason == "" ? "" : " · ") + "Purity" : "")
-        candidateReason := candidateReason + (not best.boundaryHoldOk ? (candidateReason == "" ? "" : " · ") + "Swing-Boundary" : "")
-        candidateReason := candidateReason + (not best.barsInsideOk ? (candidateReason == "" ? "" : " · ") + "Bar-Boundary" : "")
-        candidateReason := candidateReason + (requireReward and not best.rewardOk ? (candidateReason == "" ? "" : " · ") + "Risk/Reward" : "")
-        candidateReason := candidateReason == "" ? "Hard Gate" : candidateReason
-        candLn1 = line.new(best.x1, best.y1, best.x5, candidateLine13At5, color=candidateCol, style=line.style_dashed, width=2)
-        candLn2 = line.new(best.x2, best.y2, best.x5, candidateLine24At5, color=candidateCol, style=line.style_dashed, width=2)
-        array.push(candidateLines, candLn1)
-        array.push(candidateLines, candLn2)
-        candidateLabelY = best.bull ? math.min(best.y5, candidateLine13At5) : math.max(best.y5, candidateLine13At5)
-        candLabel = label.new(best.x5, candidateLabelY, "WATCH · " + (best.bull ? "Bullisch" : "Bärisch") + " · " + str.tostring(best.score) + "\nBlocker: " + candidateReason, style=best.bull ? label.style_label_up : label.style_label_down, color=candidateCol, textcolor=color.white, size=size.small)
-        array.push(candidateLabels, candLabel)
-
     // Every distinct, non-overlapping valid point-5 anchor gets its own
     // tracked pattern. An overlapping candidate only replaces the existing
-    // one at that spot if it scores higher and isn't literally the same
+    // one at that spot if it ranks higher and isn't literally the same
     // pattern already tracked. Once the cap is full, a non-overlapping
-    // candidate evicts the weakest currently tracked pattern if it scores
+    // candidate evicts the weakest currently tracked pattern if it ranks
     // higher than that one — without this, the first `maxConcurrentPatterns`
     // patterns that happen not to invalidate for a while permanently occupy
     // every slot and silently block every better candidate found afterward.
@@ -939,9 +893,9 @@ if newSwing and sz >= 5
                 arrivalTargetHit = c.bull ? high >= arrivalEpa : low <= arrivalEpa
                 stillOpen = not arrivalInvalidated and not arrivalTargetHit
                 if alreadyAged
-                    f_log("PATTERN SKIPPED (already aged) bull=" + str.tostring(c.bull) + " score=" + str.tostring(c.score) + " x5=" + str.tostring(c.x5))
+                    f_log("PATTERN SKIPPED (already aged) bull=" + str.tostring(c.bull) + " rank=" + str.tostring(c.rank) + " x5=" + str.tostring(c.x5))
                 else if not stillOpen
-                    f_log("PATTERN SKIPPED (stillborn) bull=" + str.tostring(c.bull) + " score=" + str.tostring(c.score) + " x5=" + str.tostring(c.x5))
+                    f_log("PATTERN SKIPPED (stillborn) bull=" + str.tostring(c.bull) + " rank=" + str.tostring(c.rank) + " x5=" + str.tostring(c.x5))
                 if stillOpen and not alreadyAged
                     overlapIdx = f_find_overlap_index(c)
                     if overlapIdx < 0
@@ -950,30 +904,30 @@ if newSwing and sz >= 5
                             array.push(trackedPatterns, newTp)
                             newBullPattern := newBullPattern or c.bull
                             newBearPattern := newBearPattern or not c.bull
-                            f_log("PATTERN FIRED bull=" + str.tostring(c.bull) + " score=" + str.tostring(c.score)
+                            f_log("PATTERN FIRED bull=" + str.tostring(c.bull) + " rank=" + str.tostring(c.rank)
                                  + " x1=" + str.tostring(c.x1) + " x5=" + str.tostring(c.x5))
                         else
                             weakestIdx = f_find_weakest_index()
                             weakest = array.get(trackedPatterns, weakestIdx)
-                            if c.score > weakest.p.score
+                            if c.rank > weakest.p.rank
                                 if not showOldPatterns
                                     f_delete_tracked(weakest)
                                 newTp = f_draw_pattern(c)
                                 array.set(trackedPatterns, weakestIdx, newTp)
                                 newBullPattern := newBullPattern or c.bull
                                 newBearPattern := newBearPattern or not c.bull
-                                f_log("PATTERN EVICTED old_score=" + str.tostring(weakest.p.score) + " new bull=" + str.tostring(c.bull)
-                                     + " score=" + str.tostring(c.score) + " x1=" + str.tostring(c.x1) + " x5=" + str.tostring(c.x5))
+                                f_log("PATTERN EVICTED old_rank=" + str.tostring(weakest.p.rank) + " new bull=" + str.tostring(c.bull)
+                                     + " rank=" + str.tostring(c.rank) + " x1=" + str.tostring(c.x1) + " x5=" + str.tostring(c.x5))
                     else
                         existing = array.get(trackedPatterns, overlapIdx)
-                        if c.x5 != existing.p.x5 and c.score > existing.p.score
+                        if c.x5 != existing.p.x5 and c.rank > existing.p.rank
                             if not showOldPatterns
                                 f_delete_tracked(existing)
                             newTp = f_draw_pattern(c)
                             array.set(trackedPatterns, overlapIdx, newTp)
                             newBullPattern := newBullPattern or c.bull
                             newBearPattern := newBearPattern or not c.bull
-                            f_log("PATTERN REPLACED bull=" + str.tostring(c.bull) + " score=" + str.tostring(c.score)
+                            f_log("PATTERN REPLACED bull=" + str.tostring(c.bull) + " rank=" + str.tostring(c.rank)
                                  + " x1=" + str.tostring(c.x1) + " x5=" + str.tostring(c.x5))
 
     // Cleans up any same-direction overlap chain the pairwise checks above
@@ -987,8 +941,8 @@ if newSwing and sz >= 5
 // ============================================================================
 
 anyInvalidated = false
-anyTargetHit = false
-anyPartialSuccess = false
+anyEpaReached = false
+anyHalfEpa = false
 anyExpired = false
 
 if array.size(trackedPatterns) > 0
@@ -1016,7 +970,7 @@ if array.size(trackedPatterns) > 0
         expired = bar_index > tp.p.etaBar + expiryBufferBars
         // One-bar grace period, same as Triangle/Broadening Scanner Pro: no
         // lifecycle event on the pattern's own creation bar, so "new pattern"
-        // never coincides with Partial/Target/Invalidated/Expired.
+        // never coincides with 50% EPA/EPA reached/Invalidated/Expired.
         justCreated = bar_index <= tp.createdBar
         if justCreated
             invalidated := false
@@ -1036,10 +990,10 @@ if array.size(trackedPatterns) > 0
                 f_delete_tracked(tp)
             array.remove(trackedPatterns, i)
         else if targetHit
-            tp.state := "TARGET_HIT"
-            anyTargetHit := true
-            f_log("TARGET HIT bull=" + str.tostring(tp.p.bull) + " epa=" + str.tostring(epaNow, format.mintick))
-            lb = label.new(bar_index, epaNow, "EPA Target",
+            tp.state := "EPA_REACHED"
+            anyEpaReached := true
+            f_log("EPA REACHED bull=" + str.tostring(tp.p.bull) + " epa=" + str.tostring(epaNow, format.mintick))
+            lb = label.new(bar_index, epaNow, "EPA reached",
                  style=tp.p.bull ? label.style_label_up : label.style_label_down,
                  color=tp.p.bull ? bullCol : bearCol, textcolor=color.white, size=size.tiny)
             array.push(tp.objLabels, lb)
@@ -1058,11 +1012,11 @@ if array.size(trackedPatterns) > 0
             array.remove(trackedPatterns, i)
         else
             if partialHitNow
-                tp.state := "PARTIAL_SUCCESS"
+                tp.state := "HALF_EPA"
                 tp.partialHit := true
-                anyPartialSuccess := true
-                f_log("PARTIAL bull=" + str.tostring(tp.p.bull) + " level=" + str.tostring(partialLevel, format.mintick))
-                lb = label.new(bar_index, partialLevel, "Partial",
+                anyHalfEpa := true
+                f_log("HALF EPA bull=" + str.tostring(tp.p.bull) + " level=" + str.tostring(partialLevel, format.mintick))
+                lb = label.new(bar_index, partialLevel, "50% EPA",
                      style=tp.p.bull ? label.style_label_up : label.style_label_down,
                      color=color.new(tp.p.bull ? bullCol : bearCol, 35), textcolor=color.white, size=size.tiny)
                 array.push(tp.objLabels, lb)
@@ -1071,53 +1025,41 @@ if array.size(trackedPatterns) > 0
                 line.set_xy2(tp.invalidationLine, bar_index + lineAheadBars, tp.invalidateLevel)
 
 // ============================================================================
-// Near-miss candidate marker (Watch signal, visual only)
-// ============================================================================
-
-plotshape(newSwing and showCandidate and best.score >= candidateThreshold and not best.valid and best.structureOk and best.bull, title="Bull Candidate", style=shape.circle, location=location.belowbar, size=size.tiny, color=candidateCol)
-plotshape(newSwing and showCandidate and best.score >= candidateThreshold and not best.valid and best.structureOk and not best.bull, title="Bear Candidate", style=shape.circle, location=location.abovebar, size=size.tiny, color=candidateCol)
-
-// ============================================================================
 // Dashboard
 // ============================================================================
 
 if showDashboard and barstate.islast
     statusActive = array.size(trackedPatterns) > 0
 
-    // Bias/EPA/Invalidation reflect the best currently TRACKED pattern when one
-    // exists, not the raw search candidate — `best` can be a lower-scoring
-    // near-miss (or a different pattern entirely) than what's actually being
-    // tracked, which made the dashboard look contradictory when a pattern was
-    // active but `best` itself wasn't the one live on the chart.
+    // Direction/EPA/Invalidation reflect the highest-ranked currently TRACKED
+    // pattern. Without one the status is SCAN and the rows stay empty.
     activeIdx = statusActive ? f_find_best_active_index() : -1
-    // Without an active pattern a valid `best` is never "ready": a valid
-    // candidate that passes the arrival gates is tracked the moment it is
-    // found, so an untracked valid one is stillborn, aged or already resolved.
-    // Only a near-miss (same rule as the chart's candidate marker) is WATCH.
-    dashWatch = not statusActive and best.structureOk and best.score >= candidateThreshold and not best.valid
     Pattern dashPattern = emptyPattern()
+    string dashState = "SCAN"
+    float epaCurrent = na
+    float invalidationCurrent = na
     if statusActive
-        dashPattern := array.get(trackedPatterns, activeIdx).p
-    else if dashWatch
-        dashPattern := best
-    dashState = statusActive ? array.get(trackedPatterns, activeIdx).state : dashWatch ? "WATCH" : "SCAN"
-    epaCurrent = statusActive ? f_price(dashPattern.x1, dashPattern.y1, dashPattern.x4, dashPattern.y4, bar_index) : dashPattern.targetNow
-    invalidationCurrent = statusActive ? array.get(trackedPatterns, activeIdx).invalidateLevel : dashPattern.invalidate
+        TrackedPattern activeTp = array.get(trackedPatterns, activeIdx)
+        dashPattern := activeTp.p
+        dashState := activeTp.state == "HALF_EPA" ? "50% EPA" : activeTp.state
+        epaCurrent := f_price(dashPattern.x1, dashPattern.y1, dashPattern.x4, dashPattern.y4, bar_index)
+        invalidationCurrent := activeTp.invalidateLevel
 
-    string biasTxt = dashPattern.structureOk ? (dashPattern.bull ? "Bullisch" : "Bärisch") : "—"
-    color biasCol = dashPattern.bull ? color.new(#00c853, 0) : color.new(#d50000, 0)
+    string dirTxt = statusActive ? (dashPattern.bull ? "Bull Wolfe" : "Bear Wolfe") : "—"
+    color dirCol = dashPattern.bull ? color.new(#00c853, 0) : color.new(#d50000, 0)
+    string p5AgeTxt = statusActive ? str.tostring(bar_index - dashPattern.x5) + " Bars" : "—"
 
     table.cell(dash, 0, 0, "Wolfe Engine", text_color=tc, bgcolor=hd, text_size=size.small)
-    table.cell(dash, 1, 0, dashState == "PARTIAL_SUCCESS" ? "PARTIAL" : dashState, text_color=color.white, bgcolor=statusActive ? biasCol : dashWatch ? candidateCol : color.new(color.gray, 80), text_size=size.small)
+    table.cell(dash, 1, 0, dashState, text_color=statusActive ? color.white : tc, bgcolor=statusActive ? dirCol : color.new(color.gray, 80), text_size=size.small)
 
     table.cell(dash, 0, 1, "Active Patterns", text_color=tc, text_size=size.small)
     table.cell(dash, 1, 1, str.tostring(array.size(trackedPatterns)) + " / " + str.tostring(maxConcurrentPatterns), text_color=tc, text_size=size.small)
 
-    table.cell(dash, 0, 2, "Best Score", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 2, str.tostring(dashPattern.score) + " / " + str.tostring(minScore), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 2, "P5 vor", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, p5AgeTxt, text_color=tc, text_size=size.small)
 
-    table.cell(dash, 0, 3, "Bias", text_color=tc, text_size=size.small)
-    table.cell(dash, 1, 3, biasTxt, text_color=dashPattern.structureOk ? biasCol : tc, text_size=size.small)
+    table.cell(dash, 0, 3, "Pattern", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, dirTxt, text_color=statusActive ? dirCol : tc, text_size=size.small)
 
     table.cell(dash, 0, 4, "EPA Current", text_color=tc, text_size=size.small)
     table.cell(dash, 1, 4, na(epaCurrent) ? "—" : str.tostring(epaCurrent, format.mintick), text_color=tc, text_size=size.small)
@@ -1129,60 +1071,57 @@ if showDashboard and barstate.islast
     table.cell(dash, 1, 6, na(invalidationCurrent) ? "—" : str.tostring(invalidationCurrent, format.mintick), text_color=tc, text_size=size.small)
 
 // ============================================================================
-// Debug: score breakdown of the current best-in-depth candidate
+// Debug: rule breakdown of the current best-in-depth candidate
 // ============================================================================
 
 if showDebug and barstate.islast
-    table.cell(dbgTable, 0, 0, "Score (Σ/80 → 100)", text_color=tc, bgcolor=hd, text_size=size.small)
-    table.cell(dbgTable, 1, 0, str.tostring(best.score) + " / " + str.tostring(minScore), text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dbgTable, 0, 0, "Rang (intern, max 65)", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(dbgTable, 1, 0, str.tostring(best.rank) + (best.valid ? " · gültig" : " · ungültig"), text_color=tc, bgcolor=hd, text_size=size.small)
 
     table.cell(dbgTable, 0, 1, "Struktur (Gate)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 1, str.tostring(best.structureScore) + (best.structureOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 1, str.tostring(best.structurePts) + (best.structureOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
 
     table.cell(dbgTable, 0, 2, "Kontraktion (15)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 2, str.tostring(best.contractionScore) + (best.contractionOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 2, str.tostring(best.contractionPts) + (best.contractionOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
 
     table.cell(dbgTable, 0, 3, "Channel/Traversal (10)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 3, str.tostring(best.channelScore) + (best.channelOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 3, str.tostring(best.channelPts) + (best.channelOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
 
     table.cell(dbgTable, 0, 4, "Konvergenz/Apex (10)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 4, str.tostring(best.etaScore) + (best.etaOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 4, str.tostring(best.etaPts) + (best.etaOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
 
     table.cell(dbgTable, 0, 5, "P5-Zone (15)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 5, str.tostring(best.p5Score) + (best.p5ZoneOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 5, str.tostring(best.p5Pts) + (best.p5ZoneOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 6, "Risk/Reward (15)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 6, str.tostring(best.rewardScore) + " · " + str.tostring(best.riskReward, "#.##"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 6, "Timing (5)", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 6, str.tostring(best.timingPts) + (best.timingOk ? " · OK" : ""), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 7, "Timing (5)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 7, str.tostring(best.timingScore) + (best.timingOk ? " · OK" : ""), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 7, "Symmetrie (5)", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 7, str.tostring(best.symmetryPts) + (best.symmetryOk ? " · OK" : ""), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 8, "Symmetrie (5)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 8, str.tostring(best.symmetryScore) + (best.symmetryOk ? " · OK" : ""), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 8, "Leg Purity (5)", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 8, str.tostring(best.purityPts) + " · " + str.tostring(best.legPurityRatio, "#.##") + (best.legPurityOk ? " OK" : " GATE"), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 9, "Leg Purity (5)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 9, str.tostring(best.purityScore) + " · " + str.tostring(best.legPurityRatio, "#.##") + (best.legPurityOk ? " OK" : " GATE"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 9, "Purity-Auslöser", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 9, "Leg " + str.tostring(best.purityOffenderLeg) + " @ " + str.tostring(best.purityOffenderX), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 10, "Purity-Auslöser", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 10, "Leg " + str.tostring(best.purityOffenderLeg) + " @ " + str.tostring(best.purityOffenderX), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 10, "Swing Boundaries", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 10, best.boundaryHoldOk ? "OK" : str.tostring(best.swingBoundaryViolationAtr, "#.##") + " ATR @ " + str.tostring(best.swingBoundaryViolationX), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 11, "Swing Boundaries", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 11, best.boundaryHoldOk ? "OK" : str.tostring(best.swingBoundaryViolationAtr, "#.##") + " ATR @ " + str.tostring(best.swingBoundaryViolationX), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 11, "Bar Boundaries", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 11, best.barsInsideOk ? "OK" : str.tostring(best.barBoundaryViolationAtr, "#.##") + " ATR @ " + str.tostring(best.barBoundaryViolationX), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 12, "Bar Boundaries", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 12, best.barsInsideOk ? "OK" : str.tostring(best.barBoundaryViolationAtr, "#.##") + " ATR @ " + str.tostring(best.barBoundaryViolationX), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 12, "Breite S/M/E (ATR)", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 12, str.tostring(best.widthStartAtr, "#.##") + "/" + str.tostring(best.widthMidAtr, "#.##") + "/" + str.tostring(best.widthEndAtr, "#.##"), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 13, "Breite S/M/E (ATR)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 13, str.tostring(best.widthStartAtr, "#.##") + "/" + str.tostring(best.widthMidAtr, "#.##") + "/" + str.tostring(best.widthEndAtr, "#.##"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 13, "Kontr. / Slopes", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 13, str.tostring(best.contractionRatio, "#.##") + " · " + (best.sameDirectionOk ? "DIR OK" : "DIR GATE") + " · " + str.tostring(best.slopeRatio, "#.##") + (best.slopesComparableOk ? " OK" : " GATE"), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 14, "Kontr. / Slopes", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 14, str.tostring(best.contractionRatio, "#.##") + " · " + (best.sameDirectionOk ? "DIR OK" : "DIR GATE") + " · " + str.tostring(best.slopeRatio, "#.##") + (best.slopesComparableOk ? " OK" : " GATE"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 14, "P4 / Kanal / Trav.", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 14, str.tostring(best.p4WidthAtr, "#.##") + "/" + str.tostring(best.channelWidthAt5Atr, "#.##") + " ATR · " + str.tostring(best.traversal45, "#.##") + (best.channelOk ? " OK" : " GATE"), text_color=tc, text_size=size.small)
 
-    table.cell(dbgTable, 0, 15, "P4 / Kanal / Trav.", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 15, str.tostring(best.p4WidthAtr, "#.##") + "/" + str.tostring(best.channelWidthAt5Atr, "#.##") + " ATR · " + str.tostring(best.traversal45, "#.##") + (best.channelOk ? " OK" : " GATE"), text_color=tc, text_size=size.small)
-
-    table.cell(dbgTable, 0, 16, "P5-Offset (ATR)", text_color=tc, text_size=size.small)
-    table.cell(dbgTable, 1, 16, str.tostring(best.p5OffsetAtr, "#.##") + (best.p5ZoneOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 0, 15, "P5-Offset (ATR)", text_color=tc, text_size=size.small)
+    table.cell(dbgTable, 1, 15, str.tostring(best.p5OffsetAtr, "#.##") + (best.p5ZoneOk ? " · OK" : " · GATE"), text_color=tc, text_size=size.small)
 
 // ============================================================================
 // Alerts
@@ -1190,9 +1129,9 @@ if showDebug and barstate.islast
 
 alertOk = not alertsOnBarClose or barstate.isconfirmed
 
-alertcondition(alertOk and newBullPattern, "Bullische Wolfe Wave", "WWSP · BULL WOLFE · {{ticker}} {{interval}}")
-alertcondition(alertOk and newBearPattern, "Bärische Wolfe Wave", "WWSP · BEAR WOLFE · {{ticker}} {{interval}}")
-alertcondition(alertOk and anyPartialSuccess, "Wolfe Wave Partial Success", "WWSP · PARTIAL SUCCESS · {{ticker}} {{interval}}")
-alertcondition(alertOk and anyTargetHit, "Wolfe Wave EPA erreicht", "WWSP · EPA TARGET HIT · {{ticker}} {{interval}}")
+alertcondition(alertOk and newBullPattern, "Bull Wolfe erkannt", "WWSP · BULL WOLFE DETECTED · {{ticker}} {{interval}}")
+alertcondition(alertOk and newBearPattern, "Bear Wolfe erkannt", "WWSP · BEAR WOLFE DETECTED · {{ticker}} {{interval}}")
+alertcondition(alertOk and anyHalfEpa, "Wolfe Wave 50% EPA erreicht", "WWSP · HALF WAY TO EPA · {{ticker}} {{interval}}")
+alertcondition(alertOk and anyEpaReached, "Wolfe Wave EPA erreicht", "WWSP · EPA REACHED · {{ticker}} {{interval}}")
 alertcondition(alertOk and anyInvalidated, "Wolfe Wave Invalidiert", "WWSP · INVALIDATED · {{ticker}} {{interval}}")
 alertcondition(alertOk and anyExpired, "Wolfe Wave Abgelaufen", "WWSP · EXPIRED · {{ticker}} {{interval}}")

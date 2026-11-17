@@ -2,8 +2,21 @@
 
 ## [Unreleased]
 
+## v1.6.0 — 2026-11-17
+Rebuilt as a display: the script shows the current state and the historical exit statistic; it no longer issues directional verdicts. **Existing alerts must be recreated** — the alert set changed.
+
+### Removed
+- **Edge layer:** Bull/Bear Reversal, Breakout and Continuation Edge markers (`R↑ B↑ C↑ R↓ B↓ C↓`) and the Watch markers. The edge could come from neutral-state confidence through a held bias, and the entropy-based reliability gate made reversal edges practically unreachable, so the layer did not say what its name claimed
+- **Alerts:** "Markov Bullish Edge" and "Markov Bearish Edge"
+- **Inputs:** whole "4 · Signal" group — "Directional Confidence ≥ (%)", "Reliability ≥ (%)", "Bias Flip Margin (pp)" — and "Show Watch Markers"
+- **Reliability gauge** (sample adequacy × entropy predictability) and the stable Bias; the readout headline no longer names a Bullish/Bearish bias or lean type
+
 ### Changed
-- **Reliable Sample Count:** default back from 20 to 40; a lower value only makes the reliable/edge readout easier to reach. Readouts that depend on it appear less often
+- **Alerts:** "Markov Regime Change" renamed to "MSE State Changed"; new per-state alerts "MSE State → Up Trend / Up Weak / Compression / Down Trend / Down Weak / Expansion/Chaos"; "Markov State Extended" renamed to "MSE State Extended"
+- **Resolution Bias line:** coloured by sign, drawn grey while the exit sample is below the minimum; fill has a fixed density instead of encoding reliability
+- **Inputs:** "Reliable Sample Count" renamed to "Minimum Exit Sample" (default 40) — it now only flags a thin exit sample; group "3 · Markov Forecast" renamed to "3 · Transition Statistics", "5 · Display" to "4 · Display"
+- **Readout:** headline shows state and bars in state; lines for Timing, past exit distribution with the most frequent destination, and sample size with Persistence. Amber only for an Extended/Overdue state
+- **Header:** description states the display role; Data Contract block added
 
 ## v1.5.1 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals

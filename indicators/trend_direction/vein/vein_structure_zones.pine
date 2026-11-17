@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Vein Structure & Zones 4H [WavesUnchained]
-// Version: 0.3.2
+// Version: 0.4.0
 // Author: WavesUnchained
-// Build: 2026-10-12
+// Build: 2026-11-17
 // ============================================================================
 // Combined structural event detection and automatic zone management.
 // Merges structure_events and levels_zones into a single overlay.
@@ -17,11 +17,13 @@
 //   ✓ Auto S/R zones from Swings, Springs, BOS Flips, Climax
 //   ✓ Zone lifecycle: Fresh → Tested → Confirmed → Broken → Flipped
 //   ✓ Priority-based zone rendering
+//   ✓ Nearest zone info: type, status, distance, touches, bounces, FVG/OB/POC nearby
+//   ✓ Event alerts: price enters zone, zone broken, zone flipped
 //   ✓ Light / Debug / Research display modes
 //
 // Data Contract:
 //   Price:     REQUIRED   chart symbol
-//   Volume:    OPTIONAL   real trade volume only — MFI/POC/EVR/climax degrade to neutral
+//   Volume:    OPTIONAL   real trade volume only — POC/EVR/climax degrade to neutral
 //   OI:        NO
 //   Reference: NO
 //   Verdict:   CFD-degraded
@@ -85,11 +87,10 @@ int volAvgLen = input.int(20, "Volume Average Length", minval=5, group=gVolume)
 var gATR = "ATR"
 int atrLen = input.int(14, "ATR Length", minval=1, group=gATR)
 
-var gAssess = "Zone Assessment"
-float maxAssessDistATR = input.float(3.0, "Max Assessment Distance (ATR)", minval=1.0, step=0.5, group=gAssess)
-int   approachBars     = input.int(5, "Approach Lookback Bars", minval=2, maxval=15, group=gAssess)
-bool  showAssessTable  = input.bool(false, "Show Assessment Table", group=gAssess, tooltip="Assessment table (top left) — off by default")
-bool  showAssessLabels = input.bool(true, "Show Assessment Labels on Zones", group=gAssess)
+var gAssess = "Nearest Zone Info"
+float maxAssessDistATR = input.float(3.0, "Max Distance (ATR)", minval=1.0, step=0.5, group=gAssess, tooltip="Only zones within this distance from the close count as nearest support / resistance.")
+bool  showAssessTable  = input.bool(false, "Show Zone Info Table", group=gAssess, tooltip="Table (top left) with the raw facts of the nearest support and resistance zone — off by default")
+bool  showAssessLabels = input.bool(true, "Show Zone Info Labels", group=gAssess, tooltip="Short label next to the nearest support and resistance zone: distance in ATR and touch count")
 
 var gDisplay = "Display"
 string displayMode  = input.string("Light", "Display Mode", options=["Light", "Debug", "Research"], group=gDisplay)
@@ -106,7 +107,7 @@ color resistColor   = input.color(color.new(#ff1744, 0), "Resistance Zone Color"
 color flipColor     = input.color(color.new(#ffab00, 0), "Flip Zone Color", group=gDisplay)
 bool showFVG        = input.bool(true, "Show FVG", group=gDisplay, tooltip="Fair Value Gaps — semi-transparent boxes")
 bool showOB         = input.bool(true, "Show Order Blocks", group=gDisplay, tooltip="Order Blocks — last opposing candle before BOS")
-bool showPOC        = input.bool(true, "Show POC Level", group=gDisplay, tooltip="Point of Control — highest volume/money flow price level.\nShown as dashed line. Zones near POC get hold bonus.")
+bool showPOC        = input.bool(true, "Show POC Level", group=gDisplay, tooltip="Point of Control — highest volume/money flow price level.\nShown as dashed line.")
 
 // ============================================================================
 // MODULE: base calculations
@@ -127,18 +128,6 @@ float lowerWick   = math.min(open, close) - low
 float upperWickRatio = candleRange > 0 ? upperWick / candleRange : 0.0
 float lowerWickRatio = candleRange > 0 ? lowerWick / candleRange : 0.0
 float candleATR = atrValue > 0 ? candleRange / atrValue : 0.0
-
-// Assessment context indicators
-float ema20 = ta.ema(close, 20)
-float ema50 = ta.ema(close, 50)
-float rsi14 = ta.rsi(close, 14)
-float mfi14 = volumeIsReal ? ta.mfi(hlc3, 14) : na
-float priceChange10 = math.abs(close - close[10])
-float pathLength10  = math.sum(math.abs(close - close[1]), 10)
-float effRatio      = pathLength10 > 0 ? priceChange10 / pathLength10 : 0.0
-bool  isTrendUp     = ema20 > ema50 and effRatio > 0.35
-bool  isTrendDown   = ema20 < ema50 and effRatio > 0.35
-bool  isRange       = effRatio <= 0.35
 
 // ============================================================================
 // MODULE: swing detection — micro + major
@@ -490,41 +479,41 @@ if isClimaxCandle
 
 bool hasActiveClx = clxState >= 1 and not na(clxBar) and (bar_index - clxBar) <= testLookback * 2
 
-if hasActiveClx and clxState == 1
-    if clxDirection == 1 and close > clxClose
-        clxState := 2
-        clxReactionExtreme := high
-    if clxDirection == -1 and close < clxClose
-        clxState := 2
-        clxReactionExtreme := low
+// One state step per bar at most (else-if chain), so a single bar cannot run 1→5
+if hasActiveClx
+    if clxState == 1
+        if clxDirection == 1 and close > clxClose
+            clxState := 2
+            clxReactionExtreme := high
+        if clxDirection == -1 and close < clxClose
+            clxState := 2
+            clxReactionExtreme := low
+    else if clxState == 2
+        if clxDirection == 1
+            clxReactionExtreme := math.max(nz(clxReactionExtreme), high)
+        if clxDirection == -1
+            clxReactionExtreme := math.min(nz(clxReactionExtreme, high), low)
+        bool returningToZone = false
+        if clxDirection == 1 and not na(clxClose) and atrValue > 0
+            returningToZone := close < clxClose + 1.5 * atrValue and close > clxLow - 0.5 * atrValue
+        if clxDirection == -1 and not na(clxClose) and atrValue > 0
+            returningToZone := close > clxClose - 1.5 * atrValue and close < clxHigh + 0.5 * atrValue
+        if returningToZone and (bar_index - clxBar) >= 2
+            clxState := 3
+    else if clxState == 3
+        bool isTestBar = not na(clxRange) and candleRange <= clxRange * testRangeFactor and candleRange > 0 and (volumeIsReal ? not na(clxVolume) and volume <= clxVolume * testVolFactor : true)
+        bool inZone = not na(clxClose) and atrValue > 0 and math.abs(close - clxClose) <= 1.5 * atrValue
+        if isTestBar and inZone
+            clxState   := 4
+            clxTestBar := bar_index
+    else if clxState == 4
+        if clxDirection == 1 and (microBullBOS or majorBullBOS)
+            clxState := 5
+        if clxDirection == -1 and (microBearBOS or majorBearBOS)
+            clxState := 5
 
-if hasActiveClx and clxState == 2
-    if clxDirection == 1
-        clxReactionExtreme := math.max(nz(clxReactionExtreme), high)
-    if clxDirection == -1
-        clxReactionExtreme := math.min(nz(clxReactionExtreme, high), low)
-    bool returningToZone = false
-    if clxDirection == 1 and not na(clxClose) and atrValue > 0
-        returningToZone := close < clxClose + 1.5 * atrValue and close > clxLow - 0.5 * atrValue
-    if clxDirection == -1 and not na(clxClose) and atrValue > 0
-        returningToZone := close > clxClose - 1.5 * atrValue and close < clxHigh + 0.5 * atrValue
-    if returningToZone and (bar_index - clxBar) >= 2
-        clxState := 3
-
-if hasActiveClx and clxState == 3
-    bool isTestBar = not na(clxRange) and candleRange <= clxRange * testRangeFactor and candleRange > 0 and (volumeIsReal ? not na(clxVolume) and volume <= clxVolume * testVolFactor : true)
-    bool inZone = not na(clxClose) and atrValue > 0 and math.abs(close - clxClose) <= 1.5 * atrValue
-    if isTestBar and inZone
-        clxState   := 4
-        clxTestBar := bar_index
-
-if hasActiveClx and clxState == 4
-    if clxDirection == 1 and (microBullBOS or majorBullBOS)
-        clxState := 5
-    if clxDirection == -1 and (microBearBOS or majorBearBOS)
-        clxState := 5
-
-if hasActiveClx and not na(clxBar) and (bar_index - clxBar) > testLookback * 2
+// Expire the sequence after the lookback (hasActiveClx is already false here)
+if clxState >= 1 and not na(clxBar) and (bar_index - clxBar) > testLookback * 2
     clxState := 0
 
 bool clxDetected     = clxState >= 1
@@ -679,7 +668,6 @@ type OB
     int    dir        // 1 = bullish OB, -1 = bearish OB
     int    createBar
     bool   mitigated
-    int    confScore
     box    obBox
 
 var array<OB> bullOBs = array.new<OB>()
@@ -700,24 +688,6 @@ if showOB and bullishBOS
         ob.dir       := 1
         ob.createBar := bar_index - obBar
         ob.mitigated := false
-        // Confluence scoring
-        int cs = 0
-        // Strong displacement: BOS candle range > 1.5 ATR
-        cs += candleATR >= 1.5 ? 30 : 0
-        // BOS confirmed
-        cs += 25
-        // FVG overlap check
-        bool fvgOverlap = false
-        if array.size(fvgArray) > 0
-            for fi = 0 to array.size(fvgArray) - 1
-                FVG f = array.get(fvgArray, fi)
-                if f.dir == 1 and not f.mitigated and f.upper >= ob.lower and f.lower <= ob.upper
-                    fvgOverlap := true
-                    break
-        cs += fvgOverlap ? 20 : 0
-        // High volume
-        cs += relVol >= 1.3 ? 15 : 0
-        ob.confScore := cs
         ob.obBox     := box.new(ob.createBar, ob.upper, bar_index + 15, ob.lower, border_color=color.new(#00e676, 80), border_width=1, bgcolor=color.new(#00e676, 80))
         array.push(bullOBs, ob)
         if array.size(bullOBs) > 5
@@ -739,19 +709,6 @@ if showOB and bearishBOS
         ob.dir       := -1
         ob.createBar := bar_index - obBar
         ob.mitigated := false
-        int cs = 0
-        cs += candleATR >= 1.5 ? 30 : 0
-        cs += 25
-        bool fvgOverlap = false
-        if array.size(fvgArray) > 0
-            for fi = 0 to array.size(fvgArray) - 1
-                FVG f = array.get(fvgArray, fi)
-                if f.dir == -1 and not f.mitigated and f.upper >= ob.lower and f.lower <= ob.upper
-                    fvgOverlap := true
-                    break
-        cs += fvgOverlap ? 20 : 0
-        cs += relVol >= 1.3 ? 15 : 0
-        ob.confScore := cs
         ob.obBox     := box.new(ob.createBar, ob.upper, bar_index + 15, ob.lower, border_color=color.new(#ff1744, 80), border_width=1, bgcolor=color.new(#ff1744, 80))
         array.push(bearOBs, ob)
         if array.size(bearOBs) > 5
@@ -762,12 +719,8 @@ if showOB and bearishBOS
 // OB mitigation check + extend boxes
 var bool obNearSupport    = false
 var bool obNearResistance = false
-var int  obSupConfScore   = 0
-var int  obResConfScore   = 0
 obNearSupport    := false
 obNearResistance := false
-obSupConfScore   := 0
-obResConfScore   := 0
 
 if array.size(bullOBs) > 0
     for i = array.size(bullOBs) - 1 to 0
@@ -788,7 +741,6 @@ if array.size(bullOBs) > 0
         float obDist = atrValue > 0 ? math.abs(close - (ob.upper + ob.lower) / 2.0) / atrValue : 999.0
         if obDist < 2.0
             obNearSupport := true
-            obSupConfScore := math.max(obSupConfScore, ob.confScore)
         array.set(bullOBs, i, ob)
 
 if array.size(bearOBs) > 0
@@ -807,7 +759,6 @@ if array.size(bearOBs) > 0
         float obDist = atrValue > 0 ? math.abs(close - (ob.upper + ob.lower) / 2.0) / atrValue : 999.0
         if obDist < 2.0
             obNearResistance := true
-            obResConfScore := math.max(obResConfScore, ob.confScore)
         array.set(bearOBs, i, ob)
 
 // ============================================================================
@@ -910,6 +861,12 @@ if showClimaxZones and isClimaxCandle
     addZone(dir == 1 ? 7 : 8, high, low, dir, qual)
 
 // ── Zone status updates ──
+// Per-bar zone events (any zone) — feed the event alerts
+bool evSupEntered = false
+bool evResEntered = false
+bool evSupBroken  = false
+bool evResBroken  = false
+bool evZoneFlipped = false
 int totalZones = array.size(zones)
 if totalZones > 0
     for i = totalZones - 1 to 0
@@ -931,6 +888,11 @@ if totalZones > 0
             bool prevInZone = high[1] >= z.lower and low[1] <= z.upper
             bool newVisit   = priceInZone and not prevInZone
             if newVisit
+                if z.status != 3
+                    if z.direction == 1
+                        evSupEntered := true
+                    else
+                        evResEntered := true
                 z.touchCount += 1
                 z.visitBounced := false
                 if z.status == 0
@@ -963,19 +925,23 @@ if totalZones > 0
                 z.deepPenetrations += 1
             // Broken
             bool brokeNow = false
-            if z.direction == 1 and priceBelow and close[1] >= z.lower
+            if z.status != 3 and z.direction == 1 and priceBelow and close[1] >= z.lower
                 z.status := 3
                 brokeNow := true
-            if z.direction == -1 and priceAbove and close[1] <= z.upper
+                evSupBroken := true
+            if z.status != 3 and z.direction == -1 and priceAbove and close[1] <= z.upper
                 z.status := 3
                 brokeNow := true
+                evResBroken := true
             // Flip needs a retest on a later bar than the break
             if z.status == 3 and not brokeNow and z.direction == 1 and priceInZone and close < z.mid
                 z.status    := 4
                 z.direction := -1
+                evZoneFlipped := true
             else if z.status == 3 and not brokeNow and z.direction == -1 and priceInZone and close > z.mid
                 z.status    := 4
                 z.direction := 1
+                evZoneFlipped := true
         z.score := f_zoneScore(z.zoneType, z.quality, z.status, age, z.touchCount)
         array.set(zones, i, z)
 
@@ -1047,7 +1013,7 @@ if showTest and isTestCandle
 if showClimax and clxConfirmed and clxState[1] == 4
     color confCol = clxDirection == 1 ? color.new(#00e676, 0) : color.new(#ff1744, 0)
     string confText = clxDirection == 1 ? "CLX→TST→BOS ↑" : "CLX→TST→BOS ↓"
-    label.new(bar_index, clxDirection == 1 ? low - offsetUnit * 1.5 : high + offsetUnit * 1.5, confText, style=clxDirection == 1 ? label.style_label_up : label.style_label_down, color=confCol, textcolor=color.white, size=size.normal, tooltip="CONFIRMED Reversal Sequence — strongest signal")
+    label.new(bar_index, clxDirection == 1 ? low - offsetUnit * 1.5 : high + offsetUnit * 1.5, confText, style=clxDirection == 1 ? label.style_label_up : label.style_label_down, color=confCol, textcolor=color.white, size=size.normal, tooltip="Climax sequence complete: climax → reaction → test → BOS in the climax direction")
 
 // Fake breaks
 if showFakeBreaks and fakeBreakout and not isUpthrust
@@ -1257,7 +1223,7 @@ if isResearch and barstate.islast
     if na(statsTable)
         statsTable := table.new(position.top_right, 2, 18, bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
     table.cell(statsTable, 0, 0, "Vein Structure & Zones", text_color=tcStats, text_size=size.normal, bgcolor=hdStats)
-    table.cell(statsTable, 1, 0, "v0.2", text_color=color.gray, text_size=size.normal, text_halign=text.align_right, bgcolor=hdStats)
+    table.cell(statsTable, 1, 0, "v0.4", text_color=color.gray, text_size=size.normal, text_halign=text.align_right, bgcolor=hdStats)
     // Events
     table.cell(statsTable, 0, 1, "─ EVENTS ─", text_color=tcDim, text_size=size.small)
     table.cell(statsTable, 1, 1, "", text_size=size.small)
@@ -1297,7 +1263,7 @@ if isResearch and barstate.islast
     table.cell(statsTable, 1, 17, (majorSwingTrend == 1 ? "Bull" : majorSwingTrend == -1 ? "Bear" : "—") + " / " + (microSwingTrend == 1 ? "bull" : microSwingTrend == -1 ? "bear" : "—"), text_color=majorSwingTrend == 1 ? #00e676 : majorSwingTrend == -1 ? #ff1744 : color.gray, text_size=size.normal, text_halign=text.align_right)
 
 // ============================================================================
-// MODULE: zone assessment — nearest zone evaluation
+// MODULE: nearest zone info — raw facts, no verdict
 // ============================================================================
 
 // Find nearest support (below price) and resistance (above price)
@@ -1311,7 +1277,7 @@ nearResIdx := -1
 nearSupDist := 999.0
 nearResDist := 999.0
 
-if (showAssessLabels or showAssessTable) and array.size(zones) > 0
+if array.size(zones) > 0
     for i = 0 to array.size(zones) - 1
         Zone z = array.get(zones, i)
         if z.status == 3
@@ -1326,177 +1292,27 @@ if (showAssessLabels or showAssessTable) and array.size(zones) > 0
             nearResDist := distATR
             nearResIdx := i
 
-// Assessment functions
-f_structuralStr(Zone z) =>
-    float s = z.zoneType == 3 or z.zoneType == 4 ? 30.0 : z.zoneType == 5 or z.zoneType == 6 ? 25.0 : z.zoneType == 7 or z.zoneType == 8 ? 25.0 : 20.0
-    s += z.quality == 3 ? 20.0 : z.quality == 2 ? 10.0 : 4.0
-    s += z.status == 2 ? 20.0 : z.status == 1 ? 10.0 : z.status == 0 ? 6.0 : -25.0
-    int age = bar_index - z.createBar
-    s += age < 30 ? 10.0 : age < 80 ? 5.0 : age > 150 ? -5.0 : 0.0
-    math.max(0.0, math.min(100.0, s))
+bool supOK = nearSupIdx >= 0 and nearSupIdx < array.size(zones)
+bool resOK = nearResIdx >= 0 and nearResIdx < array.size(zones)
 
-f_histRespect(Zone z) =>
-    float h = 30.0
-    h += math.min(30.0, z.goodBounces * 12.0)
-    h += z.maxBounce >= 1.0 ? 15.0 : z.maxBounce >= 0.5 ? 8.0 : 0.0
-    h -= math.min(20.0, z.deepPenetrations * 5.0)
-    h -= z.weakBounces > z.goodBounces ? 10.0 : 0.0
-    h -= z.touchCount > 3 ? (z.touchCount - 3) * 5.0 : 0.0
-    if z.goodBounces >= 2 and z.lastBounce < z.maxBounce * 0.5
-        h -= 10.0
-    math.max(0.0, math.min(100.0, h))
-
-// Approach average range — computed in global scope (ta.* must not run conditionally)
-float approachAvgRange = ta.sma(candleRange, approachBars)
-
-f_approachQ(Zone z) =>
-    float aq = 0.0
-    float avgRange = approachAvgRange
-    float recentRange = high - low
-    if z.direction == 1
-        aq += recentRange < avgRange * 0.8 ? 15.0 : 0.0
-        aq += volumeIsReal and volume < avgVol * 0.9 and close < close[1] ? 10.0 : 0.0
-        aq += lowerWickRatio > 0.3 and lowerWickRatio > lowerWickRatio[1] ? 10.0 : 0.0
-        aq += rsi14 < 35 ? 10.0 : 0.0
-        aq += volumeIsReal and mfi14 < 30 ? 8.0 : 0.0
-        aq -= recentRange > avgRange * 1.2 and close < open ? 15.0 : 0.0
-        aq -= volumeIsReal and volume > avgVol * 1.3 and close < open ? 12.0 : 0.0
-        aq -= majorBearBOS ? 18.0 : 0.0
-    else
-        aq += recentRange < avgRange * 0.8 ? 15.0 : 0.0
-        aq += volumeIsReal and volume < avgVol * 0.9 and close > close[1] ? 10.0 : 0.0
-        aq += upperWickRatio > 0.3 and upperWickRatio > upperWickRatio[1] ? 10.0 : 0.0
-        aq += rsi14 > 65 ? 10.0 : 0.0
-        aq += volumeIsReal and mfi14 > 70 ? 8.0 : 0.0
-        aq -= recentRange > avgRange * 1.2 and close > open ? 15.0 : 0.0
-        aq -= volumeIsReal and volume > avgVol * 1.3 and close > open ? 12.0 : 0.0
-        aq -= majorBullBOS ? 18.0 : 0.0
-    math.max(-100.0, math.min(100.0, aq))
-
-f_contextA(Zone z) =>
-    float ca = 0.0
-    if z.direction == 1
-        ca += isRange ? 15.0 : isTrendDown ? -20.0 : 5.0
-    else
-        ca += isRange ? 15.0 : isTrendUp ? -20.0 : 5.0
-    ca += effRatio < 0.25 ? 10.0 : 0.0
-    math.max(-100.0, math.min(100.0, ca))
-
-f_reachL(float distATR, Zone z) =>
-    float r = distATR <= 0.5 ? 75.0 : distATR <= 1.0 ? 60.0 : distATR <= 2.0 ? 40.0 : 20.0
-    if z.direction == 1 and close < close[1] and close[1] < close[2]
-        r += 15.0
-    if z.direction == -1 and close > close[1] and close[1] > close[2]
-        r += 15.0
-    if z.direction == 1 and close > close[1] and close[1] > close[2]
-        r -= 15.0
-    if z.direction == -1 and close < close[1] and close[1] < close[2]
-        r -= 15.0
-    math.max(0.0, math.min(100.0, r))
-
-f_holdL(float structural, float respect, float aqRaw, float caRaw) =>
-    float aqM = (aqRaw + 100.0) / 2.0
-    float caM = (caRaw + 100.0) / 2.0
-    math.max(0.0, math.min(100.0, 0.30 * structural + 0.25 * respect + 0.30 * aqM + 0.15 * caM))
-
-f_breakL(float hold, float aqRaw, Zone z) =>
-    float br = 100.0 - hold
-    br += aqRaw < -30 ? 10.0 : 0.0
-    br += z.touchCount > 3 ? z.touchCount * 3.0 : 0.0
-    br += z.weakBounces > z.goodBounces ? 10.0 : 0.0
-    if z.goodBounces >= 2 and z.lastBounce < z.maxBounce * 0.4
-        br += 12.0
-    math.max(0.0, math.min(100.0, br))
-
-f_holdClass(float h) =>
-    h < 31 ? "weak" : h < 51 ? "fair" : h < 71 ? "solid" : "strong"
-f_reachClass(float r) =>
-    r < 26 ? "low" : r < 51 ? "moderate" : r < 76 ? "elevated" : "high"
-f_breakClass(float b) =>
-    b < 26 ? "low" : b < 51 ? "moderate" : b < 76 ? "elevated" : "high"
-f_stateCalc(float hold, float brk, float aqRaw, Zone z) =>
-    brk >= 65 and aqRaw < -20 ? "BREAK LIKELY" : hold >= 65 ? "REACTION LIKELY" : hold >= 50 and brk >= 50 ? "UNDER PRESSURE" : z.touchCount > 3 and z.lastBounce < z.maxBounce * 0.5 ? "WEAKENING" : hold >= 50 ? "HOLD POSSIBLE" : "STABLE"
-
-// Run assessment
-var float supStruct = 0.0
-var float supResp   = 0.0
-var float supAQ     = 0.0
-var float supCA     = 0.0
-var float supReach  = 0.0
-var float supHold   = 0.0
-var float supBreak  = 0.0
-var string supState = "—"
-var string supType  = "—"
-var bool  supOK     = false
-
-var float resStruct = 0.0
-var float resResp   = 0.0
-var float resAQ     = 0.0
-var float resCA     = 0.0
-var float resReach  = 0.0
-var float resHold   = 0.0
-var float resBreak  = 0.0
-var string resState = "—"
-var string resType  = "—"
-var bool  resOK     = false
-
-if (showAssessLabels or showAssessTable) and nearSupIdx >= 0 and nearSupIdx < array.size(zones)
-    Zone z = array.get(zones, nearSupIdx)
-    supStruct := f_structuralStr(z)
-    supResp   := f_histRespect(z)
-    supAQ     := f_approachQ(z)
-    supCA     := f_contextA(z)
-    supReach  := f_reachL(nearSupDist, z)
-    supHold   := f_holdL(supStruct, supResp, supAQ, supCA)
-    // FVG near zone boosts hold score
-    if fvgNearSupport
-        supHold := math.min(100.0, supHold + 5.0)
-    // OB proximity bonus (scaled by confluence score)
-    if obNearSupport
-        supHold := math.min(100.0, supHold + obSupConfScore * 0.1)
-    // POC proximity bonus — zone near highest volume level. No price-only
-    // equivalent (Class C data); pocLevel/vaHigh/vaLow stay na without real
-    // volume, so the bonus is unreachable rather than comparing against na.
+// POC / value area relation of a zone — na without real volume
+f_pocRel(Zone z) =>
+    string r = "—"
     if not na(pocLevel) and atrValue > 0 and math.abs(z.mid - pocLevel) / atrValue < 1.0
-        supHold := math.min(100.0, supHold + 7.0)
+        r := "near POC"
     else if not na(vaLowLevel) and not na(vaHighLevel) and z.mid >= vaLowLevel and z.mid <= vaHighLevel
-        supHold := math.min(100.0, supHold + 3.0)
-    supBreak  := f_breakL(supHold, supAQ, z)
-    supState  := f_stateCalc(supHold, supBreak, supAQ, z)
-    supType   := f_zoneTypeStr(z.zoneType)
-    supOK     := true
-else
-    supOK := false
+        r := "in VA"
+    else if not na(pocLevel)
+        r := "outside VA"
+    r
 
-if (showAssessLabels or showAssessTable) and nearResIdx >= 0 and nearResIdx < array.size(zones)
-    Zone z = array.get(zones, nearResIdx)
-    resStruct := f_structuralStr(z)
-    resResp   := f_histRespect(z)
-    resAQ     := f_approachQ(z)
-    resCA     := f_contextA(z)
-    resReach  := f_reachL(nearResDist, z)
-    resHold   := f_holdL(resStruct, resResp, resAQ, resCA)
-    // FVG near zone boosts hold score
-    if fvgNearResistance
-        resHold := math.min(100.0, resHold + 5.0)
-    // OB proximity bonus (scaled by confluence score)
-    if obNearResistance
-        resHold := math.min(100.0, resHold + obResConfScore * 0.1)
-    // POC proximity bonus — zone near highest volume level. No price-only
-    // equivalent (Class C data); pocLevel/vaHigh/vaLow stay na without real
-    // volume, so the bonus is unreachable rather than comparing against na.
-    if not na(pocLevel) and atrValue > 0 and math.abs(z.mid - pocLevel) / atrValue < 1.0
-        resHold := math.min(100.0, resHold + 7.0)
-    else if not na(vaLowLevel) and not na(vaHighLevel) and z.mid >= vaLowLevel and z.mid <= vaHighLevel
-        resHold := math.min(100.0, resHold + 3.0)
-    resBreak  := f_breakL(resHold, resAQ, z)
-    resState  := f_stateCalc(resHold, resBreak, resAQ, z)
-    resType   := f_zoneTypeStr(z.zoneType)
-    resOK     := true
-else
-    resOK := false
+f_onOff(bool b) =>
+    b ? "yes" : "no"
 
-// Assessment labels on chart
+f_zoneTip(Zone z, string side, float distATR, bool fvgNear, bool obNear) =>
+    side + ": " + f_zoneTypeStr(z.zoneType) + "\nStatus: " + f_statusStr(z.status) + "\nDistance: " + str.tostring(distATR, "#.0") + " ATR\nAge: " + str.tostring(bar_index - z.createBar) + " bars\nTouches: " + str.tostring(z.touchCount) + "\nBounces ≥0.5 ATR: " + str.tostring(z.goodBounces) + " | <0.5 ATR: " + str.tostring(z.weakBounces) + "\nMax / last bounce: " + str.tostring(z.maxBounce, "#.0") + " / " + str.tostring(z.lastBounce, "#.0") + " ATR\nBars closed beyond mid: " + str.tostring(z.deepPenetrations) + "\nFVG nearby: " + f_onOff(fvgNear) + " | OB nearby: " + f_onOff(obNear) + "\nPOC: " + f_pocRel(z)
+
+// Zone info labels on chart
 var label supAssessLabel = na
 var label resAssessLabel = na
 
@@ -1506,76 +1322,77 @@ if barstate.islast
     if not na(resAssessLabel)
         label.delete(resAssessLabel)
 
-    if showAssessLabels and supOK and nearSupIdx >= 0 and nearSupIdx < array.size(zones)
+    if showAssessLabels and supOK
         Zone z = array.get(zones, nearSupIdx)
-        string txt = "H" + str.tostring(supHold, "#") + " B" + str.tostring(supBreak, "#") + " R" + str.tostring(supReach, "#")
-        color col = supHold > supBreak + 10 ? color.new(#00e676, 10) : supBreak > supHold + 10 ? color.new(#ff1744, 10) : color.new(#ffab00, 10)
-        supAssessLabel := label.new(bar_index + 8, z.mid, txt, style=label.style_label_left, color=color.new(color.black, 100), textcolor=col, size=size.normal, tooltip="Support: " + supType + "\nReach: " + str.tostring(supReach, "#") + " " + f_reachClass(supReach) + "\nHold: " + str.tostring(supHold, "#") + " " + f_holdClass(supHold) + "\nBreak: " + str.tostring(supBreak, "#") + " " + f_breakClass(supBreak) + "\nState: " + supState + "\nStructure: " + str.tostring(supStruct, "#") + " | Respect: " + str.tostring(supResp, "#") + "\nApproach: " + str.tostring(supAQ, "#") + " | Context: " + str.tostring(supCA, "#"))
+        string txt = str.tostring(nearSupDist, "#.0") + " ATR · T" + str.tostring(z.touchCount)
+        supAssessLabel := label.new(bar_index + 8, z.mid, txt, style=label.style_label_left, color=color.new(color.black, 100), textcolor=color.new(supportColor, 10), size=size.normal, tooltip=f_zoneTip(z, "Support", nearSupDist, fvgNearSupport, obNearSupport))
 
-    if showAssessLabels and resOK and nearResIdx >= 0 and nearResIdx < array.size(zones)
+    if showAssessLabels and resOK
         Zone z = array.get(zones, nearResIdx)
-        string txt = "H" + str.tostring(resHold, "#") + " B" + str.tostring(resBreak, "#") + " R" + str.tostring(resReach, "#")
-        color col = resHold > resBreak + 10 ? color.new(#ff1744, 10) : resBreak > resHold + 10 ? color.new(#00e676, 10) : color.new(#ffab00, 10)
-        resAssessLabel := label.new(bar_index + 8, z.mid, txt, style=label.style_label_left, color=color.new(color.black, 100), textcolor=col, size=size.normal, tooltip="Resistance: " + resType + "\nReach: " + str.tostring(resReach, "#") + " " + f_reachClass(resReach) + "\nHold: " + str.tostring(resHold, "#") + " " + f_holdClass(resHold) + "\nBreak: " + str.tostring(resBreak, "#") + " " + f_breakClass(resBreak) + "\nState: " + resState + "\nStructure: " + str.tostring(resStruct, "#") + " | Respect: " + str.tostring(resResp, "#") + "\nApproach: " + str.tostring(resAQ, "#") + " | Context: " + str.tostring(resCA, "#"))
+        string txt = str.tostring(nearResDist, "#.0") + " ATR · T" + str.tostring(z.touchCount)
+        resAssessLabel := label.new(bar_index + 8, z.mid, txt, style=label.style_label_left, color=color.new(color.black, 100), textcolor=color.new(resistColor, 10), size=size.normal, tooltip=f_zoneTip(z, "Resistance", nearResDist, fvgNearResistance, obNearResistance))
 
-// Assessment table
+// Zone info table
 color tcAssess = color.new(color.gray, 20)   // standard text color (dark gray)
 color hdAssess = color.new(color.gray, 90)   // header row background (very light gray)
-color wnAssess = #ff6f00                     // warning accent (readable on light bg)
 
 var table assessTable = na
 if showAssessTable and barstate.islast
     if na(assessTable)
-        assessTable := table.new(position.top_left, 3, 12, bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
-    table.cell(assessTable, 0, 0, "Zone Assessment", text_color=tcAssess, text_size=size.normal, bgcolor=hdAssess)
-    table.cell(assessTable, 1, 0, "SUPPORT", text_color=#00c853, text_size=size.normal, text_halign=text.align_center, bgcolor=hdAssess)
-    table.cell(assessTable, 2, 0, "RESISTANCE", text_color=#d50000, text_size=size.normal, text_halign=text.align_center, bgcolor=hdAssess)
+        assessTable := table.new(position.top_left, 3, 10, bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
+    // Column 1 = nearest support, column 2 = nearest resistance; "—" when none within range
+    for col = 1 to 2
+        bool ok = col == 1 ? supOK : resOK
+        string vType  = "—"
+        string vStat  = "—"
+        string vDist  = "—"
+        string vAge   = "—"
+        string vTouch = "—"
+        string vBnc   = "—"
+        string vMax   = "—"
+        string vPoc   = "—"
+        if ok
+            Zone z = array.get(zones, col == 1 ? nearSupIdx : nearResIdx)
+            vType  := f_zoneTypeStr(z.zoneType)
+            vStat  := f_statusStr(z.status)
+            vDist  := str.tostring(col == 1 ? nearSupDist : nearResDist, "#.1") + " ATR"
+            vAge   := str.tostring(bar_index - z.createBar)
+            vTouch := str.tostring(z.touchCount)
+            vBnc   := str.tostring(z.goodBounces) + " / " + str.tostring(z.weakBounces)
+            vMax   := str.tostring(z.maxBounce, "#.0") + " / " + str.tostring(z.lastBounce, "#.0")
+            vPoc   := f_pocRel(z)
+        string vNear = col == 1 ? f_onOff(fvgNearSupport) + " / " + f_onOff(obNearSupport) : f_onOff(fvgNearResistance) + " / " + f_onOff(obNearResistance)
+        table.cell(assessTable, col, 1, vType, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+        table.cell(assessTable, col, 2, vStat, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+        table.cell(assessTable, col, 3, vDist, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+        table.cell(assessTable, col, 4, vAge, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+        table.cell(assessTable, col, 5, vTouch, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+        table.cell(assessTable, col, 6, vBnc, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+        table.cell(assessTable, col, 7, vMax, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+        table.cell(assessTable, col, 8, vNear, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+        table.cell(assessTable, col, 9, vPoc, text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
+    table.cell(assessTable, 0, 0, "Nearest Zone", text_color=tcAssess, text_size=size.small, bgcolor=hdAssess)
+    table.cell(assessTable, 1, 0, "SUPPORT", text_color=#00c853, text_size=size.small, text_halign=text.align_center, bgcolor=hdAssess)
+    table.cell(assessTable, 2, 0, "RESISTANCE", text_color=#d50000, text_size=size.small, text_halign=text.align_center, bgcolor=hdAssess)
     table.cell(assessTable, 0, 1, "Zone", text_color=tcAssess, text_size=size.small)
-    table.cell(assessTable, 1, 1, supOK ? supType : "—", text_color=supOK ? tcAssess : color.gray, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 2, 1, resOK ? resType : "—", text_color=resOK ? tcAssess : color.gray, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 0, 2, "Distance", text_color=tcAssess, text_size=size.small)
-    table.cell(assessTable, 1, 2, supOK ? str.tostring(nearSupDist, "#.1") + " ATR" : "—", text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 2, 2, resOK ? str.tostring(nearResDist, "#.1") + " ATR" : "—", text_color=tcAssess, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 0, 3, "Structure", text_color=tcAssess, text_size=size.small)
-    table.cell(assessTable, 1, 3, supOK ? str.tostring(supStruct, "#") : "—", text_color=supOK and supStruct >= 60 ? #00c853 : supOK and supStruct >= 40 ? wnAssess : color.gray, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 2, 3, resOK ? str.tostring(resStruct, "#") : "—", text_color=resOK and resStruct >= 60 ? #d50000 : resOK and resStruct >= 40 ? wnAssess : color.gray, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 0, 4, "Respect", text_color=tcAssess, text_size=size.small)
-    table.cell(assessTable, 1, 4, supOK ? str.tostring(supResp, "#") : "—", text_color=supOK and supResp >= 60 ? #00c853 : supOK and supResp >= 40 ? wnAssess : color.gray, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 2, 4, resOK ? str.tostring(resResp, "#") : "—", text_color=resOK and resResp >= 60 ? #d50000 : resOK and resResp >= 40 ? wnAssess : color.gray, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 0, 5, "Approach", text_color=tcAssess, text_size=size.small)
-    table.cell(assessTable, 1, 5, supOK ? str.tostring(supAQ, "#") : "—", text_color=supOK and supAQ > 10 ? #00c853 : supOK and supAQ < -10 ? #d50000 : wnAssess, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 2, 5, resOK ? str.tostring(resAQ, "#") : "—", text_color=resOK and resAQ > 10 ? #d50000 : resOK and resAQ < -10 ? #00c853 : wnAssess, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 0, 6, "Context", text_color=tcAssess, text_size=size.small)
-    table.cell(assessTable, 1, 6, supOK ? str.tostring(supCA, "#") : "—", text_color=supOK and supCA > 5 ? #00c853 : supOK and supCA < -5 ? #d50000 : wnAssess, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 2, 6, resOK ? str.tostring(resCA, "#") : "—", text_color=resOK and resCA > 5 ? #d50000 : resOK and resCA < -5 ? #00c853 : wnAssess, text_size=size.small, text_halign=text.align_center)
-    // Results
-    table.cell(assessTable, 0, 7, "─ RESULT ─", text_color=color.new(color.gray, 50), text_size=size.small)
-    table.cell(assessTable, 1, 7, "", text_size=size.small)
-    table.cell(assessTable, 2, 7, "", text_size=size.small)
-    table.cell(assessTable, 0, 8, "Reach", text_color=tcAssess, text_size=size.normal)
-    table.cell(assessTable, 1, 8, supOK ? str.tostring(supReach, "#") + " " + f_reachClass(supReach) : "—", text_color=supOK and supReach >= 60 ? #00c853 : tcAssess, text_size=size.normal, text_halign=text.align_center)
-    table.cell(assessTable, 2, 8, resOK ? str.tostring(resReach, "#") + " " + f_reachClass(resReach) : "—", text_color=resOK and resReach >= 60 ? #d50000 : tcAssess, text_size=size.normal, text_halign=text.align_center)
-    table.cell(assessTable, 0, 9, "Hold", text_color=tcAssess, text_size=size.normal)
-    table.cell(assessTable, 1, 9, supOK ? str.tostring(supHold, "#") + " " + f_holdClass(supHold) : "—", text_color=supOK and supHold >= 60 ? #00c853 : supOK and supHold >= 45 ? wnAssess : color.gray, text_size=size.normal, text_halign=text.align_center)
-    table.cell(assessTable, 2, 9, resOK ? str.tostring(resHold, "#") + " " + f_holdClass(resHold) : "—", text_color=resOK and resHold >= 60 ? #d50000 : resOK and resHold >= 45 ? wnAssess : color.gray, text_size=size.normal, text_halign=text.align_center)
-    table.cell(assessTable, 0, 10, "Break", text_color=tcAssess, text_size=size.normal)
-    table.cell(assessTable, 1, 10, supOK ? str.tostring(supBreak, "#") + " " + f_breakClass(supBreak) : "—", text_color=supOK and supBreak >= 60 ? #d50000 : supOK and supBreak >= 45 ? wnAssess : #00c853, text_size=size.normal, text_halign=text.align_center)
-    table.cell(assessTable, 2, 10, resOK ? str.tostring(resBreak, "#") + " " + f_breakClass(resBreak) : "—", text_color=resOK and resBreak >= 60 ? #00c853 : resOK and resBreak >= 45 ? wnAssess : #d50000, text_size=size.normal, text_halign=text.align_center)
-    table.cell(assessTable, 0, 11, "Status", text_color=tcAssess, text_size=size.normal)
-    color supSCol = supState == "REACTION LIKELY" ? #00c853 : supState == "BREAK LIKELY" ? #d50000 : str.contains(supState, "PRESSURE") or str.contains(supState, "WEAKENING") ? wnAssess : tcAssess
-    color resSCol = resState == "REACTION LIKELY" ? #d50000 : resState == "BREAK LIKELY" ? #00c853 : str.contains(resState, "PRESSURE") or str.contains(resState, "WEAKENING") ? wnAssess : tcAssess
-    table.cell(assessTable, 1, 11, supOK ? supState : "—", text_color=supSCol, text_size=size.small, text_halign=text.align_center)
-    table.cell(assessTable, 2, 11, resOK ? resState : "—", text_color=resSCol, text_size=size.small, text_halign=text.align_center)
+    table.cell(assessTable, 0, 2, "Status", text_color=tcAssess, text_size=size.small)
+    table.cell(assessTable, 0, 3, "Distance", text_color=tcAssess, text_size=size.small)
+    table.cell(assessTable, 0, 4, "Age (bars)", text_color=tcAssess, text_size=size.small)
+    table.cell(assessTable, 0, 5, "Touches", text_color=tcAssess, text_size=size.small)
+    table.cell(assessTable, 0, 6, "Bounces ≥/< 0.5 ATR", text_color=tcAssess, text_size=size.small)
+    table.cell(assessTable, 0, 7, "Max / last bounce", text_color=tcAssess, text_size=size.small)
+    table.cell(assessTable, 0, 8, "FVG / OB nearby", text_color=tcAssess, text_size=size.small)
+    table.cell(assessTable, 0, 9, "POC", text_color=tcAssess, text_size=size.small)
 
-// Assessment alerts
-bool supNear = supOK and nearSupDist <= 1.0
-bool resNear = resOK and nearResDist <= 1.0
+// ============================================================================
+// MODULE: alerts — zone events
+// ============================================================================
+
 bool alertsOnBarClose = input.bool(true, "Alerts only on bar close (confirmed)", group="Alerts")
 bool alertOk = not alertsOnBarClose or barstate.isconfirmed
 
-alertcondition(alertOk and (supNear and supReach >= 60), "Support Relevant", "VEIN-SZ · SUPPORT RELEVANT · {{ticker}} {{interval}}")
-alertcondition(alertOk and (resNear and resReach >= 60), "Resistance Relevant", "VEIN-SZ · RESISTANCE RELEVANT · {{ticker}} {{interval}}")
-alertcondition(alertOk and (supNear and supHold >= 60 and supBreak < 45), "Likely Support Hold", "VEIN-SZ · SUPPORT HOLD · {{ticker}} {{interval}}")
-alertcondition(alertOk and (resNear and resHold >= 60 and resBreak < 45), "Likely Resist Hold", "VEIN-SZ · RESISTANCE HOLD · {{ticker}} {{interval}}")
-alertcondition(alertOk and (supNear and supBreak >= 60 and supHold < 45), "Likely Support Break", "VEIN-SZ · SUPPORT BREAK · {{ticker}} {{interval}}")
-alertcondition(alertOk and (resNear and resBreak >= 60 and resHold < 45), "Likely Resist Break", "VEIN-SZ · RESISTANCE BREAK · {{ticker}} {{interval}}")
+alertcondition(alertOk and evSupEntered, "Price Entered Support Zone", "VEIN-SZ · PRICE ENTERED SUPPORT ZONE · {{ticker}} {{interval}}")
+alertcondition(alertOk and evResEntered, "Price Entered Resistance Zone", "VEIN-SZ · PRICE ENTERED RESISTANCE ZONE · {{ticker}} {{interval}}")
+alertcondition(alertOk and evSupBroken, "Support Zone Broken", "VEIN-SZ · SUPPORT ZONE BROKEN (close below) · {{ticker}} {{interval}}")
+alertcondition(alertOk and evResBroken, "Resistance Zone Broken", "VEIN-SZ · RESISTANCE ZONE BROKEN (close above) · {{ticker}} {{interval}}")
+alertcondition(alertOk and evZoneFlipped, "Zone Flipped", "VEIN-SZ · ZONE FLIPPED (broken zone retested from the other side) · {{ticker}} {{interval}}")

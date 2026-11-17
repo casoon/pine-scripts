@@ -1,5 +1,18 @@
 # Changelog
 
+## v4.16 — 2026-11-17
+Rebuilt as a display of Wolfe geometry: no quality grade, no trade metrics, lifecycle-event alerts. **Existing alerts must be recreated** — titles and messages changed.
+- Removed the 0-100 score as a verdict: no `Mindestqualität` gate, no score on the chart label, dashboard or debug header. The former 80→100 renormalization is gone. Validity now comes only from the hard rules (structure, contraction, channel, swing and bar boundary hold, leg purity, P5 zone, apex convergence)
+- What remains is an internal geometric rank (sum of contraction, channel, apex, P5 zone, timing, symmetry and purity points, max 65). It only picks one combination per P5 anchor and decides between overlapping or evicted patterns; it is never displayed as a grade. "Show only the single best pattern" (`Max. gleichzeitige Patterns` = 1) is unchanged
+- Removed risk/reward entirely: inputs `Mindest-Risk/Reward`, `Reward als Pflichtfilter`, `Max. Zielentfernung ATR-Multiple`, the risk/reward rank component and the `RR` line on the chart label
+- Removed the near-miss candidate (`WATCH` status, dashed candidate wedge, blocker label, Bull/Bear Candidate markers) and its inputs `Kandidaten anzeigen`, `Kandidat-Mindestscore (Watch)`, `Kandidat` colour
+- Input `Score-Label anzeigen` replaced by `Info-Label anzeigen`: the label now shows pattern direction, how many bars P5 lay before detection (`P5 n bars before detection`) and EPA@ETA. Detection lags P5 by the pivot delay and, because P5 can sit several swings back in the search window, often by much more
+- Dashboard: `Best Score` row replaced by `P5 vor` (bars since P5), `Bias` renamed to `Pattern`; without a tracked pattern the status is `SCAN`
+- Debug table renamed `Regel-Breakdown Debug-Tabelle`, shows the rank and its components per rule; the Risk/Reward row is gone (16 rows)
+- Lifecycle wording: `PARTIAL_SUCCESS` → `50% EPA`, `TARGET_HIT` → `EPA reached`
+- Alerts renamed: `Bullische Wolfe Wave` → `Bull Wolfe erkannt` (`WWSP · BULL WOLFE DETECTED`), `Bärische Wolfe Wave` → `Bear Wolfe erkannt` (`WWSP · BEAR WOLFE DETECTED`), `Wolfe Wave Partial Success` → `Wolfe Wave 50% EPA erreicht` (`WWSP · HALF WAY TO EPA`), `WWSP · EPA TARGET HIT` → `WWSP · EPA REACHED`. Invalidated and Expired unchanged
+- Header: Data Contract block added
+
 ## v4.15 — 2026-10-02
 - The structure component (20 points) is no longer part of the score: every pattern that passes the `structureOk` gate earned the same 20 points, so it only inflated the score. `structureOk` stays a hard gate; the debug table still shows the component and labels it `(Gate)`
 - The remaining components (80 points) are scaled to 0-100, so the score range and `Mindestqualität` keep their meaning. Because the constant 20 points are gone, a valid pattern now needs more real quality to clear the same `Mindestqualität` (and `Kandidat-Mindestscore (Watch)`)

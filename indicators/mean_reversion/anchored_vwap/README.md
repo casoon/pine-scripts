@@ -1,16 +1,16 @@
 # Anchored VWAP
 
-Volume-weighted average price anchored to a selectable origin, with volume-weighted standard-deviation bands. It implements **Stage 4** of the four-stage reversal pipeline (see the `indicator-design` skill, §6.1) — the "fair value zone" / Location sensor. It reports *how stretched price is from value* (distance in σ) and *where the fair-value reference sits*; it deliberately produces **no long/short triggers**.
+Volume-weighted average price anchored to a selectable origin, with volume-weighted standard-deviation bands. It is a display tool: it shows *where the fair-value reference sits* and *how far price is from it* (distance in σ). It produces no long/short triggers; alerts describe events (a cross, a close beyond the stretch level).
 
-Anchoring a VWAP to a meaningful event (a swing pivot, a session/period start, an earnings gap) gives a far more honest "fair price since the move began" than a rolling VWAP. Large, sustained deviations from an anchored VWAP tend to revert — which is exactly the Location evidence the reversal pipeline needs.
+Anchoring a VWAP to a meaningful event (a swing pivot, a session/period start, an earnings gap) gives the average price paid since that event, rather than over an arbitrary rolling window.
 
 ## Features
 
 - Anchor at an **auto swing pivot** (re-seeded from the real pivot bar, not the confirmation bar), a **period start** (session / week / month / year), or a **manual timestamp**
-- **Volume-weighted σ bands** at two configurable multiples
-- **Distance-from-value in σ** as a symmetric Location output (positive = above value → short location, negative = below → long location)
-- Stretched / anchor / band context markers (Location flags, not entries)
-- Light-theme dashboard and alerts
+- **Volume-weighted σ bands** at two configurable multiples, drawn only once the anchor window holds `Min bars since anchor` bars
+- **Distance-from-value in σ** as a symmetric output (positive = above the AVWAP, negative = below)
+- Stretched and anchor markers (where price stands, not entries)
+- Light-theme dashboard and event alerts
 
 ## Anchor modes
 
@@ -27,9 +27,32 @@ Auto modes recompute the running sums from the actual pivot bar (`pivR` bars bac
 
 - **AVWAP** — the anchored volume-weighted average price.
 - **σ** — volume-weighted standard deviation of the source around the AVWAP since the anchor.
-- **Distance (σ)** — `(close − AVWAP) / σ`, the Location measure. `|distance| ≥ Stretched at (σ)` flags a stretched location — only once at least `Min bars since anchor` (default 20) bars lie in the anchor window, since σ from a handful of bars is not meaningful.
+- **Distance (σ)** — `(close − AVWAP) / σ`. `|distance| ≥ Stretched at (σ)` flags price as stretched above or below the AVWAP.
 
-These feed the *Location* role (skill §1) of a downstream reversal module as evidence, not as a blocking gate.
+## Minimum anchor window
+
+Right after a re-anchor σ comes from only a few bars (in the auto-swing modes `Swing Right Bars + 1`), so band levels and distances in σ are not yet meaningful. Until `Min bars since anchor` (default 20) bars lie in the anchor window, the σ bands are not drawn, the dashboard shows σ as "not yet valid" and Distance (σ) / Location as "—", and no stretched marker or stretch alert fires. The AVWAP line itself is drawn from the anchor bar on.
+
+## Dashboard
+
+| Row | Content |
+|---|---|
+| AVWAP | current anchored VWAP |
+| σ | volume-weighted σ, or "not yet valid" |
+| Distance (σ) | `(close − AVWAP) / σ` |
+| Location | Stretched above / Stretched below / Within ±Xσ |
+| Anchor | anchor mode and bars since the anchor |
+
+## Alerts
+
+All alerts fire on the confirmed bar only.
+
+| Alert | Event |
+|---|---|
+| Close Crossed Above AVWAP | close crossed above the AVWAP (not on a re-anchor bar) |
+| Close Crossed Below AVWAP | close crossed below the AVWAP (not on a re-anchor bar) |
+| Close Beyond Upper Stretch | distance first reaches `+Stretched at (σ)` |
+| Close Beyond Lower Stretch | distance first reaches `−Stretched at (σ)` |
 
 ## Notes
 

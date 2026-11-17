@@ -1,6 +1,6 @@
 # Elliott Wave Radar
 
-Rule-validated Elliott Wave counting on ZigZag pivots. The indicator labels impulses (1–5) and zigzag corrections (A–B–C) **only when the hard Elliott rules actually hold**, scores every count by Fibonacci guideline adherence (0–100), projects targets for the developing wave, and cross-checks sub-wave structure on a finer pivot degree. When no interpretation passes the rules and the score gate, the dashboard honestly reports **"No valid count"** instead of forcing labels onto the chart.
+Rule-validated Elliott Wave counting on ZigZag pivots. The indicator labels impulses (1–5) and zigzag corrections (A–B–C) **only when the hard Elliott rules actually hold**, shows the raw Fibonacci ratios of the count, draws ratio projections for the developing wave, and cross-checks sub-wave structure on a finer pivot degree. When no interpretation passes the rules, the dashboard reports **"No valid count"** instead of forcing labels onto the chart. It is a display of the current structure: there is no score, no setup call and no entry signal — alerts describe count events.
 
 ## Features
 
@@ -10,26 +10,26 @@ Rule-validated Elliott Wave counting on ZigZag pivots. The indicator labels impu
   - W3 is never the shortest of W1/W3/W5
   - W4 never enters W1 price territory (toggle for diagonals)
   - W3 exceeds the end of W1, W5 exceeds the end of W3 (no truncation in v1)
-- Fibonacci guideline scoring (0–100): W2 ≈ 0.5–0.618, W3 ≈ 1.618×W1, W4 ≈ 0.382×W3, W5 ≈ 0.618–1.0×W1, plus an alternation bonus (W2 vs. W4 depth)
+- Raw wave ratios in the dashboard: W2/W1, W3/W1, W4/W3, W5/W1 for impulses, B/A and C/A for corrections
 - Corrective patterns:
   - **Zigzag A–B–C** (B retraces 0.236–0.886 of A, C travels beyond A)
   - **Flat** (regular/expanded: B retraces 0.90–1.38 of A) — disjoint thresholds, so zigzag and flat never compete on the same structure
-- Developing counts with Fib target projections:
-  - **W3 setup** after W1–W2 confirm (targets ×1.0 / ×1.618 / ×2.618 of W1)
-  - **W5 setup** after W1–W4 confirm (targets ×0.618 / ×1.0 / ×1.618 of W1)
-  - **C-wave setup** after a completed impulse + confirmed A–B (targets ×1.0 / ×1.618 of A; invalidated if price takes out the impulse extreme)
-  - Post-impulse correction targets (38.2 / 50 / 61.8 % of the impulse)
+- Partial counts with Fib ratio projections:
+  - **W1–W2** (projections ×1.0 / ×1.618 / ×2.618 of W1 from the W2 end)
+  - **W1–W4** (projections ×0.618 / ×1.0 / ×1.618 of W1 from the W4 end)
+  - **A–B after impulse** (projections ×1.0 / ×1.618 of A from B; invalidated if price takes out the impulse extreme)
+  - Post-impulse retracement levels (38.2 / 50 / 61.8 % of the impulse)
 - Invalidation level drawn and **monitored bar-by-bar** — a broken level kills the count and fires an alert
 - Sub-wave labels (i)–(iv) / (a)–(b) from the finer pivot degree; the dashboard reports whether W1/W3 internally divide into 5 legs
 - Alternate (runner-up) interpretation shown in the dashboard
-- Alerts: impulse complete, ABC complete, W3 setup, W5 setup, count invalidated
+- Alerts (events, optionally on bar close): impulse / zigzag / flat count complete, A–B / W1–W2 / W1–W4 count active, close beyond W1 end (once per W1–W2 count), count invalidated
 
 ## How counting works
 
 1. Primary pivots come from `ta.pivothigh/pivotlow` (confirmation delay = pivot length) with an ATR minimum-swing filter against noise. Each accepted pivot is then **re-anchored to the true extreme** since the previous pivot — sharp counter-swings too short to confirm as pivots still mark the correct wave point (e.g. the strongest Wave-2 pullback, not a later weaker high).
-2. On every new confirmed pivot, six interpretations **ending at that pivot** are evaluated: complete impulse (6 pivots), complete zigzag A–B–C (4), complete flat (4), post-impulse C-wave setup (3), developing W5 setup (5), developing W3 setup (3).
-3. Each interpretation must pass its hard rules, then gets a Fibonacci guideline score. Candidates below the score gate (input, default 55) are discarded.
-4. The best candidate wins (complete patterns get a completeness bonus over developing prefixes); the runner-up appears as "Alt count" in the dashboard.
+2. On every new confirmed pivot, six interpretations **ending at that pivot** are evaluated: complete impulse (6 pivots), complete zigzag A–B–C (4), complete flat (4), A–B after impulse (3), W1–W4 (5), W1–W2 (3).
+3. Each interpretation must pass its hard rules. There is no score and no score gate.
+4. The most complete valid interpretation is shown, in a fixed order: impulse, zigzag/flat (disjoint), A–B after impulse, W1–W4, W1–W2. The next valid one appears as "Alt count" in the dashboard.
 
 ## Honesty constraints (by design)
 
@@ -46,5 +46,4 @@ Rule-validated Elliott Wave counting on ZigZag pivots. The indicator labels impu
 | ZigZag Engine | Pivot Length (sub) | 3 | Finer degree for sub-wave checks |
 | ZigZag Engine | Min Swing Size (ATR ×) | 0.5 | Noise filter for primary pivots |
 | Wave Validation | Allow W4 into W1 (diagonal) | off | Relaxes the overlap rule |
-| Wave Validation | Min count score | 55 | Quality gate — below this, no count is shown |
 | Display | Projections / sub-waves / dashboard / colors | on | Visual toggles |

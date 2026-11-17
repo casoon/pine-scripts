@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.0 — 2026-11-17
+Rebuilt as a display of the current wave count: no score, no "setup" calls. **Existing alerts must be recreated** — titles and messages changed.
+- New event "Close beyond W1 end" fires on a break observed after the W1-W2 count appears, not on the count bar when the pivot lag already placed the close beyond W1
+- Removed: Fibonacci guideline score (0–100, incl. alternation bonus) and its gate input "Min count score (0-100)". The score measured closeness to ideal ratios and read as a quality verdict; the dashboard "Score" row now shows the raw ratios (W2/W1, W3/W1, W4/W3, W5/W1, B/A, C/A)
+- Count selection no longer ranks by score + bonus: the most complete rule-valid interpretation wins in a fixed order (impulse, zigzag/flat, A-B after impulse, W1-W4, W1-W2); the next valid one is the alt count. Without the score gate, every count that passes the hard rules can be shown
+- Removed alerts: "EW: Wave-3 setup", "EW: Wave-5 setup", "EW: C-wave setup", "EW: Impulse complete", "EW: ABC complete", "EW: Flat complete"
+- New event alerts: "EW: Impulse count complete", "EW: Zigzag count complete", "EW: Flat count complete", "EW: A-B count active", "EW: W1-W2 count active", "EW: W1-W4 count active", "EW: Close beyond W1 end" (once per W1-W2 count). "EW: Count invalidated" is unchanged
+- Count alerts now also fire when a new count of the same type replaces the previous one (different first point); before, a same-type sequence was suppressed
+- Dashboard status reads "<count> ▲/▼ complete" or "… counted" instead of "→ W3/W5/C setup"; post-impulse levels relabelled "Retr 38.2/50/61.8%"
+- Header: Data Contract block added
+
 ## v1.2.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

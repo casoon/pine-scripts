@@ -24,7 +24,7 @@ and relative-volume components degrade to neutral — their score weight is drop
 (moving it to RSI would count RSI twice). Scores therefore have a lower maximum on such symbols while the absolute
 thresholds stay the same.
 Climax detection falls back to a range-only extreme-bar proxy. `vein_execution`'s `relVol`
-degrades to a neutral 1.0, the same treatment as `vein_trend`'s. Dashboard tables show a
+degrades to a neutral 1.0. Dashboard tables show a
 "Volume" row (or a one-time chart label) when running degraded. See
 [`DATA_VALIDITY.md`](../../../DATA_VALIDITY.md) for the full policy.
 
@@ -81,7 +81,7 @@ Two sections:
 
 ## 2. Vein Structure & Zones (Overlay, 4H)
 
-Combined structural event detection AND automatic S/R zones with integrated zone assessment.
+Combined structural event detection AND automatic S/R zones, with raw facts about the nearest support and resistance zone.
 
 ### Event Labels
 
@@ -122,9 +122,9 @@ Each event gets a quality grade based on 4 factors:
 |-------|-------|---------|
 | Selling CLX / Buying CLX | fuchsia | Climax detected, sequence started |
 | TST ↑ / TST ↓ | purple | Test validated |
-| **CLX→TST→BOS ↑ / ↓** | **green/red, large** | **Full sequence — strongest signal** |
+| **CLX→TST→BOS ↑ / ↓** | **green/red, large** | Sequence complete: climax → reaction → test → BOS in the climax direction |
 
-Internally 5 stages: CLX → Reacting → Test Pending → Test Valid → Confirmed (after BOS).
+Internally 5 stages: CLX → Reacting → Test Pending → Test Valid → Confirmed (after BOS). The sequence advances at most one stage per bar and resets after 2 × "Test: Lookback Bars".
 
 #### Other Events
 
@@ -165,30 +165,38 @@ Events generate horizontal S/R zones as colored boxes.
 - **Amber boxes** = Flip zones
 - Only the top N zones are shown (default: 8), prioritized by type, quality, status, touches and age
 
-### Zone Assessment (integrated)
+### Nearest Zone Info
 
-For the nearest active Support and Resistance zone, the script calculates:
+For the nearest active support (below price) and resistance (above price) within "Max Distance (ATR)", the script shows the zone's raw facts — no hold or break probability:
 
-| Metric | Range | Meaning |
-|--------|-------|---------|
-| **Reach** | 0–100 | How likely is it that price reaches this zone? |
-| **Hold** | 0–100 | If reached, how likely is a meaningful reaction? |
-| **Break** | 0–100 | How likely is the zone to fail? |
-| **State** | text | stable / holding / under_pressure / weakening / likely_reaction / likely_break |
+| Fact | Meaning |
+|------|---------|
+| Zone / Status | Zone source and lifecycle status |
+| Distance | Close to zone mid, in ATR |
+| Age | Bars since the zone was created |
+| Touches | Number of visits (entries into the zone) |
+| Bounces ≥ / < 0.5 ATR | Reactions per visit, split by size |
+| Max / last bounce | Largest and most recent reaction, in ATR |
+| FVG / OB nearby | Unmitigated FVG / order block within 2 ATR of price on that side |
+| POC | Zone near POC, inside the value area, or outside (— without real volume) |
 
-Based on 4 sub-scores:
-- **Structure** — zone origin and quality (spring > swing, major > micro)
-- **Respect** — how well was the zone historically respected?
-- **Approach** — how is price currently approaching? (decelerating = good for hold)
-- **Context** — regime, trend, volatility alignment
+**Labels at zones:** `1.2 ATR · T3` = distance 1.2 ATR, 3 touches. Hover for all facts.
 
-**Labels at zones:** `H62 B41 R74` = Hold 62, Break 41, Reach 74. Color: green if hold > break, red if break > hold, amber if mixed.
+**Zone info table:** Default off. Enable via input "Show Zone Info Table" (top left).
 
-**Assessment table:** Default off. Enable via input "Show Assessment Table". Shows full breakdown for nearest support and resistance.
+### Alerts
+
+| Alert | Trigger |
+|-------|---------|
+| Price Entered Support Zone | Price enters an active support zone (new visit) |
+| Price Entered Resistance Zone | Price enters an active resistance zone (new visit) |
+| Support Zone Broken | Close below a support zone |
+| Resistance Zone Broken | Close above a resistance zone |
+| Zone Flipped | A broken zone is retested from the other side and changes role |
 
 ### Key Purpose
 
-**"Here is a zone where the reversal system should be taken seriously."**
+**"Where is structure, and how has price treated it so far?"**
 
 ---
 
@@ -370,86 +378,60 @@ Plus: **Trap Hint** when a failed reversal signals the opposite direction.
 
 ## 5. Vein Accumulation Phase (Overlay, 4H)
 
-Detects bottom formation (accumulation) and top formation (distribution) as process states over time — not point signals.
+Shows whether the market is in an accumulation phase (range after a decline) or a distribution phase (range after a rally) — a state over time, not a point signal.
 
 ### Core Idea
 
-**"Is this just a bounce, or is a base actually forming?"**
+**"Is this just a bounce, or has a range formed after the move?"**
 
-A bottom/top is not an event but a phase: trend weakens → range forms → volatility compresses → liquidity gets swept → structure shifts.
+### Phase Rule
 
-### 5 Components (0–2 each, max 10)
+The same rule applies to both sides; neither takes precedence.
 
-| Component | What it measures | Score 0 | Score 1 | Score 2 |
-|-----------|-----------------|---------|---------|---------|
-| **Trend Loss** | Downtrend/uptrend weakening | Still trending | Flattening | Clear loss |
-| **Range Formation** | Sideways consolidation | Trending (high ER) | Transitioning | Clear range (low ER) |
-| **Vol Compression** | Candles/BB/ATR shrinking | Volatile | Declining | Compressed |
-| **Liquidity** | Sweeps, springs, upthrusts | None | Single events | Multiple/repeated |
-| **Early Structure** | First HL/LH, micro BOS | Nothing | First hints | Repeated |
-
-Range Formation and Vol Compression are direction-neutral. They count only for the side whose prior trend is weakening (Trend Loss > 0), so a range after a rally does not also build an accumulation score.
+| Condition | Accumulation | Distribution |
+|-----------|--------------|--------------|
+| Prior trend | EMA20 < EMA50, "Phase Lookback Bars" ago | EMA20 > EMA50, "Phase Lookback Bars" ago |
+| EMA20/50 flat | gap < 0.5 ATR | gap < 0.5 ATR |
+| Ranging | Efficiency Ratio < threshold | Efficiency Ratio < threshold |
 
 ### States
 
-| State | Score | Meaning |
-|-------|-------|---------|
-| none | < 3 | No phase detected |
-| transition | ≥ 3 | First signs, minimum duration not yet met |
-| early | ≥ 3 | Phase beginning after min duration met |
-| developing | ≥ 5 | Clear phase with multiple components |
-| mature | ≥ 6 | Strong phase, liquidity + range confirmed |
-| breakout_ready / breakdown_ready | ≥ 8 | Structure actively shifting |
+| State | Meaning |
+|-------|---------|
+| NONE | Condition not met |
+| ACCUM / DISTRIB forming | Condition met, fewer than "Min Phase Duration" bars in a row |
+| ACCUMULATION / DISTRIBUTION | Condition held "Min Phase Duration" bars in a row; the lookback range is latched |
+| Range exit | A close above or below the latched range ends the phase (shown as "Last exit") |
 
-**Minimum duration:** 10 bars (configurable). Filters out V-reversals.
+Once a phase is set it lasts until the range exit, even if the condition stops holding inside the range.
 
-### Both Directions
+### Raw Conditions (shown, not scored)
 
-The script detects both:
-- **Accumulation** (bottom) — after downtrend, bullish structure emerging
-- **Distribution** (top) — after uptrend, bearish structure emerging
+- Prior trend, EMA20/50 flat (gap in ATR), ranging (ER, range width in ATR)
+- Compressed: BB width ratio or ATR ratio below its threshold — info only, not part of the rule
+- Sweeps below / above the last swing, springs, upthrusts — counted within the lookback
+- Bars since the last bull / bear BOS; swing sequence HL / LL / LH / HH
 
 ### Visualization
 
 | Element | Description |
 |---------|-------------|
-| **Background shading** | Gray → orange → green(accum)/red(distrib) → blue(breakout ready) |
-| **Phase label** | On chart: "ACCUMULATION (developing) Score: 6.8 \| 14 bars" |
-| **Tooltip on label** | Full component breakdown + metrics |
+| **Background shading** | Green = accumulation, red = distribution, gray = forming |
+| **Phase range** | Latched high / low of the active phase |
+| **Phase label** | On chart: "ACCUMULATION · 14 bars"; tooltip lists all raw conditions |
 
 ### Status Table (top right)
 
-| Row | Content |
-|-----|---------|
-| Header | Vein Accum + phase type (ACCUM/DISTRIB/NONE) + state |
-| Score | X / 10 + duration in bars + range width |
-| Interpretation | Plain-language: "Accumulation building — watch sweeps" |
-| Components | T:2 R:1 V:2 L:1 S:1 (hover for details) |
-| Context | ER, BBW ratio, ATR ratio values |
-
-Debug mode adds: separate Accum/Distrib scores, sweep/spring counts, HL/LL/LH flags.
+Rows: Phase + duration, Prior trend, EMA20/50 flat, Ranging, Compressed, Sweeps ↓ / springs, Sweeps ↑ / upthrusts, bars since BOS ↑ / ↓ with swing sequence, Last exit.
 
 ### Alerts
 
 | Alert | Trigger |
 |-------|---------|
-| Accum Developing | Phase enters "developing" |
-| Accum Mature | Phase enters "mature" |
-| Breakout Ready | Accumulation with bull structure shifting |
-| Distrib Developing | Distribution enters "developing" |
-| Distrib Mature | Distribution enters "mature" |
-| Breakdown Ready | Distribution with bear structure shifting |
-
-### Integration with Other Scripts
-
-The Accumulation Phase answers: **"Should I even be watching for a reversal here?"**
-
-| Accum State | Reversal Score says... | Action |
-|-------------|----------------------|--------|
-| none | CANDIDATE | Probably just a bounce — be cautious |
-| developing | SETUP | Building — patience, wait for confirmation |
-| mature | CANDIDATE | **High confidence** — structure + base align |
-| breakout_ready | TRIGGER (15m) | **Best case** — base formed, now timing the entry |
+| Phase Changed to Accumulation | Phase becomes ACCUMULATION |
+| Phase Changed to Distribution | Phase becomes DISTRIBUTION |
+| Phase Ended — Close Above Range | Close above the latched phase range |
+| Phase Ended — Close Below Range | Close below the latched phase range |
 
 ---
 
@@ -533,7 +515,7 @@ The QUIET/WATCH/SETUP/TRIGGER status is display only and has no alerts.
 
 ## Display Modes
 
-Each 4H script has three modes (Input "Display Mode"):
+The 4H scripts except Vein Accumulation Phase have three modes (Input "Display Mode"):
 
 | Mode | What it shows |
 |------|--------------|
@@ -578,12 +560,14 @@ All tables follow consistent design:
 | Score | Spring/Upthrust | Heuristic triggered |
 | Score | Major BOS | Major Break of Structure |
 | Score | Bull/Bear Trap | Failed reversal → opposite continuation |
-| Zones | Support/Resist Relevant | Zone within 1 ATR, Reach ≥ 60 |
-| Zones | Likely Hold/Break | Hold or Break ≥ 60 |
+| Zones | Price Entered Support/Resistance Zone | New visit into an active zone |
+| Zones | Support/Resistance Zone Broken, Zone Flipped | Zone lifecycle events |
 | Execution | Bull/Bear Entry | Entry signal confirmed |
 | Execution | Bull/Bear Invalidation | Entry invalidated |
-| Accum | Developing/Mature | Phase state change |
-| Accum | Breakout/Breakdown Ready | Structure shifting |
+| Accum | Phase Changed to Accumulation/Distribution | Phase set after min duration |
+| Accum | Phase Ended — Close Above/Below Range | Close outside the latched range |
+| Trend | Candle State Changed | Heatmap state changes |
+| Trend | Major BOS / Major CHoCH Bull/Bear | Major structure events |
 
 ---
 
@@ -618,12 +602,12 @@ Three self-contained, timeframe-agnostic indicators that work on any chart. They
 
 | Script | Purpose | File |
 |--------|---------|------|
-| Vein Trend | Composite reversal signal | `vein_trend.pine` |
+| Vein Trend | Trend state and structure events | `vein_trend.pine` |
 | Vein Pullback | Pullback vs. reversal detection | `vein_pullback.pine` |
 | Vein Exhaustion | Temporal + emotional overextension | `vein_exhaustion.pine` |
 
 **Three perspectives on the same question:**
-- **Trend** → "Is there a structural reversal signal right now?"
+- **Trend** → "What state is the trend in, and what did the structure last do?"
 - **Pullback** → "Is this counter-move a pullback (reentry) or a reversal (exit)?"
 - **Exhaustion** → "Is this move overextended emotionally, before structure confirms anything?"
 
@@ -633,60 +617,42 @@ EMAs and scoring adapt automatically to the active timeframe. All three scripts 
 
 ## 7. Vein Trend (Overlay, any TF)
 
-Multi-layer composite score detecting high-probability reversal signals. Filters with structure gate, conflict detection, cooldown, and trend filter.
+Trend-state display: colors candles by EMA direction and efficiency ratio and marks the structural events that change the swing structure. No buy/sell signals.
 
-### AutoTF Parameters
+### Candle State
 
-| Timeframe | Threshold | Cooldown | Structure Gate | Delta |
-|-----------|-----------|----------|----------------|-------|
-| Daily | 5.5 | 7 bars | event + confirm ≥ 2.0 | 1.5 |
-| 4H | 5.0 | 5 bars | event | 1.5 |
-| 1H | 6.0 | 8 bars | event | 1.5 |
-| <1H | 7.5 | 25 bars | event | 2.0 |
+| State | Condition |
+|-------|-----------|
+| CONFLICT | EMA20/50 direction opposite to the direction of the last major BOS |
+| RANGE | Efficiency Ratio (20) ≤ 0.35 |
+| UP STRONG / DOWN STRONG | EMA20 above / below EMA50, ER ≥ 0.5 |
+| UP / DOWN | EMA20 above / below EMA50, ER 0.35–0.5 |
+| FLAT | EMAs equal or not enough data |
 
-### Three Score Layers
+Priority: Conflict → Range → Strong → Normal → Flat.
 
-**Layer A — Setup Score:** Momentum signals (RSI, MFI, price distance from EMA, wick rejections). Fires early, before structure events.
+### Structure Events
 
-**Layer B — Confirmation Score:** Structure events with volume weighting: Springs, Upthrusts, BOS. Highest weight (1.5×) — signal requires structural evidence.
+| Marker | Event |
+|--------|-------|
+| CHoCH | Major BOS against the current major structure |
+| BOS | Major BOS in the direction of the current major structure |
+| SPR / UT | Spring / Upthrust — wick beyond the last swing, close back inside (major = solid color) |
+| CLX | Climax sequence complete: climax → reaction → test → BOS (one stage per bar, 20-bar expiry) |
 
-**Layer C — Phase Score (0–5):** Accumulation/Distribution context. EMA slope loss, volume compression, range formation. Bonus weight (0.5×) for market context.
-
-**Composite = 1.0 × Setup + 1.5 × Confirm + 0.5 × Phase**
-
-The score bar in the table fills to threshold — full bar = signal condition met.
-
-### Confluence Gate
-
-A signal fires when the weighted confluence score reaches **Min Confluence Gate Score** (default 5, max 7.0). The guards below are weights, not individual requirements — any combination that reaches the gate score fires. Only the cooldown is a hard veto.
-
-| Role | Guard | Weight | Condition |
-|------|-------|--------|-----------|
-| Evidence | **Threshold** | 2.0 | Composite ≥ effThresh |
-| Trigger | **Structure Gate** | 1.5 | Structure event (Spring/UT, BOS/CHoCH, confirmed climax) within the last 4 bars and confirm score ≥ structure gate (AutoTF: Daily 2.0, other TFs 0; manual: 1.0) |
-| Trigger | **Follow-Through** | 0.5 | Follow-through after the last structure event (always granted when Require Follow-Through is off) |
-| Trigger | **Confirmation Bars** | 0.5 | Composite held above threshold for N bars |
-| Trend | **Trend Filter** | 1.0 | Not signalling with a confirmed EMA trend (reversal context) |
-| Quality | **No Conflict** | 1.0 | Not both sides near threshold without clear dominance |
-| Quality | **Delta** | 0.5 | Bull and bear composite differ by ≥ effDelta |
-| — | **Cooldown** | veto | Minimum bars between signals in same direction |
-
-### Debug Markers
-
-Colored dots when composite ≥ threshold but the gate score stays below the minimum (color = first missing guard):
-
-| Color | Blocking Guard |
-|-------|---------------|
-| 🟠 Orange | Conflict (both sides near threshold) |
-| 🟡 Yellow | Cooldown |
-| 🔵 Blue | Structure Gate |
-| 🟣 Purple | Trend Filter |
-| 🩵 Teal | Follow-Through |
-| ⚫ Gray | Delta |
+Micro BOS/CHoCH are tracked for the table's structure row and "Last event".
 
 ### Table (top right, configurable)
 
-Shows Composite (with progress bar to threshold), Threshold, Setup, Confirm, Phase, Status, Candle State, and Regime.
+State, EMA 20/50 (gap in ATR), Efficiency (ER + regime), BB width ratio (volatility), micro/major structure, last structure event with age, position in the major swing range (premium / discount / equilibrium, %), climax sequence stage, volume validity.
+
+### Alerts
+
+| Alert | Trigger |
+|-------|---------|
+| Candle State Changed | Heatmap state differs from the previous bar |
+| Major BOS Bull / Bear | Close beyond the major swing high / low (not a CHoCH) |
+| Major CHoCH Bull / Bear | Major BOS against the current major structure |
 
 ---
 
@@ -807,7 +773,7 @@ The three v2 indicators answer different questions simultaneously:
 |-----------|---------|---------------|
 | Exhaustion: Bear EXTREME | Score 8.5 | Downmove very overextended, time + orderflow + vol all elevated |
 | Pullback: BEAR PB active | Score 6.2 | Counter-move active, structure still intact, weak move |
-| Trend: WATCH | Composite 5.8 | Approaching threshold but no signal yet |
-| → Combined | | High confidence: pullback ending soon, exhaustion at extremes, trend signal building |
+| Trend: DOWN | ER 0.41 | EMAs still down, last event a major Spring |
+| → Combined | | Down move stretched, counter-move active with structure intact, trend state still down |
 
-**Key rule:** Exhaustion fires first (leading). Pullback identifies context (reentry vs exit). Trend fires last (structural confirmation). All three together = highest confluence.
+**Reading order:** Exhaustion reacts first (leading). Pullback identifies context (reentry vs exit). Trend shows the current state and the last structure event.

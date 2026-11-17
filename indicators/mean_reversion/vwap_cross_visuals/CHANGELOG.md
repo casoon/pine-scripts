@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.4.0 — 2026-11-17
+- Structure crosses (`◆ S`) ignore the jump of an anchored VWAP when it re-anchors on a new pivot, like the session-VWAP reset; the legend table is sized for its maximum row count
+- **Display tool:** the script now shows where price stands relative to VWAP and no longer grades setups or emits trade signals. Removed: entry signals (`L` / `S`), zone signals (`ZL` / `ZS`), volume-profile signals (`VL` / `VS`, LVN break & retest, VA re-entry), HTF stack signals (`HTF↑` / `HTF↓` / `BREAK`), the VWAP bias score and its BULLISH/BEARISH verdict, the confluence count and average strength, cross/structure/cluster strength scores, strength-coloured markers, target lines, the Zone Strength background, Avg Zone Score, Volume Score, HTF stack strength / bias / market regime, and the hidden export plots `VWAP_Bias_Score` and `VWAP_Confluence_Count`
+- Removed inputs: Signal Scope, Emit aggregated Long/Short signals, Show Signal Strength Colors, Min Signal Strength, Bias Analysis Length, Target Mode, ATR Target Steps, Sigma Target Steps, Entry Style, Use VWAP Retest Entries, Use Zone Retest Entries, Min Bars Between Entries, Require Midline Cross, Require Zone Break, Require Bias Alignment, LVN Break & Retest Signals, Value Area Re-entry Signals, Max Retest Distance (ATR), EMA Trend Filter (50/200), Supertrend Filter, MOST Filter (ATR Trailing), Auto-tune Volume Profile, Stack Alignment Threshold, Alerts only on bar close (confirmed)
+- Renamed inputs: "Min Bars Between Signals" → "Min Bars Between Markers", "Bias Band Multiplier" → "Band Multiplier" (new group "VWAP Bands" with "Band Width Basis" ATR/SIGMA), "Enable HTF Stack Panel" → "Enable HTF Slope Panel"
+- Structure-cross (`◆ S`) and cluster (`● C`) markers are shown in Smart mode again without extra switches; the cluster marker sits at the chart bottom instead of an absolute price of 1
+- Cross label tooltip shows close, VWAP and the distance in ATR; markers use fixed up/down colours. Legend shows close vs VWAP, distance in ATR, cluster state, band position, zone counts, POC/VA and choppiness — raw values only. Data window: "Distance to VWAP (ATR)"
+- Crosses caused by the daily session VWAP reset no longer count: the side memory is cleared at the session start, so the VWAP jump and the first side after it never produce a price or structure cross
+- HTF values (zone pivots, HTF VWAP/ATR/highs/lows, HTF EMA slope) come from the last closed HTF bar (`[1]` with `lookahead_on`) and no longer repaint. HTF zones are created once per new HTF bar instead of on every chart bar inside it, so one HTF pivot no longer spawns duplicate zones
+- VWAP cluster zones are created once when a cluster forms, not on every bar while it lasts. Pivot and FVG zones no longer depend on the cross strength score
+- FVG: zone creation used an inverted bullish gap; zone creation and the FVG overlap check now share one definition (bullish = low above the high two bars back, bearish = high below the low two bars back)
+- Volume Profile shows POC / VAH / VAL with the configured Value Area % only (no regime auto-tuning, no HVN/LVN nodes)
+- HTF Slope Panel shows per higher timeframe the EMA(50) change over 5 bars in % with a direction arrow (|slope| > 1 %); no weighted stack score
+- Alerts rebuilt as neutral event descriptions, always on the confirmed bar, once per cross: "VXV Close Crossed Above VWAP", "VXV Close Crossed Below VWAP", "VXV Session VWAP Crossed Above AVWAP", "VXV Session VWAP Crossed Below AVWAP". They replace "VXV Price Cross Up/Down" and "VXV Structure Cross Up/Down". Existing alerts must be recreated
+- Legend header shows the version
+
 ## v2.3.1 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - Without real volume a short "… not available" notice sits in the bottom-right corner instead of a label on the last candle
