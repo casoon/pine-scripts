@@ -45,8 +45,8 @@
 //   ✓ Position Health (Long/Short) - a second, fully decoupled score answering
 //     "is an ALREADY-OPEN position still structurally healthy", not "is a new
 //     entry attractive here". Weighted (not multiplicative-gated) blend of
-//     continuous Live Quality, Pullback Health, Trend Progress, Trend Fatigue
-//     and Structure Intact, classified into four states
+//     continuous Live Quality, Pullback Health, Trend Progress, Trend Fatigue,
+//     Structure Intact and Regime/Sideways-Risk, classified into four states
 //     (HOLD/PROTECT/REDUCE/EXIT) - never reads CRV, Trigger state or the
 //     trade-lifecycle machinery below it
 //
@@ -224,8 +224,10 @@ float wPullbackHealthInput = input.float(20.0, "Pullback Health weight", minval 
 float wTrendProgressInput = input.float(20.0, "Trend Progress weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
 float wFatigueInput = input.float(15.0, "Trend Fatigue weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
 float wStructureIntactInput = input.float(10.0, "Structure Intact weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
+float wRegimeInput = input.float(10.0, "Regime/Sideways-Risk weight", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
 int structuralProgressLookbackInput = input.int(20, "Trend Progress lookback (bars)", minval = 5, maxval = 100, group = GROUP_POSITION_HEALTH)
 float trendProgressFullCreditAtrInput = input.float(2.0, "Trend Progress full-credit distance (ATR)", minval = 0.25, maxval = 10.0, step = 0.25, tooltip = "Net directional move over the lookback window, in ATR, that earns the full Trend Progress score of 100.", group = GROUP_POSITION_HEALTH)
+int regimeLookbackInput = input.int(20, "Regime efficiency lookback (bars)", minval = 5, maxval = 100, group = GROUP_POSITION_HEALTH)
 float trendFatigueGrowthScaleInput = input.float(3.0, "Trend Fatigue growth compression", minval = 1.0, maxval = 10.0, step = 0.5, tooltip = "Recent-vs-older leg range ratio is naturally asymmetric (shrinking is bounded at -100%, growing is not) - a ratio of this many x100% growth earns the full Trend Fatigue score of 100, so one bigger leg alone doesn't saturate it.", group = GROUP_POSITION_HEALTH)
 // Defaults calibrated against 34,776 bars of backtested Pine Logs (4 sessions,
 // multiple instruments/timeframes/years) rather than picked round numbers -
@@ -986,18 +988,23 @@ float shortRecoveryRatio = haveLegRange ? f_clamp((lastHigh - close) / (lastHigh
 float structureIntactLong = swingDirection == 1 ? 100.0 * (1.0 - f_clamp(nz(bullishRetracement) / legInvalidationRetracementInput, 0.0, 1.0)) : 100.0 * f_clamp(longRecoveryRatio / legInvalidationRetracementInput, 0.0, 1.0)
 float structureIntactShort = swingDirection == -1 ? 100.0 * (1.0 - f_clamp(nz(bearishRetracement) / legInvalidationRetracementInput, 0.0, 1.0)) : 100.0 * f_clamp(shortRecoveryRatio / legInvalidationRetracementInput, 0.0, 1.0)
 
-// No separate regime/efficiency component: path-vs-net efficiency is already
-// the measure behind Live Quality, so a Kaufman ER here would count the same
-// trend-efficiency read a second time.
+// Regime/Sideways Risk: Kaufman-style efficiency ratio over regimeLookbackInput
+// - net movement vs. total path length. Direction-symmetric (a choppy regime is
+// bad news regardless of position direction), computed once, shared by both.
+float regimeNetMove = math.abs(close - close[regimeLookbackInput])
+float regimePathLength = math.sum(math.abs(close - close[1]), regimeLookbackInput)
+float regimeEfficiencyRatio = f_safeDiv(regimeNetMove, regimePathLength, 0.5)
+float regimeScore = f_clamp(100.0 * regimeEfficiencyRatio, 0.0, 100.0)
 
-float totalHealthWeight = math.max(wLiveQualityInput + wPullbackHealthInput + wTrendProgressInput + wFatigueInput + wStructureIntactInput, EPS)
+float totalHealthWeight = math.max(wLiveQualityInput + wPullbackHealthInput + wTrendProgressInput + wFatigueInput + wStructureIntactInput + wRegimeInput, EPS)
 
 float longPositionHealthRaw = (
      wLiveQualityInput * liveQualityLong +
      wPullbackHealthInput * pullbackHealthLong +
      wTrendProgressInput * trendProgressLong +
      wFatigueInput * trendFatigueScore +
-     wStructureIntactInput * structureIntactLong
+     wStructureIntactInput * structureIntactLong +
+     wRegimeInput * regimeScore
    ) / totalHealthWeight
 
 float shortPositionHealthRaw = (
@@ -1005,7 +1012,8 @@ float shortPositionHealthRaw = (
      wPullbackHealthInput * pullbackHealthShort +
      wTrendProgressInput * trendProgressShort +
      wFatigueInput * trendFatigueScore +
-     wStructureIntactInput * structureIntactShort
+     wStructureIntactInput * structureIntactShort +
+     wRegimeInput * regimeScore
    ) / totalHealthWeight
 
 float smoothedLongHealth = ta.ema(longPositionHealthRaw, smoothingInput)
@@ -1030,20 +1038,20 @@ int shortPositionHealthStateCode = shortPositionHealth >= healthHoldThresholdInp
 
 // Debug logging via log.info() - does NOT count against the plot/alertcondition
 // output cap (unlike plot(..., display=display.data_window), which is why the
-// five sub-components aren't plotted individually above. Off by default; the
+// six sub-components aren't plotted individually above. Off by default; the
 // Pine Logs panel shows one line per bar per direction when enabled.
 if debugLogPositionHealthInput
-    log.info("TPE1 POSITION_HEALTH | dir=long | bar={0} | swingDir={1} | liveQ={2} | pullback={3} | progress={4} | fatigue={5} | structure={6} | health={7} | state={8}",
+    log.info("TPE1 POSITION_HEALTH | dir=long | bar={0} | swingDir={1} | liveQ={2} | pullback={3} | progress={4} | fatigue={5} | structure={6} | regime={7} | health={8} | state={9}",
          bar_index, swingDirection,
          str.tostring(liveQualityLong, "#.0"), str.tostring(pullbackHealthLong, "#.0"),
          str.tostring(trendProgressLong, "#.0"), str.tostring(trendFatigueScore, "#.0"),
-         str.tostring(structureIntactLong, "#.0"),
+         str.tostring(structureIntactLong, "#.0"), str.tostring(regimeScore, "#.0"),
          str.tostring(longPositionHealth, "#.0"), longPositionHealthStateCode)
-    log.info("TPE1 POSITION_HEALTH | dir=short | bar={0} | swingDir={1} | liveQ={2} | pullback={3} | progress={4} | fatigue={5} | structure={6} | health={7} | state={8}",
+    log.info("TPE1 POSITION_HEALTH | dir=short | bar={0} | swingDir={1} | liveQ={2} | pullback={3} | progress={4} | fatigue={5} | structure={6} | regime={7} | health={8} | state={9}",
          bar_index, swingDirection,
          str.tostring(liveQualityShort, "#.0"), str.tostring(pullbackHealthShort, "#.0"),
          str.tostring(trendProgressShort, "#.0"), str.tostring(trendFatigueScore, "#.0"),
-         str.tostring(structureIntactShort, "#.0"),
+         str.tostring(structureIntactShort, "#.0"), str.tostring(regimeScore, "#.0"),
          str.tostring(shortPositionHealth, "#.0"), shortPositionHealthStateCode)
 
 // ============================================================================

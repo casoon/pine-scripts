@@ -1577,10 +1577,9 @@ type IndicatorSet
 
 // Memory-optimized version: calculates only essential indicators for MTF
 calculateEssentialIndicators(float src, int rsiLen = 14, int mfiLen = 14, int cciLen = 20, int rocLen = 9, int adxLen = 14, int atrLen = 14) =>
-    // BAR-INDEX OPTIMIZATION: Only calculate on last 500 bars
-    // On 2H with 40k bars, this skips 39,500 bars (98.75% reduction)
-    int MAX_LOOKBACK = 500
-    bool shouldCalculate = bar_index >= (last_bar_index - MAX_LOOKBACK)
+    // In a strategy backtest, every historical bar must receive real indicator values
+    // (capping at the last 500 bars would feed dummy values to earlier trades).
+    bool shouldCalculate = true
 
     // Extract ALL ta.* functions for consistency (always called, never in conditional scope)
     float _rsi_internal = ta.rsi(src, rsiLen)
@@ -3120,10 +3119,11 @@ type DualScore
 // ===========================================================================
 // Calculates all 6 category scores for a single timeframe
 
-// Previous-bar indicator set for non-repainting higher-timeframe requests
+// Previous-bar indicator set for non-repainting higher-timeframe requests.
+// Index primitive fields with [1] rather than the UDT reference itself.
 f_essentialPrev() =>
     IndicatorSet s = calculateEssentialIndicators(close)
-    s[1]
+    IndicatorSet.new(s.rsi[1], s.mfi[1], s.cci[1], s.roc[1], s.stochRSI[1], s.adx[1], s.diPlus[1], s.diMinus[1], s.ema8[1], s.ema20[1], s.ema50[1], s.ema200[1], s.vwap[1], s.emaStackDir[1], s.atr[1], s.atrPct[1], s.obv[1], s.obvSlope[1], s.volume[1], s.donchBreak[1])
 
 calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW, float volW, float structW, float divW) =>
 
@@ -3168,9 +3168,10 @@ calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW
     // to a larger share of the score on volume-less symbols).
     float flowWForAgg = flowW
 
-    // Calculate weighted total
-    // Divergence is pivot-based, so it stays a context row in the matrix and does not enter the score (weight 0).
-    float totalScore = calculateAggregateScore( flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, flowWForAgg, momW, trendW, volW, structW, 0.0)
+    // Calculate weighted directional total.
+    // Volatility (low ATR% = +1, high ATR% = -1) is non-directional regime context and Divergence is
+    // pivot-based: both stay visible in the matrix table and Heat Score, with weight 0 in the signed directional total.
+    float totalScore = calculateAggregateScore( flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, flowWForAgg, momW, trendW, 0.0, structW, 0.0)
 
     // Return score structure (with validity flag)
     TimeframeScores.new(flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, totalScore, flowW, momW, trendW, volW, structW, divW, timeframe, hasIndicators)
@@ -4906,7 +4907,7 @@ entryState := newEntryState
 // === GENERATE SIGNALS (legacy SignalResult, used by Matrix Table only) ===
 TimeframeScores chartTF = mtfScores.chartTF
 
-float signalOptimizedScore = (chartTF.flowScore * 0.40) + (chartTF.momentumScore * 0.40) + (chartTF.trendScore * 0.10) + (chartTF.volatilityScore * 0.05) + (chartTF.structureScore * 0.05)
+float signalOptimizedScore = (chartTF.flowScore * 0.40) + (chartTF.momentumScore * 0.40) + (chartTF.trendScore * 0.15) + (chartTF.structureScore * 0.05)
 string chartDirection = signalOptimizedScore > 0 ? "BULLISH" : signalOptimizedScore < 0 ? "BEARISH" : "NEUTRAL"
 MultiTimeframeScores chartOnlyScores = MultiTimeframeScores.new(mtfScores.tf1, mtfScores.tf2, mtfScores.tf3, chartTF, signalOptimizedScore, chartDirection, mtfScores.alignedCount, mtfScores.totalTFs)
 
@@ -5158,6 +5159,7 @@ if _doLong
                    exitLvlInput == "TP3" ? TP3_lvl : na
         _entrySL := SL_lvl
     strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=_entrySL, limit=_exitTP)
 
 if _doShort
     // Same-direction signals are ignored by strategy.entry (no pyramiding) — keep the open trade's levels
@@ -5167,6 +5169,7 @@ if _doShort
                    exitLvlInput == "TP3" ? TP3_lvl : na
         _entrySL := SL_lvl
     strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=_entrySL, limit=_exitTP)
 
 // Break-even integrated into the same exit (single stop level — no exit races)
 _beAtr   = ta.atr(14) * beATRInput
@@ -5235,7 +5238,7 @@ if cmNow > cmDone
 var table cmTbl = table.new(position.bottom_left, 3, 9,
      bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1,
      frame_color=color.new(color.gray, 40), frame_width=1)
-if barstate.islast and cmShow
+if (barstate.islastconfirmedhistory or barstate.islast) and cmShow
     color cmTc = color.new(color.gray, 20)
     color cmHd = color.new(color.gray, 90)
     bool cmSet = cmSpread != 0.0 or cmFinLong != 0.0 or cmFinShort != 0.0
@@ -5330,24 +5333,28 @@ rbTrack(bool trig, bool isLong, float atrV, float tpM, float slM, int tb) =>
         pAtr := atrV
     res
 
-bool rbSigL = _doLong
-bool rbSigS = _doShort
+bool rbEligible = _genFilterOk and (not confirmClose or barstate.isconfirmed)
+bool rbSigL = finalLong and _canLong and rbEligible
+bool rbSigS = finalShort and _canShort and rbEligible
 var int rbCntL = 0
 var int rbCntS = 0
+var int rbEligibleBars = 0
+if rbEligible
+    rbEligibleBars += 1
 if rbSigL
     rbCntL += 1
 if rbSigS
     rbCntS += 1
-float rbRateL = rbCntL / (bar_index + 1.0)
-float rbRateS = rbCntS / (bar_index + 1.0)
+float rbRateL = rbEligibleBars > 0 ? rbCntL / float(rbEligibleBars) : 0.0
+float rbRateS = rbEligibleBars > 0 ? rbCntS / float(rbEligibleBars) : 0.0
 float rbU1 = math.random(0, 1, rbSeed)
-float rbU2 = math.random(0, 1, rbSeed)
+float rbU2 = math.random(0, 1, rbSeed + 1000)
 float rbAtr = ta.atr(rbAtrLen)
 
 float rbRSL = rbTrack(rbSigL, true,  rbAtr, rbTp, rbSl, rbBars)
-float rbRRL = rbTrack(rbU1 < rbRateL, true,  rbAtr, rbTp, rbSl, rbBars)
+float rbRRL = rbTrack(rbEligible and rbU1 < rbRateL, true,  rbAtr, rbTp, rbSl, rbBars)
 float rbRSS = rbTrack(rbSigS, false, rbAtr, rbTp, rbSl, rbBars)
-float rbRRS = rbTrack(rbU2 < rbRateS, false, rbAtr, rbTp, rbSl, rbBars)
+float rbRRS = rbTrack(rbEligible and rbU2 < rbRateS, false, rbAtr, rbTp, rbSl, rbBars)
 
 var int   rbNSL = 0
 var int   rbNRL = 0
@@ -5381,7 +5388,7 @@ if not na(rbRRS)
 var table rbTbl = table.new(position.top_left, 4, 8,
      bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1,
      frame_color=color.new(color.gray, 40), frame_width=1)
-if barstate.islast and rbOn
+if (barstate.islastconfirmedhistory or barstate.islast) and rbOn
     color rbTc = color.new(color.gray, 20)
     color rbHd = color.new(color.gray, 90)
     float rbAvgSL = rbNSL > 0 ? rbSumSL / rbNSL : na

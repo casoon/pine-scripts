@@ -15,8 +15,9 @@
 //   STRUCTURE  (0-100)     - is there a coherent framework right now, either
 //                            a respected range or a clean trend?
 //   ENERGY     (0-100)     - is movement intensity building or fading -
-//                            volatility, momentum acceleration and candle
-//                            commitment (one input per information family)?
+//                            volatility, momentum acceleration, candle
+//                            commitment, and how efficiently it converts
+//                            into net progress?
 //   ACCEPTANCE (-100..100) - are new prices being validated (held) or
 //                            rejected (wicked away), and which way?
 //
@@ -904,6 +905,26 @@ float directionStep =
      close < close[1] ? -1.0 :
      0.0
 
+float signedConsistency =
+     f_safeDiv(
+         math.sum(directionStep, qualityLength),
+         qualityLength,
+         0.0
+     )
+
+float baselineCross =
+     ta.cross(close, baseline) ? 1.0 : 0.0
+
+float baselineCrossRate =
+     f_safeDiv(
+         math.sum(baselineCross, qualityLength),
+         qualityLength,
+         0.0
+     )
+
+float closeDisplacement =
+     f_safeDiv(close - baseline, atr, 0.0)
+
 // Per-bar acceptance: does the bar close near its favorable extreme (held)
 // or get wicked back toward the opposite extreme (rejected)? Scaled to
 // [-1, 1] and smoothed - this is the raw sensor v1 didn't have.
@@ -1038,13 +1059,38 @@ float rangeCompactness =
 float rangeStructureQuality =
      math.sqrt(sustainedBoundaryStability * rangeCompactness) * 100.0
 
-// Trend quality is one input: efficiency-ratio rank ("directed and efficient").
-// Baseline-cross rarity, ADX, slope and directional consistency all read the
-// same directional price path, so blending them counted one family five times.
-// Ranked against its own recent history like the range branch's sensors.
+// Rare baseline crosses alone don't make a clean trend - a quiet drift that
+// happens to sit on one side of a slow baseline would score high. Blend the
+// cross rate with efficiency, ADX, slope and directional consistency so a
+// high trend quality actually means "directed and efficient".
+
+float trendCrossQuality =
+     ta.percentrank(-baselineCrossRate, rankLength)
+
+float trendEfficiencyQuality =
+     ta.percentrank(efficiencyRatio, rankLength)
+
+float trendAdxQuality =
+     ta.percentrank(adx, rankLength)
+
+// Ranked against their own recent history like the other three components,
+// not a fixed f_scale/multiply-by-100 - those average well below 50 (strong
+// slope/consistency readings are rare by nature), which silently dragged the
+// whole composite's average below the Structure Threshold regardless of
+// instrument or timeframe.
+
+float trendSlopeQuality =
+     ta.percentrank(math.abs(normalizedSlope), rankLength)
+
+float trendConsistencyQuality =
+     ta.percentrank(math.abs(signedConsistency), rankLength)
 
 float trendStructureQuality =
-     ta.percentrank(efficiencyRatio, rankLength)
+     trendCrossQuality       * 0.25 +
+     trendEfficiencyQuality  * 0.25 +
+     trendAdxQuality         * 0.20 +
+     trendSlopeQuality       * 0.20 +
+     trendConsistencyQuality * 0.10
 
 float structureScore = math.max(rangeStructureQuality, trendStructureQuality)
 
@@ -1060,16 +1106,24 @@ bool rangeFramework = rangeStructureQuality >= trendStructureQuality
 float slopeDirection =
      f_clamp(normalizedSlope / 0.75, -1.0, 1.0)
 
-// One input per family, family weights kept from the former blend
-// (trend 0.68, price action 0.32): baseline slope for direction, bar
-// acceptance (closes held at the favourable extreme vs. wicked back) for
-// price action. Baseline displacement, DI dominance and directional
-// consistency repeated the slope's information; range position repeated
-// the bar-acceptance read.
+float baselineDirection =
+     f_clamp(closeDisplacement / 2.0, -1.0, 1.0)
+
+float diDenominator = plusDi + minusDi
+float diDirection =
+     f_safeDiv(plusDi - minusDi, diDenominator, 0.0)
+
+float rangePressure =
+     f_clamp((rangePosition - 0.5) * 2.0, -1.0, 1.0)
+
 float acceptanceScore =
      (
-         slopeDirection * 0.68 +
-         averageBarAcceptance * 0.32
+         slopeDirection * 0.22 +
+         baselineDirection * 0.16 +
+         diDirection * 0.16 +
+         signedConsistency * 0.14 +
+         rangePressure * 0.12 +
+         averageBarAcceptance * 0.20
      ) * 100.0
 
 acceptanceScore := f_clamp(acceptanceScore, -100.0, 100.0)
@@ -1078,9 +1132,12 @@ acceptanceScore := f_clamp(acceptanceScore, -100.0, 100.0)
 // ENERGY
 // ============================================================================
 
-// Is movement intensity building or fading? Volatility expansion, whether
-// directional conviction is accelerating, and candle commitment. Efficiency
-// is not repeated here: it is already the trend-quality input of Structure.
+// Is movement intensity building or fading? Volatility expansion, how
+// efficiently movement converts into net progress, whether directional
+// conviction is accelerating, and candle commitment.
+
+float energyEfficiency =
+     ta.percentrank(efficiencyRatio, rankLength)
 
 // acceptanceScore is already homogenized into a fixed -100..100 range by
 // construction, so its bar-to-bar delta doesn't need ranking the same way a
@@ -1104,11 +1161,11 @@ float energyMomentumAccel =
 float candleCommitmentScore =
      ta.percentrank(averageBodyRatio, rankLength)
 
-// Former weights 0.30 / 0.20 / 0.20 kept in proportion over the three inputs.
 float energyScore =
-     volatilityExpansionScore * 0.30 / 0.70 +
-     energyMomentumAccel * 0.20 / 0.70 +
-     candleCommitmentScore * 0.20 / 0.70
+     volatilityExpansionScore * 0.30 +
+     energyEfficiency * 0.30 +
+     energyMomentumAccel * 0.20 +
+     candleCommitmentScore * 0.20
 
 energyScore := f_clamp(energyScore, 0.0, 100.0)
 
@@ -1981,6 +2038,11 @@ if enableCalibrationLog and barstate.isconfirmed
          ' | rangeStructure=' + str.tostring(rangeStructureQuality, '#.##') +
          ' | rangeCompactness=' + str.tostring(rangeCompactness, '#.###') +
          ' | trendStructure=' + str.tostring(trendStructureQuality, '#.##') +
+         ' | trendCross=' + str.tostring(trendCrossQuality, '#.##') +
+         ' | trendEfficiency=' + str.tostring(trendEfficiencyQuality, '#.##') +
+         ' | trendAdx=' + str.tostring(trendAdxQuality, '#.##') +
+         ' | trendSlope=' + str.tostring(trendSlopeQuality, '#.##') +
+         ' | trendConsistency=' + str.tostring(trendConsistencyQuality, '#.##') +
          ' | energy=' + str.tostring(energyScore, '#.##') +
          ' | acceptance=' + str.tostring(acceptanceScore, '#.##') +
          ' | dataReady=' + str.tostring(dataReady) +
