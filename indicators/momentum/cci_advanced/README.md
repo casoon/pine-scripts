@@ -5,7 +5,7 @@ CCI with pluggable smoothing, three scale modes, and rich visualization. The ind
 ## Features
 
 - **CCI core:** `ta.cci(src, len)` → averaged main line → signal line via the shared smoothing kernel
-- **Pluggable smoothing:** EMA, SMA, RMA, WMA, SuperSmoother, T3, KAMA, JMA Approx — applied to both main and signal line
+- **Pluggable smoothing:** EMA (default) or T3 — applied to both main and signal line
 - **Three scale modes:** Classic (unbounded raw CCI), Clamp ±200 (hard clip), Adaptive ±100 (shared rescale using recent range)
 - **Shared adaptive scale:** both CCI and signal are divided by the same lookback maximum, preventing phantom crossovers
 - **Signals on raw values:** crossover detection uses the unscaled CCI so display mode changes never affect signal logic

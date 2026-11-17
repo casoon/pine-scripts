@@ -15,7 +15,7 @@ Synthetic fear gauge (Williams VIX Fix) with dual-direction signals, StdDev and 
 - **View Mode** — Clean / Balanced / Full controls how many layers show at once (Clean: core lines + Reclaim + Sentiment Bar; Balanced: + Context/Bands; Full: + Percentile/Fills/Divergence)
 - **Gradient coloring** — calm (cyan) → fear (pink) between configurable Normal Fear and Elevated Fear levels
 - **Shadow fills** — fear shadow above midline, calm shadow below
-- **Pluggable smoothing** — EMA, SMA, RMA, WMA, SuperSmoother, T3, KAMA, JMA Approx (optional, default off)
+- **Pluggable smoothing** — EMA (default) or T3 (optional, default off)
 - **Sentiment bar** — live ±100 bull/bear dominance score with a mini bar on the right edge of the panel: `(WVF ÷ its StdDev band − Bear-WVF ÷ its StdDev band) × 100`. A graded readout, not a fixed Bullish/Bearish claim
 - **Alerts** — Bull Spike, Bear Spike, absorbed variants, and Reclaim Long/Short, all bar-close gated
 

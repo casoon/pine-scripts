@@ -5,7 +5,7 @@ ADX/DI system with pluggable smoothing on the ADX line, rich visualization of DI
 ## Features
 
 - **ADX/DI core:** `ta.dmi(diLen, adxSmoothing)` produces DI+, DI−, and ADX raw
-- **Pluggable smoothing:** EMA, SMA, RMA, WMA, SuperSmoother, T3, KAMA, JMA Approx — applied to the ADX signal line
+- **Pluggable smoothing:** EMA (default) or T3 — applied to the ADX signal line
 - **ADX histogram:** ADX minus smoothed signal; 4-state coloring (above/below threshold × rising/falling)
 - **DI± display:** optional lines with a fill between DI+ and DI− — fill color tracks which direction dominates
 - **Gradient ADX line:** `color.from_gradient()` maps weak-threshold to strong-threshold using amber/orange tones

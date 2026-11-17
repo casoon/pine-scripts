@@ -5,7 +5,7 @@ ATR in four display modes with pluggable smoothing and gradient visualization. T
 ## Features
 
 - **Four display modes:** Raw ATR, ATR% (ATR / close × 100), Normalized (z-score vs N-bar window), Percentile Rank (0–100 vs N-bar window)
-- **Pluggable smoothing:** EMA, SMA, RMA, WMA, SuperSmoother, T3, KAMA, JMA Approx — default RMA (matches standard ATR convention)
+- **Pluggable smoothing:** RMA (default) or T3 — default RMA (matches standard ATR convention)
 - **4-state histogram:** ATR minus signal; rising/falling × above/below signal drives four opacity states
 - **Gradient line:** maps from low-vol teal to high-vol pink based on the mode's natural range
 - **Shadow fill:** between ATR line and signal line
