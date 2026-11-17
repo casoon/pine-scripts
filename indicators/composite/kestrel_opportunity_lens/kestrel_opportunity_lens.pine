@@ -1,0 +1,283 @@
+//@version=6
+// ============================================================================
+// Kestrel Opportunity Lens [WavesUnchained]
+// Version: 0.2.0
+// Author: WavesUnchained
+// Build: 2026-11-17
+// ============================================================================
+// Price-only long and short opportunity windows with observable recovery
+// conditions, measured from the extreme inside each window. Research companion
+// inspired by Kestrel Lab V034; NOT an exported learned model. Recovery
+// thresholds are illustrative rules, not calibrated Lab coefficients.
+//
+// Features:
+//   ✓ Long and short as independent state machines with one symmetric rule set
+//   ✓ Recovery anchored to the window extreme, not a rolling lookback
+//   ✓ Confirmed-bar zone, setup, expiry and review events with hover details
+//   ✓ Trend context (with / counter / mixed) recorded, never used as a filter
+//   ✓ Event and context series in the data window for chart-data export
+//
+// Data Contract:
+//   Price:     REQUIRED   standard chart OHLC
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
+//
+// ============================================================================
+
+indicator("Kestrel Opportunity Lens [WavesUnchained]", shorttitle="KOL", overlay=true, max_labels_count=500)
+
+string gWindow = "Opportunity window"
+string direction = input.string("Both", "Directions", options=["Both", "Long", "Short"], group=gWindow, tooltip="Long and short run as separate state machines with the same mirrored rules. Overlapping windows of both sides are possible and are not independent observations.")
+int wrLength = input.int(14, "Williams period", minval=2, group=gWindow)
+float zone = input.float(20, "Extreme zone depth (points from the edge)", minval=1, maxval=49, group=gWindow, tooltip="Long zone: Williams ≤ this value. Short zone: Williams ≥ 100 minus this value.")
+int episodeGap = input.int(12, "Minimum spacing of accepted starts (bars)", minval=1, maxval=100, group=gWindow, tooltip="Per direction: bars from one accepted start to the next.")
+int deadline = input.int(6, "Decision window (bars, incl. start bar)", minval=1, maxval=24, group=gWindow, tooltip="Number of bars that may deliver a setup, counting the start bar itself. Without a setup the window expires on its last bar.")
+string gRecovery = "Illustrative recovery rules — not Lab model"
+float wrRecovery = input.float(5, "Williams recovery from window extreme (points)", minval=0, group=gRecovery, tooltip="Long: Williams above its lowest value since the window start. Short: below its highest value. The start bar defines the extreme, so it cannot deliver a setup on its own unless this is 0.")
+float priceRecovery = input.float(0.25, "Close away from window extreme (ATR multiples)", minval=0, step=0.05, group=gRecovery, tooltip="Long: close above the lowest low since the window start. Short: close below the highest high since the window start.")
+bool useWT = input.bool(false, "Require WaveTrend turning with the setup", group=gRecovery, tooltip="Long needs a rising, short a falling WaveTrend. WaveTrend is price-derived like the other two conditions, so it is not independent confirmation.")
+int horizon = input.int(12, "Review reminder after setup (bars)", minval=1, maxval=100, group=gRecovery, tooltip="A reminder only. No simulated fill, exit, position, stop or profit calculation.")
+bool reviewLock = input.bool(true, "Suppress new windows until review", group=gRecovery, tooltip="On: no new window of the same direction until the review reminder, which keeps the chart readable. Off: every valid opportunity is recorded (minimum spacing still applies); each setup keeps its own review reminder.")
+string gView = "Display"
+bool showEMA = input.bool(true, "Show EMA 20 (trend context)", group=gView)
+bool showTable = input.bool(true, "Show condition dashboard", group=gView)
+bool showWindow = input.bool(true, "Highlight active opportunity", group=gView)
+
+// Williams raw: 0 at low, 100 at high. Flat range is neutral.
+float hh = ta.highest(high, wrLength)
+float ll = ta.lowest(low, wrLength)
+float wr = hh > ll ? 100 * (close - ll) / (hh - ll) : 50
+// Lab uses SMA true range, not Wilder ATR, for this context.
+float atr = ta.sma(ta.tr(true), 20)
+float ema20 = ta.ema(close, 20)
+float esa = ta.ema(hlc3, 10)
+float dev = ta.ema(math.abs(hlc3 - esa), 10)
+float ci = dev > 1e-8 ? (hlc3 - esa) / (0.015 * dev) : 0
+float wt = ta.ema(ci, 21)
+bool ready = chart.is_standard and bar_index >= math.max(260, wrLength) and not na(atr) and atr > 0
+
+// Trend context: close side of EMA20 and its 5-bar slope. Recorded, never filters.
+int trendDir = 0
+if close > ema20 and ema20 > ema20[5]
+    trendDir := 1
+else if close < ema20 and ema20 < ema20[5]
+    trendDir := -1
+
+// Both sides run on direction-normalised series: x = oscillator distance from
+// the side's edge, p = price in the side's favour, e = the side's extreme.
+// Long uses wr / close / low; short mirrors to 100 - wr / -close / -high.
+float xL = wr
+float xS = 100 - wr
+float pL = close
+float pS = -close
+float eL = low
+float eS = -high
+float wL = wt
+float wS = -wt
+
+type Side
+    int dir
+    int lastZoneBar
+    int lastAcceptedStart
+    int startBar
+    float xExt
+    float pExt
+    // Pending review reminders, oldest first (FIFO: the horizon is the same for all).
+    array<int> reviewDue
+    array<float> reviewClose
+    array<int> reviewTrend
+    // Setup data of the review that fired on this bar (tooltip).
+    float revClose
+    int revTrend
+    string state = "Warm-up"
+    float rise
+    float priceRise
+    bool xOK = false
+    bool pOK = false
+    bool wOK = false
+    bool startEv = false
+    bool setupEv = false
+    bool expiredEv = false
+    bool reviewEv = false
+    int barsIn
+
+f_step(Side s, bool enabled, float x, float x1, float p, float p1, float e, float w, float w1) =>
+    s.startEv := false
+    s.setupEv := false
+    s.expiredEv := false
+    s.reviewEv := false
+    s.barsIn := na
+    if not enabled
+        s.state := "Off"
+    else if barstate.isconfirmed
+        if ready
+            // Optional review lock is a display convention, not the Lab's actual position lock.
+            if array.size(s.reviewDue) > 0 and bar_index >= array.get(s.reviewDue, 0)
+                s.reviewEv := true
+                s.revClose := array.shift(s.reviewClose)
+                s.revTrend := array.shift(s.reviewTrend)
+                array.shift(s.reviewDue)
+                s.state := "Review horizon reached"
+            bool inZone = x <= zone
+            // Zone episode: more than 3 bars since the last zone bar of this side.
+            bool zoneStart = inZone and (na(s.lastZoneBar) or bar_index - s.lastZoneBar > 3)
+            if inZone
+                s.lastZoneBar := bar_index
+            bool spacingOK = na(s.lastAcceptedStart) or bar_index - s.lastAcceptedStart >= episodeGap
+            if zoneStart and spacingOK and na(s.startBar) and (not reviewLock or array.size(s.reviewDue) == 0)
+                s.startBar := bar_index
+                s.lastAcceptedStart := bar_index
+                s.xExt := x
+                s.pExt := e
+                s.startEv := true
+                s.state := "Watching recovery"
+            if not na(s.startBar)
+                // Extremes are anchored at the start and only extend inside the window.
+                s.xExt := math.min(s.xExt, x)
+                s.pExt := math.min(s.pExt, e)
+                s.rise := x - s.xExt
+                s.priceRise := (p - s.pExt) / atr
+                s.xOK := s.rise >= wrRecovery and x > x1
+                s.pOK := s.priceRise >= priceRecovery and p > p1
+                s.wOK := not useWT or w > w1
+                if s.xOK and s.pOK and s.wOK
+                    s.setupEv := true
+                    s.barsIn := bar_index - s.startBar
+                    array.push(s.reviewDue, bar_index + horizon)
+                    array.push(s.reviewClose, close)
+                    array.push(s.reviewTrend, trendDir * s.dir)
+                    s.startBar := na
+                    s.state := "Setup — observing"
+                // Window = start bar plus deadline - 1 following bars; expires on its last bar.
+                else if bar_index >= s.startBar + deadline - 1
+                    s.expiredEv := true
+                    s.barsIn := bar_index - s.startBar
+                    s.startBar := na
+                    s.state := "Window expired"
+        else
+            s.state := chart.is_standard ? "Warm-up / missing data" : "Use standard OHLC candles"
+    s
+
+var Side longSide = Side.new(dir=1, reviewDue=array.new<int>(), reviewClose=array.new<float>(), reviewTrend=array.new<int>())
+var Side shortSide = Side.new(dir=-1, reviewDue=array.new<int>(), reviewClose=array.new<float>(), reviewTrend=array.new<int>())
+f_step(longSide, direction != "Short", xL, xL[1], pL, pL[1], eL, wL, wL[1])
+f_step(shortSide, direction != "Long", xS, xS[1], pS, pS[1], eS, wS, wS[1])
+
+// ── Signal markers ── glyph only; hover shows how the event came about.
+color cZone = #ff6f00
+color cLong = #00c853
+color cShort = #d50000
+color cExpired = color.new(color.gray, 30)
+color cReview = color.new(#2962ff, 20)
+
+f_mark(bool ok) => ok ? "✓ " : "✗ "
+
+f_context(int rel) =>
+    rel > 0 ? "with the trend" : rel < 0 ? "counter-trend" : "mixed"
+
+f_lines(Side s) =>
+    bool isLong = s.dir == 1
+    string xTxt = "Williams " + str.tostring(wr, "0.0") + " · " + str.tostring(s.rise, "0.0") + " pts " + (isLong ? "above window low" : "below window high") + " (need ≥ " + str.tostring(wrRecovery, "0.0") + (isLong ? ", rising)" : ", falling)")
+    string pTxt = "Close " + str.tostring(s.priceRise, "0.00") + " ATR " + (isLong ? "above lowest low" : "below highest high") + " of the window (need ≥ " + str.tostring(priceRecovery, "0.00") + (isLong ? ", above prior close)" : ", below prior close)")
+    string wTxt = useWT ? f_mark(s.wOK) + "WaveTrend " + str.tostring(wt, "0.0") + (s.wOK ? " turning" : " not turning") : "– WaveTrend gate off"
+    f_mark(s.xOK) + xTxt + "\n" + f_mark(s.pOK) + pTxt + "\n" + wTxt
+
+f_draw(Side s) =>
+    bool isLong = s.dir == 1
+    string side = isLong ? "Long" : "Short"
+    float base = isLong ? low : high
+    float sgn = isLong ? -1.0 : 1.0
+    string ctx = "Trend context: " + f_context(trendDir * s.dir) + " (EMA20 side + 5-bar slope)"
+    if s.startEv
+        string tip = side + " opportunity window opens\nWilliams " + str.tostring(wr, "0.0") + (isLong ? " ≤ " + str.tostring(zone, "0.0") : " ≥ " + str.tostring(100 - zone, "0.0")) + "\nWatching recovery for " + str.tostring(deadline) + " bars incl. this one\n" + ctx + "\nContext only — not an entry"
+        label.new(bar_index, base + sgn * atr * 0.3, "●", style=label.style_none, textcolor=cZone, size=size.tiny, tooltip=tip)
+    if s.setupEv
+        string tip = side + " setup at confirmed close " + str.tostring(close, format.mintick) + "\nWindow bar " + str.tostring(s.barsIn + 1) + " of " + str.tostring(deadline) + "\n" + f_lines(s) + "\n" + ctx + "\nReview reminder in " + str.tostring(horizon) + " bars · not a fill"
+        label.new(bar_index, base + sgn * atr * 0.8, isLong ? "▲" : "▼", style=label.style_none, textcolor=isLong ? cLong : cShort, size=size.normal, tooltip=tip)
+    if s.expiredEv
+        string tip = side + " window expired without setup\nConditions on the last window bar:\n" + f_lines(s) + "\n" + ctx
+        label.new(bar_index, base + sgn * atr * (s.startEv ? 0.65 : 0.3), "×", style=label.style_none, textcolor=cExpired, size=size.small, tooltip=tip)
+    if s.reviewEv
+        string tip = side + " review horizon: " + str.tostring(horizon) + " bars after the setup\nSetup close " + str.tostring(s.revClose, format.mintick) + " · now " + str.tostring(close, format.mintick) + "\nTrend context at setup: " + f_context(s.revTrend) + " · now: " + f_context(trendDir * s.dir) + "\nReminder only — no exit, stop or position"
+        label.new(bar_index, base + sgn * atr * 0.8, "◆", style=label.style_none, textcolor=cReview, size=size.tiny, tooltip=tip)
+    0
+
+f_draw(longSide)
+f_draw(shortSide)
+
+plot(showEMA ? ema20 : na, "EMA 20 (trend context)", color=color.new(color.blue, 35))
+// A window includes the setup / expiry bar that closes it.
+f_inWindow(Side s) => not na(s.startBar) or s.setupEv or s.expiredEv
+bgcolor(showWindow and (f_inWindow(longSide) or f_inWindow(shortSide)) ? color.new(color.orange, 88) : na)
+
+// Data window: raw values plus event/context series for chart-data export.
+// Recovery values stay visible on the setup / expiry bar that closes the window.
+plot(wr, "Williams raw 0–100", display=display.data_window)
+plot(wt, "WaveTrend", display=display.data_window)
+plot(trendDir, "Trend context (+1 up / -1 down / 0 mixed)", display=display.data_window)
+plot(f_inWindow(longSide) ? longSide.rise : na, "Long: Williams recovery (pts)", display=display.data_window)
+plot(f_inWindow(longSide) ? longSide.priceRise : na, "Long: price recovery (ATR)", display=display.data_window)
+plot(f_inWindow(shortSide) ? shortSide.rise : na, "Short: Williams recovery (pts)", display=display.data_window)
+plot(f_inWindow(shortSide) ? shortSide.priceRise : na, "Short: price recovery (ATR)", display=display.data_window)
+plot(longSide.startEv ? 1 : 0, "Long: window start", display=display.data_window)
+plot(longSide.setupEv ? 1 : 0, "Long: setup", display=display.data_window)
+plot(longSide.expiredEv ? 1 : 0, "Long: expired", display=display.data_window)
+plot(longSide.reviewEv ? 1 : 0, "Long: review", display=display.data_window)
+plot(shortSide.startEv ? 1 : 0, "Short: window start", display=display.data_window)
+plot(shortSide.setupEv ? 1 : 0, "Short: setup", display=display.data_window)
+plot(shortSide.expiredEv ? 1 : 0, "Short: expired", display=display.data_window)
+plot(shortSide.reviewEv ? 1 : 0, "Short: review", display=display.data_window)
+
+// Dashboard
+var table panel = table.new(position.top_right, 3, 8, bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+var int lastTrend = 0
+if barstate.isconfirmed
+    lastTrend := trendDir
+
+f_cells(int col, Side s) =>
+    bool active = not na(s.startBar)
+    string riseTxt = active ? str.tostring(s.rise, "0.0") + (s.xOK ? " · yes" : " · wait") : "—"
+    string priceTxt = active ? str.tostring(s.priceRise, "0.00") + (s.pOK ? " · yes" : " · wait") : "—"
+    string wtTxt = not useWT ? "Off" : not active ? "—" : s.wOK ? "Turning" : "Waiting"
+    table.cell(panel, col, 1, s.state, text_color=tc, text_size=size.small)
+    table.cell(panel, col, 2, riseTxt, text_color=tc, text_size=size.small)
+    table.cell(panel, col, 3, priceTxt, text_color=tc, text_size=size.small)
+    table.cell(panel, col, 4, wtTxt, text_color=tc, text_size=size.small)
+    table.cell(panel, col, 5, f_context(lastTrend * s.dir), text_color=tc, text_size=size.small)
+    table.cell(panel, col, 6, str.tostring(deadline) + " / " + str.tostring(episodeGap) + " bars", text_color=tc, text_size=size.small)
+    0
+
+if barstate.islast and showTable
+    table.cell(panel, 0, 0, "Kestrel Opportunity Lens", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(panel, 1, 0, "Long", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(panel, 2, 0, "Short", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(panel, 0, 1, "State (last closed bar)", text_color=tc, text_size=size.small)
+    table.cell(panel, 0, 2, "Williams recovery", text_color=tc, text_size=size.small)
+    table.cell(panel, 0, 3, "Price recovery / ATR", text_color=tc, text_size=size.small)
+    table.cell(panel, 0, 4, "WaveTrend gate", text_color=tc, text_size=size.small)
+    table.cell(panel, 0, 5, "Trend context", text_color=tc, text_size=size.small)
+    table.cell(panel, 0, 6, "Window / spacing", text_color=tc, text_size=size.small)
+    table.cell(panel, 0, 7, "Model", text_color=tc, text_size=size.small)
+    table.cell(panel, 1, 7, "No trained weights", text_color=tc, text_size=size.small)
+    table.cell(panel, 2, 7, "No P&L", text_color=tc, text_size=size.small)
+    f_cells(1, longSide)
+    f_cells(2, shortSide)
+
+alertcondition(longSide.startEv, "KOL: long opportunity", "KOL long opportunity on {{ticker}} {{interval}} at confirmed close {{close}}.")
+alertcondition(longSide.setupEv, "KOL: long setup", "KOL rule-based LONG setup on {{ticker}} {{interval}} at confirmed close {{close}}. Not a fill.")
+alertcondition(longSide.expiredEv, "KOL: long expired", "KOL long opportunity expired without a setup on {{ticker}} {{interval}}.")
+alertcondition(longSide.reviewEv, "KOL: long review", "KOL long review horizon reached on {{ticker}} {{interval}}. Reminder only, not an exit fill.")
+alertcondition(shortSide.startEv, "KOL: short opportunity", "KOL short opportunity on {{ticker}} {{interval}} at confirmed close {{close}}.")
+alertcondition(shortSide.setupEv, "KOL: short setup", "KOL rule-based SHORT setup on {{ticker}} {{interval}} at confirmed close {{close}}. Not a fill.")
+alertcondition(shortSide.expiredEv, "KOL: short expired", "KOL short opportunity expired without a setup on {{ticker}} {{interval}}.")
+alertcondition(shortSide.reviewEv, "KOL: short review", "KOL short review horizon reached on {{ticker}} {{interval}}. Reminder only, not an exit fill.")
+
+// @strategy-config
+// long:       longSide.setupEv
+// short:      shortSide.setupEv
+// sl_type:    time_exit         // evaluation strategy: time exit after N bars, no stop (not a generator pattern)
+// @end-strategy-config
