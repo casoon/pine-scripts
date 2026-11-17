@@ -1,0 +1,458 @@
+//@version=6
+// ============================================================================
+// Kestrel Opportunity Lens [WavesUnchained] — Strategy (standalone)
+// Version: 0.1.0
+// Author: WavesUnchained
+// Build: 2026-11-17
+// ============================================================================
+// Evaluation strategy for the Kestrel Opportunity Lens signal logic (0.2.0 + Unreleased).
+// Measures every long/short setup over fixed horizons, independent of trades,
+// and compares it with a simple Williams zone-exit baseline. Deliberate
+// deviations from the indicator: dashboard replaced by the evaluation table,
+// alerts removed, trades exit on time without a stop.
+//
+// Features:
+//   ✓ Signal logic copied 1:1 from the indicator (state machines, markers, data window)
+//   ✓ Every setup measured from its signal close: return after 3/6/12/24 bars, MFE and MAE over 24 bars, all in ATR
+//   ✓ Results grouped by direction and trend context (with / counter / mixed), always with n
+//   ✓ Baseline probe: plain Williams zone exit, measured the same way
+//   ✓ One Pine Logs line per finished probe, incl. overlap count, for external analysis
+//   ✓ Strategy Tester view: entry on setup, time exit after a chosen horizon, no stop
+//   ✓ Standard strategy features: trade direction, confirmed-bar entries, cooldown, break-even, filters, chart-type guard
+//
+// Data Contract:
+//   Price:     REQUIRED   standard chart OHLC
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
+//
+// ============================================================================
+
+strategy("Kestrel Opportunity Lens [WavesUnchained] — Strategy", overlay=true, max_labels_count=500,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     pyramiding=0, margin_long=100, margin_short=100,
+     commission_type=strategy.commission.percent, commission_value=0.02,
+     slippage=1, max_bars_back=500)
+
+// Synthetische Bar-Preise (Heikin Ashi, Renko …): Orders füllen zu Marktpreisen,
+// der Backtest gilt dort nicht. Kurzer Hinweis unten rechts statt auf der Kerze.
+var table chartTypeWarn = table.new(position.bottom_right, 1, 1)
+if barstate.islast and not chart.is_standard
+    table.cell(chartTypeWarn, 0, 0, "KOL · backtest invalid on this chart type",
+         bgcolor = color.new(color.red, 10), text_color = color.white, text_size = size.small)
+
+// ─── Signal logic (copy of the indicator, keep in line) ──────────────────────
+string gWindow = "Opportunity window"
+string direction = input.string("Both", "Directions", options=["Both", "Long", "Short"], group=gWindow, tooltip="Long and short run as separate state machines with the same mirrored rules. Overlapping windows of both sides are possible and are not independent observations.")
+int wrLength = input.int(14, "Williams period", minval=2, group=gWindow)
+float zone = input.float(20, "Extreme zone depth (points from the edge)", minval=1, maxval=49, group=gWindow, tooltip="Long zone: Williams ≤ this value. Short zone: Williams ≥ 100 minus this value.")
+int episodeGap = input.int(12, "Minimum spacing of accepted starts (bars)", minval=1, maxval=100, group=gWindow, tooltip="Per direction: bars from one accepted start to the next.")
+int deadline = input.int(6, "Decision window (bars, incl. start bar)", minval=1, maxval=24, group=gWindow, tooltip="Number of bars that may deliver a setup, counting the start bar itself. Without a setup the window expires on its last bar.")
+string gRecovery = "Illustrative recovery rules — not Lab model"
+float wrRecovery = input.float(5, "Williams recovery from window extreme (points)", minval=0, group=gRecovery, tooltip="Long: Williams above its lowest value since the window start. Short: below its highest value. The start bar defines the extreme, so it cannot deliver a setup on its own unless this is 0.")
+float priceRecovery = input.float(0.25, "Close away from window extreme (ATR multiples)", minval=0, step=0.05, group=gRecovery, tooltip="Long: close above the lowest low since the window start. Short: close below the highest high since the window start.")
+bool useWT = input.bool(false, "Require WaveTrend turning with the setup", group=gRecovery, tooltip="Long needs a rising, short a falling WaveTrend. WaveTrend is price-derived like the other two conditions, so it is not independent confirmation.")
+int horizon = input.int(12, "Review reminder after setup (bars)", minval=1, maxval=100, group=gRecovery, tooltip="A reminder only. No simulated fill, exit, position, stop or profit calculation.")
+bool reviewLock = input.bool(true, "Suppress new windows until review", group=gRecovery, tooltip="On: no new window of the same direction until the review reminder, which keeps the chart readable. Off: every valid opportunity is recorded (minimum spacing still applies); each setup keeps its own review reminder.")
+string gView = "Display"
+bool showEMA = input.bool(true, "Show EMA 20 (trend context)", group=gView)
+bool showTable = input.bool(true, "Show condition dashboard", group=gView)
+bool showWindow = input.bool(true, "Highlight active opportunity", group=gView)
+
+// Williams raw: 0 at low, 100 at high. Flat range is neutral.
+float hh = ta.highest(high, wrLength)
+float ll = ta.lowest(low, wrLength)
+float wr = hh > ll ? 100 * (close - ll) / (hh - ll) : 50
+// Lab uses SMA true range, not Wilder ATR, for this context.
+float atr = ta.sma(ta.tr(true), 20)
+float ema20 = ta.ema(close, 20)
+float esa = ta.ema(hlc3, 10)
+float dev = ta.ema(math.abs(hlc3 - esa), 10)
+float ci = dev > 1e-8 ? (hlc3 - esa) / (0.015 * dev) : 0
+float wt = ta.ema(ci, 21)
+bool ready = chart.is_standard and bar_index >= math.max(260, wrLength) and not na(atr) and atr > 0
+
+// Trend context: close side of EMA20 and its 5-bar slope. Recorded, never filters.
+int trendDir = 0
+if close > ema20 and ema20 > ema20[5]
+    trendDir := 1
+else if close < ema20 and ema20 < ema20[5]
+    trendDir := -1
+
+// Both sides run on direction-normalised series: x = oscillator distance from
+// the side's edge, p = price in the side's favour, e = the side's extreme.
+// Long uses wr / close / low; short mirrors to 100 - wr / -close / -high.
+float xL = wr
+float xS = 100 - wr
+float pL = close
+float pS = -close
+float eL = low
+float eS = -high
+float wL = wt
+float wS = -wt
+
+type Side
+    int dir
+    int lastZoneBar
+    int lastAcceptedStart
+    int startBar
+    float xExt
+    float pExt
+    // Pending review reminders, oldest first (FIFO: the horizon is the same for all).
+    array<int> reviewDue
+    array<float> reviewClose
+    array<int> reviewTrend
+    // Setup data of the review that fired on this bar (tooltip).
+    float revClose
+    int revTrend
+    string state = "Warm-up"
+    float rise
+    float priceRise
+    bool xOK = false
+    bool pOK = false
+    bool wOK = false
+    bool startEv = false
+    bool setupEv = false
+    bool expiredEv = false
+    bool reviewEv = false
+    int barsIn
+
+f_step(Side s, bool enabled, float x, float x1, float p, float p1, float e, float w, float w1) =>
+    s.startEv := false
+    s.setupEv := false
+    s.expiredEv := false
+    s.reviewEv := false
+    s.barsIn := na
+    if not enabled
+        s.state := "Off"
+    else if barstate.isconfirmed
+        if ready
+            // Optional review lock is a display convention, not the Lab's actual position lock.
+            if array.size(s.reviewDue) > 0 and bar_index >= array.get(s.reviewDue, 0)
+                s.reviewEv := true
+                s.revClose := array.shift(s.reviewClose)
+                s.revTrend := array.shift(s.reviewTrend)
+                array.shift(s.reviewDue)
+                s.state := "Review horizon reached"
+            bool inZone = x <= zone
+            // Zone episode: more than 3 bars since the last zone bar of this side.
+            bool zoneStart = inZone and (na(s.lastZoneBar) or bar_index - s.lastZoneBar > 3)
+            if inZone
+                s.lastZoneBar := bar_index
+            bool spacingOK = na(s.lastAcceptedStart) or bar_index - s.lastAcceptedStart >= episodeGap
+            if zoneStart and spacingOK and na(s.startBar) and (not reviewLock or array.size(s.reviewDue) == 0)
+                s.startBar := bar_index
+                s.lastAcceptedStart := bar_index
+                s.xExt := x
+                s.pExt := e
+                s.startEv := true
+                s.state := "Watching recovery"
+            if not na(s.startBar)
+                // Extremes are anchored at the start and only extend inside the window.
+                s.xExt := math.min(s.xExt, x)
+                s.pExt := math.min(s.pExt, e)
+                s.rise := x - s.xExt
+                s.priceRise := (p - s.pExt) / atr
+                s.xOK := s.rise >= wrRecovery and x > x1
+                s.pOK := s.priceRise >= priceRecovery and p > p1
+                s.wOK := not useWT or w > w1
+                if s.xOK and s.pOK and s.wOK
+                    s.setupEv := true
+                    s.barsIn := bar_index - s.startBar
+                    array.push(s.reviewDue, bar_index + horizon)
+                    array.push(s.reviewClose, close)
+                    array.push(s.reviewTrend, trendDir * s.dir)
+                    s.startBar := na
+                    s.state := "Setup — observing"
+                // Window = start bar plus deadline - 1 following bars; expires on its last bar.
+                else if bar_index >= s.startBar + deadline - 1
+                    s.expiredEv := true
+                    s.barsIn := bar_index - s.startBar
+                    s.startBar := na
+                    s.state := "Window expired"
+        else
+            s.state := chart.is_standard ? "Warm-up / missing data" : "Use standard OHLC candles"
+    s
+
+var Side longSide = Side.new(dir=1, reviewDue=array.new<int>(), reviewClose=array.new<float>(), reviewTrend=array.new<int>())
+var Side shortSide = Side.new(dir=-1, reviewDue=array.new<int>(), reviewClose=array.new<float>(), reviewTrend=array.new<int>())
+f_step(longSide, direction != "Short", xL, xL[1], pL, pL[1], eL, wL, wL[1])
+f_step(shortSide, direction != "Long", xS, xS[1], pS, pS[1], eS, wS, wS[1])
+
+// ── Signal markers ── glyph only; hover shows how the event came about.
+color cZone = #ff6f00
+color cLong = #00c853
+color cShort = #d50000
+color cExpired = color.new(color.gray, 30)
+color cReview = color.new(#2962ff, 20)
+
+f_mark(bool ok) => ok ? "✓ " : "✗ "
+
+f_context(int rel) =>
+    rel > 0 ? "with the trend" : rel < 0 ? "counter-trend" : "mixed"
+
+f_lines(Side s) =>
+    bool isLong = s.dir == 1
+    string xTxt = "Williams " + str.tostring(wr, "0.0") + " · " + str.tostring(s.rise, "0.0") + " pts " + (isLong ? "above window low" : "below window high") + " (need ≥ " + str.tostring(wrRecovery, "0.0") + (isLong ? ", rising)" : ", falling)")
+    string pTxt = "Close " + str.tostring(s.priceRise, "0.00") + " ATR " + (isLong ? "above lowest low" : "below highest high") + " of the window (need ≥ " + str.tostring(priceRecovery, "0.00") + (isLong ? ", above prior close)" : ", below prior close)")
+    string wTxt = useWT ? f_mark(s.wOK) + "WaveTrend " + str.tostring(wt, "0.0") + (s.wOK ? " turning" : " not turning") : "– WaveTrend gate off"
+    f_mark(s.xOK) + xTxt + "\n" + f_mark(s.pOK) + pTxt + "\n" + wTxt
+
+f_draw(Side s) =>
+    bool isLong = s.dir == 1
+    string side = isLong ? "Long" : "Short"
+    float base = isLong ? low : high
+    float sgn = isLong ? -1.0 : 1.0
+    string ctx = "Trend context: " + f_context(trendDir * s.dir) + " (EMA20 side + 5-bar slope)"
+    if s.startEv
+        string tip = side + " opportunity window opens\nWilliams " + str.tostring(wr, "0.0") + (isLong ? " ≤ " + str.tostring(zone, "0.0") : " ≥ " + str.tostring(100 - zone, "0.0")) + "\nWatching recovery for " + str.tostring(deadline) + " bars incl. this one\n" + ctx + "\nContext only — not an entry"
+        label.new(bar_index, base + sgn * atr * 0.3, "●", style=label.style_none, textcolor=cZone, size=size.tiny, tooltip=tip)
+    if s.setupEv
+        string tip = side + " setup at confirmed close " + str.tostring(close, format.mintick) + "\nWindow bar " + str.tostring(s.barsIn + 1) + " of " + str.tostring(deadline) + "\n" + f_lines(s) + "\n" + ctx + "\nReview reminder in " + str.tostring(horizon) + " bars · not a fill"
+        label.new(bar_index, base + sgn * atr * 0.8, isLong ? "▲" : "▼", style=label.style_none, textcolor=isLong ? cLong : cShort, size=size.normal, tooltip=tip)
+    if s.expiredEv
+        string tip = side + " window expired without setup\nConditions on the last window bar:\n" + f_lines(s) + "\n" + ctx
+        label.new(bar_index, base + sgn * atr * (s.startEv ? 0.65 : 0.3), "×", style=label.style_none, textcolor=cExpired, size=size.small, tooltip=tip)
+    if s.reviewEv
+        string tip = side + " review horizon: " + str.tostring(horizon) + " bars after the setup\nSetup close " + str.tostring(s.revClose, format.mintick) + " · now " + str.tostring(close, format.mintick) + "\nTrend context at setup: " + f_context(s.revTrend) + " · now: " + f_context(trendDir * s.dir) + "\nReminder only — no exit, stop or position"
+        label.new(bar_index, base + sgn * atr * 0.8, "◆", style=label.style_none, textcolor=cReview, size=size.tiny, tooltip=tip)
+    0
+
+f_draw(longSide)
+f_draw(shortSide)
+
+plot(showEMA ? ema20 : na, "EMA 20 (trend context)", color=color.new(color.blue, 35))
+// A window includes the setup / expiry bar that closes it.
+f_inWindow(Side s) => not na(s.startBar) or s.setupEv or s.expiredEv
+bgcolor(showWindow and (f_inWindow(longSide) or f_inWindow(shortSide)) ? color.new(color.orange, 88) : na)
+
+// Data window: raw values plus event/context series for chart-data export.
+// Recovery values stay visible on the setup / expiry bar that closes the window.
+plot(wr, "Williams raw 0–100", display=display.data_window)
+plot(wt, "WaveTrend", display=display.data_window)
+plot(trendDir, "Trend context (+1 up / -1 down / 0 mixed)", display=display.data_window)
+plot(f_inWindow(longSide) ? longSide.rise : na, "Long: Williams recovery (pts)", display=display.data_window)
+plot(f_inWindow(longSide) ? longSide.priceRise : na, "Long: price recovery (ATR)", display=display.data_window)
+plot(f_inWindow(shortSide) ? shortSide.rise : na, "Short: Williams recovery (pts)", display=display.data_window)
+plot(f_inWindow(shortSide) ? shortSide.priceRise : na, "Short: price recovery (ATR)", display=display.data_window)
+plot(longSide.startEv ? 1 : 0, "Long: window start", display=display.data_window)
+plot(longSide.setupEv ? 1 : 0, "Long: setup", display=display.data_window)
+plot(longSide.expiredEv ? 1 : 0, "Long: expired", display=display.data_window)
+plot(longSide.reviewEv ? 1 : 0, "Long: review", display=display.data_window)
+plot(shortSide.startEv ? 1 : 0, "Short: window start", display=display.data_window)
+plot(shortSide.setupEv ? 1 : 0, "Short: setup", display=display.data_window)
+plot(shortSide.expiredEv ? 1 : 0, "Short: expired", display=display.data_window)
+plot(shortSide.reviewEv ? 1 : 0, "Short: review", display=display.data_window)
+
+// ─── Strategy inputs ─────────────────────────────────────────────────────────
+g_strat       = "Strategy"
+tradeDirInput = input.string("Both", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=g_strat,
+     tooltip="Filter entries by direction. Useful for asymmetric instruments.")
+confirmClose  = input.bool(true,  "Entries on Confirmed Bar Only", group=g_strat,
+     tooltip="Only trigger entries on closed bars. Prevents repainting in live trading.")
+cooldownBars  = input.int(0,     "Cooldown Bars After Exit", minval=0, group=g_strat,
+     tooltip="Block new entries for N bars after a position closes. Set 0 to disable.")
+enableBE      = input.bool(false, "Break-Even Stop", group=g_strat,
+     tooltip="Move SL to entry price once the trade is N×ATR in profit.")
+beATRInput    = input.float(1.0,  "Break-Even Trigger (ATR×)", minval=0.1, step=0.1, group=g_strat,
+     tooltip="ATR distance from entry that triggers the break-even move.")
+exitBars      = input.int(12, "Time Exit (bars held)", options=[3, 6, 12, 24], group=g_strat,
+     tooltip="Strategy Tester trades close on the close of the N-th held bar. No stop besides the optional break-even. The evaluation table measures all horizons regardless of this setting.")
+
+g_filters     = "Filters"
+useSession    = input.bool(false, "Session Filter", group=g_filters)
+sessionInput  = input.session("0000-2345", "Session", group=g_filters)
+useDateRange  = input.bool(false, "Date Range", group=g_filters)
+dateFrom      = input.time(timestamp("01 Jan 2020 00:00 +0000"), "From", group=g_filters)
+dateTo        = input.time(timestamp("31 Dec 2030 23:59 +0000"), "To",   group=g_filters)
+useMaxDD      = input.bool(false, "Max Drawdown", group=g_filters)
+maxDD         = input.float(20.0, "Max Drawdown (%)", minval=1, step=1, group=g_filters)
+useMaxIntraDD = input.bool(false, "Max Intraday Loss", group=g_filters)
+maxIntraDD    = input.float(5.0,  "Max Intraday Loss (%)", minval=1, step=1, group=g_filters)
+useLossStreak = input.bool(false, "Losing Streak Limit", group=g_filters)
+maxLossStreak = input.int(5,      "Max Consecutive Losses", minval=1, group=g_filters)
+
+strategy.risk.max_drawdown(useMaxDD ? maxDD : 100, strategy.percent_of_equity)
+strategy.risk.max_intraday_loss(useMaxIntraDD ? maxIntraDD : 100, strategy.percent_of_equity)
+
+var int _lossStreak = 0
+if strategy.losstrades > strategy.losstrades[1]
+    _lossStreak := _lossStreak + 1
+if strategy.wintrades > strategy.wintrades[1]
+    _lossStreak := 0
+_filterOk = (not useSession or not na(time(timeframe.period, sessionInput))) and
+     (not useDateRange or (time >= dateFrom and time <= dateTo)) and
+     (not useLossStreak or _lossStreak < maxLossStreak)
+
+var int _lastExitBar = na
+_justClosed = strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+if _justClosed
+    _lastExitBar := bar_index
+_inCooldown = cooldownBars > 0 and not na(_lastExitBar) and (bar_index - _lastExitBar) < cooldownBars
+_canEntry   = not _inCooldown and (not confirmClose or barstate.isconfirmed) and _filterOk
+
+// ─── Strategy execution: entry on setup, time exit, no stop ──────────────────
+_canLong  = tradeDirInput != "Short Only"
+_canShort = tradeDirInput != "Long Only"
+
+// Both sides firing on the same bar is ambiguous — skip instead of picking one.
+bool _bothFire    = longSide.setupEv and shortSide.setupEv
+bool longSignal   = longSide.setupEv and not _bothFire and _canLong and _canEntry and strategy.position_size == 0
+bool shortSignal  = shortSide.setupEv and not _bothFire and _canShort and _canEntry and strategy.position_size == 0
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+_beAtr   = ta.atr(14) * beATRInput
+_beLong  = enableBE and strategy.position_size > 0 and close >= strategy.position_avg_price + _beAtr
+_beShort = enableBE and strategy.position_size < 0 and close <= strategy.position_avg_price - _beAtr
+
+// No regular stop: the only stop level is break-even, latched once triggered.
+if _beLong
+    strategy.exit("Long Exit", "Long", stop=strategy.position_avg_price)
+if _beShort
+    strategy.exit("Short Exit", "Short", stop=strategy.position_avg_price)
+
+if strategy.position_size != 0
+    // Time exit on the close of the exitBars-th held bar.
+    int barsHeld = bar_index - strategy.opentrades.entry_bar_index(0) + 1
+    if barsHeld >= exitBars
+        strategy.close(strategy.position_size > 0 ? "Long" : "Short", comment="Time", immediately=true)
+
+// ─── Evaluation: every setup and baseline event, independent of trades ──────
+// Reference = signal close and ATR on the signal bar. Returns in ATR, signed in
+// the signal's direction. MFE / MAE use high/low of bars 1…24 after the signal.
+// Probes still open at the last bar are not counted.
+g_eval      = "Evaluation"
+showEval    = input.bool(true, "Show evaluation table", group=g_eval)
+useBaseline = input.bool(true, "Measure baseline: Williams zone exit", group=g_eval,
+     tooltip="Long: Williams crosses back above the zone; short: back below 100 minus the zone. No window, no recovery rules — the plain alternative the setup has to beat.")
+logProbes   = input.bool(true, "Write finished probes to Pine Logs", group=g_eval,
+     tooltip="One line per probe after 24 bars: kind, direction, context, time, entry, ATR, returns, MFE, MAE and how many other probes were open at the start (overlap).")
+
+type Probe
+    int kind
+    int dir
+    int ctx
+    int bar
+    int t
+    float entry
+    float atrRef
+    int overlap
+    float mfe = 0.0
+    float mae = 0.0
+    float r3
+    float r6
+    float r12
+
+// Buckets 0–2: long setup by context (counter / mixed / with), 3–5: short setup,
+// 6: baseline long, 7: baseline short.
+var array<Probe> probes = array.new<Probe>()
+var array<int>   bCount = array.new<int>(8, 0)
+var array<float> bR3    = array.new<float>(8, 0.0)
+var array<float> bR6    = array.new<float>(8, 0.0)
+var array<float> bR12   = array.new<float>(8, 0.0)
+var array<float> bR24   = array.new<float>(8, 0.0)
+var array<float> bMFE   = array.new<float>(8, 0.0)
+var array<float> bMAE   = array.new<float>(8, 0.0)
+
+f_bucket(Probe p) =>
+    p.kind == 1 ? (p.dir == 1 ? 6 : 7) : (p.dir == 1 ? 0 : 3) + p.ctx + 1
+
+f_add(array<float> a, int i, float v) =>
+    array.set(a, i, array.get(a, i) + v)
+
+bool baseLong  = ta.crossover(wr, zone)
+bool baseShort = ta.crossunder(wr, 100 - zone)
+
+if barstate.isconfirmed and ready
+    // Update open probes first, so a new probe starts measuring on the next bar.
+    if array.size(probes) > 0
+        for i = array.size(probes) - 1 to 0
+            Probe p = array.get(probes, i)
+            int age = bar_index - p.bar
+            float fav = p.dir == 1 ? high - p.entry : p.entry - low
+            float adv = p.dir == 1 ? p.entry - low : high - p.entry
+            p.mfe := math.max(p.mfe, fav / p.atrRef)
+            p.mae := math.max(p.mae, adv / p.atrRef)
+            float r = p.dir * (close - p.entry) / p.atrRef
+            if age == 3
+                p.r3 := r
+            if age == 6
+                p.r6 := r
+            if age == 12
+                p.r12 := r
+            if age >= 24
+                int b = f_bucket(p)
+                array.set(bCount, b, array.get(bCount, b) + 1)
+                f_add(bR3, b, p.r3)
+                f_add(bR6, b, p.r6)
+                f_add(bR12, b, p.r12)
+                f_add(bR24, b, r)
+                f_add(bMFE, b, p.mfe)
+                f_add(bMAE, b, p.mae)
+                if logProbes
+                    log.info("KOL PROBE | kind={0} | dir={1} | ctx={2} | t={3} | entry={4} | atr={5} | r3={6} | r6={7} | r12={8} | r24={9} | mfe24={10} | mae24={11} | overlap={12}",
+                         p.kind == 1 ? "base" : "setup", p.dir == 1 ? "long" : "short", p.ctx, str.format_time(p.t, "yyyy-MM-dd HH:mm"),
+                         str.tostring(p.entry, format.mintick), str.tostring(p.atrRef, format.mintick),
+                         str.tostring(p.r3, "0.00"), str.tostring(p.r6, "0.00"), str.tostring(p.r12, "0.00"), str.tostring(r, "0.00"),
+                         str.tostring(p.mfe, "0.00"), str.tostring(p.mae, "0.00"), p.overlap)
+                array.remove(probes, i)
+    int open0 = array.size(probes)
+    if longSide.setupEv
+        array.push(probes, Probe.new(0, 1, trendDir, bar_index, time, close, atr, open0))
+    if shortSide.setupEv
+        array.push(probes, Probe.new(0, -1, -trendDir, bar_index, time, close, atr, open0))
+    if useBaseline and baseLong and direction != "Short"
+        array.push(probes, Probe.new(1, 1, trendDir, bar_index, time, close, atr, open0))
+    if useBaseline and baseShort and direction != "Long"
+        array.push(probes, Probe.new(1, -1, -trendDir, bar_index, time, close, atr, open0))
+
+// ─── Evaluation table ────────────────────────────────────────────────────────
+var table evalPanel = table.new(position.top_right, 8, 11, bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+
+f_mean(array<float> a, int b0, int b1, int n) =>
+    float s = 0.0
+    for i = b0 to b1
+        s += array.get(a, i)
+    n > 0 ? str.tostring(s / n, "0.00") : "—"
+
+f_row(int row, string name, int b0, int b1) =>
+    int n = 0
+    for i = b0 to b1
+        n += array.get(bCount, i)
+    table.cell(evalPanel, 0, row, name, text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(evalPanel, 1, row, str.tostring(n), text_color=tc, text_size=size.small)
+    table.cell(evalPanel, 2, row, f_mean(bR3, b0, b1, n), text_color=tc, text_size=size.small)
+    table.cell(evalPanel, 3, row, f_mean(bR6, b0, b1, n), text_color=tc, text_size=size.small)
+    table.cell(evalPanel, 4, row, f_mean(bR12, b0, b1, n), text_color=tc, text_size=size.small)
+    table.cell(evalPanel, 5, row, f_mean(bR24, b0, b1, n), text_color=tc, text_size=size.small)
+    table.cell(evalPanel, 6, row, f_mean(bMFE, b0, b1, n), text_color=tc, text_size=size.small)
+    table.cell(evalPanel, 7, row, f_mean(bMAE, b0, b1, n), text_color=tc, text_size=size.small)
+    0
+
+if barstate.islast and showEval
+    table.cell(evalPanel, 0, 0, "KOL evaluation · mean, ATR", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(evalPanel, 1, 0, "n", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(evalPanel, 2, 0, "+3", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(evalPanel, 3, 0, "+6", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(evalPanel, 4, 0, "+12", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(evalPanel, 5, 0, "+24", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(evalPanel, 6, 0, "MFE", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(evalPanel, 7, 0, "MAE", text_color=tc, bgcolor=hd, text_size=size.small)
+    f_row(1, "Long · with trend", 2, 2)
+    f_row(2, "Long · counter-trend", 0, 0)
+    f_row(3, "Long · mixed", 1, 1)
+    f_row(4, "Long · all", 0, 2)
+    f_row(5, "Short · with trend", 5, 5)
+    f_row(6, "Short · counter-trend", 3, 3)
+    f_row(7, "Short · mixed", 4, 4)
+    f_row(8, "Short · all", 3, 5)
+    f_row(9, "Baseline long (zone exit)", 6, 6)
+    f_row(10, "Baseline short (zone exit)", 7, 7)

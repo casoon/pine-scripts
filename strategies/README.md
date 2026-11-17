@@ -16,6 +16,7 @@ The Claude Code skill `strategy-from-indicator` carries the build rules.
 |---|---|---|
 | `chandelier_flip_radar/` | Chandelier Flip Radar | Trailing (ATR envelope) |
 | `commodity_pulse_matrix/` | Commodity Pulse Matrix v4 | Directional fixed SL/TP |
+| `kestrel_opportunity_lens/` | Kestrel Opportunity Lens | Time exit, no stop (evaluation) |
 | `market_average_relationship_engine/` | Market–Average Relationship Engine | Trailing (MA ∓ ATR×) |
 | `oscillator_divergence_zones/` | Oscillator Divergence Zones | Pivot + ATR buffer |
 | `reversal_engine_score/` | Reversal Engine Score | Structural + R-multiple TP |

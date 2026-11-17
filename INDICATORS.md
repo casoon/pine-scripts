@@ -111,6 +111,8 @@ A set of composable indicators — the core three cover trend, pullback, and exh
 
 ## Momentum & Oscillators
 
+- [Kestrel Opportunity Lens](indicators/composite/kestrel_opportunity_lens/kestrel_opportunity_lens.pine) — Long and short opportunity windows with recovery from the window extreme, trend context and confirmed-bar alerts (rule prototype).
+
 | Script | What it does |
 |--------|--------------|
 | [`cci_advanced.pine`](indicators/momentum/cci_advanced/cci_advanced.pine) | CCI with pluggable smoothing, three scale modes, OB/OS extreme-zone filter, gradient line, shadow fills, and Sentiment Bar/Signal Quality scoring |

@@ -98,6 +98,7 @@ hier bewusst nicht doppelt geführt, weil eine zweite Kopie still veraltet.
 
 | Indikator | Status | Konzept | Code | Getestet | Notiz |
 | --- | --- | --- | --- | --- | --- |
+| [kestrel_opportunity_lens](indicators/composite/kestrel_opportunity_lens/) | Draft | ungeprüft | statisch geprüft | ☆☆☆☆☆ | Regelprototyp aus V034-Ideen; keine Modellgewichte, kein Kontonachweis; Long/Short gespiegelt, Erholung vom Fensterextrem, Trendkontext ohne Filter, optionale WaveTrend-Bestätigung, bestätigte Alerts; TradingView-Compile/Replay offen. |
 | [reversal_engine_score](indicators/momentum/reversal_engine_score/) | Aktiv | ★★★★☆ | ★★★★☆ | ★★★☆☆ | Score logic needs rework (test131) |
 | [reversal_type_classifier](indicators/market_structure/reversal_type_classifier/) | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ |  |
 | [commodity_heat_reversal](indicators/composite/commodity_heat_reversal/) | Stabil | ★★★★☆ | ★★★★☆ | ★★★☆☆ |  |
@@ -192,6 +193,7 @@ Ratings: **Not ready** (PF < 1.15 or Return/DD < 1.5) · **Promising** (PF ≥ 1
 | [market_average_relationship_engine_strategy](strategies/market_average_relationship_engine/) | Market–Average Relationship Engine | Trailing (MA ∓ ATR×) | Not ready | Kein Backtest vorhanden |
 | [reversal_engine_score_strategy](strategies/reversal_engine_score/) | Reversal Engine Score | Strukturell + R-Multiple TP | Not ready | Gate-Modell über v1.1–v1.4 umgebaut (additiver Score rankte invers); **stale**: Datei ist v1.6.1, Messungen bis v1.4 |
 | [commodity_pulse_matrix_v4_strategy](strategies/commodity_pulse_matrix/) | Commodity Pulse Matrix v4 | Directional Fixed TP | Not ready | Kein Backtest vorhanden |
+| [kestrel_opportunity_lens_strategy](strategies/kestrel_opportunity_lens/) | Kestrel Opportunity Lens | Zeitausstieg, kein Stop | Not ready | Evaluationsstrategie: misst jedes Long/Short-Setup über 3/6/12/24 Bars plus MFE/MAE, gruppiert nach Trendkontext, gegen Williams-Zonenaustritt als Baseline; noch nicht getestet |
 
 Backtest-Zahlen stehen ausschließlich in `strategies/<name>/<name>_strategy_assessment.md`,
 wo Instrument, Timeframe und Stichprobengröße mitlaufen.

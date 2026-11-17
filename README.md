@@ -63,6 +63,7 @@ and the transformation rules.
 | [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Promising |
 | [`reversal_engine_score_strategy.pine`](strategies/reversal_engine_score/reversal_engine_score_strategy.pine) | Reversal Engine Score | Structural + R-multiple TP | Not ready |
 | [`commodity_pulse_matrix_v4_strategy.pine`](strategies/commodity_pulse_matrix/commodity_pulse_matrix_v4_strategy.pine) | Commodity Pulse Matrix v4 | Directional fixed TP | Not ready — not yet backtested |
+| [`kestrel_opportunity_lens_strategy.pine`](strategies/kestrel_opportunity_lens/kestrel_opportunity_lens_strategy.pine) | Kestrel Opportunity Lens | Time exit, no stop (evaluation) | Not ready — not yet tested |
 
 Backtest results and parameter notes live in `strategies/<name>/<name>_strategy_assessment.md`
 — that is the only place figures belong. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
