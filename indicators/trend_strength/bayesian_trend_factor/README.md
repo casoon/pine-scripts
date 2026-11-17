@@ -36,13 +36,13 @@ The confidence gate soft-neutralizes the factor when evidence quality is below t
 - Exhaustion is a malus only; low exhaustion no longer adds confidence by itself
 - Optional short factor smoothing to reduce state flicker
 - Trend-state hysteresis via separate activation and exit thresholds
-- Final Bull/Bear probability derived from the smoothed factor, with raw probability still exposed for diagnostics
+- Final Bull/Bear evidence score derived from the smoothed factor, with raw evidence score still exposed for diagnostics
 - Confidence gate that scales down low-quality directional reads
 - Fair Path regression line plus optional `+/-2 ATR` bands
 - Candle coloring by trend state and optional score labels on threshold/large-score changes
 - Optional Pullback / Continuation module with PB setup labels and CONT trigger labels, both with hover explanations
 - Optional HAMA-style smoothed overlay candles with BTF-gradient coloring and visible wick/border styling
-- Dashboard with factor, state, confidence, bull probability and key evidence scores
+- Dashboard with factor, state, confidence, bull evidence score and key evidence scores
 - Alerts for bull/bear activation, strong trend states, neutral transition, pullback setups and continuation triggers
 
 ## Trend Candles

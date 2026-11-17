@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Reliable Sample Count:** default back from 20 to 40; a lower value only makes the reliable/edge readout easier to reach. Readouts that depend on it appear less often
+
 ## v1.5.1 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
 

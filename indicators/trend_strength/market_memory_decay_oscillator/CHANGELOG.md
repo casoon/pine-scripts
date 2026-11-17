@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Naming:** the "Hurst" readout is now called "Persistence ratio" (single-window rescaled range, not a Hurst estimate); the calculation is unchanged
+
 ## v1.2.1 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
 
