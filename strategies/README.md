@@ -48,12 +48,17 @@ the result is meaningless — reliably flattering, never reproducible.
 | Setting | Value | Note |
 |---|---|---|
 | Position size | 10% of equity | Change via TradingView Properties |
-| Commission | 0.02% | Placeholder only. Capital CFDs charge no commission: cost = spread per trade + financing per night held (+ DPA on commodities). Not modelled yet (plan 14) |
-| Slippage | 1 tick | Increase for illiquid instruments |
+| Commission | 0 | Capital CFDs charge none. Cost is modelled in the **Cost Model (CFD)** group: spread per trade, financing per night held, stress ×1.5 |
+| Slippage | 0 | Covered by the spread input |
 | Entries | On confirmed bar | `confirmClose` input, on by default — prevents repainting |
 
-Overnight/roll financing on CFDs is **not** priced in. On multi-day holds that is a known,
-unquantified drag on every rating in this directory.
+The TradingView tester books none of the CFD costs. Each strategy therefore has a **Cost Model (CFD)**
+group (spread in price points, financing % p.a. long/short, stress factor) and its own table
+(bottom left) that deducts them per closed trade: net and profit factor after costs and under
+stress, plus trades and average nights held. With all three values at 0 the table says
+"NOT SET – cost-free"; set them from the broker sheet before reading any result. Financing is
+counted per calendar night (a weekend = 3 nights); take the rate from a normal weekday sheet, not
+from the triple-charge day.
 
 Shared inputs: Trade Direction (Both / Long Only / Short Only), Cooldown Bars After Exit,
 Break-Even Stop + trigger, plus a Filters group (session, date range, max drawdown, max
