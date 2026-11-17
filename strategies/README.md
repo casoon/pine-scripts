@@ -52,6 +52,11 @@ the result is meaningless — reliably flattering, never reproducible.
 | Slippage | 0 | Covered by the spread input |
 | Entries | On confirmed bar | `confirmClose` input, on by default — prevents repainting |
 
+**Exit Mode.** `chandelier_flip_radar`, `market_average_relationship_engine` and `wavetrend_v4` offer
+`Existing | Fixed`. Fixed = target, stop and time limit only, from the ATR at the signal bar, with
+exit reasons in the trade comment (`tp` / `sl` / `time`; Existing adds `trail` / `be`). Run both
+on the same window: a dynamic exit that does not beat Fixed is not earning its complexity.
+
 The TradingView tester books none of the CFD costs. Each strategy therefore has a **Cost Model (CFD)**
 group (spread in price points, financing % p.a. long/short, stress factor) and its own table
 (bottom left) that deducts them per closed trade: net and profit factor after costs and under

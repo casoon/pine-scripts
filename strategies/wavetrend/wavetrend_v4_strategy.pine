@@ -122,6 +122,11 @@ showSignals   = input.bool(true, "Show Entry Labels on Chart",                 g
 dirMode       = input.string("Both", "Trade Direction",
      options=["Both", "Long Only", "Short Only"],                            group=g_strat)
 cooldown      = input.int(0, "Cooldown Bars After Exit", minval=0,           group=g_strat)
+exitMode      = input.string("Existing", "Exit Mode", options=["Existing", "Fixed"], group=g_strat,
+     tooltip="Existing: break-even, trailing, structural, fail-fast and no-follow exits as configured. Fixed: only the ATR stop (Risk group), the ATR target of the timeframe and the time limit below; all dynamic exits are off. Use Fixed as the comparison for the dynamic exits on the same entries.")
+fxTimeBars    = input.int(24, "Fixed: Time Limit (Bars)", minval=1,          group=g_strat,
+     tooltip="Fixed mode only. Closes the position at the next bar open after this many bars held.")
+_fx = exitMode == "Fixed"
 useStructExit   = input.bool(true, "Structural Exit (unconfirmed pivot)",     group=g_strat,
      tooltip="Close trade when price forms a potential swing against the position (high[1] > high[0] and high[2]) before ATR target is reached.")
 structMinR15M = input.float(2.0,  "  Struct Exit Min Profit 15M (R×)", minval=0.0, step=0.1, group=g_strat)
@@ -898,44 +903,48 @@ if _isFlat
 // ─── Bracket exit + break-even + trailing stop ───────────────────────────────
 if strategy.position_size > 0 and not na(_longRisk)
     _nextBar = bar_index > strategy.opentrades.entry_bar_index(0)
-    if enableBE and _nextBar and close >= strategy.position_avg_price + beTrigR * _longRisk
+    if enableBE and not _fx and _nextBar and close >= strategy.position_avg_price + beTrigR * _longRisk
         _longBE := true
     // Track highest close since entry for trailing
     if na(_maxCloseLong) or close > _maxCloseLong
         _maxCloseLong := close
     // Trail SL once trade has progressed by trailTriggerR. Stop never moves down.
-    if enableTrail and _nextBar and (close - strategy.position_avg_price) >= trailTriggerR * _longRisk
+    if enableTrail and not _fx and _nextBar and (close - strategy.position_avg_price) >= trailTriggerR * _longRisk
         _longTrailArmed := true
     _longTrailLevel = _longTrailArmed ? _maxCloseLong - trailDistanceR * _longRisk : na
     _longBaseStop = _longBE ? strategy.position_avg_price : _longSL
     _longStop     = na(_longTrailLevel) ? _longBaseStop : math.max(_longBaseStop, _longTrailLevel)
     _longExitComment = _longStop != _longBaseStop ? "trail" : _longBE ? "be" : "sl"
     // Trail replaces the fixed TP: a TP limit at ≤ trailTriggerR would fill before the trail arms
-    strategy.exit("Long Exit", "Long", stop=_longStop, limit=enableTrail ? na : _longTP,
+    strategy.exit("Long Exit", "Long", stop=_longStop, limit=enableTrail and not _fx ? na : _longTP,
          comment_profit="tp", comment_loss=_longExitComment)
 
 if strategy.position_size < 0 and not na(_shortRisk)
     _nextBar = bar_index > strategy.opentrades.entry_bar_index(0)
-    if enableBE and _nextBar and close <= strategy.position_avg_price - beTrigR * _shortRisk
+    if enableBE and not _fx and _nextBar and close <= strategy.position_avg_price - beTrigR * _shortRisk
         _shortBE := true
     // Track lowest close since entry for trailing
     if na(_minCloseShort) or close < _minCloseShort
         _minCloseShort := close
     // Trail SL once trade has progressed by trailTriggerR. Stop never moves up.
-    if enableTrail and _nextBar and (strategy.position_avg_price - close) >= trailTriggerR * _shortRisk
+    if enableTrail and not _fx and _nextBar and (strategy.position_avg_price - close) >= trailTriggerR * _shortRisk
         _shortTrailArmed := true
     _shortTrailLevel = _shortTrailArmed ? _minCloseShort + trailDistanceR * _shortRisk : na
     _shortBaseStop = _shortBE ? strategy.position_avg_price : _shortSL
     _shortStop     = na(_shortTrailLevel) ? _shortBaseStop : math.min(_shortBaseStop, _shortTrailLevel)
     _shortExitComment = _shortStop != _shortBaseStop ? "trail" : _shortBE ? "be" : "sl"
     // Trail replaces the fixed TP: a TP limit at ≤ trailTriggerR would fill before the trail arms
-    strategy.exit("Short Exit", "Short", stop=_shortStop, limit=enableTrail ? na : _shortTP,
+    strategy.exit("Short Exit", "Short", stop=_shortStop, limit=enableTrail and not _fx ? na : _shortTP,
          comment_profit="tp", comment_loss=_shortExitComment)
+
+// Fixed mode: time limit (reason "time"); stop and target come from the bracket exit above
+if _fx and strategy.position_size != 0 and bar_index - strategy.opentrades.entry_bar_index(0) >= fxTimeBars
+    strategy.close(strategy.position_size > 0 ? "Long" : "Short", comment="time")
 
 // ─── Structural exit (unconfirmed pivot) ─────────────────────────────────────
 _structMinR = _tfSec == 900 ? structMinR15M : _tfSec == 3600 ? structMinR1H : _tfSec == 14400 ? structMinR4H : structMinR1D
 
-if useStructExit
+if useStructExit and not _fx
     _potentialHigh = high[1] > high[0] and high[1] > high[2]
     _potentialLow  = low[1]  < low[0]  and low[1]  < low[2]
     _longProfitR   = not na(_longRisk)  and _longRisk  > 0 ? (close - strategy.position_avg_price) / _longRisk  : 0.0
@@ -949,7 +958,7 @@ if useStructExit
 // E — Fail-Fast: cut quickly if trade is immediately adverse (1H only)
 // Skip the entry bar itself (_barsInTrade > 0): wait for at least one new bar
 // before evaluating adverse move.
-_failFastActive = useFailFast and _tfSec == 3600
+_failFastActive = useFailFast and not _fx and _tfSec == 3600
 if _failFastActive and strategy.position_size > 0 and not na(_longRisk) and _longRisk > 0
     _barsInTrade = bar_index - strategy.opentrades.entry_bar_index(0)
     _adverseR    = (close - strategy.position_avg_price) / _longRisk
@@ -965,13 +974,13 @@ if _failFastActive and strategy.position_size < 0 and not na(_shortRisk) and _sh
 // F — No-Follow Exit: SINGLE check at window end. Hardcoded to 1H only.
 _isGrindTrade     = useGrindEngine and not na(_tradeAbsWt1) and _tradeAbsWt1 >= grindAbsWt1Min
 _noFollowActiveTF = _tfSec == 3600 and not _isGrindTrade
-if useNoFollow and _noFollowActiveTF and strategy.position_size > 0 and not na(_longRisk) and _longRisk > 0
+if useNoFollow and not _fx and _noFollowActiveTF and strategy.position_size > 0 and not na(_longRisk) and _longRisk > 0
     _barsInTrade = bar_index - strategy.opentrades.entry_bar_index(0)
     _progressR   = (close - strategy.position_avg_price) / _longRisk
     if _barsInTrade == nftWindow and _progressR < nftRequiredR
         strategy.close("Long", comment="noFollow")
 
-if useNoFollow and _noFollowActiveTF and strategy.position_size < 0 and not na(_shortRisk) and _shortRisk > 0
+if useNoFollow and not _fx and _noFollowActiveTF and strategy.position_size < 0 and not na(_shortRisk) and _shortRisk > 0
     _barsInTrade = bar_index - strategy.opentrades.entry_bar_index(0)
     _progressR   = (strategy.position_avg_price - close) / _shortRisk
     if _barsInTrade == nftWindow and _progressR < nftRequiredR
