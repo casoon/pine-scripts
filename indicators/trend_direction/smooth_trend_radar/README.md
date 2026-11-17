@@ -11,7 +11,8 @@ Double-smoothed Supertrend baseline for trend direction, with pivot-based reject
 - **Trend strength**: baseline-slope magnitude ranked against its own recent history — self-adapting like Overextension, not a fixed threshold. Flags a "strong trend" state (optional background tint) and tags rejection signals fired during it, with a dedicated alert pair for rejection entries inside an already-strong trend
 - **Live baseline rejection signals**: validated by sustained baseline contact, a slope filter, and optional bar-polarity and volume filters. Fires in both ADX regimes, tagged "Trend Pullback" (trending) or "Range Rejection" (sideways) in the tooltip
 - **Statistical overextension**: bars where the absolute distance from baseline ranks in the top X% of the lookback window are flagged with accent candle coloring (purple = price far below baseline, orange = far above) — self-adapts to symbol/timeframe characteristics
-- **SL/TP visualization**: on every trend flip (or rejection re-entry), entry, SL, and three TP levels are drawn with extended horizontal lines, labels, and risk/reward fills
+- **Trend signal**: one per trend run, on the first bar where ADX is above the threshold (the flip bar or later in the same trend)
+- **SL/TP visualization**: on every trend signal (or rejection re-entry), entry, SL, and three TP levels are drawn with extended horizontal lines, labels, and risk/reward fills. A trend change ends the setup. The levels are tracked (TP/SL alerts) even when their drawing is hidden
 - **Re-Entry on Rejection**: after an SL hit with unchanged trend, the next confirmed rejection signal rebuilds the full setup at current price
 - **Trail to Break-Even**: optional — when TP1 is hit, SL moves to entry price so the trade can no longer result in a loss
 - **Hover tooltips**: every flip and rejection label shows price, direction, and timestamp on hover
@@ -67,7 +68,7 @@ Disable Auto Scaling to use the manual input values exclusively. Enable **Volati
 
 ## Rejection Signal
 
-Pivots are not used for signal timing — rejection is detected live, from the current bar plus recent baseline contact. A rejection fires when **all** of the following hold on the current bar:
+Pivots are not used for signal timing — rejection is detected live, from the current bar plus recent baseline contact. A rejection fires on the first bar of a run where **all** of the following hold:
 
 1. Price touches the baseline this bar: `low <= tL and close > tL` for bull (or `high >= tL and close < tL` for bear)
 2. Trend matches the signal direction (`trend == 1` for bull)

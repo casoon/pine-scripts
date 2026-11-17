@@ -639,10 +639,10 @@ Multi-layer composite score detecting high-probability reversal signals. Filters
 
 | Timeframe | Threshold | Cooldown | Structure Gate | Delta |
 |-----------|-----------|----------|----------------|-------|
-| Daily | 5.5 | 7 bars | 2.0 (conf required) | 1.5 |
-| 4H | 5.0 | 5 bars | off | 1.5 |
-| 1H | 6.0 | 8 bars | off | 1.5 |
-| <1H | 7.5 | 25 bars | off | 2.0 |
+| Daily | 5.5 | 7 bars | event + confirm ≥ 2.0 | 1.5 |
+| 4H | 5.0 | 5 bars | event | 1.5 |
+| 1H | 6.0 | 8 bars | event | 1.5 |
+| <1H | 7.5 | 25 bars | event | 2.0 |
 
 ### Three Score Layers
 
@@ -663,7 +663,7 @@ A signal fires when the weighted confluence score reaches **Min Confluence Gate 
 | Role | Guard | Weight | Condition |
 |------|-------|--------|-----------|
 | Evidence | **Threshold** | 2.0 | Composite ≥ effThresh |
-| Trigger | **Structure Gate** | 1.5 | Confirm score ≥ structure gate (AutoTF: Daily 2.0, other TFs 0; manual: 1.0) |
+| Trigger | **Structure Gate** | 1.5 | Structure event (Spring/UT, BOS/CHoCH, confirmed climax) within the last 4 bars and confirm score ≥ structure gate (AutoTF: Daily 2.0, other TFs 0; manual: 1.0) |
 | Trigger | **Follow-Through** | 0.5 | Follow-through after the last structure event (always granted when Require Follow-Through is off) |
 | Trigger | **Confirmation Bars** | 0.5 | Composite held above threshold for N bars |
 | Trend | **Trend Filter** | 1.0 | Not signalling with a confirmed EMA trend (reversal context) |
@@ -709,9 +709,9 @@ Answers: "Is this counter-trend move a pullback (continue trend) or a reversal (
 |-------|-----|-----------------|
 | **Trend Quality** | 2 | EMA alignment + Efficiency Ratio — weak trend = weak pullback context |
 | **Pullback Active** | 2 | Bars elapsed since pullback start — reward pullbacks with some duration |
-| **Move Weakness** | 3 | RSI stays in safe zone + volume stays low + small candles |
+| **Move Weakness** | 3 | RSI stays in safe zone + volume stays low + small candles (max 2 without real volume) |
 | **Structure Intact** | 2 | No break of frozen swing low/high reference |
-| **Fib Depth** | 1 | Retracement in 25–68% range (both references frozen at PB start) |
+| **Fib Depth** | 1 | Retracement in 25–68% range (both references frozen at PB start; the origin is the higher of the last swing high and the recent unconfirmed high — mirrored for bear) |
 
 ### State Machine
 
@@ -731,6 +731,8 @@ Fires when score ≥ threshold AND (rejection candle OR micro BOS from pullback 
 | `▲ 7.2` | Label below bar | Bull pullback ending — entry in trend direction |
 | `▼ 6.8` | Label above bar | Bear pullback ending — entry in trend direction |
 | ◆ | Diamond | Structure broken — pullback became reversal |
+| Stop line | Line | Pullback extreme frozen when the end signal fires |
+| ✕ | Cross | Close beyond that stop — end signal invalidated |
 
 ### Table (configurable position)
 

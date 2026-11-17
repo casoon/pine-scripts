@@ -40,7 +40,7 @@ The matrix table displays these per-category scores across timeframes, along wit
 The Flow category (MFI, OBV, VFI), the VWAP component of the Trend category, the
 HTF Midline VWAP mode (v3), and MV Confluence all need real trade volume
 (the feed delivers volume and `syminfo.volumetype` is not `tick`). On instruments that only provide tick
-volume or none at all these components degrade to neutral automatically — the Flow category weight is excluded and the other
-categories are renormalized instead of a false score dragging the total down.
+volume or none at all these components degrade to neutral automatically — the Flow category keeps its weight with a
+neutral score, so missing evidence counts as absent instead of being stretched over the other categories.
 The dashboard's "Volume" row shows whether the module is running on real
 volume or is currently degraded. See `DATA_VALIDITY.md` in the repo root.

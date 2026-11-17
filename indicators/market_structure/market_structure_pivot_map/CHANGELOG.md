@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.4 — 2026-11-17
+- Fix: ADR and daily ATR projections used the still-forming daily bar (lookahead), so historical bars saw the full day's range. They now use the last completed day
+- CPR-cross alert messages no longer say LONG/SHORT — the tool reports location, not trade direction
+
 ## v1.0.3 — 2026-10-02
 - Fixed: confluence zones counted the P, TC and BC of one timeframe as three independent levels, so a narrow CPR alone was drawn as a "confluence zone". CPR members of the same timeframe now count as one level
 

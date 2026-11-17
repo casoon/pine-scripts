@@ -5,6 +5,11 @@
 ### Changed
 - **Naming:** "Probability" outputs are now called "Evidence Score" (data window, dashboard, README, TradingView description). The numbers are unchanged; they come from hand-weighted evidence and were never calibrated against outcomes
 
+### Fixed
+- **Pullback (v1.8.1):** a pullback only arms when its depth, measured from the impulse high/low, is within Max Pullback Depth (ATR). Before, a touch already deeper than the maximum armed and was invalidated on the same bar
+- **Pullback (v1.8.1):** no `PB` label and no Pullback Setup alert when the pullback is invalidated on its start bar
+- **Dashboard (v1.8.1):** the rows "Bull Prob" / "Raw Bull Prob" now read "Bull Evidence" / "Raw Bull Evidence", matching the rename; the TradingView description was corrected the same way
+
 ## v1.8 — 2026-10-02
 - Max Pullback Depth (ATR) is now a hard gate instead of a score point: a pullback is Mature only while its depth stays inside the Min..Max band, and a pullback that runs deeper than the maximum moves to Invalidated (as the README state machine describes). Deep pullbacks can no longer produce a CONT signal through the remaining score points; RSI and volatility stay score points
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.7.5 — 2026-11-17
+- Fix: Tide and Wave read the last closed higher-timeframe bar, so their phase, grade points and the signals built on them no longer change while the higher-timeframe bar is still forming. When a horizon equals the chart timeframe it now lags by one bar
+- Header and Min Grade tooltip corrected to match the code: the grade runs 0–6 (the divergence point included), and crosses below Min Grade are not shown
+
 ## v0.7.4 — 2026-10-02
 - Oscillator scale no longer inherits the chart symbol's price precision (values like 80,0000 on 4-decimal symbols such as NATGAS) — shows 2 decimals
 

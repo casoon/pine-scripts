@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.7 — 2026-11-17
+- Fix: Edge is now measured against the completion rate of same-direction cycles that reached the same progress bucket (without the age condition) instead of the plain direction base rate. Cycles that already made progress complete more often by selection alone; the old comparison counted that as Edge. Opportunity marker and live label both use the new base rate, so Opportunity markers and OPPORTUNITY / WATCH states can appear less often
+- Fix: the Opportunity marker respects "Process Confirmed Bars Only" like the cycle state machine, so it no longer fires on an unconfirmed realtime bar
+
 ## v1.5.6 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.1 — 2026-11-17
+- Fix (1-2-3): when a more extreme pivot replaces Point 3 and moves it beyond Point 1, the pending setup is dropped instead of staying armed
+- 1-2-3: new input "1-2-3 Max Wait for Break" (default 50 bars) — a setup that has not broken Point 2 within that window expires instead of firing a late trigger
+
 ## v1.2.0 — 2026-10-02
 - 1-2-3 Reversal: a setup is cancelled (not drawn, not armed) if price already closes beyond Point 2 on the bar Point 3 is confirmed — the break happened before the setup was known, so it no longer fires an immediate 1-2-3 Long/Short trigger from that earlier movement
 

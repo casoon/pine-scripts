@@ -1,5 +1,11 @@
 # Changelog
 
+## Bug fixes — 2026-11-17
+- `market_tradability_engine` v1.3.5→1.3.6: all alert conditions fire only on bar close
+- `market_tradability_engine` v1.3.5→1.3.6: without real volume, participation now counts as neutral (50) in the Tradability score instead of scaling the other components up to fill its share
+- `market_tradability_engine` v1.3.5→1.3.6: breakout alert text now says what the code checks — a break above the rolling range high / below the rolling range low, not "from the balance"
+- `market_tradability_engine_v2` v2.5.4→2.5.5: all alert conditions fire only on bar close
+
 ## Volume check — 2026-10-12
 - `market_tradability_engine` v1.3.4→1.3.5: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - `market_tradability_engine_v2` v2.5.3→2.5.4: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets

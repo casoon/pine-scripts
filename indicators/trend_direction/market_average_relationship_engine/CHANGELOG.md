@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.3 — 2026-11-17
+- Fix: the respect gate (Pullback events and the Healthy Trend state) now needs a minimum number of evaluated MA touches — new input `Minimum respect samples` (default 3). Without samples the neutral respect score plus the stability component could pass `Minimum respect` on its own
+- The standalone strategy clone received the same fix
+
 ## v1.3.2 — 2026-10-12
 - The "backtest invalid" notice on non-standard chart types (Heikin Ashi, Renko …) now sits in the bottom-right corner as a short note instead of a label on the last candle
 - Fix: compile error CE10072 — `precision` was passed twice since the 2026-10-02 scale change; the duplicate is removed and the script's own precision (1 decimals) stays

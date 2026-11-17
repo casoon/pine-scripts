@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.2 — 2026-11-17
+- Fix: the Alert Long/Short (early warning) fires only on the bar its condition starts; a condition that persists no longer re-fires every 10 bars and moves the entry window start
+- Removed the unused reversion inputs "Extreme score for Reversion", "Return trigger" and "Deviation mult" — they had no effect
+
 ## v2.5.1 — 2026-10-12
 - Bars per day and trading days per week are now measured on the chart (maximum over the last 5 sessions / 4 weeks) instead of assuming a 24h, 7-day calendar with a fixed table per timeframe. The "1/3/7-day" pre-pivot windows are now trading days, and the Wyckoff volume length, cooldown and bias expiry no longer come out several times too long on exchange-session feeds (stocks, futures sessions) or on timeframes missing from the old table (default was 96 bars/day)
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets

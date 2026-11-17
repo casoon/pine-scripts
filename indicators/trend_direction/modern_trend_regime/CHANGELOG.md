@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.8.1 — 2026-11-17
+- Fix: the end of a confirmed trend (drop to Transition, Range or the opposite trend) now has its own marker (×) and alerts "Aufwärtstrend beendet" / "Abwärtstrend beendet"
+- Fix: when the same trend returns after a short Transition, it is no longer reported as a new trend — the triangle is drawn faded with the tooltip "fortgesetzt" and the "Trend bestätigt" alert does not fire
+
 ## v1.8.0 — 2026-10-02
 - Fix: a range breakout (`BREAK`) now needs a fresh cross on the signal bar — the previous close must still be inside the frozen boundary plus buffer. Previously price that had already drifted beyond the boundary while still in Range fired a late `BREAK` on the first bar after the Range ended; such a drift now gives no breakout
 

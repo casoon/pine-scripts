@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.1 — 2026-11-17
+- Script header corrected: the smoothing choice is EMA or T3 (it still listed the removed SMA / RMA / WMA)
+
 ## v1.1.0 — 2026-11-17
 - **Breaking:** "Smoothing Type" now offers `EMA` (default, the original core) and `T3` (slower, fewer crosses, misses more turns). SMA/EMA/RMA/WMA are practically the same line, and the ranking of the other cores did not hold between periods — the choice only changed signal density, not quality. Removed: SuperSmoother, KAMA, JMA Approx and the JMA Phase / Power inputs. Saved chart settings that used a removed type must be re-selected
 

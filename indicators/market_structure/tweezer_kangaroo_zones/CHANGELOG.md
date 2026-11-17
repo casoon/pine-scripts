@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.2.2 — 2026-11-17
+- Fix: all higher-timeframe values (regime gate, HTF stack, Supertrend/MOST HTF) now use the last closed HTF bar, so they no longer repaint intrabar
+- Fix: HTF stack and regime points count per side — a SELL retest scores bearish timeframes and a down-regime, a BUY retest bullish timeframes and an up-regime (before, both sides scored the bullish stack and any regime)
+- Min Score BUY and Min Score SELL now share the same default (5.0)
+- Dashboard "Raw" shows the BUY and SELL base score separately; the hidden `confluenceScoreRaw` export is the higher of the two
+
 ## v3.2.1 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 

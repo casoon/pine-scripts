@@ -6,6 +6,16 @@
 - `vein_reversal_score` v0.2.4→0.3.0 — **role: context display.** REVIEW and ACTION alerts, the hand-weighted "Quality" grade (table row, data window, "High Quality" diamonds) and the "Min Quality for ACTION Alert" input are removed. "Candidate" alerts are renamed "Setup + Structure Event". Setup, confirmation and status are calculated as before. Saved REVIEW/ACTION alerts no longer exist
 - `vein_reversal_score`, `vein_exhaustion`: without real volume the MFI points are no longer moved to RSI (RSI was counted twice). The setup/exhaustion maximum is lower on such symbols; thresholds are unchanged, so fewer setups reach them there. Instruments with real volume are unaffected. `vein_reversal_score`: comment on the confirmation maximum corrected
 
+### Fixed
+- `vein_trend` v0.2.3→0.2.4 — without real volume the MFI points are no longer moved to RSI (RSI was counted twice); the setup maximum is lower on such symbols, thresholds are unchanged
+- `vein_trend` v0.2.3→0.2.4 — the structure gate (1.5 of the confluence score) now needs a real structure event (Spring/Upthrust, BOS/CHoCH, confirmed climax) within the last 4 bars. Below Daily it was granted on every bar, so signals could pass the gate without any structure
+- `vein_trend` v0.2.3→0.2.4 — the unused "Strong Dominance Delta" input is removed (its tooltip named a candle state that does not exist)
+- `vein_pullback` v0.3.2→0.3.3 — without real volume the Move Weakness layer is no longer scaled up from 2 to 3 points; the missing volume point counts as 0
+- `vein_pullback` v0.3.2→0.3.3 — the Fib-depth origin at pullback start now includes the recent high/low that is not yet a confirmed pivot, so the depth is measured from the actual impulse extreme instead of an older swing
+- `vein_pullback` v0.3.2→0.3.3 — the pullback extreme is frozen as a stop line when an end signal fires; a later close beyond it marks the signal invalidated (✕) with new "Signal Invalidated" alerts
+- `vein_execution` v0.1.8→0.1.9 — the entry stop uses the sweep level only when the sweep is fresh (within "Sweep: Max Bars to Reclaim"); otherwise the last micro swing low/high. Before, a sweep from long ago could set the stop
+- `vein_execution` v0.1.8→0.1.9 — Bull/Bear Trigger alerts fire once when the TRIGGER state starts instead of on every bar it lasts
+
 ## Volume check — 2026-10-12
 - `vein_spread_context` v0.1.3→0.1.4: the futures root is now matched exactly instead of as a substring — two-letter roots such as "PL" or "HO" no longer map unrelated symbols (e.g. a "PLTR" root to Platinum, "HOOD" to Heating Oil)
 - `vein_execution` v0.1.7→0.1.8: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets

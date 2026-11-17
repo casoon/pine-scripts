@@ -11,7 +11,7 @@ Renders an adaptive, efficiency-smoothed candle overlay in place of raw price ac
 - Strong/weak bull/bear candle coloring — "strong" requires quality ≥ `Minimum Signal Quality` input and regression slope agreement
 - Optional quality score line and high-quality dot markers (quality ≥ 70) plotted below bars
 - Bullish/Bearish flip signals when direction changes with quality ≥ 55 and regression-slope confirmation (early warning, not a trade signal on its own)
-- Long/Short breakout signals — the actual entry trigger: a strong bull/bear state confirmed by a close breaking the prior `Signal Breakout Length` bars' high/low
+- Long/Short breakout signals — the actual entry trigger: a strong bull/bear state confirmed by a close breaking the prior `Signal Breakout Length` bars' high/low; fires once per strong bull/bear run (first break only)
 
 ## Scoring
 

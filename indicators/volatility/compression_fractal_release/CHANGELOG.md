@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.5 — 2026-11-17
+- Fix: the HTF trend direction reads the last closed higher-timeframe bar, so Release / Base Break classification and the HTF trend in the dashboard no longer change while the higher-timeframe bar is still forming
+
 ## v1.1.4 — 2026-06-30
 > Consolidated entry, reconstructed from the diff — v1.1.0–v1.1.3 were shipped without
 > individual changelog entries.

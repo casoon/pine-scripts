@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Reversal Engine Score v1 [WavesUnchained]
-// Version: 1.7.3
+// Version: 1.7.4
 // Author: WavesUnchained
-// Build: 2026-10-12 00:00:00
+// Build: 2026-11-17
 // ============================================================================
 // Score-based liquidity sweep reversal detector with HTF trend confluence.
 //
@@ -11,17 +11,17 @@
 //   ✓ Sweep trigger with graded quality instead of hard filter chain
 //   ✓ Quality score (0–1) replaces additive sum
 //   ✓ Per-direction quality thresholds (Long/Short configurable separately)
-//   ✓ Short optionals: RSI > 50 (elevated), no HH
+//   ✓ Optional quality: RSI > 50 for longs, RSI < 50 for shorts (mirrored)
 //   ✓ Structural SL — sweep low/high as base + configurable ATR noise buffer
 //   ✓ R-multiple TP — adapts to actual risk distance (TP = entry ± risk × factor)
 //   ✓ ATR corridor filter — rejects both low-volatility noise and spike regimes
 //   ✓ Spike filter — blocks sweeps deeper than N×ATR (real breakdowns, not reversals)
 //   ✓ Session filter — optionally restricts signals to a configurable intraday window
 //   ✓ Liquidity sweep detection (swing violation + recovery close)
-//   ✓ HTF trend filter via dual EMA on configurable timeframe
+//   ✓ HTF trend filter via dual EMA on configurable timeframe (last closed HTF bar)
 //   ✓ Price structure labels (HH / HL / LH / LL) at confirmed pivots
 //   ✓ Outcome-based label coloring (blue = no follow-through within N bars)
-//   ✓ Cooldown gate to suppress chasing
+//   ✓ Cooldown gate per direction to suppress chasing
 //   ✓ Alert conditions for BUY / SELL / either
 //
 // ============================================================================
@@ -51,10 +51,10 @@ tradeDir            = input.string("Both", "Handelsrichtung",       group = g_di
 
 // — Signal-Qualität —
 g_quality = "Signal-Qualität"
-minQualityLong  = input.int(1, "Min. Qualität Long (0–1)",  minval = 0, maxval = 1, group = g_quality,
-     tooltip = "Mindestanzahl optionaler Bedingungen für Longs (RSI über 50). Die frühere Pivot-Bedingung (kein LL) zählt nicht mehr zur Qualität; Pivots bleiben Anzeige.")
+minQualityLong  = input.int(0, "Min. Qualität Long (0–1)",  minval = 0, maxval = 1, group = g_quality,
+     tooltip = "Mindestanzahl optionaler Bedingungen für Longs (RSI über 50). 0 = Qualität optional. Die frühere Pivot-Bedingung (kein LL) zählt nicht mehr zur Qualität; Pivots bleiben Anzeige.")
 minQualityShort = input.int(0, "Min. Qualität Short (0–1)", minval = 0, maxval = 1, group = g_quality,
-     tooltip = "Mindestanzahl optionaler Bedingungen für Shorts.")
+     tooltip = "Mindestanzahl optionaler Bedingungen für Shorts (RSI unter 50). 0 = Qualität optional.")
 rsiLen = input.int(14, "RSI Länge", minval = 1, group = g_quality)
 
 // — Pflicht-Gates —
@@ -152,8 +152,8 @@ emaReclaim = f_smooth(close, emaLen, smoothType)
 rsiValue   = ta.rsi(close, rsiLen)
 atrValue   = ta.atr(atrLen)
 atrBase    = ta.sma(atrValue, atrBaseLen)
-htfEmaFast = request.security(syminfo.tickerid, htf, ta.ema(close, htfFastLen), barmerge.gaps_off, barmerge.lookahead_off)
-htfEmaSlow = request.security(syminfo.tickerid, htf, ta.ema(close, htfSlowLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfEmaFast = request.security(syminfo.tickerid, htf, ta.ema(close, htfFastLen)[1], barmerge.gaps_off, barmerge.lookahead_on)
+htfEmaSlow = request.security(syminfo.tickerid, htf, ta.ema(close, htfSlowLen)[1], barmerge.gaps_off, barmerge.lookahead_on)
 bullTrend  = htfEmaFast > htfEmaSlow
 bearTrend  = htfEmaFast < htfEmaSlow
 htfReady   = not na(htfEmaFast) and not na(htfEmaSlow)   // gate F fails closed while the HTF EMAs are not yet available
@@ -164,8 +164,8 @@ f_wt1(src, chLen, avgLen) =>
     _ci  = (src - _esa) / (0.015 * _d)
     ta.ema(_ci, avgLen)
 
-wt1_1H = request.security(syminfo.tickerid, "60",  f_wt1(hlc3, wtChLen, wtAvgLen), barmerge.gaps_off, barmerge.lookahead_off)
-wt1_4H = request.security(syminfo.tickerid, "240", f_wt1(hlc3, wtChLen, wtAvgLen), barmerge.gaps_off, barmerge.lookahead_off)
+wt1_1H = request.security(syminfo.tickerid, "60",  f_wt1(hlc3, wtChLen, wtAvgLen)[1], barmerge.gaps_off, barmerge.lookahead_on)
+wt1_4H = request.security(syminfo.tickerid, "240", f_wt1(hlc3, wtChLen, wtAvgLen)[1], barmerge.gaps_off, barmerge.lookahead_on)
 
 prevSwingLow  = ta.lowest(low[1],  swingLen)
 prevSwingHigh = ta.highest(high[1], swingLen)
@@ -245,7 +245,7 @@ longQuality  = 0
 longQuality  += rsiValue > 50  ? 1 : 0
 
 shortQuality  = 0
-shortQuality  += rsiValue > 50  ? 1 : 0
+shortQuality  += rsiValue < 50  ? 1 : 0
 
 // Quality tier label (max points = 1)
 f_tier(q) =>
@@ -254,16 +254,20 @@ f_tier(q) =>
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Cooldown + final signals
 //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-var int lastSignalBar = na
-cooldownOk = na(lastSignalBar) or bar_index - lastSignalBar > sigCooldown
+var int lastLongBar  = na
+var int lastShortBar = na
+cooldownLongOk  = na(lastLongBar)  or bar_index - lastLongBar  > sigCooldown
+cooldownShortOk = na(lastShortBar) or bar_index - lastShortBar > sigCooldown
 
 rawLongSignal  = isActive and longGateOk  and longQuality  >= minQualityLong  and tradeDir != "Short Only"
 rawShortSignal = isActive and shortGateOk and shortQuality >= minQualityShort and tradeDir != "Long Only"
-longSignal  = rawLongSignal  and cooldownOk and barstate.isconfirmed
-shortSignal = rawShortSignal and cooldownOk and barstate.isconfirmed
+longSignal  = rawLongSignal  and cooldownLongOk  and barstate.isconfirmed
+shortSignal = rawShortSignal and cooldownShortOk and barstate.isconfirmed
 
-if longSignal or shortSignal
-    lastSignalBar := bar_index
+if longSignal
+    lastLongBar := bar_index
+if shortSignal
+    lastShortBar := bar_index
 
 // Keep longScore/shortScore as aliases for strategy log compatibility
 longScore  = longQuality
@@ -378,7 +382,7 @@ if showScoreLabel and shortSignal
     tip += (not useGateG or wt1_1H >= gateG_ob)  ? "✓ [G] 1H WT ok\n"          : "✗ [G] 1H WT ok\n"
     tip += (not useGateH or wt1_4H >= gateH_ob)  ? "✓ [H] 4H WT ok\n"          : "✗ [H] 4H WT ok\n"
     tip += "── Optional ──\n"
-    tip += rsiValue > 50       ? "✓ RSI > 50 (+1)\n"        : "✗ RSI > 50\n"
+    tip += rsiValue < 50       ? "✓ RSI < 50 (+1)\n"        : "✗ RSI < 50\n"
     tip += not hhDetected      ? "✓ Kein HH (nur Anzeige)\n"         : "✗ Kein HH\n"
     tip += structCtx
     lbl = label.new(bar_index, high,

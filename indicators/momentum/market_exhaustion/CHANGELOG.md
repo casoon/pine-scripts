@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.3 — 2026-11-17
+- Fix: the HTF MFI line, bias label and HTF filter read the last closed higher-timeframe bar, so they no longer change while the higher-timeframe bar is still forming
+- Header text corrected: without real volume the long/short signals stay empty in every oscillator mode (they are built on MFI); only the CCI-mode divergences keep working
+
 ## v1.2.2 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - Fix: compile error CE10072 — `precision` was passed twice since the 2026-10-02 scale change; the duplicate is removed and the script's own precision (0 decimals) stays

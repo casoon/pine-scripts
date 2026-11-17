@@ -67,4 +67,4 @@ When enabled, a higher-timeframe Chandelier stop runs on `Higher Timeframe` (def
 - **Pullback zone** — when the chart trend opposes the HTF trend, the background takes a subtle tint in the HTF direction (the "pullback against the higher trend" state).
 - **Confluence flips** — when a flip aligns with the HTF trend, a **diamond** marker replaces the plain dot. Non-aligned flips keep the normal dot/label.
 
-The HTF reference uses `lookahead=off` — values update only on confirmed HTF bar closes, no lookahead bias. With MTF off, the chart, markers and alerts are identical to the base behavior, so the validated strategy path is unchanged.
+The HTF reference reads the last closed HTF bar (`[1]` with `lookahead=on`) — values update only on confirmed HTF bar closes, no repainting and no lookahead bias. With MTF off, the chart, markers and alerts are identical to the base behavior, so the validated strategy path is unchanged.

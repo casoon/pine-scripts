@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.0.3 — 2026-11-17
+- Script header now carries the Data Contract block: the benchmark symbol is a required reference
+
 ## v2.0.2 — 2026-06-30
 - Alerts: added a "Alerts only on bar close (confirmed)" toggle (default on); all alert conditions now respect it, preventing intrabar repaint of the named alerts
 

@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Vein Pullback [WavesUnchained]
-// Version: 0.3.2
+// Version: 0.3.3
 // Author: WavesUnchained
-// Build: 2026-10-12
+// Build: 2026-11-17
 // ============================================================================
 // Detects pullbacks (temporary counter-trend moves) and signals when they end.
 // Distinguishes pullbacks from reversals via weakness checks and structure gates.
@@ -12,13 +12,14 @@
 // Score layers (0–10):
 //   A  Trend quality    (0–2) — EMA alignment + directional efficiency
 //   B  Pullback active  (0–2) — price crossed EMA fast, bars elapsed
-//   C  Move weakness    (0–3) — RSI not extreme, low volume, small candles
+//   C  Move weakness    (0–3) — RSI not extreme, low volume, small candles (0–2 without real volume)
 //   D  Structure intact (0–2) — no break of last confirmed swing low/high
 //   E  Optimal depth    (0–1) — 25–68% Fibonacci retracement (frozen references)
 //
 // Signals:
 //   ▲ score  Pullback End     — entry in trend direction (rejection or micro BOS)
 //   ◆        Structure Break  — pullback evolved into reversal
+//   ✕        Invalidated      — close beyond the stop frozen at the end signal (pullback extreme)
 //
 // Data Contract:
 //   Price:     REQUIRED   chart symbol
@@ -122,6 +123,11 @@ float pivLow  = ta.pivotlow(low,  swingLeft, swingRight)
 var float lastPivHigh = na
 var float lastPivLow  = na
 
+// Unconfirmed recent extremes — a pivot needs swingRight bars to confirm, so the
+// impulse extreme right before a pullback is usually not yet in lastPivHigh/Low.
+float recentHigh = ta.highest(high, swingRight + 1)
+float recentLow  = ta.lowest(low,  swingRight + 1)
+
 if not na(pivHigh)
     lastPivHigh := pivHigh
 if not na(pivLow)
@@ -149,7 +155,7 @@ if bullPBStart
     inBearPB     := false
     pbStartBar   := bar_index
     pbExtreme    := low
-    pbOriginHigh := na(lastPivHigh) ? high[1] : lastPivHigh
+    pbOriginHigh := na(lastPivHigh) ? recentHigh : math.max(lastPivHigh, recentHigh)
     pbRefLow     := na(lastPivLow)  ? low[1]  : lastPivLow   // freeze — do not update during PB
 
 if bearPBStart
@@ -157,7 +163,7 @@ if bearPBStart
     inBullPB     := false
     pbStartBar   := bar_index
     pbExtreme    := high
-    pbOriginLow  := na(lastPivLow)  ? low[1]  : lastPivLow
+    pbOriginLow  := na(lastPivLow)  ? recentLow  : math.min(lastPivLow, recentLow)
     pbRefHigh    := na(lastPivHigh) ? high[1] : lastPivHigh   // freeze — do not update during PB
 
 // Structure break: close beyond the swing reference frozen at PB start. Not tied to the
@@ -198,9 +204,7 @@ if inBullPB or inBearPB
 
 // C. Move weakness (0–3): RSI not extreme + no volume spike + small candles
 // The volume sub-condition drops out (no price-only equivalent) when volume
-// is not real — rescaled onto the reduced max so 0–3 stays the practical
-// range instead of the score silently sinking on tick-volume symbols.
-float scoreCMax = volumeIsReal ? 3.0 : 2.0
+// is not real — it then contributes nothing and the layer maxes out at 2.
 float scoreCRaw = 0.0
 if inBullPB
     if rsi14 >= rsiBullMin
@@ -216,7 +220,7 @@ if inBearPB
         scoreCRaw += 1.0
     if range_ <= atr14
         scoreCRaw += 1.0
-float scoreC = scoreCMax > 0 ? scoreCRaw / scoreCMax * 3.0 : 0.0
+float scoreC = scoreCRaw
 
 // D. Structure intact (0–2)
 float scoreD = 0.0
@@ -273,6 +277,24 @@ if bullEnd
 if bearEnd
     lastBearEndBar := bar_index
 
+// Stop frozen at the pullback extreme when the end signal fires; a later close
+// beyond it invalidates the signal. An opposite end signal or a new pullback
+// in the same direction retires the old stop.
+var float bullStop = na
+var float bearStop = na
+bool bullStopHit = not na(bullStop) and not bullEnd and close < bullStop
+bool bearStopHit = not na(bearStop) and not bearEnd and close > bearStop
+if bullStopHit or bullPBStart
+    bullStop := na
+if bearStopHit or bearPBStart
+    bearStop := na
+if bullEnd
+    bullStop := pbExtreme
+    bearStop := na
+if bearEnd
+    bearStop := pbExtreme
+    bullStop := na
+
 // ============================================================================
 // STATE RESET (after signal computation)
 // ============================================================================
@@ -308,6 +330,12 @@ if showEndSig and bearEnd
 // Structure break — pullback became reversal
 plotshape(showBreak and bullPBBreak, "Bull Structure Break ◆", shape.diamond, location.belowbar, color.new(#ff6f00, 0), size=size.tiny)
 plotshape(showBreak and bearPBBreak, "Bear Structure Break ◆", shape.diamond, location.abovebar, color.new(#ff6f00, 0), size=size.tiny)
+
+// Signal stop (pullback extreme frozen at the end signal) and its invalidation
+plot(showEndSig ? bullStop : na, "Bull Signal Stop", color.new(#00c853, 30), linewidth=1, style=plot.style_linebr)
+plot(showEndSig ? bearStop : na, "Bear Signal Stop", color.new(#d50000, 30), linewidth=1, style=plot.style_linebr)
+plotshape(showEndSig and bullStopHit, "Bull Signal Invalidated ✕", shape.xcross, location.belowbar, color.new(#00c853, 0), size=size.tiny)
+plotshape(showEndSig and bearStopHit, "Bear Signal Invalidated ✕", shape.xcross, location.abovebar, color.new(#d50000, 0), size=size.tiny)
 
 // ============================================================================
 // TABLE
@@ -379,3 +407,5 @@ alertcondition(alertOk and (bullEnd),      "Vein Pullback: Bull Entry ▲",     
 alertcondition(alertOk and (bearEnd),      "Vein Pullback: Bear Entry ▼",            "VEIN-PB · PULLBACK SHORT · {{ticker}} {{interval}}")
 alertcondition(alertOk and (bullPBBreak),  "Vein Pullback: Bull Structure Break ◆",  "VEIN-PB · BULL STRUCTURE BREAK · {{ticker}} {{interval}}")
 alertcondition(alertOk and (bearPBBreak),  "Vein Pullback: Bear Structure Break ◆",  "VEIN-PB · BEAR STRUCTURE BREAK · {{ticker}} {{interval}}")
+alertcondition(alertOk and (bullStopHit),  "Vein Pullback: Bull Signal Invalidated ✕", "VEIN-PB · BULL INVALIDATED · {{ticker}} {{interval}}")
+alertcondition(alertOk and (bearStopHit),  "Vein Pullback: Bear Signal Invalidated ✕", "VEIN-PB · BEAR INVALIDATED · {{ticker}} {{interval}}")

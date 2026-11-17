@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.7.4 — 2026-11-17
+- Reclaim markers/alerts no longer fire on an anchor bar, where the curve jumps to the new anchor and a "cross" compared against the old episode; a stretch on an anchor bar no longer counts as the prior stretch
+
 ## v2.7.3 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - Without real volume a short "… not available" notice sits in the bottom-right corner instead of a label on the last candle

@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.4 — 2026-11-17
+- Fix: a confirmed flip against the current direction is no longer swallowed when the opposite trigger is crossed on the same bar (strong trends could block the short/long flip entirely) — also in the HTF reference stop
+- Fix: the HTF reference stop and direction now use the last closed higher-timeframe bar, so they no longer repaint during an open HTF bar
+
 ## v1.6.3 — 2026-10-12
 - The "backtest invalid" notice on non-standard chart types (Heikin Ashi, Renko …) now sits in the bottom-right corner as a short note instead of a label on the last candle
 

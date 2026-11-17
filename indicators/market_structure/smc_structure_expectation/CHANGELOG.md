@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.7 — 2026-11-17
+- Fix: BOS+OB alerts only fire when the Order Block was created by the BOS on the same bar — before, any older OB still on the chart could attach to a new BOS
+
 ## v1.1.6 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - Without real volume a short "… not available" notice sits in the bottom-right corner instead of a label on the last candle

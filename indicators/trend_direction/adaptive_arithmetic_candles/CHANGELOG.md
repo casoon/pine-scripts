@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.1 — 2026-11-17
+- Fix: Long/Short breakout signals fire only on the first structure break of each strong bullish/bearish run, instead of on every new high/low while the strong state lasts
+
 ## v1.2 — 2026-07-05
 - Added Data Window debug plots (direction, quality, regression slope, efficiency ratio, strongBull/strongBear state, breakHigh/breakLow) to diagnose why a signal did or didn't fire at a given bar
 

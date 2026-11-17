@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.8 — 2026-11-17
+- HTF agreement now reads the last closed higher-timeframe bar (no repaint); the HTF gate, tiers, SSA and MA zones no longer change while the HTF bar is still forming
+- RDP entries: after a band exit, a new entry in the same direction needs a new regime start; the same ongoing regime no longer re-enters after the cooldown
+- SSA events fire on the rising edge of the gate condition only; the cooldown now filters events instead of creating a new one every time it expires
+- Info panel: Win Rate and Profit Factor rows removed
+
 ## v1.1.7 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 

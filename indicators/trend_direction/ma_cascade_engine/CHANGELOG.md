@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.1 — 2026-11-17
+- Fix: Exit Long / Exit Short now fire only after a Long / Short Reactivation and once per position, instead of on every bar the exit condition holds — markers and alerts alike
+- Fix: the Anchor Rejection marker is drawn on the confirmation bar, where its alert fires, instead of being back-dated to the touch bar
+
 ## v1.5.0 — 2026-10-02
 - Fix: Bull/Bear Regime Fading could never fire from an Expansion state — Expansion requires price above (bull) / below (bear) the Fast MA, Fading requires the close back through it. Fading is now gated on the long/short regime (Base vs. Anchor + Base slope) instead of the Expansion/Pullback state booleans
 - Fix: Base and Anchor Respect no longer count a breakout through the MA as a bounce — a bullish respect/rejection requires the bar before the touch episode to have closed above the MA, a bearish one below it

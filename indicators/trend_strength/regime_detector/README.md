@@ -26,10 +26,9 @@ MA-zone based trend regime overlay with an adaptive core engine, higher-timefram
 
 1. **Adaptive Engine** — adaptive line, ATR, efficiency ratio, normalized slope
 2. **Regime Detection** — regime state with hysteresis (separate enter/exit thresholds)
-3. **MTF Gate** — weighted HTF agreement via `request.security` (EMA-50 side per TF)
+3. **MTF Gate** — weighted HTF agreement via `request.security` (EMA-50 side per TF, last closed HTF bar — no repaint)
 4. **Filter System** — signal quality score 0..1 and market condition (Trending/Neutral/Choppy)
 5. **Signal Generation** — tiered entries, band/regime-based exits, cooldown
-6. **Performance Tracking** — win rate / profit factor of the internal position model (informational)
 
 ## Signals & visuals
 
@@ -56,5 +55,4 @@ For equities, enable **RS vs. Benchmark** (default SPY; use QQQ for tech/momentu
 ## Notes
 
 - Inputs marked **(WIP)** are exposed but not yet wired into the engine
-- The performance metrics are based on a simplified internal position model, not a backtest
 - The volatility rank and RS both need history (`Volatility Rank Lookback`, `RS MA Length`) before they read meaningfully; on fresh charts they start neutral

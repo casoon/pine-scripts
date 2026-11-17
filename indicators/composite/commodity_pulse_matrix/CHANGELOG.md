@@ -1,8 +1,20 @@
 # Changelog
 
-## [Unreleased]
+## v3.4.2 / v4.2.2 — 2026-11-17
+Bug fixes. Signal frequency and scores change - re-check on the chart and re-run the strategy backtest.
 
-### Changed
+- **Higher-timeframe scores repainted** (v3, v4, v4 strategy). The timeframe rows read the still-forming higher-timeframe bar, so scores and signals could change after the fact. They now use the last closed bar of each higher timeframe; the chart timeframe itself still uses the current bar
+- **Missing volume was stretched over other categories** (v3). Without real volume the Flow weight dropped out of the category aggregate and the chart part of the precision score was divided by the remaining weight. Flow now keeps its weight with a neutral score in both places, as in v4
+- **"Exhaustion Confirmed" alert repeated** (v3, v4). It fired on every bar while the confirmed state lasted; it now fires once when the state is reached. Display and scoring are unchanged
+- **A blocked entry suppressed later entries** (v4, v4 strategy). The quality veto, trend filter and evidence gate ran after the entry de-duplication, so a long the gates blocked still used up the de-duplication slot and the next valid long could be dropped. The gates now run first
+- **Mean-reversion exits without an entry** (v3). A mean-reversion signal opened the position state even while the trend model was active and no MR label was shown, which led to EXIT labels and alerts without a matching entry. The state now opens only on signals of the active model
+- **Weakness alerts and EXIT labels could fire in the wrong direction** (v3). A confirmed bear warning also released a pending bull weakness (and vice versa); each direction now uses its own confirmation
+- **Entry V2 alerts ignored the signal mode** (v3). They now follow the same Trend / ADX Auto gate as the chart labels
+- **A-Setup repeated** (v3). It fired on every bar the entry condition held; it now requires the de-duplicated entry event, as the entry labels do
+- **Daily+ recovery removed** (v3). On Daily and higher, moderate signals the confidence gate removed were re-added after the quality gate, bypassing it. The confidence and quality gates now apply on Daily and higher as well
+- Tooltips: "Allow Counter-Trend Entries" states the actual threshold factor (1.15) (v3, v4); "Signal Density" describes the thresholds instead of a quality claim (v4)
+- v3: removed an unused internal type
+
 - `commodity_pulse_matrix_v4` and its strategy: the Divergence category no longer enters the 6-category aggregate (weight 0; it was the largest single weight). It stays as a context row in the matrix. Heat score and A-setup read the remaining five categories, so signal density changes
 - `commodity_pulse_matrix_v4` and its strategy: without real volume the Flow weight no longer drops out of the 6-category aggregate (which stretched the other categories, Divergence to 28 %); the missing evidence counts as absent. Affects only symbols without real volume; the heat score there is lower than before
 - `commodity_pulse_matrix_v3`, `_v4` and the v4 strategy: code comments no longer claim JMA gives "less lag / better responsiveness"; comments only, no calculation change

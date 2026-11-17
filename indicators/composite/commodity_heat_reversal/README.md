@@ -33,7 +33,7 @@ Reversal signals require the exhaustion gate (RSI extreme or BB breach) and the 
 
 ## Quality Gate
 
-Counter-trend reversal signals use `Balanced` confirmation by default:
+A reversal is counter-trend when a long fires below a flat-or-falling MA50 or a short above a flat-or-rising MA50. Counter-trend reversal signals use `Balanced` confirmation by default:
 
 - **Early** — original confirmation: close beyond prior bar or MA9
 - **Balanced** — close beyond MA9 plus prior-bar break or wick pressure
@@ -45,7 +45,7 @@ Weak countertrend reversals can be displayed in three modes:
 
 - **Show** — plot them as normal reversal triangles
 - **Mark** — plot them as small x markers instead of normal signals
-- **Hide** — suppress them unless the heat score is extreme. This is the default.
+- **Hide** — suppress them unless reversal heat reaches the Extreme Heat Threshold, so a counter-trend reversal effectively needs the extreme threshold instead of the normal one. This is the default.
 
 ## Pullback Continuation
 

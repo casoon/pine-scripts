@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Regime Detector (MA Zones Overlay) [WavesUnchained]
-// Version: 1.1.7
+// Version: 1.1.8
 // Author: WavesUnchained
-// Build: 2026-10-12
+// Build: 2026-11-17
 // ============================================================================
 // MA-zone based trend regime overlay with adaptive sensitivity and HTF gate.
 // v1.1 adds a second dimension (volatility), regime maturity / transition
@@ -215,6 +215,10 @@ newMultiTimeframeConfig() =>
 newMultiTimeframeState() =>
     MultiTimeframeState.new(false, 1.0, 0, 0.0, 0.6)
 
+// HTF trend direction vs. EMA50 — requested as [1] with lookahead_on (last closed HTF bar, no repaint)
+htfEmaDir() =>
+    close > ta.ema(close, 50) ? 1 : close < ta.ema(close, 50) ? -1 : 0
+
 processMultiTimeframeAnalysis(MultiTimeframeState state, MultiTimeframeConfig config, int baseRegime) =>
     state.enabled := config.enableHTFGate
     state.minAgreement := config.minAgreement
@@ -232,7 +236,7 @@ processMultiTimeframeAnalysis(MultiTimeframeState state, MultiTimeframeConfig co
         for i = 0 to array.size(config.timeframes) - 1
             tf = array.get(config.timeframes, i)
             w = map.contains(config.weights, tf) ? map.get(config.weights, tf) : 1.0
-            dir = request.security(syminfo.tickerid, tf, close > ta.ema(close, 50) ? 1 : close < ta.ema(close, 50) ? -1 : 0, barmerge.gaps_off, barmerge.lookahead_off)
+            dir = request.security(syminfo.tickerid, tf, htfEmaDir()[1], barmerge.gaps_off, barmerge.lookahead_on)
 
             totalW += w
             biasSum += dir * w
@@ -346,12 +350,14 @@ type SignalState
     bool lowQualityShort
     int position
     int lastSignalBar
+    bool longArmed
+    bool shortArmed
 
 newSignalConfig() =>
     SignalConfig.new(2, true, true, "Hybrid", true, 0.7, true, 3, 5, 1.2, 0.8, 0.65, 0.7, 0.7, 0.55, 0.6)
 
 newSignalState() =>
-    SignalState.new(false, false, false, false, false, false, 0, na)
+    SignalState.new(false, false, false, false, false, false, 0, na, true, true)
 
 processSignalGeneration(SignalState state, SignalConfig config, AdaptiveState adaptiveState, RegimeState regimeState, MultiTimeframeState mtfState, FilterState filterState) =>
     bull = regimeState.currentRegime == 1
@@ -368,8 +374,15 @@ processSignalGeneration(SignalState state, SignalConfig config, AdaptiveState ad
     qualB = not qualA and (regimeState.confidence >= config.tierBConf) and (htfAgree >= config.tierBAgree) and (filterState.signalQuality >= config.tierBQuality)
     allowEntry = qualA or qualB
 
-    longCandidate = canFire and filterOk and barsOkBull and state.position != 1
-    shortCandidate = canFire and filterOk and barsOkBear and state.position != -1
+    // One entry per regime: re-armed only once the regime has left that direction,
+    // so a band exit inside an ongoing regime does not re-enter without a new regime start.
+    if not bull
+        state.longArmed := true
+    if not bear
+        state.shortArmed := true
+
+    longCandidate = canFire and filterOk and barsOkBull and state.position != 1 and state.longArmed
+    shortCandidate = canFire and filterOk and barsOkBear and state.position != -1 and state.shortArmed
 
     longEntry = longCandidate and allowEntry
     shortEntry = shortCandidate and allowEntry
@@ -392,9 +405,11 @@ processSignalGeneration(SignalState state, SignalConfig config, AdaptiveState ad
     if longEntry
         state.position := 1
         state.lastSignalBar := bar_index
+        state.longArmed := false
     else if shortEntry
         state.position := -1
         state.lastSignalBar := bar_index
+        state.shortArmed := false
     else if exitLong or exitShort
         state.position := 0
 
@@ -549,7 +564,7 @@ confluenceThreshold = input.float(0.6, "Confluence Threshold", minval=0.0, maxva
 
 // === SIGNAL MANAGEMENT ===
 // Trade-engine isolation: default OFF keeps RDP a pure regime classifier/visual.
-showTradeEngine = input.bool(false, "Show Trade Engine (entries/exits/TP/SL + performance)", group=SIGNAL_GROUP, tooltip="Off (default): RDP is a pure regime classifier — only regime bands, heatmap, context labels and warnings render. On: enables RDP entry/exit markers, tier/quality labels, MA-zone entry/SL engine, trade alerts and the performance statistics rows.")
+showTradeEngine = input.bool(false, "Show Trade Engine (entries/exits/TP/SL)", group=SIGNAL_GROUP, tooltip="Off (default): RDP is a pure regime classifier — only regime bands, heatmap, context labels and warnings render. On: enables RDP entry/exit markers, tier/quality labels, MA-zone entry/SL engine, and trade alerts.")
 // Whipsaw Protection
 confirmBars = input.int(2, "Signal Confirmation Bars", minval=1, maxval=10, group=SIGNAL_GROUP, tooltip="Bars required for signal confirmation")
 enableSmartConfirm = input.bool(true, "Smart Confirmation (WIP)", group=WIP_GROUP, tooltip="WIP: not yet used in engine")
@@ -1499,7 +1514,6 @@ if showInfoPanel and barstate.islast
     panelPos = infoPanelPosition == "Top Left" ? position.top_left : infoPanelPosition == "Bottom Right" ? position.bottom_right : infoPanelPosition == "Bottom Left" ? position.bottom_left : position.top_right
 
     // Performance statistics + auto-tune rows belong to the trade engine — gate them.
-    bool showPerf = showTradeEngine and enablePerformanceTracking
     bool showTune = showTradeEngine and enableAutoTuning
 
     int rows = 1  // header
@@ -1517,8 +1531,6 @@ if showInfoPanel and barstate.islast
     if compactMode
         if enableMTFGate
             rows += 1
-        if showPerf
-            rows += 2  // Win Rate, Profit Factor — cells are written regardless of compact mode
         if showConfidenceMeters
             rows += 1
         rows += 1  // Market Condition
@@ -1528,8 +1540,6 @@ if showInfoPanel and barstate.islast
         rows += 3  // ER, Alpha, Slope
         if enableMTFGate
             rows += 1
-        if showPerf
-            rows += 2
         if showConfidenceMeters
             rows += 1
         rows += 1  // Market Condition
@@ -1630,18 +1640,6 @@ if showInfoPanel and barstate.islast
         table.cell(infoTable, 0, r, "HTF Agreement:", text_color=rdpTc, text_size=size.small)
         table.cell(infoTable, 1, r, str.tostring(htfAgreement, "#.##"),
             text_color=rdpTc, text_size=size.small)
-        r += 1
-
-    if showPerf
-        winRateTxt = performanceMetrics.sampleCount > 10 ? str.tostring(performanceMetrics.winRate * 100, "#") + "%" : "—"
-        pfTxt = performanceMetrics.sampleCount > 10 ? str.tostring(performanceMetrics.profitFactor, "#.##") : "—"
-
-        table.cell(infoTable, 0, r, "Win Rate:", text_color=rdpTc, text_size=size.small)
-        table.cell(infoTable, 1, r, winRateTxt, text_color=rdpTc, text_size=size.small)
-        r += 1
-
-        table.cell(infoTable, 0, r, "Profit Factor:", text_color=rdpTc, text_size=size.small)
-        table.cell(infoTable, 1, r, pfTxt, text_color=rdpTc, text_size=size.small)
         r += 1
 
     if showConfidenceMeters
@@ -1811,14 +1809,14 @@ tierGateOk := ssaRequireRdpTierBPlus ? (tierGateOk and cond_tierBplus) : tierGat
 
 ssaGateOk = (not ssaUseRDPGate) or ((cond_conf_ok and cond_htf_ok and cond_qual_ok and not ssaFlat) and tierGateOk)
 
-longTrend = ssaEnable and ssaCanFire and ssaGateOk and ssaBull
-shortTrend = ssaEnable and ssaCanFire and ssaGateOk and ssaBear
+longTrend = ssaEnable and ssaGateOk and ssaBull
+shortTrend = ssaEnable and ssaGateOk and ssaBear
 
 revDistMult = input.float(1.5, "Reversal Distance (ATR)", group=SSA_GROUP, step=0.1)
 revDist = ssaAtr14 * revDistMult
 
-longRev = ssaEnable and ssaCanFire and (not ssaFlat) and (close < fvt - revDist) and biasBull
-shortRev = ssaEnable and ssaCanFire and (not ssaFlat) and (close > fvt + revDist) and biasBear
+longRev = ssaEnable and (not ssaFlat) and (close < fvt - revDist) and biasBull
+shortRev = ssaEnable and (not ssaFlat) and (close > fvt + revDist) and biasBear
 
 ssaLong = ssaSignalMode == "Trend" ? longTrend : longRev
 ssaShort = ssaSignalMode == "Trend" ? shortTrend : shortRev
@@ -1828,8 +1826,10 @@ ssaStrongShort = ssaShort and cond_strong
 ssaSuperLong = ssaLong and cond_super
 ssaSuperShort = ssaShort and cond_super
 
-ssaLongEvent_engine = ssaLong and not ssaLong[1]
-ssaShortEvent_engine = ssaShort and not ssaShort[1]
+// Event = rising edge of the gated condition; the cooldown filters events afterwards
+// (it is not part of the condition, so its expiry cannot create a new edge).
+ssaLongEvent_engine = ssaLong and not ssaLong[1] and ssaCanFire
+ssaShortEvent_engine = ssaShort and not ssaShort[1] and ssaCanFire
 
 ssaLongEvent_rdp = ssaEntrySource == "RDP A only" ? rdpLongAEvent : ssaEntrySource == "RDP B only" ? rdpLongBEvent : rdpLongAnyAB
 

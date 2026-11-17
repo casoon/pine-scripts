@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.5.3 — 2026-11-17
+- Fix: a level that only becomes eligible when its confirming pivot is detected (several bars after the pivot) no longer fires a late sweep/breakout on that bar if price already ran through it in between — such a level is marked as used up
+- Without real volume the volume component of the event score now counts as neutral (0) instead of scaling the other components up to fill its share
+- Momentum Hybrid tooltip no longer claims that a sweep at an oscillator extreme makes a reversal more likely
+
 ## v3.5.2 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 

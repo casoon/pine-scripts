@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.5.5 — 2026-11-17
+- Fix: the trend signal (▲/▼) now fires on the first bar of a trend where ADX is above the threshold, not only on the flip bar — a flip below the threshold no longer leaves the whole trend without a signal
+- Fix: a trend change now ends the running setup — its SL/TP lines are removed and no TP/SL alerts or rejection re-entries follow from a setup whose trend has turned
+- Fix: entry/SL/TP state and the TP/SL hit alerts no longer depend on "Show SL / TP Levels" — the toggle only hides the drawing; "Trail SL to Break-Even at TP1" also works with the levels hidden
+- Rejections fire once per run of consecutive qualifying bars instead of on every bar of the run
+- The standalone strategy clone received the same fixes
+
 ## v3.5.4 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - The "backtest invalid" notice on non-standard chart types (Heikin Ashi, Renko …) now sits in the bottom-right corner as a short note instead of a label on the last candle

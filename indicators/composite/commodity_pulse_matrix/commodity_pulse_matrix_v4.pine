@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Commodity Pulse Matrix v4 [WavesUnchained]
-// Version: 4.2.1
+// Version: 4.2.2
 // Author: WavesUnchained
-// Build: 2026-10-12
+// Build: 2026-11-17
 // ============================================================================
 // Chart-timeframe entry engine with multi-timeframe confluence context.
 // Slimmed down from v3 (~7200 lines) to focus on filtered signal generation.
@@ -58,13 +58,13 @@ if barstate.islast and not chart.is_standard
 
 // ==== ENTRY ENGINE ====
 
-string entryDensity = input.string("Moderate", "Signal Density", options=["Few (Top Signals)", "Moderate", "Many (Scalper)"], group="Entry Engine", tooltip="Few: Only highest quality setups | Moderate: Balanced | Many: More signals for scalping")
+string entryDensity = input.string("Moderate", "Signal Density", options=["Few (Top Signals)", "Moderate", "Many (Scalper)"], group="Entry Engine", tooltip="Sets the strength thresholds an entry must reach. Few: highest thresholds, fewest entries | Moderate: medium thresholds | Many: lowest thresholds, most entries")
 
 bool useBreakoutEntries = input.bool(true, "Enable Breakout Entries", group="Entry Engine", tooltip="Trigger on level breaks with momentum confirmation")
 bool usePullbackEntries = input.bool(true, "Enable Pullback Entries", group="Entry Engine", tooltip="Trigger on pullbacks to support/resistance zones")
 bool useContinuationEntries = input.bool(true, "Enable Continuation Entries", group="Entry Engine", tooltip="Trigger on trend continuations after mini-pullbacks")
 
-bool allowCounterTrendEntries = input.bool(false, "Allow Counter-Trend Entries", group="Entry Engine", tooltip="Allow entries against trend (requires 1.5x stronger momentum)")
+bool allowCounterTrendEntries = input.bool(false, "Allow Counter-Trend Entries", group="Entry Engine", tooltip="Allow entries against trend (entry thresholds are raised by a factor of 1.15)")
 bool useTrendFilter             = input.bool(false, "Trend Filter (regime + JMA50)", group="Entry Engine", tooltip="Optional trend hard filter. Default OFF: trend context is already represented in entry strength/heat scoring.")
 
 float volStopATRMult = input.float(2.0, "VolStop ATR Multiplier", minval=1.0, maxval=4.0, step=0.1, group="Entry Engine", tooltip="ATR multiplier for volatility stop calculation")
@@ -3239,10 +3239,18 @@ type DualScore
 // ===========================================================================
 // Calculates all 6 category scores for a single timeframe
 
+// Previous-bar indicator set for non-repainting higher-timeframe requests
+f_essentialPrev() =>
+    IndicatorSet s = calculateEssentialIndicators(close)
+    s[1]
+
 calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW, float volW, float structW, float divW) =>
 
     // Fetch timeframe-local indicator context.
-    IndicatorSet indicators = request.security(syminfo.tickerid, timeframe, calculateEssentialIndicators(close), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+    // Other timeframes: last closed bar (no repaint). Chart timeframe: current bar, computed locally.
+    IndicatorSet htfSet = request.security(syminfo.tickerid, timeframe, f_essentialPrev(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+    IndicatorSet localSet = calculateEssentialIndicators(close)
+    IndicatorSet indicators = timeframe == timeframe.period ? localSet : htfSet
 
     // Extract all score calculations for consistency (always called)
     // Use safe defaults when indicators are na
@@ -5149,39 +5157,12 @@ EntrySignal entryV2 = generateEntries(
     strengthThreshold
 )
 
-// State machine for entry deduplication
-var EntryState entryState = newEntryState()
-[entryEvent, newEntryState] = updateEntryStateMachine(
-    entryState,
-    entryV2.finalLong,
-    entryV2.finalShort,
-    entryV2.finalLongStrength,
-    entryV2.finalShortStrength,
-    false, false,
-    5,    // entry cooldown
-    8,    // warning cooldown (unused)
-    0.35  // upgrade delta
-)
-entryState := newEntryState
-
-// === GENERATE SIGNALS (legacy SignalResult, used by Matrix Table only) ===
-TimeframeScores chartTF = mtfScores.chartTF
-
-float signalOptimizedScore = (chartTF.flowScore * 0.40) + (chartTF.momentumScore * 0.40) + (chartTF.trendScore * 0.10) + (chartTF.volatilityScore * 0.05) + (chartTF.structureScore * 0.05)
-string chartDirection = signalOptimizedScore > 0 ? "BULLISH" : signalOptimizedScore < 0 ? "BEARISH" : "NEUTRAL"
-MultiTimeframeScores chartOnlyScores = MultiTimeframeScores.new(mtfScores.tf1, mtfScores.tf2, mtfScores.tf3, chartTF, signalOptimizedScore, chartDirection, mtfScores.alignedCount, mtfScores.totalTFs)
-
-SignalResult signal = generateSignals(chartOnlyScores, zones, heatBreakdown, mvInterp, exhaust, regime, 0.75, 0.45, true, false, 0.3)
-
 // === SIGNAL QUALITY GATE (ATR + Volume) - Filter Entry V2 finals ===
 MarketQuality marketQuality = analyzeMarketQuality(atr, atrSMA, volume, volumeSMA, qualityATRContractThresh, qualityATRExpandThresh, qualityVolLowThresh, qualityVolHighThresh)
 
-// === FINAL GATE: timing trigger (required) + optional hard filters + graded evidence ===
-// The genuine timing trigger must ALWAYS hold: the entry engine's directional final
-// (entryV2.finalLong/Short) plus the dedup/cooldown emit (entryEvent.emitEntry). These are
-// the trigger and may not be out-voted by context evidence.
-bool triggerLong  = entryEvent.emitEntry and entryV2.finalLong
-bool triggerShort = entryEvent.emitEntry and entryV2.finalShort
+// === FINAL GATE: optional hard filters + graded evidence ===
+// Applied to the entry engine's directional final (entryV2.finalLong/Short) BEFORE the dedup
+// state machine, so an entry the gates block does not consume the dedup/cooldown slot.
 
 bool nearSR = zones.nearSupport or zones.nearResistance or zones.atSupport or zones.atResistance
 
@@ -5208,8 +5189,36 @@ int evidenceThreshold = math.max(0, math.min(3, finalMinGate - 2))
 int longEvidence  = (qualityContextOk ? 1 : 0) + (trendAlignedLong ? 1 : 0)  + (heatOk ? 1 : 0)
 int shortEvidence = (qualityContextOk ? 1 : 0) + (trendAlignedShort ? 1 : 0) + (heatOk ? 1 : 0)
 
-bool finalLong  = triggerLong  and not qualityVeto and trendOkLong  and longEvidence  >= evidenceThreshold
-bool finalShort = triggerShort and not qualityVeto and trendOkShort and shortEvidence >= evidenceThreshold
+bool gatedLong  = entryV2.finalLong  and not qualityVeto and trendOkLong  and longEvidence  >= evidenceThreshold
+bool gatedShort = entryV2.finalShort and not qualityVeto and trendOkShort and shortEvidence >= evidenceThreshold
+
+// State machine for entry deduplication
+var EntryState entryState = newEntryState()
+[entryEvent, newEntryState] = updateEntryStateMachine(
+    entryState,
+    gatedLong,
+    gatedShort,
+    entryV2.finalLongStrength,
+    entryV2.finalShortStrength,
+    false, false,
+    5,    // entry cooldown
+    8,    // warning cooldown (unused)
+    0.35  // upgrade delta
+)
+entryState := newEntryState
+
+// === GENERATE SIGNALS (legacy SignalResult, used by Matrix Table only) ===
+TimeframeScores chartTF = mtfScores.chartTF
+
+float signalOptimizedScore = (chartTF.flowScore * 0.40) + (chartTF.momentumScore * 0.40) + (chartTF.trendScore * 0.10) + (chartTF.volatilityScore * 0.05) + (chartTF.structureScore * 0.05)
+string chartDirection = signalOptimizedScore > 0 ? "BULLISH" : signalOptimizedScore < 0 ? "BEARISH" : "NEUTRAL"
+MultiTimeframeScores chartOnlyScores = MultiTimeframeScores.new(mtfScores.tf1, mtfScores.tf2, mtfScores.tf3, chartTF, signalOptimizedScore, chartDirection, mtfScores.alignedCount, mtfScores.totalTFs)
+
+SignalResult signal = generateSignals(chartOnlyScores, zones, heatBreakdown, mvInterp, exhaust, regime, 0.75, 0.45, true, false, 0.3)
+
+// Timing trigger: gated final plus the dedup/cooldown emit (entryEvent.emitEntry)
+bool finalLong  = entryEvent.emitEntry and gatedLong
+bool finalShort = entryEvent.emitEntry and gatedShort
 
 // === EARLY REVERSAL CANDIDATES (informational, pre-entry) ===
 bool earlyLongEvidence = (earlyUseDivergence and divZones.nearBullZone) or
@@ -5410,7 +5419,9 @@ alertcondition(alertOk and (earlyShortCandidate), title="Early Reversal Short Ca
 alertcondition(alertOk and (isASetupLong), title="A-Setup Long", message="CPM4 · A-SETUP LONG · {{ticker}} {{interval}}")
 alertcondition(alertOk and (isASetupShort), title="A-Setup Short", message="CPM4 · A-SETUP SHORT · {{ticker}} {{interval}}")
 alertcondition(alertOk and (heatBreakdown.overall >= 0.7), title="High Quality Setup", message="CPM4 · HIGH-QUALITY SETUP · {{ticker}} {{interval}}")
-alertcondition(alertOk and (exhaust.bullConfirmed or exhaust.bearConfirmed), title="Exhaustion Confirmed", message="CPM4 · EXHAUSTION CONFIRMED · {{ticker}} {{interval}}")
+// Edge only: Confirmed stays true while the watch persists, the alert fires on the first confirmed bar
+bool exhaustConfirmed = exhaust.bullConfirmed or exhaust.bearConfirmed
+alertcondition(alertOk and exhaustConfirmed and not exhaustConfirmed[1], title="Exhaustion Confirmed", message="CPM4 · EXHAUSTION CONFIRMED · {{ticker}} {{interval}}")
 
 // ============================================================================
 // DEBUG PLOTS (invisible, for alert messages)

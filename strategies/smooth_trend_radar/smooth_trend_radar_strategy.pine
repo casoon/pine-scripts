@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Smooth Trend Radar [WavesUnchained] — Strategy (standalone)
-// Version: 3.4.5
+// Version: 3.4.6
 // Author: WavesUnchained
-// Build: 2026-10-12
+// Build: 2026-11-17
 // ============================================================================
 // Double-smoothed Supertrend baseline for trend direction, with live baseline
 // rejection signals at the baseline, statistical overextension highlighting,
@@ -74,7 +74,7 @@ wmaLength   = input.int(40,   "WMA Length",            minval=1, group=g_trend, 
 emaLength   = input.int(14,   "EMA Length",            minval=1, group=g_trend, display=disp,
      tooltip="EMA applied to the WMA output — second smoothing pass.")
 adxThreshold = input.float(25.0, "ADX Trend/Sideways Threshold", minval=5.0, maxval=50.0, step=1.0, group=g_trend, display=disp,
-     tooltip="ADX threshold: trend flips only fire above this value. Rejections fire in both regimes — the threshold only tags them as Trend Pullback (above) or Range Rejection (at or below).")
+     tooltip="ADX threshold: the trend signal fires on the first bar of a trend run where ADX is above this value (on the flip bar or later in the same trend). Rejections fire in both regimes — the threshold only tags them as Trend Pullback (above) or Range Rejection (at or below).")
 trendSlopeLookback  = input.int(3, "Trend Slope Lookback", minval=1, group=g_trend, display=disp,
      tooltip="Bars back to measure baseline slope for trend direction.")
 trendSlopeThreshold = input.float(0.05, "Trend Slope Threshold (× ATR)", minval=0.0, step=0.01, group=g_trend, display=disp,
@@ -197,8 +197,16 @@ trend := _trendSlope > _stAtr * trendSlopeThreshold ? 1 : _trendSlope < -_stAtr 
 isTrending = not na(adx) and adx > adxThreshold
 isSideways = not na(adx) and adx <= adxThreshold
 
-longSignal  = trend == 1  and trend[1] != 1 and isTrending
-shortSignal = trend == -1 and trend[1] != -1 and isTrending
+// One trend signal per trend run: on the first bar of the run where ADX clears
+// the threshold — not only on the flip bar, so a flip below the threshold does
+// not leave the whole trend without a signal.
+var bool trendSignaled = false
+if trend != trend[1]
+    trendSignaled := false
+longSignal  = trend == 1  and isTrending and not trendSignaled
+shortSignal = trend == -1 and isTrending and not trendSignaled
+if longSignal or shortSignal
+    trendSignaled := true
 
 // ─── Rejection detection (live baseline touch validation) ───────────────────
 // Pivots are intentionally not used for signal timing. Rejection is detected
@@ -221,8 +229,11 @@ bool _volOk   = volumeFilter == "Off" or not volumeIsReal or volume > ta.sma(vol
 // Rejections fire in both ADX regimes — a baseline pullback in an active trend
 // is as valid a signal as one in a range. The regime is carried as a label tag
 // (Trend Pullback vs Range Rejection) rather than used to gate the signal.
-rejSignalBull = low <= tL and close > tL and trend == 1 and tL > tL[slopeLookback] and _bullTouches >= contFactor and _polBull and _volOk
-rejSignalBear = high >= tL and close < tL and trend == -1 and tL < tL[slopeLookback] and _bearTouches >= contFactor and _polBear and _volOk
+_rejBullRaw = low <= tL and close > tL and trend == 1 and tL > tL[slopeLookback] and _bullTouches >= contFactor and _polBull and _volOk
+_rejBearRaw = high >= tL and close < tL and trend == -1 and tL < tL[slopeLookback] and _bearTouches >= contFactor and _polBear and _volOk
+// Edge: one rejection per run of consecutive qualifying bars
+rejSignalBull = _rejBullRaw and not _rejBullRaw[1]
+rejSignalBear = _rejBearRaw and not _rejBearRaw[1]
 rejRegime     = isTrending ? "Trend Pullback" : "Range Rejection"
 
 // ─── SL / TP levels ──────────────────────────────────────────────────────────
@@ -277,6 +288,26 @@ var label tp3_label   = na
 var linefill lf_risk   = na
 var linefill lf_reward = na
 var float    entryPrice = na
+
+// A trend change invalidates the running setup — no TP/SL tracking or
+// re-entry from a setup whose trend no longer holds. An open position keeps
+// its setup (SL/TP/break-even) until its own exit.
+if trend != trend[1] and tradeDir != 0 and strategy.position_size == 0
+    tradeDir := 0
+    line.delete(entry_line)
+    line.delete(sl_line)
+    line.delete(tp1_line)
+    line.delete(tp2_line)
+    line.delete(tp3_line)
+    label.delete(entry_label)
+    label.delete(sl_label)
+    label.delete(tp1_label)
+    label.delete(tp2_label)
+    label.delete(tp3_label)
+    linefill.delete(lf_risk)
+    linefill.delete(lf_reward)
+    entry_line := na
+    sl_line    := na
 
 bullRejRe = rejReentry and (slDone or stopFilled) and tradeDir == 1  and trend == 1  and rejSignalBull
 bearRejRe = rejReentry and (slDone or stopFilled) and tradeDir == -1 and trend == -1 and rejSignalBear
@@ -421,14 +452,15 @@ slHit  = not slDone  and tradeDir != 0 and (tradeDir == 1 ? ta.crossunder(close,
 
 if tp1Hit
     tp1Done := true
-    if trailBE and not na(sl_line)
+    if trailBE
         SL := entryPrice
-        line.set_y1(sl_line,  SL)
-        line.set_y2(sl_line,  SL)
-        label.set_y(sl_label, SL)
-        label.set_text(sl_label, "BE " + str.tostring(SL, format.mintick))
-        linefill.delete(lf_risk)
-        lf_risk := na
+        if not na(sl_line)
+            line.set_y1(sl_line,  SL)
+            line.set_y2(sl_line,  SL)
+            label.set_y(sl_label, SL)
+            label.set_text(sl_label, "BE " + str.tostring(SL, format.mintick))
+            linefill.delete(lf_risk)
+            lf_risk := na
 if tp2Hit
     tp2Done := true
 if tp3Hit

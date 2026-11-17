@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Commodity Pulse Matrix v3 [WavesUnchained]
-// Version: 3.4.1
+// Version: 3.4.2
 // Author: WavesUnchained
-// Build: 2026-10-12
+// Build: 2026-11-17
 // ============================================================================
 // Multi-Timeframe Confluence Indicator for Commodities
 //
@@ -58,7 +58,7 @@ bool useBreakoutEntries = input.bool(true, "Enable Breakout Entries", group="Ent
 bool usePullbackEntries = input.bool(true, "Enable Pullback Entries", group="Entry Engine", tooltip="Trigger on pullbacks to support/resistance zones")
 bool useContinuationEntries = input.bool(true, "Enable Continuation Entries", group="Entry Engine", tooltip="Trigger on trend continuations after mini-pullbacks")
 
-bool allowCounterTrendEntries = input.bool(true, "Allow Counter-Trend Entries", group="Entry Engine", tooltip="Allow entries against trend (requires 1.5x stronger momentum)")
+bool allowCounterTrendEntries = input.bool(true, "Allow Counter-Trend Entries", group="Entry Engine", tooltip="Allow entries against trend (entry thresholds are raised by a factor of 1.15)")
 
 bool showVolatilityStop = input.bool(true, "Show Volatility Stop Lines", group="Entry Engine", tooltip="Display ATR-based trend bias lines on chart")
 float volStopATRMult = input.float(2.0, "VolStop ATR Multiplier", minval=1.0, maxval=4.0, step=0.1, group="Entry Engine", tooltip="ATR multiplier for volatility stop calculation")
@@ -233,13 +233,6 @@ type Signal
     bool active              // Is signal active.
     int barsSinceSignal      // Bars since signal generated
 
-// Signal quality metrics
-type SignalQuality
-    float score              // Quality score (0-100)
-    string grade             // Quality grade: "A", "B", "C", "D", "F"
-    bool passesFilter        // Passes minimum quality filter.
-    string[] issues          // Array of quality issues
-
 // Market quality assessment (ATR + volume)
 type MarketQuality
     bool allowEntries        // True if volume is sufficient
@@ -336,10 +329,6 @@ newMTFScores() =>
 // Create new Signal
 newSignal() =>
     Signal.new("NEUTRAL", 0.0, false, 999)
-
-// Create new SignalQuality
-newSignalQuality() =>
-    SignalQuality.new(0.0, "F", false, array.new<string>())
 
 // Create new DiamondZone
 newDiamondZone() =>
@@ -3210,10 +3199,18 @@ type DualScore
 // ===========================================================================
 // Calculates all 6 category scores for a single timeframe
 
+// Previous-bar indicator set for non-repainting higher-timeframe requests
+f_essentialPrev() =>
+    IndicatorSet s = calculateEssentialIndicators(close)
+    s[1]
+
 calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW, float volW, float structW, float divW) =>
 
     // [TEST] Re-enable request.security() ALONE to test if it's the problem
-    IndicatorSet indicators = request.security(syminfo.tickerid, timeframe, calculateEssentialIndicators(close), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+    // Other timeframes: last closed bar (no repaint). Chart timeframe: current bar, computed locally.
+    IndicatorSet htfSet = request.security(syminfo.tickerid, timeframe, f_essentialPrev(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+    IndicatorSet localSet = calculateEssentialIndicators(close)
+    IndicatorSet indicators = timeframe == timeframe.period ? localSet : htfSet
 
     // Extract all score calculations for consistency (always called)
     // Use safe defaults when indicators are na
@@ -3243,11 +3240,10 @@ calculateTimeframeScores(string timeframe, float flowW, float momW, float trendW
     float structureScore = calculateStructureScore(close, _ema20, _ema50, _ema200, high, low)
     float divergenceScore = calculateDivergenceScore(_rsi, 5, 5)
 
-    // Flow score is neutral (0.0) without real volume (MFI/VFI/OBV) — exclude
-    // its weight from the aggregate instead of diluting the total score, and
-    // renormalize the remaining category weights (calculateAggregateScore
-    // divides by the sum of the weights actually passed in).
-    float flowWForAgg = volumeIsReal ? flowW : 0.0
+    // Flow score is neutral (0.0) without real volume (MFI/VFI/OBV). Its weight
+    // stays in the aggregate: missing evidence counts as absent, it is not
+    // stretched over the other categories.
+    float flowWForAgg = flowW
 
     // Calculate weighted total
     float totalScore = calculateAggregateScore( flowScore, momentumScore, trendScore, volatilityScore, structureScore, divergenceScore, flowWForAgg, momW, trendW, volW, structW, divW)
@@ -3805,9 +3801,6 @@ type SignalResult
     // Cooldown status
     bool inCooldown
     int barsSinceLastSignal
-    // Moderate signals the confidence gate removed (Daily+ recovery reads these)
-    bool confGateRemovedBuy = false
-    bool confGateRemovedSell = false
 
 // ===========================================================================
 // SIGNAL COOLDOWN MANAGEMENT
@@ -3849,10 +3842,9 @@ strategyA(MultiTimeframeScores mtfScores, DiamondZoneResult zones, ExhaustionRes
     bool htfAligned = (htfScore > 0 and bullishConfluence) or (htfScore < 0 and bearishConfluence)
 
     // PRECISION SCORE: Chart 60% + HTF 40%
-    // Flow is neutral (0.0) without real volume - exclude its weight and renormalize
-    // momentum + trend (same handling as the category aggregate), otherwise the chart
-    // part caps at 0.5 and strong signals are only reachable via the zone boost
-    float chartScore = volumeIsReal ? (flowScore * 0.50) + (momScore * 0.40) + (trendScore * 0.10) : ((momScore * 0.40) + (trendScore * 0.10)) / 0.50
+    // Flow is neutral (0.0) without real volume - its weight stays in place (fixed
+    // denominator), missing evidence is not stretched over momentum + trend
+    float chartScore = (flowScore * 0.50) + (momScore * 0.40) + (trendScore * 0.10)
     float precisionScore = (chartScore * 0.60) + (htfScore * 0.40)
 
     // ADAPTIVE THRESHOLDS (regime-aware)
@@ -4182,8 +4174,6 @@ generateSignals(string strategy, MultiTimeframeScores mtfScores, float rsi, bool
         strongSell := false
 
     // Remove Moderate signals if confidence too low
-    bool confGateRemovedBuy = moderateBuy and confidence < moderateConfMin
-    bool confGateRemovedSell = moderateSell and confidence < moderateConfMin
     if (moderateBuy or moderateSell) and confidence < moderateConfMin
         moderateBuy := false
         moderateSell := false
@@ -4208,7 +4198,7 @@ generateSignals(string strategy, MultiTimeframeScores mtfScores, float rsi, bool
         reason := "Moderate Sell: Score " + str.tostring(mtfScores.consensusScore, "#.00")
 
     // Return result (cooldown fields set to defaults - applied in main script)
-    SignalResult.new(strongBuy, strongSell, moderateBuy, moderateSell, mtfScores.consensusScore, reason, confidence, confidenceLevel, passedHeatFilter, false, 0, confGateRemovedBuy, confGateRemovedSell)
+    SignalResult.new(strongBuy, strongSell, moderateBuy, moderateSell, mtfScores.consensusScore, reason, confidence, confidenceLevel, passedHeatFilter, false, 0)
 
 // ===========================================================================
 // SIGNAL TEXT (for display)
@@ -5080,9 +5070,10 @@ newMeanReversionState() =>
 // @param zoneLookback Lookback for dynamic zones
 // @param zoneMult Zone multiplier for stdev bands
 // @param cooldownBars Minimum bars between signals
+// @param isActive MR model active on this bar (only then a signal opens the state)
 // @param state Persistent mean reversion state
 // @returns [MeanReversionSignal, MeanReversionState]
-calculateMeanReversion( float source, int wtLen1, int wtLen2, int signalLen, int zoneLookback, float zoneMult, int cooldownBars, MeanReversionState state ) =>
+calculateMeanReversion( float source, int wtLen1, int wtLen2, int signalLen, int zoneLookback, float zoneMult, int cooldownBars, bool isActive, MeanReversionState state ) =>
     // WaveTrend core
     float esa = ta.ema(source, wtLen1)
     float de = ta.ema(math.abs(source - esa), wtLen1)
@@ -5124,13 +5115,14 @@ calculateMeanReversion( float source, int wtLen1, int wtLen2, int signalLen, int
     string strength = strengthScore >= 0.6 ? "STRONG" : strengthScore >= 0.3 ? "MODERATE" : "WEAK"
 
     // Update state: an exit closes the position (otherwise every later zero cross
-    // would repeat the exit), then a new signal opens one
+    // would repeat the exit), then a new signal opens one — only while the MR model
+    // is active, so a signal that was never shown cannot produce an exit later
     if longExit or shortExit
         state.lastSignalDir := "NONE"
-    if longSignal
+    if longSignal and isActive
         state.lastSignalBar := bar_index
         state.lastSignalDir := "LONG"
-    else if shortSignal
+    else if shortSignal and isActive
         state.lastSignalBar := bar_index
         state.lastSignalDir := "SHORT"
 
@@ -5908,9 +5900,6 @@ var WarningConfirmation warningConfirm = newWarningConfirmation(2, 8)  // 2 bars
 [emitBull, emitBear, newWarningConfirm] = confirmWarning(independentWarning, warningConfirm)
 warningConfirm := newWarningConfirm
 
-// Combined emit flag for visualization
-bool shouldEmit = emitBull or emitBear
-
 // State machine for entry deduplication (warnings handled separately above)
 var EntryState entryState = newEntryState()
 [entryEvent, newEntryState] = updateEntryStateMachine(
@@ -6093,19 +6082,6 @@ bool isDailyOrHigher = tfMinutes >= 1440
 // Reduce cooldown for Daily (5 bars = 5 days is too long)
 int effectiveCooldown = isDailyOrHigher ? math.min(cooldown, 2) : cooldown
 
-// Daily: Relax confidence requirements (scores fluctuate less on higher TFs)
-if isDailyOrHigher
-    // Re-enable signals that were blocked by confidence gate in generateSignals()
-    // Daily often has lower confidence due to slower score movement. Only a signal
-    // the base strategy actually produced and the confidence gate removed is recovered.
-    float dailyConfMin = 0.35  // Lower than normal 0.45
-    if signal.confidence >= dailyConfMin
-        float chartScore = (mtfScores.chartTF.flowScore * 0.35) + (mtfScores.chartTF.momentumScore * 0.50) + (mtfScores.chartTF.trendScore * 0.15)
-        if signal.confGateRemovedBuy and chartScore > 0.02 and not signal.strongBuy and not signal.moderateBuy
-            signal.moderateBuy := true
-        else if signal.confGateRemovedSell and chartScore < -0.02 and not signal.strongSell and not signal.moderateSell
-            signal.moderateSell := true
-
 // === COOLDOWN FILTER (Applied at script level for proper var state) ===
 // Check cooldown using global state
 bool inCooldown = not na(g_lastSignalBar) and (bar_index - g_lastSignalBar) < effectiveCooldown
@@ -6190,8 +6166,8 @@ bool isASetupShort = false
 if useNewEntryEngine
     // Entry Engine V2 based A-Setup: Final entry + high heat + strong strength + trending
     float momentumNorm = (rsi - 50) / 50  // -1 to +1
-    isASetupLong := entryV2.finalLong and heatBreakdown.overall >= 0.65 and strengthScore.longStrength >= 0.70 and regime.isTrending and close > jma50 and jma20 > jma50
-    isASetupShort := entryV2.finalShort and heatBreakdown.overall >= 0.65 and strengthScore.shortStrength >= 0.70 and regime.isTrending and close < jma50 and jma20 < jma50
+    isASetupLong := entryEvent.emitEntry and entryV2.finalLong and heatBreakdown.overall >= 0.65 and strengthScore.longStrength >= 0.70 and regime.isTrending and close > jma50 and jma20 > jma50
+    isASetupShort := entryEvent.emitEntry and entryV2.finalShort and heatBreakdown.overall >= 0.65 and strengthScore.shortStrength >= 0.70 and regime.isTrending and close < jma50 and jma20 < jma50
 else
     // Legacy: finalSignal based (when Entry Engine disabled)
     isASetupLong := signal.strongBuy and heatBreakdown.overall >= 0.65 and signal.confidence >= 0.60 and regime.isTrending and close > jma50 and jma20 > jma50 and jma50 > jma200
@@ -6373,6 +6349,16 @@ plotshape(showBpcShort, "BPC Short", shape.circle, location.abovebar, color.new(
 // ============================================================================
 // MEAN REVERSION CALCULATION (must be before unified labels)
 // ============================================================================
+[_diPlus_chart, _diMinus_chart, _adx_chart] = ta.dmi(14, 14)
+bool _adxTrending = _adx_chart > adxAutoThreshold
+
+// Regime classification drives the auto switch: trending structure OR ADX-confirmed trend.
+bool _regimeTrend = regime.isTrending and not regime.isTransitioning and _adxTrending
+
+// Active mode gate: only one signal model fires at a time (no parallel mixing).
+bool useTrendSignals = signalMode == "Trend" or (signalMode == "ADX Auto" and _regimeTrend)
+bool useMeanReversion = signalMode == "Mean Reversion" or (signalMode == "ADX Auto" and not _regimeTrend)
+
 var MeanReversionState mrState = newMeanReversionState()
 
 [mrSignal, newMrState] = calculateMeanReversion(
@@ -6383,6 +6369,7 @@ var MeanReversionState mrState = newMeanReversionState()
     mrZoneLookback,                // Zone Lookback (default: 180)
     mrZoneMultiplier,              // Zone Multiplier (default: 2.0)
     mrCooldown,          // Cooldown (default: 20)
+    useMeanReversion,    // State opens only on signals of the active model
     mrState
 )
 mrState := newMrState
@@ -6459,15 +6446,8 @@ int MAX_UNIFIED_LABELS = 30
 // model is active on a given bar; chart-TF ADX is used only as a tie-confirmation.
 // In a trend regime the trend model is active; in a range/transitioning regime the
 // reversal (MR) model is active. The two are mutually exclusive per bar — no parallel mixing.
-[_diPlus_chart, _diMinus_chart, _adx_chart] = ta.dmi(14, 14)
-bool _adxTrending = _adx_chart > adxAutoThreshold
-
-// Regime classification drives the auto switch: trending structure OR ADX-confirmed trend.
-bool _regimeTrend = regime.isTrending and not regime.isTransitioning and _adxTrending
-
-// Active mode gate: only one signal model fires at a time (no parallel mixing).
-bool useTrendSignals = signalMode == "Trend" or (signalMode == "ADX Auto" and _regimeTrend)
-bool useMeanReversion = signalMode == "Mean Reversion" or (signalMode == "ADX Auto" and not _regimeTrend)
+// Active signal model (useTrendSignals / useMeanReversion) is computed above the
+// Mean Reversion calculation, which needs it to gate its position state.
 
 bool hasTrendLong  = useTrendSignals and useNewEntryEngine and entryEvent.emitEntry and entryV2.finalLong
 bool hasTrendShort = useTrendSignals and useNewEntryEngine and entryEvent.emitEntry and entryV2.finalShort
@@ -6541,8 +6521,8 @@ var int lastExitShortBar = na
 int EXIT_COOLDOWN = 10  // Minimum bars between exit signals
 
 // Determine exit sources
-bool hasWeaknessBull = useNewEntryEngine and shouldEmit and independentWarning.warningBull
-bool hasWeaknessBear = useNewEntryEngine and shouldEmit and independentWarning.warningBear
+bool hasWeaknessBull = useNewEntryEngine and emitBull and independentWarning.warningBull
+bool hasWeaknessBear = useNewEntryEngine and emitBear and independentWarning.warningBear
 bool hasMRExitLong = useMeanReversion and mrShowExits and mrSignal.longExit
 bool hasMRExitShort = useMeanReversion and mrShowExits and mrSignal.shortExit
 
@@ -6652,15 +6632,17 @@ alertcondition(alertOk and (signal.moderateSell), title="Moderate Sell Signal", 
 alertcondition(alertOk and (heatBreakdown.overall >= 0.7), title="High Quality Setup", message='CPM3 · HIGH-QUALITY SETUP · {{ticker}} {{interval}} · Heat={{plot("Heat Score")}}')
 
 // Entry Engine V2 Alerts - event-based (only emit on state machine events)
-alertcondition(alertOk and (useNewEntryEngine and entryEvent.emitEntry and entryV2.finalLong), title="Entry V2 Long", message="CPM3 · ENTRY LONG · {{ticker}} {{interval}}")
-alertcondition(alertOk and (useNewEntryEngine and entryEvent.emitEntry and entryV2.finalShort), title="Entry V2 Short", message="CPM3 · ENTRY SHORT · {{ticker}} {{interval}}")
+alertcondition(alertOk and hasTrendLong, title="Entry V2 Long", message="CPM3 · ENTRY LONG · {{ticker}} {{interval}}")
+alertcondition(alertOk and hasTrendShort, title="Entry V2 Short", message="CPM3 · ENTRY SHORT · {{ticker}} {{interval}}")
 
 // Independent Warning Alerts (NOT tied to entries - separate cooldown)
-alertcondition(alertOk and (useNewEntryEngine and shouldEmit and independentWarning.warningBull), title="Weakness Bull", message="CPM3 · BULL WEAKNESS · {{ticker}} {{interval}}")
-alertcondition(alertOk and (useNewEntryEngine and shouldEmit and independentWarning.warningBear), title="Weakness Bear", message="CPM3 · BEAR WEAKNESS · {{ticker}} {{interval}}")
+alertcondition(alertOk and (useNewEntryEngine and emitBull and independentWarning.warningBull), title="Weakness Bull", message="CPM3 · BULL WEAKNESS · {{ticker}} {{interval}}")
+alertcondition(alertOk and (useNewEntryEngine and emitBear and independentWarning.warningBear), title="Weakness Bear", message="CPM3 · BEAR WEAKNESS · {{ticker}} {{interval}}")
 
 // Exhaustion Alert
-alertcondition(alertOk and (exhaust.bullConfirmed or exhaust.bearConfirmed), title="Exhaustion Confirmed", message="CPM3 · EXHAUSTION CONFIRMED · {{ticker}} {{interval}}")
+// Edge only: Confirmed stays true while the watch persists, the alert fires on the first confirmed bar
+bool exhaustConfirmed = exhaust.bullConfirmed or exhaust.bearConfirmed
+alertcondition(alertOk and exhaustConfirmed and not exhaustConfirmed[1], title="Exhaustion Confirmed", message="CPM3 · EXHAUSTION CONFIRMED · {{ticker}} {{interval}}")
 
 // Mean Reversion Alerts
 alertcondition(alertOk and (useMeanReversion and mrSignal.longSignal), title="Mean Rev Long", message="CPM3 · MEAN REVERSION LONG · {{ticker}} {{interval}}")

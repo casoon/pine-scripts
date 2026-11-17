@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.4.5 — 2026-11-17
+- Fix: on symbols without real volume, Setup and Impulse Pressure no longer scale their other components up to fill the missing volume weight; the volume part contributes a neutral mid-value instead, so missing data does not amplify the remaining evidence
+- Fix: the "Impulse Running" and "Sideways / Quiet" alerts fire once when the phase is entered instead of on every bar while it lasts; they follow the phase shown in the dashboard (chop takes priority)
+
 ## v2.4.4 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 

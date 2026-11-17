@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.1 — 2026-11-17
+- Fix: the HTF bias reads the last closed higher-timeframe bar, so it no longer changes while the higher-timeframe bar is still forming
+- Fix: the HTF bias can no longer be up and down at the same time. Close vs EMA and EMA slope each vote; when they disagree the bias is neutral and neither side counts as HTF-aligned
+- Fix: one counter-trend definition (long below a flat-or-falling MA50, short above a flat-or-rising MA50) now drives both the stricter confirmation and the Show / Mark / Hide handling; previously the confirmation used a broader definition that also counted MA200 and flat MA50 contexts
+- The "Counter-Trend Reversals" input now has a tooltip that states what Hide does: a counter-trend reversal then needs the Extreme Heat Threshold
+
 ## v1.5.0 — 2026-10-02
 - Reversal signals no longer count their own mandatory gates as score points. The exhaustion (RSI/BB) and wick-rejection gates stay required; on top of them a signal now needs reversal heat from ATR distance to MA50 and ATR expansion (0–2). Default 1 = distance or expansion, which is exactly what the old 4/7 threshold amounted to once the gates passed, so default signals are unchanged. "Score Threshold" / "Extreme Score Threshold" are replaced by "Reversal Heat Threshold" (1) and "Extreme Heat Threshold" (2) — custom values need to be set again
 

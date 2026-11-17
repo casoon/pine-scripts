@@ -5,17 +5,17 @@ Score-based liquidity sweep reversal detector with HTF trend confluence. A signa
 ## Features
 
 - Mandatory gate model — sweep + close position + body size + ATR corridor + HTF trend + spike filter must all pass
-- Quality score (0–2 optional conditions) with per-direction thresholds (Long/Short configurable separately)
-- Short optionals use reversal-appropriate conditions (RSI still elevated, no higher-high structure)
+- Quality score (0–1 optional condition) with per-direction thresholds (Long/Short configurable separately)
+- Optional quality condition mirrored per direction (RSI above 50 for longs, below 50 for shorts)
 - Liquidity sweep detection: swing violation with recovery close on the same bar
 - ATR corridor filter — rejects both low-volatility noise and spike/news regimes
 - Spike filter — blocks sweeps deeper than N×ATR (real breakdowns, not reversals)
 - Structural SL: sweep low/high plus configurable ATR noise buffer; TP as R-multiple of actual risk
-- HTF trend filter via dual EMA on a configurable timeframe (`lookahead_off`, no repaint)
+- HTF trend filter via dual EMA on a configurable timeframe (last closed HTF bar, no repaint)
 - Configurable Reclaim MA (EMA / RMA / SMA / WMA / HMA / JMA)
 - Price structure labels (HH / HL / LH / LL) at confirmed pivots (optional)
 - Outcome tracking: signal label turns blue when no follow-through within N bars
-- Cooldown gate to suppress signal chasing
+- Cooldown gate per direction to suppress signal chasing
 - 15M-only lockout with orange background on other timeframes
 - Hidden strategy-ready plots: direction, score, entry, stop, take
 - Alert conditions for BUY / SELL / either
@@ -35,14 +35,14 @@ Score-based liquidity sweep reversal detector with HTF trend confluence. A signa
 
 Shorts mirror all conditions, except the HTF gate (not bullish) and the optionals below.
 
-**Optional quality points (0–2):**
+**Optional quality point (0–1):**
 
-| Direction | +1 | +1 |
-|-----------|----|----|
-| Long | RSI > 50 | No lower-low structure |
-| Short | RSI > 50 (still elevated — reversal from overbought) | No higher-high structure |
+| Direction | +1 |
+|-----------|----|
+| Long | RSI > 50 |
+| Short | RSI < 50 |
 
-Quality tiers: A (2), B (1), C (0). Signals require `minQualityLong` (default 2) / `minQualityShort` (default 1).
+Quality tiers: A (1), C (0). Signals require `minQualityLong` / `minQualityShort` (both default 0 — quality is optional). Pivot structure (LL / HH) is shown in the tooltip only.
 
 ## SL / TP
 

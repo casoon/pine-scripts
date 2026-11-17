@@ -1,5 +1,8 @@
 # Changelog
 
+## v4.10.2 — 2026-11-17
+- Fix: the HTF bias now uses the last closed HTF bar, so it no longer repaints intrabar
+
 ## v4.10.1 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - Fix: possible runtime error on empty event list (no Wyckoff events recorded yet) — in Pine v6 `for i = 0 to n - 1` counts down when n is 0; the loop now only runs when there is something to iterate

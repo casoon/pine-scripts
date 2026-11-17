@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.1.3 — 2026-11-17
+- Zones and `BOX` breakouts (and their alerts) are now tracked even when "Balance/Compression Zones" is off; the toggle only hides the box and its label. Before, turning it off silently disabled the breakout alerts
+- Without real volume, Auction Pressure and Exhaustion no longer scale up the remaining terms; the missing volume term counts as neutral 0
+
 ## v2.1.2 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 

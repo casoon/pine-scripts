@@ -27,7 +27,7 @@ Auto modes recompute the running sums from the actual pivot bar (`pivR` bars bac
 
 - **AVWAP** — the anchored volume-weighted average price.
 - **σ** — volume-weighted standard deviation of the source around the AVWAP since the anchor.
-- **Distance (σ)** — `(close − AVWAP) / σ`, the Location measure. `|distance| ≥ Stretched at (σ)` flags a stretched location.
+- **Distance (σ)** — `(close − AVWAP) / σ`, the Location measure. `|distance| ≥ Stretched at (σ)` flags a stretched location — only once at least `Min bars since anchor` (default 20) bars lie in the anchor window, since σ from a handful of bars is not meaningful.
 
 These feed the *Location* role (skill §1) of a downstream reversal module as evidence, not as a blocking gate.
 
