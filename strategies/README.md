@@ -57,6 +57,15 @@ the result is meaningless — reliably flattering, never reproducible.
 exit reasons in the trade comment (`tp` / `sl` / `time`; Existing adds `trail` / `be`). Run both
 on the same window: a dynamic exit that does not beat Fixed is not earning its complexity.
 
+**Random Baseline.** Nine strategies (all except `kestrel_opportunity_lens`, which has its own
+baseline) carry a shadow test (table top left, group "Random Baseline", display only, no orders).
+It replays the strategy's own entries and a random set of the same side and frequency with one
+identical fixed exit (ATR target / stop / time limit, gross R) and shows the difference per side.
+Set target/stop/time like the Fixed exit of the strategy to compare. A signal that does not beat
+the random set under the same exit carries no information of its own. One seed is one draw:
+under about 30 trades the difference is noise. The tester's own Long/Short columns give the
+per-side result of the real strategy.
+
 The TradingView tester books none of the CFD costs. Each strategy therefore has a **Cost Model (CFD)**
 group (spread in price points, financing % p.a. long/short, stress factor) and its own table
 (bottom left) that deducts them per closed trade: net and profit factor after costs and under
