@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- `vein_reversal_score` v0.3.0→0.4.0 — **signal back, without score sums:** "Bull/Bear Reversal Signal" (triangle markers + alerts) fires on the first follow-through bar after a structure event (Spring/Upthrust, BOS, confirmed climax) whose own confirmation reaches "Confirmation Required", while the opposite side is not confirmed. The Setup score and quality do not gate it. The existing Invalidation alert also covers signals. "Setup + Structure Event" alerts now fire once when the status is reached instead of every bar
 - `vein_reversal_score` v0.2.4→0.3.0 — **role: context display.** REVIEW and ACTION alerts, the hand-weighted "Quality" grade (table row, data window, "High Quality" diamonds) and the "Min Quality for ACTION Alert" input are removed. "Candidate" alerts are renamed "Setup + Structure Event". Setup, confirmation and status are calculated as before. Saved REVIEW/ACTION alerts no longer exist
 - `vein_reversal_score`, `vein_exhaustion`: without real volume the MFI points are no longer moved to RSI (RSI was counted twice). The setup/exhaustion maximum is lower on such symbols; thresholds are unchanged, so fewer setups reach them there. Instruments with real volume are unaffected. `vein_reversal_score`: comment on the confirmation maximum corrected
 

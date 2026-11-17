@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Trade Permission Engine [WavesUnchained]
-// Version: 1.4.0
+// Version: 1.5.0
 // Author: WavesUnchained
-// Build: 2026-11-17 00:00:00
+// Build: 2026-11-17 12:00:00
 // ============================================================================
 // Answers "does the market currently permit trading Long or Short here", not
 // "how probable is this specific setup" - the successor to Directional
@@ -27,9 +27,10 @@
 //     accelerating momentum or ATR expansion, instead of sitting at a stale
 //     high value once the move that earned it has gone quiet
 //   ✓ Exhaustion split by role: counter-move exhaustion feeds Continuation,
-//     reference-impulse exhaustion (via divergence at the leg's own
-//     endpoint) feeds Reversal - using counter-move exhaustion for Reversal
-//     was backwards (a strong counter-move is what a reversal thesis wants)
+//     reference-impulse exhaustion (momentum recovering faster than price
+//     since the leg's endpoint, no pivot divergence) feeds Reversal
+//   ✓ Permission = geometric mean of its gated factors (leg quality,
+//     maturity, exhaustion, HTF alignment) on a real 0-100 scale
 //   ✓ Trigger state machine (UNTRIGGERED -> BROKEN -> CONFIRMED -> ACCEPTED)
 //     with a same-bar rejection-at-extreme (genuinely leading) and a
 //     validity window so Permission clearing its threshold a few bars late
@@ -155,7 +156,6 @@ float minSwingAtrInput = input.float(1.0, "Minimum relevant swing size (ATR)", m
 float legInvalidationRetracementInput = input.float(0.90, "Retracement to invalidate the reference leg (promote counter-move)", minval = 0.50, maxval = 1.50, step = 0.05, tooltip = "An opposite-type pivot only replaces the reference leg once price has retraced (near-)fully back to the leg's own origin - an ordinary pullback into the Continuation zone (~0.38-0.62) must NOT replace the leg it's a pullback within. Below this threshold the pivot is ignored for reference-leg purposes; the counter-move can still contain its own internal pivots without becoming the new reference.", group = GROUP_LEG)
 float contextFloorInput = input.float(0.25, "Reference-leg quality floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_LEG)
 int maxLegHistoryInput = input.int(4, "Legs tracked for Live Trend Quality", minval = 4, maxval = 8, tooltip = "How many of the most recent completed legs feed Live Trend Quality - is the trend still healthy, not just how good the reference leg was when it formed. Below 4, the recent-half-vs-older-half trend split has nothing to compare and silently stays neutral.", group = GROUP_LEG)
-float liveTrendQualityFloorInput = input.float(0.25, "Live Trend Quality floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_LEG)
 float decayPerBarInput = input.float(0.5, "Permission decay per stale bar (%)", minval = 0.0, maxval = 3.0, step = 0.1, tooltip = "A bar with no fresh extreme, no accelerating momentum and no ATR expansion in the relevant direction is 'stale' - each stale bar fades Permission by this percentage, so it doesn't sit at a high value once the move that earned it has gone quiet. 0 disables decay.", group = GROUP_LEG)
 int decayAtrLookbackInput = input.int(10, "ATR expansion lookback (bars)", minval = 3, maxval = 50, group = GROUP_LEG)
 
@@ -178,8 +178,7 @@ string oscillatorInput = input.string("Stochastic RSI", "Oscillator", options = 
 int customOscLen = input.int(14, "Custom oscillator length", minval = 5, maxval = 100, group = GROUP_EXHAUSTION)
 int customOscSmooth = input.int(3, "Custom oscillator smoothing", minval = 1, maxval = 20, group = GROUP_EXHAUSTION)
 int exhaustionRecentBarsInput = input.int(5, "Recent-bars window (deterioration check)", minval = 2, maxval = 20, group = GROUP_EXHAUSTION)
-bool divergenceEnabledInput = input.bool(true, "Use regular and hidden divergence", group = GROUP_EXHAUSTION)
-float divergenceStrengthInput = input.float(18.0, "Divergence maximum contribution", minval = 0.0, maxval = 40.0, step = 1.0, group = GROUP_EXHAUSTION)
+bool divergenceEnabledInput = input.bool(true, "Detect regular and hidden divergence (display only)", tooltip = "Divergence is found at confirmed pivots and therefore arrives late; it is shown as warning markers only and does not feed Permission or the signals.", group = GROUP_EXHAUSTION)
 int divergenceMaxBarsInput = input.int(120, "Maximum bars between divergence pivots", minval = 10, maxval = 500, group = GROUP_EXHAUSTION)
 float exhaustionFloorInput = input.float(0.15, "Exhaustion floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_EXHAUSTION)
 
@@ -206,15 +205,14 @@ int maxPivotHistoryInput = input.int(20, "Max tracked pivots for T1 search", min
 bool htfEnabledInput = input.bool(true, "Enable confirmed HTF context", group = GROUP_HTF)
 string htfModeInput = input.string("Auto", "HTF selection", options = ["Auto", "Manual"], group = GROUP_HTF)
 string manualHtfInput = input.timeframe("240", "Manual higher timeframe", group = GROUP_HTF)
-float htfInfluenceInput = input.float(15.0, "HTF influence", minval = 0.0, maxval = 40.0, step = 1.0, group = GROUP_HTF)
-float reversalHtfAlignedFactorInput = input.float(0.5, "Reversal HTF-aligned bonus factor", minval = 0.0, maxval = 1.0, step = 0.1, tooltip = "A Reversal thesis needs less help from an agreeing HTF trend than a Continuation does - the aligned bonus is scaled down by this factor relative to Continuation's.", group = GROUP_HTF)
-float reversalHtfConflictFactorInput = input.float(1.5, "Reversal HTF-conflict penalty factor", minval = 1.0, maxval = 3.0, step = 0.1, tooltip = "A Reversal thesis fighting an established HTF trend is riskier than a Continuation with the trend - the conflict penalty is scaled up by this factor relative to Continuation's.", group = GROUP_HTF)
+float htfFloorInput = input.float(0.25, "HTF alignment floor", minval = 0.0, maxval = 1.0, step = 0.05, tooltip = "HTF trend alignment enters Permission as one factor: fully aligned = 1, fully against = this floor, neutral or no valid HTF = halfway.", group = GROUP_HTF)
 int htfFastEmaInput = input.int(21, "HTF fast EMA", minval = 2, maxval = 200, group = GROUP_HTF)
 int htfSlowEmaInput = input.int(55, "HTF slow EMA", minval = 3, maxval = 400, group = GROUP_HTF)
 int htfAtrLenInput = input.int(14, "HTF ATR length", minval = 5, maxval = 100, group = GROUP_HTF)
 float scenarioHysteresisMarginInput = input.float(10.0, "Continuation/Reversal dominance margin (hysteresis)", minval = 0.0, maxval = 50.0, step = 1.0, tooltip = "The dominant scenario only flips to the other one once it leads by this many points - prevents the Target/Invalidation geometry from flickering between Continuation and Reversal when the two are close.", group = GROUP_MATURITY)
 
-float permissionThresholdInput = input.float(12.0, "Permission threshold (Setup/Watch)", minval = 0, maxval = 100, tooltip = "Gates longSetup/shortSetup, and so Trigger eligibility and the Setup/Trigger alerts; also drawn as a reference line against the Permission curve below. Provisional default, lowered from 55 - a real chart showed longPermission/shortPermission peaking around 10-15 (a floored-multiplicative product of several 0-1 factors compresses it well below a 0-100 scale's intuitive range), meaning 55 was very likely unreachable in practice and Trigger may never have fired. This is a rough recalibration from limited observation (one instrument, a few days), not a validated figure - revisit against a wider longPermission/shortPermission sample (visible directly on the pane) before relying on it.", group = GROUP_DISPLAY)
+float permissionThresholdInput = input.float(55.0, "Permission threshold (Setup/Watch)", minval = 0, maxval = 100, tooltip = "Gates longSetup/shortSetup, and so Trigger eligibility and the Setup/Trigger/Signal alerts; also drawn as a reference line. Permission is the geometric mean of its gated factors (each 0-1), so 55 means the factors average around 0.55.", group = GROUP_DISPLAY)
+float signalRetentionInput = input.float(50.0, "Signal retention (% of Permission)", minval = 0, maxval = 100, step = 5, tooltip = "Gates the Long/Short Signal alerts: a Trigger counts as a signal when Active Permission (after confirmation, target feasibility and decay) still holds at least this share of the side's Permission.", group = GROUP_DISPLAY)
 
 // Position Health answers a different question than Permission above ("is an
 // EXISTING position still structurally healthy", not "is a NEW entry attractive
@@ -868,8 +866,6 @@ float bearDivDecay = 0.0
 if not na(lastBearDivConfirmationBar)
     bearDivDecay := f_clamp(1.0 - float(bar_index - lastBearDivConfirmationBar) / divergenceDecayBars, 0.0, 1.0)
 
-float bullDivergenceBonus = divergenceStrengthInput * bullDivDecay * lastBullDivTypeStrength
-float bearDivergenceBonus = divergenceStrengthInput * bearDivDecay * lastBearDivTypeStrength
 
 // ============================================================================
 // Exhaustion: DETERIORATION of the counter-move (recent efficiency vs. the
@@ -887,28 +883,32 @@ if not na(liveLegBars) and liveLegBars >= exhaustionRecentBarsInput
 
 float bearExhaustion = 0.0
 if latestLegBullish
-    bearExhaustion := f_clamp(exhaustionRaw + 15.0 * math.max(accelerationNorm, 0.0) + bullDivergenceBonus, 0.0, 100.0)
+    bearExhaustion := f_clamp(exhaustionRaw + 15.0 * math.max(accelerationNorm, 0.0), 0.0, 100.0)
 
 float bullExhaustion = 0.0
 if latestLegBearish
-    bullExhaustion := f_clamp(exhaustionRaw + 15.0 * math.max(-accelerationNorm, 0.0) + bearDivergenceBonus, 0.0, 100.0)
+    bullExhaustion := f_clamp(exhaustionRaw + 15.0 * math.max(-accelerationNorm, 0.0), 0.0, 100.0)
 
 // Reference-IMPULSE exhaustion (distinct from counter-move exhaustion above):
 // Reversal permission needs "is the ORIGINAL impulse itself exhausted", not
-// "is the counter-move exhausted" (the counter-move exhausting is evidence
-// FOR continuation, not for reversal - using the same measure for both was
-// backwards). Proxied via divergence at the impulse's own endpoint pivot -
-// imprecise once deep into the counter-move (the divergence tracker may have
-// since moved to a more recent, smaller pivot), but this measure matters
-// most right after the leg completes (Endpoint Reversal), when the endpoint
-// pivot IS still the most recent one of its type.
+// "is the counter-move exhausted" (that one is evidence FOR continuation).
+// Pivot-free read: momentum has recovered from its extreme further than price
+// has retraced the leg - the oscillator turns before price does. Both parts
+// are 0-1: oscillator position within its recent range vs. retracement ratio.
+int impulseOscWindow = math.max(5, oscLen * 2)
+float impulseOscLow = ta.lowest(oscillatorSmoothed, impulseOscWindow)
+float impulseOscHigh = ta.highest(oscillatorSmoothed, impulseOscWindow)
+float impulseOscRange = math.max(impulseOscHigh - impulseOscLow, 5.0)
+float oscRecoveryFromLow = f_clamp((oscillatorSmoothed - impulseOscLow) / impulseOscRange, 0.0, 1.0)
+float oscRecoveryFromHigh = f_clamp((impulseOscHigh - oscillatorSmoothed) / impulseOscRange, 0.0, 1.0)
+
 float bullImpulseExhaustion = 0.0
-if latestLegBullish
-    bullImpulseExhaustion := f_clamp(100.0 * bearDivDecay * lastBearDivTypeStrength, 0.0, 100.0)
+if latestLegBullish and not na(bullishRetracement)
+    bullImpulseExhaustion := 100.0 * f_clamp(oscRecoveryFromHigh - f_clamp(bullishRetracement, 0.0, 1.0), 0.0, 1.0)
 
 float bearImpulseExhaustion = 0.0
-if latestLegBearish
-    bearImpulseExhaustion := f_clamp(100.0 * bullDivDecay * lastBullDivTypeStrength, 0.0, 100.0)
+if latestLegBearish and not na(bearishRetracement)
+    bearImpulseExhaustion := 100.0 * f_clamp(oscRecoveryFromLow - f_clamp(bearishRetracement, 0.0, 1.0), 0.0, 1.0)
 
 // ============================================================================
 // Position Health: answers "assuming I'm already Long/Short, is that position
@@ -1230,25 +1230,23 @@ else if shortTriggerState == 3
 // Target/Invalidation below.
 // ============================================================================
 
-float longContinuationPermission = 100.0 * f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(liveTrendQuality, liveTrendQualityFloorInput) * f_gatedFactor(continuationMaturityLong, maturityFloorInput) * f_gatedFactor(bearExhaustion, exhaustionFloorInput)
-float longReversalPermission = 100.0 * f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(liveTrendQuality, liveTrendQualityFloorInput) * f_gatedFactor(reversalMaturityLong, maturityFloorInput) * f_gatedFactor(bearImpulseExhaustion, exhaustionFloorInput)
-float shortContinuationPermission = 100.0 * f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(liveTrendQuality, liveTrendQualityFloorInput) * f_gatedFactor(continuationMaturityShort, maturityFloorInput) * f_gatedFactor(bullExhaustion, exhaustionFloorInput)
-float shortReversalPermission = 100.0 * f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(liveTrendQuality, liveTrendQualityFloorInput) * f_gatedFactor(reversalMaturityShort, maturityFloorInput) * f_gatedFactor(bullImpulseExhaustion, exhaustionFloorInput)
-
-// HTF influence is applied PER SCENARIO, before the max() combination, and
-// asymmetrically for Reversal: a Reversal fighting the HTF trend is riskier
-// than a Continuation fighting it, and a Reversal agreeing with the HTF
-// trend needs that agreement less than a Continuation does (the HTF trend
-// direction is itself evidence FOR continuation and AGAINST reversal).
+// HTF alignment as one gated factor per side (neutral = halfway when HTF is
+// disabled or not higher than the chart). Same factor for both scenarios of a
+// side: a long - continuation or reversal - wants the HTF trend up.
+float htfAlignLong = 50.0
 if htfEnabledInput and validHigherTimeframe
-    longContinuationPermission := f_clamp(longContinuationPermission + htfInfluenceInput * htfTrendSigned, 0.0, 100.0)
-    shortContinuationPermission := f_clamp(shortContinuationPermission - htfInfluenceInput * htfTrendSigned, 0.0, 100.0)
+    htfAlignLong := 50.0 + 50.0 * htfTrendSigned
+float htfFactorLong = f_gatedFactor(htfAlignLong, htfFloorInput)
+float htfFactorShort = f_gatedFactor(100.0 - htfAlignLong, htfFloorInput)
 
-    float longReversalHtfFactor = htfTrendSigned >= 0 ? reversalHtfAlignedFactorInput : reversalHtfConflictFactorInput
-    longReversalPermission := f_clamp(longReversalPermission + htfInfluenceInput * longReversalHtfFactor * htfTrendSigned, 0.0, 100.0)
-
-    float shortReversalHtfFactor = htfTrendSigned <= 0 ? reversalHtfAlignedFactorInput : reversalHtfConflictFactorInput
-    shortReversalPermission := f_clamp(shortReversalPermission - htfInfluenceInput * shortReversalHtfFactor * htfTrendSigned, 0.0, 100.0)
+// Geometric mean keeps the 0-100 scale meaningful: a plain product of four
+// 0-1 factors collapses toward the floor and made any fixed threshold either
+// unreachable or arbitrary. Continuation carries the one leg-quality factor;
+// Reversal carries none (a clean impulse argues against reversing it).
+float longContinuationPermission = 100.0 * math.pow(f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(continuationMaturityLong, maturityFloorInput) * f_gatedFactor(bearExhaustion, exhaustionFloorInput) * htfFactorLong, 1.0 / 4.0)
+float longReversalPermission = 100.0 * math.pow(f_gatedFactor(reversalMaturityLong, maturityFloorInput) * f_gatedFactor(bearImpulseExhaustion, exhaustionFloorInput) * htfFactorLong, 1.0 / 3.0)
+float shortContinuationPermission = 100.0 * math.pow(f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(continuationMaturityShort, maturityFloorInput) * f_gatedFactor(bullExhaustion, exhaustionFloorInput) * htfFactorShort, 1.0 / 4.0)
+float shortReversalPermission = 100.0 * math.pow(f_gatedFactor(reversalMaturityShort, maturityFloorInput) * f_gatedFactor(bullImpulseExhaustion, exhaustionFloorInput) * htfFactorShort, 1.0 / 3.0)
 
 // Continuation and Reversal only swap dominance once one leads by a margin
 // (hysteresis) - otherwise the dominant scenario (and so T2/Invalidation
@@ -1431,8 +1429,8 @@ bool hasShortT2Prior = useT2Input and not na(t2ShortFrozen)
 bool longTradeOpenPrior = not na(t1LongFrozen) and not longInvHit and not longCancelled and (hasLongT2Prior ? not longT2Hit : not longT1Hit)
 bool shortTradeOpenPrior = not na(t1ShortFrozen) and not shortInvHit and not shortCancelled and (hasShortT2Prior ? not shortT2Hit : not shortT1Hit)
 
-bool newLongTriggerCandidate = longArmed and longCooldownOk and longTriggerEligible and not longTradeOpenPrior
-bool newShortTriggerCandidate = shortArmed and shortCooldownOk and shortTriggerEligible and not shortTradeOpenPrior
+bool newLongTriggerCandidate = barstate.isconfirmed and longArmed and longCooldownOk and longTriggerEligible and not longTradeOpenPrior
+bool newShortTriggerCandidate = barstate.isconfirmed and shortArmed and shortCooldownOk and shortTriggerEligible and not shortTradeOpenPrior
 bool simultaneousTrigger = newLongTriggerCandidate and newShortTriggerCandidate
 
 bool newLongTrigger = newLongTriggerCandidate and (not simultaneousTrigger or longScorePreCrv > shortScorePreCrv)
@@ -1579,6 +1577,8 @@ float shortDecayFactor = f_clamp(1.0 - shortStaleBars * decayPerBarInput / 100.0
 float longScoreRaw = longScorePreCrv * longCrvFactor * longDecayFactor
 float shortScoreRaw = shortScorePreCrv * shortCrvFactor * shortDecayFactor
 
+bool newLongSignal = newLongTrigger and longPermission > 0 and longScoreRaw >= longPermission * signalRetentionInput / 100.0
+bool newShortSignal = newShortTrigger and shortPermission > 0 and shortScoreRaw >= shortPermission * signalRetentionInput / 100.0
 
 float smoothedLong = ta.ema(longScoreRaw, smoothingInput)
 float smoothedShort = ta.ema(shortScoreRaw, smoothingInput)
@@ -1600,6 +1600,8 @@ alertcondition(newLongSetup, "TPE1 Long Setup", "TPE1: Long permission rose abov
 alertcondition(newShortSetup, "TPE1 Short Setup", "TPE1: Short permission rose above the threshold")
 alertcondition(newLongTrigger, "TPE1 Long Trigger", "TPE1: Long trigger event (rejection at the extreme or close above the last micro swing high)")
 alertcondition(newShortTrigger, "TPE1 Short Trigger", "TPE1: Short trigger event (rejection at the extreme or close below the last micro swing low)")
+alertcondition(newLongSignal, "TPE1 Long Signal", "TPE1: Long signal - trigger with Permission above threshold and target feasibility retained")
+alertcondition(newShortSignal, "TPE1 Short Signal", "TPE1: Short signal - trigger with Permission above threshold and target feasibility retained")
 alertcondition(longT1HitNow, "TPE1 Long T1 Hit", "TPE1: price reached the Long reference level T1")
 alertcondition(longT2HitNow, "TPE1 Long T2 Hit", "TPE1: price reached the Long reference level T2")
 alertcondition(longInvHitNow, "TPE1 Long Invalidated", "TPE1: price crossed the Long invalidation level")

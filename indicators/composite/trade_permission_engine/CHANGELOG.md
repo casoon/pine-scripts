@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.5.0 — 2026-11-17
+- **Long/Short Signal back**, with the "Signal retention" input; the v1.4.0 switch to display-only rested on missing data, not on the code. Re-create the signal alerts if you use them
+- **Permission scale fixed:** Permission is now the geometric mean of its gated factors instead of their plain product, which compressed it far below 100 and made any threshold arbitrary. Default threshold back to 55
+- **HTF context** is one gated factor (aligned = 1, against = new "HTF alignment floor", neutral = halfway) instead of adding ±15 points; the inputs "HTF influence", "Reversal HTF-aligned bonus factor" and "Reversal HTF-conflict penalty factor" are removed
+- **No pivot divergence in Permission:** counter-move exhaustion no longer adds a divergence bonus ("Divergence maximum contribution" removed); Reversal's impulse exhaustion is now momentum recovering from its extreme faster than price retraces the leg. Divergence stays as a warning marker. Position Health's pullback read uses the same exhaustion, so it changes slightly too
+- **One quality factor:** Live Trend Quality no longer enters Permission ("Live Trend Quality floor" removed; it still feeds Position Health); Reversal carries no leg-quality factor
+- **Trigger fires on confirmed bars only** — no intrabar signal that disappears at the close
+
 ## v1.4.0 — 2026-11-17
 - **Role: context display.** The "fully qualified Long/Short signal" alerts and the "Signal retention" input are removed; the other alerts now describe events ("permission rose above the threshold", "trigger event", "price reached reference level T1", "price crossed the invalidation level") instead of recommending trades. Calculation and display are unchanged. Saved alerts on "TPE1 Long/Short Signal" no longer exist
 

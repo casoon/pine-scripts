@@ -1,10 +1,10 @@
 # Trade Permission Engine
 
-**Role: context display, not a signal generator.** Its triggers (rejection at an extreme, close beyond
-a micro swing) and gates (retracement maturity, leg efficiency, divergence exhaustion) belong to
-event types that showed no robust net entry edge when measured broadly with costs against random
-entries (`chronicles/11`). The script shows where the market stands; it does not recommend entries.
-Pivots are used as known reference levels (no lag on the event itself).
+**Role: signal generator with context.** A Trigger (rejection at the extreme or close beyond the
+last micro swing, on a confirmed bar) becomes a Long/Short signal when Permission clears its
+threshold and dominates the other side, and Active Permission still retains `signalRetentionInput` %
+of it. Pivots are used as known reference levels (leg endpoints, targets); divergence is shown as a
+warning marker only and does not feed Permission.
 
 The successor to `directional_probability_engine` (archived, see
 `archive/indicators/directional_probability_engine/`). It answers *"does the market currently
@@ -64,9 +64,14 @@ reference leg, not two separate detectors:
   uses its own, wider/later-centered duration curve.
 - **Continuation/Reversal dominance is sticky** (hysteresis), resetting on a new reference leg.
 - **Two distinct Exhaustion measures**: counter-move exhaustion (deterioration, feeds Continuation)
-  and reference-impulse exhaustion (divergence at the leg's own endpoint, feeds Reversal) — most
-  accurate right after the leg completes; it gets imprecise deep into the counter-move, since the
-  divergence tracker may by then have moved on to a more recent, smaller pivot.
+  and reference-impulse exhaustion (feeds Reversal): how far the oscillator has recovered from its
+  recent extreme minus how far price has retraced the leg — momentum turning before price. No
+  pivot divergence in either.
+- **Permission** = geometric mean of its gated factors, so it stays on a real 0–100 scale:
+  Continuation = reference-leg quality × maturity × counter-move exhaustion × HTF alignment
+  (4th root); Reversal = maturity × impulse exhaustion × HTF alignment (cube root, no leg-quality
+  factor — a clean impulse argues against reversing it). HTF alignment: 1 when aligned, the
+  `HTF alignment floor` when against, halfway when neutral or no valid HTF. Default threshold 55.
 - **Trigger** — an explicit state machine (`UNTRIGGERED → BROKEN → CONFIRMED → ACCEPTED`) driven by
   either a same-bar rejection-at-extreme or a micro-swing structure break, armed for
   `triggerValidityBarsInput` bars, resetting on a stale reference leg or an opposite confirmed
@@ -98,7 +103,8 @@ reference leg, not two separate detectors:
   height aren't interpretable the way a moving curve is ("mit den Kurven konnte ich was anfangen,
   hiermit nicht") - reverted to curves in v1.3.0. Every other raw score (Active Permission, Live
   Trend Quality, the decay factors, etc.) is in the data window.
-- **Alerts** (descriptive events, no entry recommendation): permission above threshold, trigger event, price at reference level T1/T2, Invalidation hit,
+- **Alerts**: Setup (permission above threshold), Trigger, Signal (Trigger whose Active Permission
+  still holds ≥ `signalRetentionInput` % of its Permission), T1/T2 hit, Invalidation hit,
   Cancelled — per side.
 
 ## Position Health (Long/Short)

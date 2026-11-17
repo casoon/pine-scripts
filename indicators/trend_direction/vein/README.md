@@ -329,17 +329,20 @@ Compact display with rich hover tooltips on every cell:
 | Trend conflict | Setup against strong trend (ER > 0.45) |
 | Opposed candidate | Candidate + opposing side confirmed |
 
-### Alerts describe events
+### Signal and alerts
 
-`vein_reversal_score` is a context display, not a signal generator: its setup (oscillator extremes,
-stretch) and confirmation (springs/upthrusts, BOS/CHoCH) are event types that showed no robust net
-entry edge when measured broadly with costs against random entries (`chronicles/11`). There is no
-REVIEW/ACTION stage and no quality grade. Alerts describe what happened:
+The **Reversal Signal** is built from structure and price only: a structure event (Spring/Upthrust,
+BOS, confirmed climax) whose own confirmation reaches `Confirmation Required`, followed within 1–4
+bars by its first follow-through bar (higher/lower close beyond the trigger level, no counter BOS),
+while the opposite side is not confirmed. The Setup score does not gate it, and there is no quality
+grade. It is invalidated when price closes back through the trigger level or the event expires
+without follow-through.
 
 | Alert | Condition |
 |-------|-----------|
-| **Setup + Structure Event** | Status = CANDIDATE (setup and a structure event on the same side) |
-| **Invalidation** | Previously Candidate, now Failed |
+| **Reversal Signal** | Structure event + first follow-through bar (triangle marker) |
+| **Setup + Structure Event** | Status becomes CANDIDATE (setup and a structure event on the same side) |
+| **Invalidation** | A Candidate or Signal, now Failed |
 
 Plus: **Trap Hint** when a failed reversal signals the opposite direction.
 
@@ -562,7 +565,7 @@ All tables follow consistent design:
 
 | Alert | Source | Purpose |
 |-------|--------|---------|
-| **Bull/Bear Setup + Structure Event** | Vein Score (4H) | Setup and a structure event on the same side |
+| **Bull/Bear Reversal Signal** | Vein Score (4H) | Structure event + follow-through |
 | **Bull/Bear Trigger** | Vein Execution (15m) | "Now it's getting concrete" |
 | **Bull/Bear Invalidation** | Vein Score (4H) | "Cancel — signal failed" |
 
@@ -570,8 +573,9 @@ All tables follow consistent design:
 
 | Source | Alert | Condition |
 |--------|-------|-----------|
-| Score | Bull/Bear Invalidation | Candidate → Failed |
-| Score | Bull/Bear Setup + Structure Event | Status = CANDIDATE |
+| Score | Bull/Bear Reversal Signal | Structure event + first follow-through bar |
+| Score | Bull/Bear Invalidation | Candidate or Signal → Failed |
+| Score | Bull/Bear Setup + Structure Event | Status becomes CANDIDATE |
 | Score | Conflict | Significant conflict detected |
 | Score | Spring/Upthrust | Heuristic triggered |
 | Score | Major BOS | Major Break of Structure |
