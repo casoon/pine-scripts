@@ -70,7 +70,7 @@ signal. The 4H short leg was the dominant loss block (WR 7%, avg R −0.39 over 
 
 ## Verdict
 
-**Rating:** Promising — *under review, see caveats*
+**Rating:** Not ready — only measured in the window it was tuned on (previously: Promising)
 
 The rating is carried over from the project record and is **not** confirmed by the data in this
 file. What `test92` actually shows is one profitable timeframe (1H), one outright unprofitable

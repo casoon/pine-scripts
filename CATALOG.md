@@ -186,10 +186,10 @@ Ratings: **Not ready** (PF < 1.15 or Return/DD < 1.5) · **Promising** (PF ≥ 1
 
 | Strategy | Basisindikator | SL-Typ | Rating | Notiz |
 |---|---|---|---|---|
-| [wavetrend_v4_strategy](strategies/wavetrend/) | WaveTrend v4 | Trailing | Promising — unter Vorbehalt | **stale**: gemessen auf v4.21, Datei ist v4.90. Gates blocken 94% der Crosses bei kaum besserer Selektion als der Marktdurchschnitt |
-| [chandelier_flip_radar_strategy](strategies/chandelier_flip_radar/) | Chandelier Flip Radar | Trailing | Promising | Beide Richtungen profitabel — **stale**: Werte vor dem v1.6-Ratchet-Fix, neu zu validieren |
-| [smooth_trend_radar_strategy](strategies/smooth_trend_radar/) | Smooth Trend Radar | Fixed TP | Promising (Long Only) | Short-Seite durch NatGas-Bull-Bias strukturell schwach — **stale**: Werte von vor dem Resync auf Indikator v3.4.0 |
-| [oscillator_divergence_zones_strategy](strategies/oscillator_divergence_zones/) | Oscillator Divergence Zones | Pivot ATR | Promising | Short-Entry verzögert durch `pivRight` |
+| [wavetrend_v4_strategy](strategies/wavetrend/) | WaveTrend v4 | Trailing | Not ready | **stale**: gemessen auf v4.21, Datei ist v4.90. Gates blocken 94% der Crosses bei kaum besserer Selektion als der Marktdurchschnitt |
+| [chandelier_flip_radar_strategy](strategies/chandelier_flip_radar/) | Chandelier Flip Radar | Trailing | Not ready | Im Fenster beide Richtungen profitabel, nur dort gemessen — **stale**: Werte vor dem v1.6-Ratchet-Fix, neu zu validieren |
+| [smooth_trend_radar_strategy](strategies/smooth_trend_radar/) | Smooth Trend Radar | Fixed TP | Not ready | Long-Seite ohne Zufallsbasis; Short-Seite durch NatGas-Bull-Bias strukturell schwach — **stale**: Werte von vor dem Resync auf Indikator v3.4.0 |
+| [oscillator_divergence_zones_strategy](strategies/oscillator_divergence_zones/) | Oscillator Divergence Zones | Pivot ATR | Not ready | Short-Entry verzögert durch `pivRight` |
 | [market_average_relationship_engine_strategy](strategies/market_average_relationship_engine/) | Market–Average Relationship Engine | Trailing (MA ∓ ATR×) | Not ready | Kein Backtest vorhanden |
 | [reversal_engine_score_strategy](strategies/reversal_engine_score/) | Reversal Engine Score | Strukturell + R-Multiple TP | Not ready | Gate-Modell über v1.1–v1.4 umgebaut (additiver Score rankte invers); **stale**: Datei ist v1.6.1, Messungen bis v1.4 |
 | [commodity_pulse_matrix_v4_strategy](strategies/commodity_pulse_matrix/) | Commodity Pulse Matrix v4 | Directional Fixed TP | Not ready | Kein Backtest vorhanden |

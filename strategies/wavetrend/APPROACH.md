@@ -6,7 +6,7 @@ Stand: 2026-05-20 | Datenbasis: test151–166 | Symbol: CAPITALCOM:NATURALGAS | 
 
 ## Ziel
 
-Die Strategie hat einen nachweisbaren Edge (Pivot-to-Pivot avgR +2.7R über alle TFs).
+Pivot-to-Pivot avgR +2.7R über alle TFs ist eine Obergrenze mit Rückblick, kein Handelsergebnis; die Strategie ist nur im Anpassungszeitraum gemessen (Rating: Not ready).
 Das Problem ist nicht der Core-Mechanismus, sondern dass zu viele Signale in Regimes
 gehandelt werden, in denen WT-Reversals systematisch scheitern.
 

@@ -97,9 +97,9 @@ Runs 1–4: commission sensitivity and multiplier sweep. Runs 7–9: AI mode exp
 
 ## Verdict
 
-**Rating:** Promising
+**Rating:** Not ready — measured before the v1.6 ratchet fix and only in one window (previously: Promising)
 
-PF 1.598 and Return/DD 5.87 exceed the "Ready" thresholds on all quantitative metrics. The strategy is not rated "Ready" solely because out-of-sample validation on a second instrument has not been performed. Within the tested period it shows a genuine and robust edge — both directions profitable, 177 trades, Max DD under 6%.
+In the tested window (pre-v1.6): PF 1.598, Return/DD 5.87, 177 trades, both directions profitable. Settings ranking did not carry over to untouched data in other tests, so this is a description of that window, not an edge.
 
 **Next steps:**
 1. Out-of-sample validation on a second instrument (Crude Oil, Gold) — required for "Ready" rating

@@ -87,9 +87,9 @@ The STR uses a smoothed Supertrend midline crossover — a symmetric oscillator.
 
 ## Verdict
 
-**Rating:** Promising (Long Only) / Not ready (Both Directions)
+**Rating:** Not ready — measured only in the window it was tuned on (previously: Promising, Long Only)
 
-The long side has a genuine, strong edge on NatGas (PF 1.707, lowest Max DD of all tested strategies). Running both directions, the short-side drag reduces the strategy to marginal profitability. The honest deployment path for this instrument is Long Only, which would isolate the strong long signal and eliminate the structural short drag. For a bidirectional deployment, a trend-neutral or bearish instrument is required.
+The long side shows PF 1.707 on NatGas in that window, with no random-entry baseline for the long side: NatGas drifted up over the period, so a random long entry with the same exit may show a similar figure (see plan 36). Running both directions, the short-side drag reduces the strategy to marginal profitability. Long Only is a hypothesis to test against that baseline, not a deployment path. For a bidirectional deployment, a trend-neutral or bearish instrument is required.
 
 **Next steps:**
 1. Test Long Only on 4H to quantify the isolated long-side performance

@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Ultimate Smoother:** removed the "zero lag / earlier crosses" wording from header, tooltip, README and TradingView description; the filter's phase behaviour is described on a sine wave only, with no claim about signal timing
+
 ## v2.7.0 — 2026-10-02
 - New Situation panel (bottom left, with "Show Signal Stats"): average R and trade count per situational bucket, split Long / Short. Buckets are recorded at entry and read relative to the trade direction, so they stay symmetric: 4H JMA slope with/against the trade, net drift over the last N bars with/against, stretch from the 4H mean (Room / Near / Extended) and volatility regime (ATR percentile high/low). Purpose: find a situational driver of the long/short asymmetry — measurement only, no signal is gated
 - Two inputs for the panel: Situation Drift Lookback (100 bars) and Stretch Threshold (1.0 × 4H ATR)

@@ -48,7 +48,7 @@ the result is meaningless — reliably flattering, never reproducible.
 | Setting | Value | Note |
 |---|---|---|
 | Position size | 10% of equity | Change via TradingView Properties |
-| Commission | 0.02% | Realistic for CFD/futures; raise for crypto maker/taker |
+| Commission | 0.02% | Placeholder only. Capital CFDs charge no commission: cost = spread per trade + financing per night held (+ DPA on commodities). Not modelled yet (plan 14) |
 | Slippage | 1 tick | Increase for illiquid instruments |
 | Entries | On confirmed bar | `confirmClose` input, on by default — prevents repainting |
 
@@ -68,17 +68,19 @@ drawing any conclusion. Candidates: ES/SPY (1H, 4H, D), NQ/QQQ (1H, 4H), EURUSD 
 BTCUSD (1H, 4H, D), CL crude (1H, 4H), NG natural gas (1H, 4H, D).
 
 **Step 2 — baseline.** Run with defaults first and record net profit %, max drawdown %,
-win rate, profit factor and trade count. Under 30 trades is not a result.
+win rate, profit factor and trade count. A few dozen trades is a hint, not a result; several
+hundred are needed before a statement about the signal. Compare against random entries with the
+same exit and frequency (win rate follows from target/stop, not from the signal).
 
-**Step 3 — one group at a time.** Optimizing all parameters at once produces an overfit set.
-Change one group, re-measure, keep or revert.
+**Step 3 — fix once, then test untouched.** Set the parameters once, from reasoning rather than
+from a search. Run them unchanged on a later period and on instruments not used for the setting.
+Group-by-group optimisation and walk-forward on the same data produce a fitted set; settings
+rankings did not carry over to untouched data. Record how many variants were tried.
 
-**Step 4 — walk-forward.** Validate on data outside the optimization window. A parameter set
-that only works on the window it was fitted to is fitted, not found.
+**Step 4 — direction split.** Test Long Only and Short Only separately. Long results contain the
+instrument's drift, so the long baseline must be causal random entries, not the whole year.
 
-**Step 5 — direction split.** Test Long Only and Short Only separately. Trend-following
-strategies are frequently asymmetric on a given instrument, and an aggregate that looks
-mediocre often hides one healthy side and one broken one.
+See `chronicles/19-ground-rules-for-strategies.md` for the general rules.
 
 Every run that informs a decision belongs in the strategy's assessment file with its
 instrument, timeframe and sample size attached. A figure without that context is not a result.

@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- `commodity_pulse_matrix_v3`, `_v4` and the v4 strategy: code comments no longer claim JMA gives "less lag / better responsiveness"; comments only, no calculation change
+
 ## Volume check — 2026-10-12
 - `commodity_pulse_matrix_v3` v3.4.0→3.4.1: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - `commodity_pulse_matrix_v4` v4.2.0→4.2.1: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets

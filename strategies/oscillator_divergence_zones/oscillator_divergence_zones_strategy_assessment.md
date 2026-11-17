@@ -72,7 +72,7 @@ Run 3 (1D) excluded from consideration: only 32 trades over 9 years, statistical
 
 **What remains weak:**
 - Short side (PF 0.940) is a small but persistent drag. Root cause: `bearHidDiv` entry fires `pivRight` bars after the pivot, by which time the optimal entry has passed. The W/L ratio (1.55×) falls just below the breakeven threshold for a 37.7% win rate (needs 1.65×).
-- SL/TP parameter adjustments (TP R:R 3.0, SL Buffer 0.3) both reduced overall profit — the current defaults are already optimal for this signal type.
+- SL/TP parameter adjustments (TP R:R 3.0, SL Buffer 0.3) both reduced overall profit on this one window — no claim that the defaults are optimal.
 - CAGR of 1.08% remains below risk-free rates. Real-world execution costs (spreads, swaps) would reduce this further.
 - No out-of-sample validation performed.
 
@@ -80,9 +80,9 @@ Run 3 (1D) excluded from consideration: only 32 trades over 9 years, statistical
 
 ## Verdict
 
-**Rating:** Promising
+**Rating:** Not ready — PF below the own threshold, short-side change tuned on the same data (previously: Promising)
 
-The strategy has a real long-side edge and now beats a negative market period convincingly. The short side is structurally limited by the `pivRight`-bar entry delay and cannot be fixed by SL/TP tuning alone. A meaningful upgrade path would be to reduce `pivRight` (faster entry) or add a trend filter that disables shorts in bull regimes. Left as-is, the strategy is directionally sound but too thin in absolute return for live deployment without further development.
+The long side was positive in the tested window; no baseline or out-of-window test exists. The short side is structurally limited by the `pivRight`-bar entry delay and cannot be fixed by SL/TP tuning alone. A meaningful upgrade path would be to reduce `pivRight` (faster entry) or add a trend filter that disables shorts in bull regimes. Left as-is, the strategy is directionally sound but too thin in absolute return for live deployment without further development.
 
 **Next steps:**
 1. Out-of-sample validation on a second instrument (Crude Oil, Gold)

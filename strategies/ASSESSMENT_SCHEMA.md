@@ -38,7 +38,10 @@ One `*_strategy_assessment.md` file per strategy, placed in `strategies/`.
 |-----------|---------|-----------|-------|
 | ...       | ...     | ...       | ...   |
 
-Commission used in all runs: X.XX%
+**Cost model:** {spread per trade, financing per night held (long/short), DPA if commodity, stress ×1.5 yes/no — or "commission X.XX% only, overnight cost not modelled"}
+**Mean holding time:** {bars / nights, per TF}
+**Random baseline:** {Signal − random entries, same side, same exit, same frequency, per side — or "not measured"}
+**Variants tried:** {number of parameter/gate variants run against this dataset}
 
 ---
 
@@ -94,5 +97,5 @@ Commission used in all runs: X.XX%
 | Rating | Criteria |
 |--------|----------|
 | **Not ready** | PF < 1.15, CAGR below risk-free rate, or Return/DD < 1.5 |
-| **Promising** | PF ≥ 1.15, both sides positive, but not yet validated out-of-sample |
+| **Promising** | PF ≥ 1.15, both sides positive, **and** unchanged settings tested on a later period and on instruments not used for tuning — without that test the rating stays Not ready |
 | **Ready** | PF ≥ 1.3, CAGR meaningfully above risk-free rate, Return/DD ≥ 2.0, validated on ≥ 2 instruments |

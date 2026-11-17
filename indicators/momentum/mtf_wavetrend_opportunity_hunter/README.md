@@ -7,7 +7,7 @@ MTF confluence pane around WaveTrend. The core idea: make multi-timeframe conflu
 - **Confluence pane**: net score histogram (−100…+100, green/red) with ±60 strong-confluence reference lines
 - **Heat ribbons**: Regime / Opportunity / Timing / Quality as color strips (green = long-side dominance, red = short-side, gray = neutral) plus a **Noise ribbon** (green = unusually clean tape, orange = unusually noisy) — the "why (no) signal" view over the full history
 - **Confluence Rotation Map** (RRG-inspired): quadrant inset right of the last bar — x = net confluence, y = confluence momentum — with a curved polyline trail. Quadrants: LEADING (+/+), WEAKENING (+/−), LAGGING (−/−), IMPROVING (−/+). A clockwise rotation through IMPROVING → LEADING is the classic early-entry path
-- **Ultimate Smoother core** (John Ehlers, TASC 04/2024): optional zero-lag replacement for the EMA core of WaveTrend (default on) — earlier crosses at the same length, less whipsaw than shortening the EMA
+- **Ultimate Smoother core** (John Ehlers, TASC 04/2024): optional replacement for the EMA core of WaveTrend (default on). On a sine wave it shifts phase less than an EMA of the same length; on price data this lead was not found to carry over, so no earlier-signal claim is made
 - **Entropy noise floor**: Shannon sign-entropy of the Trigger TF, percentile-ranked over a lookback window — self-calibrating per instrument, weighted into Quality (20%)
 - **Slim gate** (three conditions instead of five thresholds):
   1. Regime bias — Regime score ≥ minimum on the Regime TF (default Daily)
