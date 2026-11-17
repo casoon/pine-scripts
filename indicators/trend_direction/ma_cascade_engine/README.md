@@ -9,7 +9,7 @@ Moving averages are treated as a layered system rather than an isolated crossove
 - ATR-normalised slope and curvature per MA
 - Fast/Base and Base/Anchor separation tracking (expansion vs. compression) and entanglement detection (flat/overlapping MAs)
 - Price extension gate to block entries after an overextended move
-- MA Respect statistics — historical win rate of price bouncing off the Base MA vs. breaking through it, tracked separately for the Anchor MA
+- MA Respect statistics — share of Base MA touch episodes that bounced (moved away by the required reaction without breaching the invalidation), tracked separately for the Anchor MA, each shown with its number of touches (n) and next to the base rate: the share of ordinary bars that pass the same exit from their own close. Below `Minimum Touches for a Respect Rate` (default 30) the rate is hidden and counts 0 in the score
 - Confirmed Anchor Rejection markers/alerts — fires when price touches the Anchor MA and holds a reaction move away from it
 - Seven-state market classification: Bull/Bear Expansion, Bull/Bear Pullback, Overextended, Transition, Neutral Compression — while a long/short regime is active, the state also carries a Fading attribute (Fast MA momentum decelerating + Fast/Base compressing)
 - Signed −100..+100 score combining direction, slope, expansion, curvature, Base/Anchor MA respect, and cross-frequency quality

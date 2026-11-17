@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.6.0 — 2026-11-17
+- MA Respect readout shows each rate with its number of touches (n) and the base rate — the share of ordinary bars that pass the same reaction test from their own close, per side. The data window adds "Base/Anchor Touches (n)" and "Base Rate Bullish/Bearish (any bar)"
+- New input "Minimum Touches for a Respect Rate" (default 30): below it the Base/Anchor respect rate is hidden (readout and data window) and contributes 0 to the score. With the default 150-bar lookback this is often the case, so the score loses the respect part there; raise the lookback for a longer sample
+- The readout no longer judges "Base respected bullish / bearish" from a 10-point difference; it shows the rates themselves
+
 ## v1.5.1 — 2026-11-17
 - Fix: Exit Long / Exit Short now fire only after a Long / Short Reactivation and once per position, instead of on every bar the exit condition holds — markers and alerts alike
 - Fix: the Anchor Rejection marker is drawn on the confirmation bar, where its alert fires, instead of being back-dated to the touch bar
