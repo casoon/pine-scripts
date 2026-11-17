@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- `vein_reversal_score`, `vein_exhaustion`: without real volume the MFI points are no longer moved to RSI (RSI was counted twice). The setup/exhaustion maximum is lower on such symbols; thresholds are unchanged, so fewer setups reach them there. Instruments with real volume are unaffected. `vein_reversal_score`: comment on the confirmation maximum corrected
+
 ## Volume check — 2026-10-12
 - `vein_spread_context` v0.1.3→0.1.4: the futures root is now matched exactly instead of as a substring — two-letter roots such as "PL" or "HO" no longer map unrelated symbols (e.g. a "PLTR" root to Platinum, "HOOD" to Heating Oil)
 - `vein_execution` v0.1.7→0.1.8: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets

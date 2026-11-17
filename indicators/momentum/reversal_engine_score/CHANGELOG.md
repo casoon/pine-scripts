@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Gate F (HTF trend) failed open while the higher-timeframe EMAs were not yet available (warm-up): "not bearish" was true for missing data. It now requires the HTF EMAs to exist
+
 ## v1.7.3 — 2026-10-12
 - The "backtest invalid" notice on non-standard chart types (Heikin Ashi, Renko …) now sits in the bottom-right corner as a short note instead of a label on the last candle
 
