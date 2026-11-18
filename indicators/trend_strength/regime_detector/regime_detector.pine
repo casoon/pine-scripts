@@ -214,11 +214,16 @@ newMultiTimeframeConfig() =>
 newMultiTimeframeState() =>
     MultiTimeframeState.new(false, 1.0, 0, 0.0, 0.6)
 
-// HTF trend direction vs. EMA50 — requested as [1] with lookahead_on (last closed HTF bar, no repaint)
-htfEmaDir() =>
-    close > ta.ema(close, 50) ? 1 : close < ta.ema(close, 50) ? -1 : 0
+// HTF trend direction vs. EMA50 of the last closed HTF bar — requested with
+// lookahead_on; the [1] lives inside the requested expression (no repaint)
+htfEmaDirPrev() =>
+    float _ema = ta.ema(close, 50)
+    int _dir = close > _ema ? 1 : close < _ema ? -1 : 0
+    _dir[1]
 
-processMultiTimeframeAnalysis(MultiTimeframeState state, MultiTimeframeConfig config, int baseRegime) =>
+// HTF directions are requested once per bar at global scope (see MAIN
+// PROCESSING) and passed in index-aligned with config.timeframes.
+processMultiTimeframeAnalysis(MultiTimeframeState state, MultiTimeframeConfig config, int baseRegime, int[] dirs) =>
     state.enabled := config.enableHTFGate
     state.minAgreement := config.minAgreement
 
@@ -235,7 +240,7 @@ processMultiTimeframeAnalysis(MultiTimeframeState state, MultiTimeframeConfig co
         for i = 0 to array.size(config.timeframes) - 1
             tf = array.get(config.timeframes, i)
             w = map.contains(config.weights, tf) ? map.get(config.weights, tf) : 1.0
-            dir = request.security(syminfo.tickerid, tf, htfEmaDir()[1], barmerge.gaps_off, barmerge.lookahead_on)
+            int dir = nz(array.get(dirs, i))
 
             totalW += w
             biasSum += dir * w
@@ -274,25 +279,26 @@ newFilterState() =>
     FilterState.new(true, 0)
 
 processFilterSystem(FilterState state, FilterConfig config, AdaptiveState adaptiveState, RegimeState regimeState) =>
+    // Stateful ta.* calls run on every bar, ahead of the branch (consistent history)
+    atrPct = close > 0 ? (adaptiveState.atr / close) : 0.0
+    atrPctAvg = ta.sma(atrPct, config.marketConditionPeriod)
+    // Real trade volume only (feed delivers volume, volumetype not "tick");
+    // volume carries no confirmation signal. volGate degrades to pass-through rather than a permanent
+    // block/pass built on tick-count noise.
+    volumeIsReal = (ta.cum(nz(volume)) > 0 and syminfo.volumetype != "tick") and not na(volume)
+    volAvg = ta.sma(volume, config.volumeLength)
+    trendScore = ta.sma(math.abs(adaptiveState.normalizedSlope), config.marketConditionPeriod)
+    erAvg = ta.sma(adaptiveState.efficiencyRatio, config.marketConditionPeriod)
+
     if not config.enableAdvancedFilters
         state.filterPass := true
         state.marketCondition := 0
         state
     else
-        atrPct = close > 0 ? (adaptiveState.atr / close) : 0.0
-        atrPctAvg = ta.sma(atrPct, config.marketConditionPeriod)
         atrPctThresh = config.volatilityMode == "Static" ? config.minATRPercent : config.volatilityMode == "Adaptive" ? math.max(config.minATRPercent, atrPctAvg * 0.7) : math.max(config.minATRPercent, atrPctAvg * (regimeState.currentRegime != 0 ? 0.6 : 0.85))
         volOk = atrPct >= atrPctThresh
-
-        // Real trade volume only (feed delivers volume, volumetype not "tick");
-        // volume carries no confirmation signal. volGate degrades to pass-through rather than a permanent
-        // block/pass built on tick-count noise.
-        volumeIsReal = (ta.cum(nz(volume)) > 0 and syminfo.volumetype != "tick") and not na(volume)
-        volAvg = ta.sma(volume, config.volumeLength)
         volGate = not config.enableVolumeFilter or not volumeIsReal or (volAvg > 0 and volume >= volAvg * config.volumeQuantile)
 
-        trendScore = ta.sma(math.abs(adaptiveState.normalizedSlope), config.marketConditionPeriod)
-        erAvg = ta.sma(adaptiveState.efficiencyRatio, config.marketConditionPeriod)
         marketCond = 0
         if config.enableMarketCondition
             marketCond := trendScore > 0.35 ? 1 : erAvg < 0.15 ? -1 : 0
@@ -337,8 +343,10 @@ processSignalGeneration(SignalState state, SignalConfig config, AdaptiveState ad
     bull = regimeState.currentRegime == 1
     bear = regimeState.currentRegime == -1
 
-    barsOkBull = config.confirmBars <= 1 ? bull : ta.sma(bull ? 1 : 0, config.confirmBars) == 1.0
-    barsOkBear = config.confirmBars <= 1 ? bear : ta.sma(bear ? 1 : 0, config.confirmBars) == 1.0
+    float bullAvg = ta.sma(bull ? 1 : 0, math.max(config.confirmBars, 1))
+    float bearAvg = ta.sma(bear ? 1 : 0, math.max(config.confirmBars, 1))
+    barsOkBull = config.confirmBars <= 1 ? bull : bullAvg == 1.0
+    barsOkBear = config.confirmBars <= 1 ? bear : bearAvg == 1.0
 
     canFire = na(state.lastSignalBar) or (bar_index - state.lastSignalBar >= config.cooldownPeriod)
     htfGateOk = not mtfState.enabled or (mtfState.agreementRatio >= mtfState.minAgreement)
@@ -873,9 +881,11 @@ adaptiveState := processAdaptiveEngine(adaptiveState, adaptiveConfig, atrLength)
 // 3. Process Regime Detection
 regimeState := processRegimeDetection(regimeState, regimeConfig, adaptiveState)
 
-// 4. Process Multi-Timeframe Analysis
-if enableMTFGate
-    mtfState := processMultiTimeframeAnalysis(mtfState, mtfConfig, regimeState.currentRegime)
+// 4. Process Multi-Timeframe Analysis — HTF requests unconditional at global scope
+int htfDir1 = request.security(syminfo.tickerid, htfTimeframe1, htfEmaDirPrev(), barmerge.gaps_off, barmerge.lookahead_on)
+int htfDir2 = request.security(syminfo.tickerid, htfTimeframe2, htfEmaDirPrev(), barmerge.gaps_off, barmerge.lookahead_on)
+int htfDir3 = request.security(syminfo.tickerid, htfTimeframe3, htfEmaDirPrev(), barmerge.gaps_off, barmerge.lookahead_on)
+mtfState := processMultiTimeframeAnalysis(mtfState, mtfConfig, regimeState.currentRegime, array.from(htfDir1, htfDir2, htfDir3))
 
 // 5. Process Filter System
 filterState := processFilterSystem(filterState, filterConfig, adaptiveState, regimeState)
@@ -1250,7 +1260,8 @@ lowestMA = math.min(ma1z, math.min(ma2z, ma3z))
 
 spreadATR = atrz > 0 ? (highestMA - lowestMA) / atrz : 0.0
 minStrengthByType = baseMinStrengthZones * f_strengthFactor_zone()
-amaStep = atrz > 0 ? ta.rma(math.abs(amaz - amaz[1]), atrLenZones) / atrz : 0.0
+amaStepRma = ta.rma(math.abs(amaz - amaz[1]), atrLenZones)
+amaStep = atrz > 0 ? amaStepRma / atrz : 0.0
 amaStepRef = ta.sma(amaStep, autoLookbackZones)
 autoFactor = (amaStepRef > 0) ? (amaStep / amaStepRef) : 1.0
 minStrengthAuto = baseMinStrengthZones * autoFactor
