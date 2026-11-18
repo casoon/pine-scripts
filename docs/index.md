@@ -50,7 +50,8 @@ and whether it reads data that actually carries a signal there.
 ## How the docs are organised
 
 - **Getting started:** add a script to a chart, a first walkthrough, and the catalog with the status of every script.
-- **Concepts:** data validity and the Data Contract, alerts, and the strategy wrappers.
+- **Concepts:** data validity and the Data Contract, alerts, the strategy wrappers, and the
+  pitfalls that produced wrong results here together with the limits of Pine itself.
 - **Indicator groups:** one page per indicator directory, built from the `README.md` in that
   directory. The README on GitHub and the page here are the same text.
 

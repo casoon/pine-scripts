@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Auto Trendlines [WavesUnchained]
-// Version: 1.1.1
+// Version: 1.2.0
 // Author: WavesUnchained
-// Build: 2026-06-11 00:00:00
+// Build: 2026-11-18 00:00:00
 // ============================================================================
 // Automatically fits trendlines through confirmed pivot highs and lows,
 // validated by minimum touch count and ATR-based tolerance.
@@ -14,8 +14,16 @@
 //   ✓ Touch count, violation %, recency and extreme-anchor scoring
 //   ✓ Configurable max lines per direction, projection length
 //   ✓ Sloped / Near-horizontal filter
+//   ✓ Role flip for near-horizontal levels; broken sloped trendlines are dropped
 //   ✓ Retest highlighting with distance label
 //   ✓ Convex hull envelope (optional)
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol (OHLC)
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
 //
 // ============================================================================
 
@@ -30,7 +38,8 @@ pivRight = input.int(5, "Right Bars", minval=1, group=g_pivot,
      tooltip="Right confirmation bars.")
 
 g_line = "Trendlines"
-fitMode    = input.string("Outer", "Line Fit",          options=["OLS","Outer"], group=g_line)
+fitMode    = input.string("Outer", "Line Fit",          options=["OLS","Outer"], group=g_line,
+     tooltip="Combinatorial only: OLS refits the line through all inliers, Outer shifts that fit to the outermost inlier. Directional lines always run through their two anchor pivots.")
 lineMethod = input.string("Directional", "Detection Method", options=["Directional","Combinatorial"], group=g_line)
 minTouches = input.int(3,    "Min Touches",            minval=2, maxval=10, group=g_line)
 tolMult    = input.float(1.0, "Tolerance (× ATR)",      minval=0.05, step=0.05, group=g_line)
@@ -40,6 +49,8 @@ maxPivots  = input.int(30,   "Max Pivots per Direction", minval=10, maxval=100, 
 minSpan    = input.int(15,   "Min Line Span (bars)",    minval=1, group=g_line)
 maxViolPct = input.float(20.0, "Max Violation %",       minval=0.0, maxval=50.0, step=0.5, group=g_line)
 violSrc    = input.string("Close", "Violation Source",  options=["Close","Wick"], group=g_line)
+breakBars  = input.int(2, "Break confirmation (closes)", minval=0, maxval=20, group=g_line,
+     tooltip="After its last touch, a line that sees this many consecutive closes beyond it by more than the tolerance flips its role: broken resistance turns into support (green, dashed), broken support into resistance (red, dashed). If price then closes back through it by the same count, the flipped line is dropped. Only near-horizontal lines (below the Sloped / Flat cutoff) flip; a broken sloped trendline is dropped. 0 = ignore breaks.")
 projectBars = input.int(30,   "Bars past last touch",   minval=0, maxval=500, group=g_line)
 showMode    = input.string("Both", "Show",              options=["Sloped","Near-horizontal","Both"], group=g_line)
 levelThrATR = input.float(0.5, "Sloped / Flat Cutoff (× ATR over span)", minval=0.1, step=0.1, group=g_line)
@@ -92,7 +103,29 @@ var array<line>  resistLines  = array.new<line>()
 var array<line>  supportLines = array.new<line>()
 var array<line>  hullLines    = array.new<line>()
 var array<label> touchLabels  = array.new<label>()
-var array<label> retestLabels = array.new<label>()
+
+// ── Helper: Line state after the last touch ─────────────────────────────────
+// 0 = intact, 1 = flipped (broken and holding on the new side), 2 = failed (flipped, then broken back,
+// or broken while sloped — role reversal is a property of horizontal levels, not of trendlines)
+_lineState(float slope, float intercept, int oldB, int newB, bool isResist, float tol) =>
+    bool canFlip = math.abs(slope * (newB - oldB)) / atr_14 < levelThrATR
+    int state = 0
+    if breakBars > 0 and bar_index > newB
+        int run = 0
+        for iBar = newB + 1 to bar_index
+            lineY = slope * iBar + intercept
+            float c = close[bar_index - iBar]
+            bool beyond = isResist ? c > lineY + tol : c < lineY - tol
+            bool back   = isResist ? c < lineY - tol : c > lineY + tol
+            run := (state == 0 ? beyond : back) ? run + 1 : 0
+            if run >= breakBars
+                if state == 0 and canFlip
+                    state := 1
+                    run := 0
+                else
+                    state := 2
+                    break
+    state
 
 // ── Helper: Add candidate with scoring ────────────────────────────────────────
 _addCandidate(slope, intercept, oldB, newB, touches, sumRes, isResist, topThresh, tol, n, lookback, cSlope, cIntercept, cOldest, cNewest, cTouches, cScore, prices, bars) =>
@@ -115,6 +148,9 @@ _addCandidate(slope, intercept, oldB, newB, touches, sumRes, isResist, topThresh
                             violations += 1
     violPct = 100.0 * violations / math.max(1, span)
 
+    // A flipped line stays; one that failed on its new side as well is dropped
+    bool failed = _lineState(slope, intercept, oldB, newB, isResist, tol) == 2
+
     lineAtCur = slope * bar_index + intercept
     relevant = math.abs(lineAtCur - close) <= atr_14 * relevanceATR
 
@@ -130,10 +166,10 @@ _addCandidate(slope, intercept, oldB, newB, touches, sumRes, isResist, topThresh
             if (isResist and ykx >= topThresh) or (not isResist and ykx <= topThresh)
                 extremeTouches += 1
 
-    hasExtreme = extremeTouches >= 1
-    violOK = hasExtreme or violPct <= maxViolPct
+    // Extreme anchors only earn a score bonus — they never exempt a line from the violation filter
+    violOK = violPct <= maxViolPct
 
-    if violOK and relevant and modeOK
+    if violOK and not failed and relevant and modeOK
         avgRes = touches > 0 ? sumRes / touches : tol
         recency = bar_index - newB
         recBonus = math.max(0.2, 1.0 - (recency * 1.0) / lookback)
@@ -150,7 +186,7 @@ _addCandidate(slope, intercept, oldB, newB, touches, sumRes, isResist, topThresh
         array.push(cScore, score)
 
 // ── Trendline finder ────────────────────────────────────────────────────────
-findTrendlines(array<float> prices, array<int> bars, bool isResist, color lineCol, float atr) =>
+findTrendlines(array<float> prices, array<int> bars, bool isResist, float atr) =>
     n = array.size(prices)
 
     if n >= minTouches and not na(atr) and atr > 0
@@ -358,30 +394,33 @@ findTrendlines(array<float> prices, array<int> bars, bool isResist, color lineCo
                         transp := math.max(0, transp - 30)
                         scaledW := scaledW + 1
 
+                    // Flipped lines take the colour and label side of their new role
+                    bool flipped  = _lineState(slope, intercept, oldB, newB, isResist, tol) == 1
+                    bool roleRes  = flipped ? not isResist : isResist
+                    color roleCol = roleRes ? resistCol : supportCol
+
                     endBar = math.max(newB + projectBars, bar_index)
                     yOld = slope * oldB + intercept
                     yEnd = slope * endBar + intercept
 
                     ln = line.new(oldB, yOld, endBar, yEnd,
-                         color=color.new(lineCol, transp), width=scaledW, style=lineStyleVal)
+                         color=color.new(roleCol, transp), width=scaledW, style=flipped ? line.style_dashed : lineStyleVal)
 
                     if isResist
                         array.push(resistLines, ln)
                     else
                         array.push(supportLines, ln)
 
-                    if showCount
-                        lbl = label.new(endBar, yEnd, str.tostring(actualT),
-                             style=isResist ? label.style_label_down : label.style_label_up,
-                             color=color.new(lineCol, transp), textcolor=color.white, size=size.tiny)
+                    // One label per line at its end: touch count and retest distance share it,
+                    // so labels of converging lines no longer stack on the current bar
+                    string countTxt  = showCount ? str.tostring(actualT) + (flipped ? " · Flip" : "") : (flipped ? "Flip" : "")
+                    string retestTxt = inRetest and retestLabel ? "Retest " + str.tostring(distATR, "0.0#") + " ATR" : ""
+                    string lblTxt    = countTxt != "" and retestTxt != "" ? countTxt + " · " + retestTxt : countTxt + retestTxt
+                    if lblTxt != ""
+                        lbl = label.new(endBar, yEnd, lblTxt,
+                             style=roleRes ? label.style_label_down : label.style_label_up,
+                             color=color.new(roleCol, transp), textcolor=color.white, size=size.small)
                         array.push(touchLabels, lbl)
-
-                    if inRetest and retestLabel
-                        rLbl = label.new(bar_index, lineAtNow,
-                             "Retest " + str.tostring(distATR, "#.0#") + " ATR",
-                             style=label.style_label_left,
-                             color=color.new(lineCol, transp), textcolor=color.white, size=size.tiny)
-                        array.push(retestLabels, rLbl)
 
                     for kk = 0 to array.size(toMark) - 1
                         array.set(used, array.get(toMark, kk), true)
@@ -447,12 +486,9 @@ if barstate.islast
     for lb in touchLabels
         label.delete(lb)
     array.clear(touchLabels)
-    for lb in retestLabels
-        label.delete(lb)
-    array.clear(retestLabels)
 
-    findTrendlines(phPrices, phBars, true, resistCol, atr_14)
-    findTrendlines(plPrices, plBars, false, supportCol, atr_14)
+    findTrendlines(phPrices, phBars, true, atr_14)
+    findTrendlines(plPrices, plBars, false, atr_14)
 
     if showHull
         findHull(phPrices, phBars, true, hullResistCol)

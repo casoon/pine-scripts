@@ -17,6 +17,7 @@ Interprets candle behaviour as a weighted multi-candle sequence instead of relyi
 - Classic candlestick patterns (Engulfing, Hammer, Shooting Star, Morning/Evening Star) as supporting evidence only, not standalone triggers
 - Doji are explicitly separated from Hammer/Shooting-Star detection and exported to the data window
 - Liquidity Sweep detection — a wick pierces a recent N-bar high/low and closes back inside it; informational only, not a BUY/SELL input
+- Hover tooltips on the BUY/SELL, exhaustion, follow-through, failure, candle-role and liquidity-sweep markers listing what triggered them on that candle; these markers are drawn as small text-symbol labels and the 250 most recent are kept
 - Data-window outputs (Bull/Bear Evidence, Pressure, Dominance, Exhaustion, Compression, Trend Context, Range/ATR, Relative Volume) for downstream research/backtesting
 
 ## Scoring
@@ -32,7 +33,7 @@ The sequence sub-measures are intentionally **not** presented as independent vot
 
 A fresh BUY/SELL signal fires when the leading evidence score clears `signalThreshold`, beats the opposite score, improves by at least `minimumSignalChange` since the prior bar, and the trend is not already flagged as exhausted in that direction. With the default setting, signals and alerts are evaluated only after the bar closes; this can be disabled with `Confirm Signals on Bar Close`.
 
-The underlying "in control" state uses hysteresis rather than a single hard threshold: it arms at `signalThreshold` but only disarms once evidence drops `signalExitBuffer` points below it (or the opposite side takes over, or exhaustion trips — both exit immediately). Candle Evidence is ~30% driven by the current single candle, so without this buffer one weak pullback candle mid-trend would drop evidence under the threshold for a bar and re-trigger a "fresh" signal on the next strong candle, producing a signal on almost every bar of an otherwise clean trend leg.
+The underlying "in control" state uses hysteresis rather than a single hard threshold: it arms at `signalThreshold` but only disarms once evidence drops `signalExitBuffer` points below it (or the opposite side takes over, or exhaustion trips — both exit immediately). Candle Evidence is ~30% driven by the current single candle, so without this buffer one weak pullback candle mid-trend would drop evidence under the threshold for a bar and re-trigger a "fresh" signal on the next strong candle, producing a signal on almost every bar of an otherwise clean trend leg. After the state exits — or while exhaustion is present — that side stays locked until its evidence has cooled below the exit level or the opposite side has taken control, so a leg produces at most one BUY or SELL. A side that reaches its threshold while the close is already more than `maxSignalExtension` ATR beyond the Trend EMA in its direction gets no signal and is locked the same way — the signal marks a side taking control, not a leg that is already stretched.
 
 ## Deceleration Engine
 
@@ -40,7 +41,7 @@ For each close-to-close interval in the sequence, progress-per-range measures ho
 
 ## Exhaustion vs. Reversal
 
-Exhaustion is a separate concept from a directional signal. `bullExhaustion` / `bearExhaustion` only evaluate while an existing trend is in place (`trendScore` beyond `exhaustionTrendMin`) and combine opposing-wick rejection, body contraction, deceleration and trend-strength context. A high exhaustion score means the prevailing trend is losing force — it does not by itself imply the opposite direction is now in control; that still requires the opposite evidence score to clear its own threshold.
+Exhaustion is a separate concept from a directional signal. `bullExhaustion` / `bearExhaustion` only evaluate while an existing trend is in place (`trendScore` beyond `exhaustionTrendMin`; `trendScore` is computed even when `Use Trend Context` is off — that switch only removes trend evidence from BUY/SELL and the counter-trend requirement for patterns) and combine opposing-wick rejection, body contraction, deceleration and trend-strength context. A high exhaustion score means the prevailing trend is losing force — it does not by itself imply the opposite direction is now in control; that still requires the opposite evidence score to clear its own threshold.
 
 ## Follow-through / Failure
 

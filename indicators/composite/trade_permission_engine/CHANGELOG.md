@@ -3,7 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- **Signals:** Continuation and Reversal signals are separate — four alerts (`Long/Short Continuation Signal`, `Long/Short Reversal Signal`) replace the two Signal alerts; the signal label carries a `CONT`/`REV` tag. Re-create saved Signal alerts
+- **Signal log:** opt-in table (`Show signal log table`, off by default) of closed signals by side × scenario and by Permission band, with sample size `n`, T1-before-invalidation share and average R after a `spread assumption (ticks)`
+- **Status line:** one text right of the last bar — leading side, scenario, limiting factor, trigger state
+- **Trigger:** `Rejection must sit in a zone (min. Maturity)` — a rejection candle only triggers while price is inside the matching pullback or reversal zone
 - **Position Health:** sixth component Regime/Sideways Risk — net move vs. path length over `Regime efficiency lookback (bars)`, weighted by `Regime/Sideways-Risk weight` (default 10), the same for long and short. The HOLD/PROTECT thresholds were set on the six-component blend
+
+### Changed
+- **Display:** setup `▵`/`▿`, attempt `◇`, health `●`/`○` markers and the pane entry circles are removed; the trigger label shows entry, invalidation and T1. Green/red mean direction only — warnings and Position Health use orange/gray
+- **Position Health:** shown as a state line under (Long) or above (Short) the candles while a tracked trade is open instead of a curve on the Permission axis; score in the data window. Wording is state-only (no "consider exiting"), the band edges are documented as frequency-based
+- **Divergence:** markers are off by default; the `Detect divergence` input is removed (markers alone switch it)
 
 ### Fixed
 - **Pine v6:** the pivot-window high/low and the micro-structure break crosses now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped

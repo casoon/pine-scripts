@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Trade Permission Engine [WavesUnchained]
-// Version: 1.6.0
+// Version: 1.7.0
 // Author: WavesUnchained
-// Build: 2026-11-17 12:00:00
+// Build: 2026-11-18 12:00:00
 // ============================================================================
 // Answers "does the market currently permit trading Long or Short here", not
 // "how probable is this specific setup" - the successor to Directional
@@ -38,17 +38,22 @@
 //   ✓ Target/Invalidation via a real recent-pivot search (not just the
 //     latest swing), scenario-aware T2, CRV feasibility gating the score,
 //     drawn on the price chart via force_overlay
-//   ✓ Display: Permission (Long/Short) and Position Health as plain value
-//     curves - height is magnitude, same convention any oscillator uses -
-//     plus a lean circle marker on the actual entry event instead of a
-//     separate state lane, no table
+//   ✓ Continuation and Reversal signals are separate: own alerts, own tags on
+//     the signal label, own rows in the optional signal log
+//   ✓ Display: Permission (Long/Short) as plain value curves, one status line at
+//     the last bar (scenario, limiting factor, trigger state), one signal label
+//     on price (entry, invalidation, T1). Position Health is a neutral colour
+//     band on price, only while a tracked trade is open
+//   ✓ Optional signal log (off by default): closed signals split by side,
+//     scenario and Permission band - sample sizes shown with every figure
 //   ✓ Position Health (Long/Short) - a second, fully decoupled score answering
 //     "is an ALREADY-OPEN position still structurally healthy", not "is a new
 //     entry attractive here". Weighted (not multiplicative-gated) blend of
 //     continuous Live Quality, Pullback Health, Trend Progress, Trend Fatigue,
-//     Structure Intact and Regime/Sideways-Risk, classified into four states
-//     (HOLD/PROTECT/REDUCE/EXIT) - never reads CRV, Trigger state or the
-//     trade-lifecycle machinery below it
+//     Structure Intact and Regime/Sideways-Risk, classified into four state
+//     bands (HOLD/PROTECT/REDUCE/EXIT) - a state indicator whose band edges
+//     follow the score's own distribution, not trade outcomes - never reads
+//     CRV, Trigger state or the trade-lifecycle machinery below it
 //
 // Deliberately not implemented (see README "Deliberate scope cuts"):
 // Opportunity Window lifecycle staging, event-only score updates, a full
@@ -178,12 +183,12 @@ string oscillatorInput = input.string("Stochastic RSI", "Oscillator", options = 
 int customOscLen = input.int(14, "Custom oscillator length", minval = 5, maxval = 100, group = GROUP_EXHAUSTION)
 int customOscSmooth = input.int(3, "Custom oscillator smoothing", minval = 1, maxval = 20, group = GROUP_EXHAUSTION)
 int exhaustionRecentBarsInput = input.int(5, "Recent-bars window (deterioration check)", minval = 2, maxval = 20, group = GROUP_EXHAUSTION)
-bool divergenceEnabledInput = input.bool(true, "Detect regular and hidden divergence (display only)", tooltip = "Divergence is found at confirmed pivots and therefore arrives late; it is shown as warning markers only and does not feed Permission or the signals.", group = GROUP_EXHAUSTION)
 int divergenceMaxBarsInput = input.int(120, "Maximum bars between divergence pivots", minval = 10, maxval = 500, group = GROUP_EXHAUSTION)
 float exhaustionFloorInput = input.float(0.15, "Exhaustion floor", minval = 0.0, maxval = 1.0, step = 0.05, group = GROUP_EXHAUSTION)
 
 bool microPivotLenAutoInput = input.bool(true, "Auto micro-swing length (pivotLen / 3)", group = GROUP_TRIGGER)
 int customMicroPivotLenInput = input.int(3, "Custom micro-swing length", minval = 1, maxval = 20, group = GROUP_TRIGGER)
+float rejectionZoneMinInput = input.float(25.0, "Rejection must sit in a zone (min. Maturity)", minval = 0.0, maxval = 100.0, step = 5.0, tooltip = "A rejection candle only counts as a trigger while the matching side's Continuation or Reversal Maturity is at least this value - i.e. price is inside the pullback or reversal zone. 0 accepts a rejection anywhere.", group = GROUP_TRIGGER)
 float rejectionCloseLocInput = input.float(0.6, "Rejection-at-extreme close location", minval = 0.3, maxval = 0.95, step = 0.05, tooltip = "Same-bar leading trigger: a marginal new extreme that closes back this far into the bar's range.", group = GROUP_TRIGGER)
 int acceptanceBarsInput = input.int(3, "Bars to reach full Acceptance after confirmation", minval = 1, maxval = 20, group = GROUP_TRIGGER)
 float triggerWeightInput = input.float(70.0, "Trigger weight (Confirmation)", minval = 0.0, maxval = 100.0, group = GROUP_TRIGGER)
@@ -214,6 +219,9 @@ float scenarioHysteresisMarginInput = input.float(10.0, "Continuation/Reversal d
 float permissionThresholdInput = input.float(55.0, "Permission threshold (Setup/Watch)", minval = 0, maxval = 100, tooltip = "Gates longSetup/shortSetup, and so Trigger eligibility and the Setup/Trigger/Signal alerts; also drawn as a reference line. Permission is the geometric mean of its gated factors (each 0-1), so 55 means the factors average around 0.55.", group = GROUP_DISPLAY)
 float signalRetentionInput = input.float(50.0, "Signal retention (% of Permission)", minval = 0, maxval = 100, step = 5, tooltip = "Gates the Long/Short Signal alerts: a Trigger counts as a signal when Active Permission (after confirmation, target feasibility and decay) still holds at least this share of the side's Permission.", group = GROUP_DISPLAY)
 
+bool showSignalLogInput = input.bool(false, "Show signal log table", tooltip = "Calibration aid, not a result sheet: closed Signals of the loaded chart history, split by side, scenario and Permission band. Each row shows its sample size n; rows with n < 30 say nothing about the signal. A signal counts as won when T1 is reached before the invalidation level and as lost when invalidation comes first (the same bar: invalidation wins); trades cancelled by an opposite trigger are not counted. R is measured from the close of the signal bar to the invalidation level and exits at T1.", group = GROUP_DISPLAY)
+float spreadTicksInput = input.float(0.0, "Signal log: spread assumption (ticks)", minval = 0.0, maxval = 1000.0, step = 0.5, tooltip = "Subtracted from every closed signal's R as spread / risk. Set to the instrument's typical spread for a cost-adjusted R.", group = GROUP_DISPLAY)
+
 // Position Health answers a different question than Permission above ("is an
 // EXISTING position still structurally healthy", not "is a NEW entry attractive
 // here") - so it's a weighted combination (a single weak factor must not crash
@@ -239,12 +247,12 @@ float trendFatigueGrowthScaleInput = input.float(3.0, "Trend Fatigue growth comp
 // literally unreachable (0% of 34,776 bars) - these track the actual
 // distribution instead: HOLD ~top 2% (p98), PROTECT ~next 16% (p82-98),
 // REDUCE ~next 50% (p32-82), EXIT ~bottom 32%.
-float healthHoldThresholdInput = input.float(68.0, "HOLD threshold", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
-float healthProtectThresholdInput = input.float(54.0, "PROTECT threshold", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
-float healthReduceThresholdInput = input.float(36.0, "REDUCE threshold", minval = 0.0, maxval = 100.0, group = GROUP_POSITION_HEALTH)
-string healthDisplayModeInput = input.string("Auto", "Position Health Display", options = ["Auto", "Long", "Short", "Off"], tooltip = "Which side's Position Health curve to show. Auto shows whichever side currently has a TPE-tracked trade open (empty when neither does) - Long/Short shows that side unconditionally (e.g. to watch a manually-entered position TPE itself never triggered); Off hides it entirely. Long and Short together on one pane axis answered a question nobody has ('what's the hypothetical health of a position I'm not in') - only the side you actually hold matters.", group = GROUP_POSITION_HEALTH)
+float healthHoldThresholdInput = input.float(68.0, "HOLD threshold", minval = 0.0, maxval = 100.0, tooltip = "Band edge. Position Health is a state indicator: the four bands (HOLD/PROTECT/REDUCE/EXIT) follow how often the score takes these values, not how a position performed afterwards.", group = GROUP_POSITION_HEALTH)
+float healthProtectThresholdInput = input.float(54.0, "PROTECT threshold", minval = 0.0, maxval = 100.0, tooltip = "Band edge, frequency-based - see HOLD threshold.", group = GROUP_POSITION_HEALTH)
+float healthReduceThresholdInput = input.float(36.0, "REDUCE threshold", minval = 0.0, maxval = 100.0, tooltip = "Band edge, frequency-based - see HOLD threshold.", group = GROUP_POSITION_HEALTH)
+string healthDisplayModeInput = input.string("Auto", "Position Health Display", options = ["Auto", "Long", "Short", "Off"], tooltip = "Which side's Position Health band to show on the price chart. Auto shows whichever side currently has a TPE-tracked trade open (nothing when neither does) - Long/Short shows that side unconditionally (e.g. to watch a manually-entered position TPE itself never triggered); Off hides it. The score itself is always in the data window.", group = GROUP_POSITION_HEALTH)
 bool debugLogPositionHealthInput = input.bool(false, "Debug: log Position Health components (Pine Logs)", tooltip = "Logs all 6 components + final score + state per bar via log.info() - does NOT count against the plot/alertcondition output cap. Open the Pine Logs panel to read.", group = GROUP_POSITION_HEALTH)
-bool showDivergenceMarkersInput = input.bool(true, "Show divergence warning markers", tooltip = "Marks bearish divergence (warning for an existing LONG) and bullish divergence (warning for an existing SHORT) on the price chart, reusing this file's existing divergence detection. Purely visual - does not feed the Position Health score itself.", group = GROUP_POSITION_HEALTH)
+bool showDivergenceMarkersInput = input.bool(false, "Show divergence markers", tooltip = "Marks regular/hidden divergence found at confirmed pivots (bearish above the high, bullish below the low). It arrives late and feeds neither Permission, Position Health nor the signals.", group = GROUP_POSITION_HEALTH)
 
 // ============================================================================
 // Timeframe-adaptive parameter resolution
@@ -841,10 +849,10 @@ if newPivotHigh
 bool validLowDivSpan = not na(lastLowPivotDivBar) and not na(previousLowPivotDivBar) and lastLowPivotDivBar - previousLowPivotDivBar <= divergenceMaxBarsInput
 bool validHighDivSpan = not na(lastHighPivotDivBar) and not na(previousHighPivotDivBar) and lastHighPivotDivBar - previousHighPivotDivBar <= divergenceMaxBarsInput
 
-bool regularBullDiv = divergenceEnabledInput and validLowDivSpan and lastLowPivotPrice < previousLowPivotPrice - pivotTolerance and lastLowPivotOsc > previousLowPivotOsc
-bool hiddenBullDiv = divergenceEnabledInput and validLowDivSpan and lastLowPivotPrice > previousLowPivotPrice + pivotTolerance and lastLowPivotOsc < previousLowPivotOsc
-bool regularBearDiv = divergenceEnabledInput and validHighDivSpan and lastHighPivotPrice > previousHighPivotPrice + pivotTolerance and lastHighPivotOsc < previousHighPivotOsc
-bool hiddenBearDiv = divergenceEnabledInput and validHighDivSpan and lastHighPivotPrice < previousHighPivotPrice - pivotTolerance and lastHighPivotOsc > previousHighPivotOsc
+bool regularBullDiv = validLowDivSpan and lastLowPivotPrice < previousLowPivotPrice - pivotTolerance and lastLowPivotOsc > previousLowPivotOsc
+bool hiddenBullDiv = validLowDivSpan and lastLowPivotPrice > previousLowPivotPrice + pivotTolerance and lastLowPivotOsc < previousLowPivotOsc
+bool regularBearDiv = validHighDivSpan and lastHighPivotPrice > previousHighPivotPrice + pivotTolerance and lastHighPivotOsc < previousHighPivotOsc
+bool hiddenBearDiv = validHighDivSpan and lastHighPivotPrice < previousHighPivotPrice - pivotTolerance and lastHighPivotOsc > previousHighPivotOsc
 
 
 
@@ -1082,8 +1090,12 @@ if not na(microPivotHigh)
 if not na(microPivotLow)
     microLastLow := microPivotLow
 
-bool longRejectionAtExtreme = low < low[1] and close > low[1] and f_safeDiv(close - low, candleRange, 0.0) >= rejectionCloseLocInput
-bool shortRejectionAtExtreme = high > high[1] and close < high[1] and f_safeDiv(high - close, candleRange, 0.0) >= rejectionCloseLocInput
+// A rejection candle is common on any bar - it only counts as a trigger while
+// price is inside the matching side's pullback (Continuation) or reversal zone.
+bool longInTriggerZone = math.max(continuationMaturityLong, reversalMaturityLong) >= rejectionZoneMinInput
+bool shortInTriggerZone = math.max(continuationMaturityShort, reversalMaturityShort) >= rejectionZoneMinInput
+bool longRejectionAtExtreme = longInTriggerZone and low < low[1] and close > low[1] and f_safeDiv(close - low, candleRange, 0.0) >= rejectionCloseLocInput
+bool shortRejectionAtExtreme = shortInTriggerZone and high > high[1] and close < high[1] and f_safeDiv(high - close, candleRange, 0.0) >= rejectionCloseLocInput
 bool _xMicroHigh = ta.crossover(close, microLastHigh)
 bool _xMicroLow  = ta.crossunder(close, microLastLow)
 bool longMicroBreak = not na(microLastHigh) and _xMicroHigh
@@ -1226,10 +1238,20 @@ float htfFactorShort = f_gatedFactor(100.0 - htfAlignLong, htfFloorInput)
 // 0-1 factors collapses toward the floor and made any fixed threshold either
 // unreachable or arbitrary. Continuation carries the one leg-quality factor;
 // Reversal carries none (a clean impulse argues against reversing it).
-float longContinuationPermission = 100.0 * math.pow(f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(continuationMaturityLong, maturityFloorInput) * f_gatedFactor(bearExhaustion, exhaustionFloorInput) * htfFactorLong, 1.0 / 4.0)
-float longReversalPermission = 100.0 * math.pow(f_gatedFactor(reversalMaturityLong, maturityFloorInput) * f_gatedFactor(bearImpulseExhaustion, exhaustionFloorInput) * htfFactorLong, 1.0 / 3.0)
-float shortContinuationPermission = 100.0 * math.pow(f_gatedFactor(referenceLegQuality, contextFloorInput) * f_gatedFactor(continuationMaturityShort, maturityFloorInput) * f_gatedFactor(bullExhaustion, exhaustionFloorInput) * htfFactorShort, 1.0 / 4.0)
-float shortReversalPermission = 100.0 * math.pow(f_gatedFactor(reversalMaturityShort, maturityFloorInput) * f_gatedFactor(bullImpulseExhaustion, exhaustionFloorInput) * htfFactorShort, 1.0 / 3.0)
+float legQualityFactor = f_gatedFactor(referenceLegQuality, contextFloorInput)
+float contMaturityFactorLong = f_gatedFactor(continuationMaturityLong, maturityFloorInput)
+float contMaturityFactorShort = f_gatedFactor(continuationMaturityShort, maturityFloorInput)
+float revMaturityFactorLong = f_gatedFactor(reversalMaturityLong, maturityFloorInput)
+float revMaturityFactorShort = f_gatedFactor(reversalMaturityShort, maturityFloorInput)
+float contExhaustionFactorLong = f_gatedFactor(bearExhaustion, exhaustionFloorInput)
+float contExhaustionFactorShort = f_gatedFactor(bullExhaustion, exhaustionFloorInput)
+float revExhaustionFactorLong = f_gatedFactor(bearImpulseExhaustion, exhaustionFloorInput)
+float revExhaustionFactorShort = f_gatedFactor(bullImpulseExhaustion, exhaustionFloorInput)
+
+float longContinuationPermission = 100.0 * math.pow(legQualityFactor * contMaturityFactorLong * contExhaustionFactorLong * htfFactorLong, 1.0 / 4.0)
+float longReversalPermission = 100.0 * math.pow(revMaturityFactorLong * revExhaustionFactorLong * htfFactorLong, 1.0 / 3.0)
+float shortContinuationPermission = 100.0 * math.pow(legQualityFactor * contMaturityFactorShort * contExhaustionFactorShort * htfFactorShort, 1.0 / 4.0)
+float shortReversalPermission = 100.0 * math.pow(revMaturityFactorShort * revExhaustionFactorShort * htfFactorShort, 1.0 / 3.0)
 
 // Continuation and Reversal only swap dominance once one leads by a margin
 // (hysteresis) - otherwise the dominant scenario (and so T2/Invalidation
@@ -1563,6 +1585,85 @@ float shortScoreRaw = shortScorePreCrv * shortCrvFactor * shortDecayFactor
 bool newLongSignal = newLongTrigger and longPermission > 0 and longScoreRaw >= longPermission * signalRetentionInput / 100.0
 bool newShortSignal = newShortTrigger and shortPermission > 0 and shortScoreRaw >= shortPermission * signalRetentionInput / 100.0
 
+// ============================================================================
+// Signal log: every Signal is followed to its outcome so Continuation vs.
+// Reversal and the Permission bands can be compared on the loaded history.
+// Won = T1 reached before the invalidation level, lost = invalidation first
+// (same bar: invalidation wins), cancelled by an opposite trigger = not
+// counted. R runs from the signal bar's close to the invalidation level and
+// exits at T1, minus the spread assumption. Groups: 0 Long Continuation,
+// 1 Long Reversal, 2 Short Continuation, 3 Short Reversal. Bands: Permission at
+// the trigger in [threshold, +10), [+10, +20), >= +20.
+// ============================================================================
+
+f_permissionBand(float permission) =>
+    permission >= permissionThresholdInput + 20.0 ? 2 : permission >= permissionThresholdInput + 10.0 ? 1 : 0
+
+f_logResult(array<float> n, array<float> wins, array<float> sumR, int idx, bool won, float r) =>
+    array.set(n, idx, array.get(n, idx) + 1.0)
+    array.set(wins, idx, array.get(wins, idx) + (won ? 1.0 : 0.0))
+    array.set(sumR, idx, array.get(sumR, idx) + r)
+
+var array<float> groupN = array.new_float(4, 0.0)
+var array<float> groupWins = array.new_float(4, 0.0)
+var array<float> groupSumR = array.new_float(4, 0.0)
+var array<float> bandN = array.new_float(3, 0.0)
+var array<float> bandWins = array.new_float(3, 0.0)
+var array<float> bandSumR = array.new_float(3, 0.0)
+
+float spreadPrice = spreadTicksInput * syminfo.mintick
+
+var bool longSigOpen = false
+var int longSigGroup = 0
+var int longSigBand = 0
+var float longSigEntry = na
+var float longSigRisk = na
+var bool shortSigOpen = false
+var int shortSigGroup = 2
+var int shortSigBand = 0
+var float shortSigEntry = na
+var float shortSigRisk = na
+
+if newLongSignal
+    longSigOpen := true
+    longSigGroup := longIsContinuation ? 0 : 1
+    longSigBand := f_permissionBand(longPermission)
+    longSigEntry := close
+    longSigRisk := math.max(close - nz(invLongFrozen, close), atrSafe * 0.1)
+
+if newShortSignal
+    shortSigOpen := true
+    shortSigGroup := shortIsContinuation ? 2 : 3
+    shortSigBand := f_permissionBand(shortPermission)
+    shortSigEntry := close
+    shortSigRisk := math.max(nz(invShortFrozen, close) - close, atrSafe * 0.1)
+
+if longSigOpen and longCancelled
+    longSigOpen := false
+else if longSigOpen and longInvHitNow
+    float rLoss = -1.0 - spreadPrice / longSigRisk
+    f_logResult(groupN, groupWins, groupSumR, longSigGroup, false, rLoss)
+    f_logResult(bandN, bandWins, bandSumR, longSigBand, false, rLoss)
+    longSigOpen := false
+else if longSigOpen and longT1HitNow
+    float rWin = (t1LongFrozen - longSigEntry - spreadPrice) / longSigRisk
+    f_logResult(groupN, groupWins, groupSumR, longSigGroup, true, rWin)
+    f_logResult(bandN, bandWins, bandSumR, longSigBand, true, rWin)
+    longSigOpen := false
+
+if shortSigOpen and shortCancelled
+    shortSigOpen := false
+else if shortSigOpen and shortInvHitNow
+    float rLossShort = -1.0 - spreadPrice / shortSigRisk
+    f_logResult(groupN, groupWins, groupSumR, shortSigGroup, false, rLossShort)
+    f_logResult(bandN, bandWins, bandSumR, shortSigBand, false, rLossShort)
+    shortSigOpen := false
+else if shortSigOpen and shortT1HitNow
+    float rWinShort = (shortSigEntry - t1ShortFrozen - spreadPrice) / shortSigRisk
+    f_logResult(groupN, groupWins, groupSumR, shortSigGroup, true, rWinShort)
+    f_logResult(bandN, bandWins, bandSumR, shortSigBand, true, rWinShort)
+    shortSigOpen := false
+
 float smoothedLong = ta.ema(longScoreRaw, smoothingInput)
 float smoothedShort = ta.ema(shortScoreRaw, smoothingInput)
 
@@ -1583,8 +1684,10 @@ alertcondition(newLongSetup, "TPE1 Long Setup", "TPE1: Long permission rose abov
 alertcondition(newShortSetup, "TPE1 Short Setup", "TPE1: Short permission rose above the threshold")
 alertcondition(newLongTrigger, "TPE1 Long Trigger", "TPE1: Long trigger event (rejection at the extreme or close above the last micro swing high)")
 alertcondition(newShortTrigger, "TPE1 Short Trigger", "TPE1: Short trigger event (rejection at the extreme or close below the last micro swing low)")
-alertcondition(newLongSignal, "TPE1 Long Signal", "TPE1: Long signal - trigger with Permission above threshold and target feasibility retained")
-alertcondition(newShortSignal, "TPE1 Short Signal", "TPE1: Short signal - trigger with Permission above threshold and target feasibility retained")
+alertcondition(newLongSignal and longIsContinuation, "TPE1 Long Continuation Signal", "TPE1: Long Continuation signal - trigger with Permission above threshold and target feasibility retained")
+alertcondition(newLongSignal and not longIsContinuation, "TPE1 Long Reversal Signal", "TPE1: Long Reversal signal - trigger with Permission above threshold and target feasibility retained")
+alertcondition(newShortSignal and shortIsContinuation, "TPE1 Short Continuation Signal", "TPE1: Short Continuation signal - trigger with Permission above threshold and target feasibility retained")
+alertcondition(newShortSignal and not shortIsContinuation, "TPE1 Short Reversal Signal", "TPE1: Short Reversal signal - trigger with Permission above threshold and target feasibility retained")
 alertcondition(longT1HitNow, "TPE1 Long T1 Hit", "TPE1: price reached the Long reference level T1")
 alertcondition(longT2HitNow, "TPE1 Long T2 Hit", "TPE1: price reached the Long reference level T2")
 alertcondition(longInvHitNow, "TPE1 Long Invalidated", "TPE1: price crossed the Long invalidation level")
@@ -1595,24 +1698,19 @@ alertcondition(newShortTrigger and longTradeOpen, "TPE1 Long Cancelled", "TPE1: 
 alertcondition(newLongTrigger and shortTradeOpen, "TPE1 Short Cancelled", "TPE1: Short setup cancelled by opposite trigger")
 
 // Position Health state-transition alerts - independent of the trade-lifecycle/
-// CRV/decay alerts above; these fire on an existing Long/Short position's
-// structural health crossing into a new state, regardless of whether TPE1
-// itself ever triggered that position. Limited to PROTECT only (the state
-// this feature actually closes a gap on): alertcondition() calls count
-// against the same script-wide "plot" output cap as plot() (empirically
-// confirmed - RE10140 fires from total plot+alertcondition+hline+bgcolor
-// count, not just plot() calls), and this script was already using nearly
-// its entire budget before Position Health. HOLD/REDUCE/EXIT transitions
-// stay visible via the state-colored pane line instead of a dedicated alert.
+// CRV/decay alerts above. Limited to PROTECT only: alertcondition() calls count
+// against the same script-wide output cap as plot() (RE10140 fires from total
+// plot+alertcondition+hline+bgcolor count).
 bool longEnteredProtect = longPositionHealthStateCode == 2 and longPositionHealthStateCode[1] != 2
 bool shortEnteredProtect = shortPositionHealthStateCode == 2 and shortPositionHealthStateCode[1] != 2
 
-alertcondition(longEnteredProtect, "TPE1 Long Position Health: PROTECT", "TPE1: existing Long position health entered PROTECT")
-alertcondition(shortEnteredProtect, "TPE1 Short Position Health: PROTECT", "TPE1: existing Short position health entered PROTECT")
+alertcondition(longEnteredProtect, "TPE1 Long Position Health: PROTECT", "TPE1: existing Long position health entered the PROTECT band")
+alertcondition(shortEnteredProtect, "TPE1 Short Position Health: PROTECT", "TPE1: existing Short position health entered the PROTECT band")
 
 // ============================================================================
-// Price-chart Target/Invalidation lines (force_overlay from a non-overlay
-// pane). Dimmed to gray once the setup closes (hit, invalidated or cancelled).
+// Signal label with Target/Invalidation lines (force_overlay from a non-overlay
+// pane). Lines dim to gray once the setup closes (hit, invalidated or
+// cancelled). Colour = direction only.
 // ============================================================================
 
 var line t1LongLine = na
@@ -1626,10 +1724,10 @@ if newLongTrigger and showTargetsInput
     line.delete(invLongLine)
     label.delete(longTriggerLabel)
     t1LongLine := line.new(bar_index, t1LongFrozen, bar_index + targetLineBarsInput, t1LongFrozen, color = color.new(color.green, 0), style = line.style_dashed, width = 1, force_overlay = true)
-    invLongLine := line.new(bar_index, invLongFrozen, bar_index + targetLineBarsInput, invLongFrozen, color = color.new(color.red, 0), style = line.style_dotted, width = 1, force_overlay = true)
-    longTriggerLabel := label.new(bar_index, low, "Long · T1 " + t1LongTypeFrozen, style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny, force_overlay = true)
+    invLongLine := line.new(bar_index, invLongFrozen, bar_index + targetLineBarsInput, invLongFrozen, color = color.new(color.green, 40), style = line.style_dotted, width = 1, force_overlay = true)
+    longTriggerLabel := label.new(bar_index, low, "Long " + (newLongSignal ? "Signal " : "Trigger ") + (longIsContinuation ? "CONT" : "REV") + "\nEntry " + str.tostring(close, format.mintick) + "\nInv " + str.tostring(invLongFrozen, format.mintick) + "\nT1 " + str.tostring(t1LongFrozen, format.mintick), style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small, force_overlay = true)
     if useT2Input
-        t2LongLine := line.new(bar_index, t2LongFrozen, bar_index + targetLineBarsInput, t2LongFrozen, color = color.new(color.lime, 25), style = line.style_dashed, width = 1, force_overlay = true)
+        t2LongLine := line.new(bar_index, t2LongFrozen, bar_index + targetLineBarsInput, t2LongFrozen, color = color.new(color.green, 25), style = line.style_dashed, width = 1, force_overlay = true)
 
 if longInvHitNow or (longT2HitNow and useT2Input) or (longT1HitNow and not useT2Input) or longCancelled
     color dimColor = color.new(color.gray, 70)
@@ -1648,10 +1746,10 @@ if newShortTrigger and showTargetsInput
     line.delete(invShortLine)
     label.delete(shortTriggerLabel)
     t1ShortLine := line.new(bar_index, t1ShortFrozen, bar_index + targetLineBarsInput, t1ShortFrozen, color = color.new(color.red, 0), style = line.style_dashed, width = 1, force_overlay = true)
-    invShortLine := line.new(bar_index, invShortFrozen, bar_index + targetLineBarsInput, invShortFrozen, color = color.new(color.green, 0), style = line.style_dotted, width = 1, force_overlay = true)
-    shortTriggerLabel := label.new(bar_index, high, "Short · T1 " + t1ShortTypeFrozen, style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny, force_overlay = true)
+    invShortLine := line.new(bar_index, invShortFrozen, bar_index + targetLineBarsInput, invShortFrozen, color = color.new(color.red, 40), style = line.style_dotted, width = 1, force_overlay = true)
+    shortTriggerLabel := label.new(bar_index, high, "Short " + (newShortSignal ? "Signal " : "Trigger ") + (shortIsContinuation ? "CONT" : "REV") + "\nEntry " + str.tostring(close, format.mintick) + "\nInv " + str.tostring(invShortFrozen, format.mintick) + "\nT1 " + str.tostring(t1ShortFrozen, format.mintick), style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small, force_overlay = true)
     if useT2Input
-        t2ShortLine := line.new(bar_index, t2ShortFrozen, bar_index + targetLineBarsInput, t2ShortFrozen, color = color.new(color.maroon, 25), style = line.style_dashed, width = 1, force_overlay = true)
+        t2ShortLine := line.new(bar_index, t2ShortFrozen, bar_index + targetLineBarsInput, t2ShortFrozen, color = color.new(color.red, 25), style = line.style_dashed, width = 1, force_overlay = true)
 
 if shortInvHitNow or (shortT2HitNow and useT2Input) or (shortT1HitNow and not useT2Input) or shortCancelled
     color dimColorShort = color.new(color.gray, 70)
@@ -1660,223 +1758,148 @@ if shortInvHitNow or (shortT2HitNow and useT2Input) or (shortT1HitNow and not us
     line.set_color(invShortLine, dimColorShort)
 
 // ============================================================================
-// Setup-phase markers (price-chart overlay). The pane's Permission curve
-// below shows WHICH side is currently permitted, but a permission phase
-// starting is itself worth marking directly on price - a small, low-key
-// event marker (not a trade signal - the Trigger labels above already own
-// that), same bounded-history-array pattern as the other overlay markers.
+// Position Health: a state line on price (under the candles for Long, above for
+// Short) while a tracked trade is open (or the side forced via the display
+// input), plus one warning marker when the state
+// drops out of PROTECT/HOLD. Warnings are orange, never green/red - those mean
+// direction only. Health is a state indicator, not an exit instruction.
 // ============================================================================
 
-int maxSetupLabelsCount = 30
-var array<label> longSetupLabels = array.new_label()
-var array<label> shortSetupLabels = array.new_label()
+f_healthStateName(int code) => code == 3 ? "HOLD" : code == 2 ? "PROTECT" : code == 1 ? "REDUCE" : "EXIT"
+f_healthLineColor(int code) => code == 3 ? color.new(color.gray, 40) : code == 2 ? #ffd600 : code == 1 ? #ff6f00 : #bf360c
 
-if newLongSetup
-    array.push(longSetupLabels, label.new(bar_index, low - atrSafe * 0.3, "▵", style = label.style_none, color = color(na), textcolor = color.new(color.green, 40), size = size.tiny, force_overlay = true, tooltip = "Long setup - market permission phase began"))
-    if array.size(longSetupLabels) > maxSetupLabelsCount
-        label.delete(array.shift(longSetupLabels))
-
-if newShortSetup
-    array.push(shortSetupLabels, label.new(bar_index, high + atrSafe * 0.3, "▿", style = label.style_none, color = color(na), textcolor = color.new(color.red, 40), size = size.tiny, force_overlay = true, tooltip = "Short setup - market permission phase began"))
-    if array.size(shortSetupLabels) > maxSetupLabelsCount
-        label.delete(array.shift(shortSetupLabels))
-
-// BROKEN markers - a rejection-at-extreme or micro-swing break just fired
-// (Trigger state entering 1), "needs follow-through" per the state machine
-// above. BROKEN reverts to UNTRIGGERED within a bar or two very often in
-// normal price action, too transient to be its own pane series - a small
-// hollow marker here says "an attempt happened" without claiming it held.
-int maxBrokenLabelsCount = 30
-var array<label> longBrokenLabels = array.new_label()
-var array<label> shortBrokenLabels = array.new_label()
-
-bool longEnteredBroken = longTriggerState == 1 and longTriggerState[1] != 1
-bool shortEnteredBroken = shortTriggerState == 1 and shortTriggerState[1] != 1
-
-if longEnteredBroken
-    array.push(longBrokenLabels, label.new(bar_index, low - atrSafe * 0.3, "◇", style = label.style_none, color = color(na), textcolor = color.new(color.green, 55), size = size.tiny, force_overlay = true, tooltip = "Long trigger attempt - needs follow-through"))
-    if array.size(longBrokenLabels) > maxBrokenLabelsCount
-        label.delete(array.shift(longBrokenLabels))
-
-if shortEnteredBroken
-    array.push(shortBrokenLabels, label.new(bar_index, high + atrSafe * 0.3, "◇", style = label.style_none, color = color(na), textcolor = color.new(color.red, 55), size = size.tiny, force_overlay = true, tooltip = "Short trigger attempt - needs follow-through"))
-    if array.size(shortBrokenLabels) > maxBrokenLabelsCount
-        label.delete(array.shift(shortBrokenLabels))
-
-// ============================================================================
-// Position Health downgrade markers (price-chart overlay). A history of
-// small warning labels every time Long/Short Position Health drops a state
-// (HOLD->PROTECT->REDUCE->EXIT) - so "where did weakness begin" is visible
-// directly on the price chart across the whole visible history, not just as
-// the Health curve's color in the pane below. Bounded rolling array (like
-// pivotHighHistory/pivotLowHistory above) so history doesn't accumulate
-// without limit.
-// A single short, plain action clause - no state names, no scores, no
-// comparison to the other side. Earlier versions ("was PROTECT (cooling,
-// protect gains), now REDUCE (weakening, cut size), score 47.4 - for
-// comparison Long is EXIT...") were still too dense to read at a glance -
-// this is deliberately the shortest version that still says what to DO.
-f_healthStateAction(int code) => code == 2 ? "getting risky - start protecting profit" : code == 1 ? "weak - consider a smaller position" : "broken - consider exiting"
-
-// These chart markers stay independent of WHICH side healthDisplayModeInput
-// picks for the pane's Health curve (Auto/Long/Short) - only the master
-// Off switch hides them, same as before this input was split in two.
 bool healthDisplayEnabled = healthDisplayModeInput != "Off"
+bool showLongHealth = healthDisplayModeInput == "Long" or (healthDisplayModeInput == "Auto" and longTradeOpen)
+bool showShortHealth = healthDisplayModeInput == "Short" or (healthDisplayModeInput == "Auto" and shortTradeOpen)
 
 int maxHealthWarningLabelsCount = 30
+var array<label> longHealthWarningLabels = array.new_label()
+var array<label> shortHealthWarningLabels = array.new_label()
 
-// Only mark downgrades FROM PROTECT or HOLD (stateCode[1] >= 2) - a side that
-// spends most of its time in REDUCE/EXIT (e.g. Short during a sustained
-// uptrend) constantly flickers back and forth across that boundary; marking
-// every one of those is noise, not a real "this was fine, now it's not"
-// event. A drop that started from PROTECT/HOLD is the meaningful case.
 bool longHealthDowngraded = longPositionHealthStateCode < longPositionHealthStateCode[1] and longPositionHealthStateCode[1] >= 2
 bool shortHealthDowngraded = shortPositionHealthStateCode < shortPositionHealthStateCode[1] and shortPositionHealthStateCode[1] >= 2
 
-// Mirror filter for upgrades: only mark a rise INTO PROTECT or HOLD
-// (stateCode >= 2), not every REDUCE<->EXIT wobble - the same noise this
-// file's REDUCE/EXIT boundary produces for downgrades applies symmetrically
-// here. This is deliberate even though it means a plain EXIT->REDUCE tick
-// (a natural first example to reach for) does NOT get marked - that
-// boundary is exactly where the chronic flickering happens.
-bool longHealthUpgraded = longPositionHealthStateCode > longPositionHealthStateCode[1] and longPositionHealthStateCode >= 2
-bool shortHealthUpgraded = shortPositionHealthStateCode > shortPositionHealthStateCode[1] and shortPositionHealthStateCode >= 2
-
-var array<label> longHealthWarningLabels = array.new_label()
-var array<label> shortHealthWarningLabels = array.new_label()
-var array<label> longHealthUpgradeLabels = array.new_label()
-var array<label> shortHealthUpgradeLabels = array.new_label()
-
-// Neutral, genuinely small marker - style_none draws floating text with no
-// background bubble, unlike style_circle (used in an earlier pass) which
-// renders a fixed-size filled disc regardless of the size= setting. Colored
-// by the side it concerns (green = long, red = short - this file's existing
-// convention throughout, e.g. the Permission/Position Health curves), not a flat
-// warning orange - and brightness/opacity scales with severity: a mild
-// HOLD->PROTECT slip is faint, a drop into EXIT is much more visible.
-// Offset by half an ATR from the wick so the marker doesn't sit on top of
-// the candle - same offset style as vein_structure_zones.pine's labels.
-f_healthWarningTransparency(int code) => code == 2 ? 85 : code == 1 ? 70 : 40
-f_healthUpgradeAction(int code) => code == 3 ? "looking strong - worth holding" : "improving - worth watching"
-
-if healthDisplayEnabled and longHealthDowngraded
-    array.push(longHealthWarningLabels, label.new(bar_index, low - atrSafe * 0.5, "●", style = label.style_none, color = color(na), textcolor = color.new(color.green, f_healthWarningTransparency(longPositionHealthStateCode)), size = size.tiny, force_overlay = true, tooltip = "Long position " + f_healthStateAction(longPositionHealthStateCode)))
+if healthDisplayEnabled and longTradeOpen and longHealthDowngraded
+    array.push(longHealthWarningLabels, label.new(bar_index, low - atrSafe * 0.5, "Health " + f_healthStateName(longPositionHealthStateCode), style = label.style_none, color = color(na), textcolor = color.new(#ff6f00, 0), size = size.small, force_overlay = true, tooltip = "Long Position Health moved to the " + f_healthStateName(longPositionHealthStateCode) + " band (state indicator, frequency-based bands)"))
     if array.size(longHealthWarningLabels) > maxHealthWarningLabelsCount
         label.delete(array.shift(longHealthWarningLabels))
 
-if healthDisplayEnabled and shortHealthDowngraded
-    array.push(shortHealthWarningLabels, label.new(bar_index, high + atrSafe * 0.5, "●", style = label.style_none, color = color(na), textcolor = color.new(color.red, f_healthWarningTransparency(shortPositionHealthStateCode)), size = size.tiny, force_overlay = true, tooltip = "Short position " + f_healthStateAction(shortPositionHealthStateCode)))
+if healthDisplayEnabled and shortTradeOpen and shortHealthDowngraded
+    array.push(shortHealthWarningLabels, label.new(bar_index, high + atrSafe * 0.5, "Health " + f_healthStateName(shortPositionHealthStateCode), style = label.style_none, color = color(na), textcolor = color.new(#ff6f00, 0), size = size.small, force_overlay = true, tooltip = "Short Position Health moved to the " + f_healthStateName(shortPositionHealthStateCode) + " band (state indicator, frequency-based bands)"))
     if array.size(shortHealthWarningLabels) > maxHealthWarningLabelsCount
         label.delete(array.shift(shortHealthWarningLabels))
 
-// Upgrade markers - the mirror of the downgrade markers above, same side
-// convention and position, but a hollow "○" instead of a filled "●" (getting
-// better vs. getting worse), full opacity throughout (an improvement is
-// worth noticing regardless of whether it just reached PROTECT or HOLD).
-if healthDisplayEnabled and longHealthUpgraded
-    array.push(longHealthUpgradeLabels, label.new(bar_index, low - atrSafe * 0.5, "○", style = label.style_none, color = color(na), textcolor = color.green, size = size.tiny, force_overlay = true, tooltip = "Long position " + f_healthUpgradeAction(longPositionHealthStateCode)))
-    if array.size(longHealthUpgradeLabels) > maxHealthWarningLabelsCount
-        label.delete(array.shift(longHealthUpgradeLabels))
-
-if healthDisplayEnabled and shortHealthUpgraded
-    array.push(shortHealthUpgradeLabels, label.new(bar_index, high + atrSafe * 0.5, "○", style = label.style_none, color = color(na), textcolor = color.red, size = size.tiny, force_overlay = true, tooltip = "Short position " + f_healthUpgradeAction(shortPositionHealthStateCode)))
-    if array.size(shortHealthUpgradeLabels) > maxHealthWarningLabelsCount
-        label.delete(array.shift(shortHealthUpgradeLabels))
-
 // ============================================================================
-// Divergence warning markers - reuses this file's existing divergence
-// detection (regularBearDiv/hiddenBearDiv/regularBullDiv/hiddenBullDiv,
-// already computed above for Permission's Exhaustion) rather than
-// recomputing anything new. Bearish divergence (price makes a new high,
-// momentum doesn't confirm it) is a classic leading warning for an existing
-// LONG position - the rally is losing steam even though price itself hasn't
-// turned yet. Bullish divergence (price makes a new low, momentum doesn't
-// confirm it) is the mirror warning for an existing SHORT. Deliberately
-// PURELY VISUAL - does not feed the Position Health score itself, so the
-// thresholds already calibrated against real backtested Pine Logs don't need
-// re-tuning for this. Same bounded-history-array pattern as the downgrade
-// markers above.
+// Divergence markers (off by default) - found at confirmed pivots, arrive late,
+// feed nothing else. Orange: a caution, not a side. One marker per confirmed
+// pivot event.
 // ============================================================================
 
 int maxDivergenceLabelsCount = 30
-var array<label> longDivergenceLabels = array.new_label()
-var array<label> shortDivergenceLabels = array.new_label()
+var array<label> highDivergenceLabels = array.new_label()
+var array<label> lowDivergenceLabels = array.new_label()
 
-// regularBearDiv/hiddenBearDiv (and the bull versions) stay TRUE for every
-// bar between one pivot confirmation and the next, not just the bar the
-// divergence was actually confirmed on - marking every one of those bars
-// produced dense clusters of markers for what was really a single event.
-// Gated to newPivotHigh/newPivotLow (the exact bar the underlying pivot,
-// and so the divergence read itself, actually changed) - one marker per
-// real event. "◆" (filled) instead of "◇" (outline only) - the outline
-// glyph was too faint to read at a glance, especially at size.tiny.
 if showDivergenceMarkersInput and newPivotHigh and (regularBearDiv or hiddenBearDiv)
-    array.push(longDivergenceLabels, label.new(bar_index, high + atrSafe * 0.5, "◆", style = label.style_none, color = color(na), textcolor = color.green, size = size.tiny, force_overlay = true, tooltip = "New high, but momentum is fading - early warning for a Long position"))
-    if array.size(longDivergenceLabels) > maxDivergenceLabelsCount
-        label.delete(array.shift(longDivergenceLabels))
+    array.push(highDivergenceLabels, label.new(bar_index, high + atrSafe * 0.5, "◆", style = label.style_none, color = color(na), textcolor = color.new(#ff6f00, 0), size = size.small, force_overlay = true, tooltip = "New high, momentum does not confirm it"))
+    if array.size(highDivergenceLabels) > maxDivergenceLabelsCount
+        label.delete(array.shift(highDivergenceLabels))
 
 if showDivergenceMarkersInput and newPivotLow and (regularBullDiv or hiddenBullDiv)
-    array.push(shortDivergenceLabels, label.new(bar_index, low - atrSafe * 0.5, "◆", style = label.style_none, color = color(na), textcolor = color.red, size = size.tiny, force_overlay = true, tooltip = "New low, but momentum is fading - early warning for a Short position"))
-    if array.size(shortDivergenceLabels) > maxDivergenceLabelsCount
-        label.delete(array.shift(shortDivergenceLabels))
+    array.push(lowDivergenceLabels, label.new(bar_index, low - atrSafe * 0.5, "◆", style = label.style_none, color = color(na), textcolor = color.new(#ff6f00, 0), size = size.small, force_overlay = true, tooltip = "New low, momentum does not confirm it"))
+    if array.size(lowDivergenceLabels) > maxDivergenceLabelsCount
+        label.delete(array.shift(lowDivergenceLabels))
 
 // ============================================================================
-// Visuals - value curves, not fixed-height state lanes.
-//
-// v1.2.0/v1.2.1 replaced the old histogram/velocity/balance/backgrounds with
-// three fixed-height lanes where height carried no information - only lane,
-// side and color transparency did. That looked right on paper (matches the
-// engine's actual situation -> entry -> position sequence) but real chart
-// feedback after the state-lifecycle bugs were fixed was clear: flat bands
-// at a constant height are not interpretable the way a moving curve is
-// ("mit den Kurven konnte ich was anfangen, hiermit nicht"). Back to plain
-// magnitude curves - height means what it always means on an oscillator,
-// bigger = stronger - plus a lean marker for actual entries instead of a
-// separate Entry lane/display-duration window.
+// Status line at the last bar: which side leads, which scenario, what limits
+// its Permission (the smallest gated factor) and where the Trigger stands.
 // ============================================================================
 
-// Permission curves - longPermission/shortPermission directly, no display
-// stretch/scaling (v1.1.0's permissionDisplayStretchInput was removed for
-// exactly this reason: a manual scale factor is one more thing to get wrong
-// and re-explain). Also no debounce - unlike a boolean-gated flat lane, a
-// continuous value has nothing to flicker; longSetup/shortSetup's narrow,
-// frequent crossing of permissionThresholdInput only ever caused a display
-// problem when it gated whether a fixed-height line was drawn at all.
+f_triggerName(int state) => state == 3 ? "accepted" : state == 2 ? "confirmed" : state == 1 ? "broken" : "none"
+
+bool leadLong = longPermission >= shortPermission
+bool leadCont = leadLong ? longIsContinuation : shortIsContinuation
+float leadPermission = leadLong ? longPermission : shortPermission
+float limMaturity = leadLong ? (leadCont ? contMaturityFactorLong : revMaturityFactorLong) : (leadCont ? contMaturityFactorShort : revMaturityFactorShort)
+float limExhaustion = leadLong ? (leadCont ? contExhaustionFactorLong : revExhaustionFactorLong) : (leadCont ? contExhaustionFactorShort : revExhaustionFactorShort)
+float limLegQuality = leadCont ? legQualityFactor : 1.0
+float limHtf = leadLong ? htfFactorLong : htfFactorShort
+
+string limitingName = "Maturity"
+float limitingValue = limMaturity
+if limExhaustion < limitingValue
+    limitingName := "Exhaustion"
+    limitingValue := limExhaustion
+if limLegQuality < limitingValue
+    limitingName := "Leg quality"
+    limitingValue := limLegQuality
+if limHtf < limitingValue
+    limitingName := "HTF"
+    limitingValue := limHtf
+
+var label statusLabel = na
+if barstate.islast
+    string statusText = (leadLong ? "Long" : "Short") + " " + (leadCont ? "Continuation" : "Reversal") + " " + str.tostring(leadPermission, "0") + " | limiting: " + limitingName + " " + str.tostring(limitingValue, "0.00") + " | trigger: " + f_triggerName(leadLong ? longTriggerState : shortTriggerState)
+    if na(statusLabel)
+        statusLabel := label.new(bar_index + 1, 0.0, statusText, style = label.style_label_left, color = color(na), textcolor = color.new(color.gray, 20), size = size.small)
+    else
+        label.set_x(statusLabel, bar_index + 1)
+        label.set_text(statusLabel, statusText)
+
+// ============================================================================
+// Signal log table (opt-in). One row per side/scenario plus Permission bands.
+// ============================================================================
+
+color logText = color.new(color.gray, 20)
+color logHeader = color.new(color.gray, 90)
+color logSeparator = color.new(color.gray, 80)
+
+f_logRow(table t, int row, string name, float n, float wins, float sumR) =>
+    table.cell(t, 0, row, name, text_color = logText, text_size = size.small, text_halign = text.align_left)
+    table.cell(t, 1, row, str.format("{0,number,integer}", n), text_color = logText, text_size = size.small)
+    table.cell(t, 2, row, n > 0 ? str.format("{0,number,integer}", 100.0 * wins / n) + "%" : "-", text_color = logText, text_size = size.small)
+    table.cell(t, 3, row, n > 0 ? str.tostring(sumR / n, "0.00") : "-", text_color = logText, text_size = size.small)
+
+var table logTable = na
+if showSignalLogInput and barstate.islast
+    if na(logTable)
+        logTable := table.new(position.bottom_right, 4, 11, bgcolor = color.new(color.white, 5), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+    table.cell(logTable, 0, 0, "Signal log " + syminfo.ticker + " " + timeframe.period, text_color = logText, bgcolor = logHeader, text_size = size.small, text_halign = text.align_left)
+    table.cell(logTable, 1, 0, "", bgcolor = logHeader, text_size = size.small)
+    table.cell(logTable, 2, 0, "", bgcolor = logHeader, text_size = size.small)
+    table.cell(logTable, 3, 0, "loaded history", text_color = logText, bgcolor = logHeader, text_size = size.small)
+    table.cell(logTable, 0, 1, "Closed signals", text_color = logText, bgcolor = logHeader, text_size = size.small, text_halign = text.align_left)
+    table.cell(logTable, 1, 1, "n", text_color = logText, bgcolor = logHeader, text_size = size.small)
+    table.cell(logTable, 2, 1, "T1 first", text_color = logText, bgcolor = logHeader, text_size = size.small)
+    table.cell(logTable, 3, 1, "avg R", text_color = logText, bgcolor = logHeader, text_size = size.small)
+    f_logRow(logTable, 2, "Long Continuation", array.get(groupN, 0), array.get(groupWins, 0), array.get(groupSumR, 0))
+    f_logRow(logTable, 3, "Long Reversal", array.get(groupN, 1), array.get(groupWins, 1), array.get(groupSumR, 1))
+    f_logRow(logTable, 4, "Short Continuation", array.get(groupN, 2), array.get(groupWins, 2), array.get(groupSumR, 2))
+    f_logRow(logTable, 5, "Short Reversal", array.get(groupN, 3), array.get(groupWins, 3), array.get(groupSumR, 3))
+    for c = 0 to 3
+        table.cell(logTable, c, 6, "", bgcolor = logSeparator, text_size = size.small)
+    f_logRow(logTable, 7, "Permission " + str.tostring(permissionThresholdInput, "0") + "-" + str.tostring(permissionThresholdInput + 10.0, "0"), array.get(bandN, 0), array.get(bandWins, 0), array.get(bandSumR, 0))
+    f_logRow(logTable, 8, "Permission " + str.tostring(permissionThresholdInput + 10.0, "0") + "-" + str.tostring(permissionThresholdInput + 20.0, "0"), array.get(bandN, 1), array.get(bandWins, 1), array.get(bandSumR, 1))
+    f_logRow(logTable, 9, "Permission " + str.tostring(permissionThresholdInput + 20.0, "0") + "+", array.get(bandN, 2), array.get(bandWins, 2), array.get(bandSumR, 2))
+    table.cell(logTable, 0, 10, "n < 30: too few to say anything", text_color = logText, text_size = size.small, text_halign = text.align_left)
+    table.cell(logTable, 1, 10, "", text_size = size.small)
+    table.cell(logTable, 2, 10, "", text_size = size.small)
+    table.cell(logTable, 3, 10, "spread " + str.tostring(spreadTicksInput, "0.#") + " ticks", text_color = logText, text_size = size.small)
+
+// ============================================================================
+// Visuals: Permission as plain value curves (height = magnitude); Position
+// Health as a state line on price, not on this axis.
+// ============================================================================
+
 plot(longPermission, "Long Permission", color = color.new(color.green, 0), linewidth = 2)
 plot(-shortPermission, "Short Permission", color = color.new(color.red, 0), linewidth = 2)
 plot(permissionThresholdInput, "Permission threshold", color = color.new(color.gray, 80), linewidth = 1)
 plot(-permissionThresholdInput, "Permission threshold (short)", color = color.new(color.gray, 80), linewidth = 1)
-
-// Entry marker - a lean symbol at the actual entry event
-// (newLongTrigger/newShortTrigger, fires once, on the bar entry is granted),
-// placed right on the Permission curve instead of a separate lane. Answers
-// "was there just an entry", nothing more - Target/Invalidation on the price
-// chart and the trigger label there already carry the detail. shape.circle,
-// not shape.triangleup/down: a triangle's apex-vs-base asymmetry made it
-// visibly sit off the curve at location.absolute even though its anchor was
-// centered on the exact value (user report: "die Position der Pfeile ist
-// nicht gut") - a circle centers cleanly regardless of that shape bias.
-plotshape(newLongTrigger ? longPermission : na, "Entry: Long", style = shape.circle, location = location.absolute, color = color.new(color.green, 0), size = size.tiny)
-plotshape(newShortTrigger ? -shortPermission : na, "Entry: Short", style = shape.circle, location = location.absolute, color = color.new(color.red, 0), size = size.tiny)
-
-// Position Health curve - only the side healthDisplayModeInput selects (see
-// its tooltip): Auto follows the actual open trade, Long/Short is a manual
-// override for a position TPE itself never triggered, Off hides it. Showing
-// both sides at once answered a question nobody has ("what's the
-// hypothetical health of a position I'm not in"). style_circles (not a
-// smooth line) keeps it visually distinct from the Permission curve above,
-// which also uses green/red - same convention this file used before the
-// lane rework. Brightness still ramps with state (vivid at HOLD, fading
-// toward EXIT) on top of the curve's own height already showing the score.
-f_healthLineTransparency(int code) => code == 3 ? 10 : code == 2 ? 35 : code == 1 ? 60 : 85
-
-bool showLongHealth = healthDisplayModeInput == "Long" or (healthDisplayModeInput == "Auto" and longTradeOpen)
-bool showShortHealth = healthDisplayModeInput == "Short" or (healthDisplayModeInput == "Auto" and shortTradeOpen)
-
-plot(showLongHealth ? longPositionHealth : na, "Long Position Health", color = color.new(color.green, f_healthLineTransparency(longPositionHealthStateCode)), style = plot.style_circles, linewidth = 2)
-plot(showShortHealth ? -shortPositionHealth : na, "Short Position Health", color = color.new(color.red, f_healthLineTransparency(shortPositionHealthStateCode)), style = plot.style_circles, linewidth = 2)
-
 hline(0, "Zero", color = color.new(color.gray, 65))
+
+// Rolling 20-bar low/high keeps the line near-horizontal instead of tracing every wick.
+float healthLineY = showLongHealth ? ta.lowest(low, 20) - atrSafe : showShortHealth ? ta.highest(high, 20) + atrSafe : na
+color healthLineColor = showLongHealth ? f_healthLineColor(longPositionHealthStateCode) : f_healthLineColor(shortPositionHealthStateCode)
+plot(healthLineY, "Position Health line", color = healthLineColor, linewidth = 3, style = plot.style_linebr, force_overlay = true)
 
 // ============================================================================
 // Data-window diagnostics
@@ -1886,6 +1909,8 @@ hline(0, "Zero", color = color.new(color.gray, 65))
 // comment above. If this fires again, trim more of this section before
 // cutting a chart-visible plot/line/alert.
 
+plot(longPositionHealth, "Position Health Long", display = display.data_window)
+plot(shortPositionHealth, "Position Health Short", display = display.data_window)
 plot(referenceLegQuality, "Diagnostic: Reference Leg Quality (frozen at leg formation)", display = display.data_window)
 plot(liveTrendQuality, "Diagnostic: Live Trend Quality (continuous)", display = display.data_window)
 plot(longDecayFactor, "Diagnostic: Long Decay Factor", display = display.data_window)
@@ -1906,19 +1931,5 @@ plot(t1LongFrozen, "Diagnostic: T1 Long", display = display.data_window)
 plot(invLongFrozen, "Diagnostic: Invalidation Long", display = display.data_window)
 plot(t1ShortFrozen, "Diagnostic: T1 Short", display = display.data_window)
 plot(invShortFrozen, "Diagnostic: Invalidation Short", display = display.data_window)
-
-// longPermission/shortPermission/longPositionHealth/shortPositionHealth are
-// NOT duplicated here - the "Long/Short Permission" and "Long/Short Position
-// Health" pane plots above already carry their values into the data window
-// automatically (Pine's default display includes it), so a second
-// data-window-only copy under a "Diagnostic:" label would just be the same
-// number twice. Active Permission (longScore/shortScore) has no pane plot of
-// its own, so it stays here.
 plot(longScore, "Diagnostic: Long Active Permission", display = display.data_window)
 plot(shortScore, "Diagnostic: Short Active Permission", display = display.data_window)
-
-// Position Health sub-components are deliberately NOT individually plotted
-// here - this script was already using nearly its entire budget against
-// Pine's 64-output cap (RE10140 counts plot() AND alertcondition() together,
-// empirically confirmed - see the alert comment above), before Position
-// Health added anything.

@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.11.0 — 2026-11-18
+- Exhaustion no longer switches off with `Use Trend Context`: the EMA trend is always computed, the switch only removes trend evidence from BUY/SELL and the counter-trend requirement for reversal patterns. With the switch off, EXH markers and alerts now appear where they were silently suppressed before
+- Breakout accepted on the last bar of the validation window keeps its BRK↑/BRK↓ label instead of being deleted as unresolved
+- A compression zone is frozen once a breakout attempt has used it; later compressed bars no longer move the box or the boundary shown for that breakout
+- One BUY/SELL per directional leg: after a signal ends or exhaustion appears, the same side can only signal again once its evidence has cooled below the exit level or the opposite side has taken control. Previously one counter-candle or fading exhaustion re-fired a second BUY/SELL late in the same leg, often near its extreme
+- New `Max Signal Extension (ATR)` (default 2.0): no fresh BUY/SELL while the close is already further than this from the Trend EMA in the signal direction; a side that reaches its threshold that stretched stays locked until it cools down
+- Hover tooltips on BUY/SELL, exhaustion, follow-through, failure, candle-role and liquidity-sweep markers explain what triggered them on that candle (evidence components, wick/body shares, swept level). These markers are now small text symbols (▲ ▼ ◆ ● ✕ ■) instead of plotshapes, since only labels can carry a tooltip; the 250 most recent are kept
+- Resolved pattern tooltips (✓ / × / ·) state how many bars after the pattern candle the outcome became known
+
 ## v1.10.2 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - Without real volume a short "… not available" notice sits in the bottom-right corner instead of a label on the last candle

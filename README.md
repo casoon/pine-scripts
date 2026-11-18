@@ -36,6 +36,34 @@ Run `python3 scripts/audit_data_sources.py` to scan all scripts against it.
 
 ---
 
+## Known pitfalls and limits of Pine
+
+Several scripts in this collection produced wrong or misleading results without any compile
+error. Many were fixed or archived; older or less checked scripts may still contain some of
+these patterns:
+
+- **Data without signal:** tick volume read as trade volume, `nz(volume)` or `volume = 1.0` as
+  a "guard", and the weight of a missing volume part moved onto price oscillators.
+- **Hindsight on the chart:** pivots and divergences drawn at the extreme although they are
+  confirmed bars later; `request.security()` reading the unclosed higher-timeframe bar; labels
+  and scores computed from bars after the event.
+- **Pine v6 short-circuiting:** stateful `ta.*` calls behind `and`/`or`/`?:` or inside an `if`
+  skip bars and return wrong values silently.
+- **Scores that measure something else:** one price series counted as four votes (RSI,
+  StochRSI, CCI, WaveTrend), direction derived from volatility, long and short not mirrored,
+  and names like "Hurst", "dominant cycle", "divergence" or "Probability %" that the formula
+  does not support.
+- **Strategy Tester traps:** no stop on the first bar after entry, costs left out, history cut
+  to 500 bars, and filters tuned and judged on the same data.
+
+Pine is good for showing where the market stands, alerts on closed bars, quick prototypes and
+reference values for another implementation. It cannot show that a signal beats chance, has no
+order flow, open interest or bid/ask on most symbols, and sees one symbol at a time. Rebuilding
+the logic outside TradingView (Kestrel, a separate Rust engine) is where several of these errors
+surfaced. Details: [Pitfalls and limits](docs/concepts/pitfalls-and-limits.md).
+
+---
+
 ## Indicators
 
 Full indicator index, grouped by focus, with one-line descriptions and links to each script:

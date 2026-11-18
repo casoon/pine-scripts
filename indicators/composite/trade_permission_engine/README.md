@@ -1,10 +1,11 @@
 # Trade Permission Engine
 
-**Role: signal generator with context.** A Trigger (rejection at the extreme or close beyond the
-last micro swing, on a confirmed bar) becomes a Long/Short signal when Permission clears its
-threshold and dominates the other side, and Active Permission still retains `signalRetentionInput` %
-of it. Pivots are used as known reference levels (leg endpoints, targets); divergence is shown as a
-warning marker only and does not feed Permission.
+**Role: signal generator with context.** A Trigger (rejection inside the pullback/reversal zone or
+close beyond the last micro swing, on a confirmed bar) becomes a Long/Short signal when Permission
+clears its threshold and dominates the other side, and Active Permission still retains
+`signalRetentionInput` % of it. Continuation and Reversal signals are tagged and alerted separately.
+Pivots are used as known reference levels (leg endpoints, targets); divergence is an optional
+marker (off by default) and does not feed Permission.
 
 The successor to `directional_probability_engine` (archived, see
 `archive/indicators/directional_probability_engine/`). It answers *"does the market currently
@@ -75,12 +76,9 @@ reference leg, not two separate detectors:
 - **Trigger** — an explicit state machine (`UNTRIGGERED → BROKEN → CONFIRMED → ACCEPTED`) driven by
   either a same-bar rejection-at-extreme or a micro-swing structure break, armed for
   `triggerValidityBarsInput` bars, resetting on a stale reference leg or an opposite confirmed
-  trigger, and gated so it can't fire while a same-direction trade is already open. Two price-chart
-  markers (`force_overlay`, bounded rolling history like the Position Health markers below): a small
-  `▵`/`▿` on `newLongSetup`/`newShortSetup` (a permission phase beginning), and a small `◇` when a
-  side enters BROKEN (an attempt happened, without claiming it held - BROKEN reverts to
-  `UNTRIGGERED` often enough in normal price action that it's marked as a discrete event, not a
-  persisting state).
+  trigger, and gated so it can't fire while a same-direction trade is already open. A rejection
+  candle only counts while the matching side's Continuation or Reversal Maturity is at least
+  `rejectionZoneMinInput` (price is inside the zone) - rejection candles are common on any bar.
 - **Confirmation** = weighted(Trigger state score, Acceptance).
 - **Active Permission** = `Permission × confirmation factor × CRV feasibility factor × decay
   factor`. CRV targets T1 until T1 is hit, then switches to T2 if tracked.
@@ -88,24 +86,23 @@ reference leg, not two separate detectors:
   (`force_overlay`): T1 via a real recent-pivot search (falls back to an ATR projection only if none
   qualify), scenario-aware T2/Invalidation, same-bar ambiguity resolved conservatively
   (invalidation checked first), opposite-trigger cancellation.
-- **Display** (no table, standing preference for this lineage): plain value curves - `longPermission`/
-  `shortPermission` as a mirrored 0–100 line pair, `permissionThresholdInput` drawn as a reference
-  line against it, and Position Health (only the side `healthDisplayModeInput` selects - see
-  `## Position Health` below) as a second, `style_circles` curve so it stays visually distinct from
-  the Permission line while sharing the axis. Entry gets a lean circle marker (`shape.circle`, not
-  a directional triangle - a triangle's apex-vs-base asymmetry visibly sat off the curve at
-  `location.absolute` even with a correctly-centered anchor) at the actual entry event
-  (`newLongTrigger`/`newShortTrigger`, fires once) placed directly on the Permission curve, not a
-  separate series. v1.2.0/v1.2.1 tried a "Decision Timeline" pane instead - three fixed-height
-  lanes (Market/Entry/Health) where height carried no information, only lane/side/color transparency
-  did, matching the engine's situation → entry → position sequence on paper. Real chart feedback
-  after the state-lifecycle bugs in that version were fixed was clear: flat bands at a constant
-  height aren't interpretable the way a moving curve is ("mit den Kurven konnte ich was anfangen,
-  hiermit nicht") - reverted to curves in v1.3.0. Every other raw score (Active Permission, Live
-  Trend Quality, the decay factors, etc.) is in the data window.
-- **Alerts**: Setup (permission above threshold), Trigger, Signal (Trigger whose Active Permission
-  still holds ≥ `signalRetentionInput` % of its Permission), T1/T2 hit, Invalidation hit,
-  Cancelled — per side.
+- **Display**: Permission as a mirrored 0–100 line pair with the threshold as reference line; one
+  status line right of the last bar (leading side, scenario, the smallest gated factor limiting
+  Permission, trigger state); one label per Trigger/Signal on price with side, scenario tag
+  (`CONT`/`REV`), entry, invalidation and T1, plus the T1/T2/invalidation lines. Colour means
+  direction only (green/red); warnings are orange. Position Health is a state line under (Long) or above (Short) the candles on the price
+  chart while a tracked trade is open. Every other raw score is in the data window.
+- **Signal log** (opt-in, `showSignalLogInput`, off by default): follows every Signal to its outcome
+  and tabulates closed signals by Long/Short × Continuation/Reversal and by Permission band
+  ([threshold, +10), [+10, +20), ≥ +20), each row with its sample size `n`. Won = T1 before
+  invalidation (same bar: invalidation wins), lost = invalidation first, cancelled by an opposite
+  trigger = not counted. R = from the signal bar's close to the invalidation level, exit at T1,
+  minus the spread assumption (`spreadTicksInput`, in ticks). It is a measurement of the loaded
+  chart history - rows with n < 30 say nothing about the signal. Ablation of single factors uses
+  the existing inputs (decay per bar 0, factor floors 1.0) and reads the effect from this table.
+- **Alerts**: Setup (permission above threshold), Trigger, Long/Short **Continuation** Signal and
+  Long/Short **Reversal** Signal (Trigger whose Active Permission still holds ≥
+  `signalRetentionInput` % of its Permission), T1/T2 hit, Invalidation hit, Cancelled — per side.
 
 ## Position Health (Long/Short)
 
@@ -161,62 +158,24 @@ action, since its underlying efficiency measure - net move / path length - is ra
 this looks like a genuine property of real market data, not a formula defect). The original
 85/65/40 thresholds made HOLD literally unreachable across the entire backtest.
 
-Displayed as the pane's Position Health curve - a single `style_circles` series, not two.
-`healthDisplayModeInput` (Auto/Long/Short/Off, default Auto) picks which side to show: Auto follows
-whichever side has a TPE-tracked trade open (empty when neither does), Long/Short shows that side
-unconditionally (e.g. to watch a manually-entered position TPE itself never triggered). Showing both
-Long and Short Position Health at once answered a question nobody has ("what's the hypothetical
-health of a position I'm not in"); only the side actually held matters. Hue still encodes side
-(green = Long, red = Short, this file's existing convention); brightness encodes state on top of the
-curve's own height - vivid/opaque at HOLD, fading toward gray-transparent toward EXIT. Sub-components
-aren't individually plotted to the data window - this script's `plot()`/`alertcondition()` combined
-were already close to Pine's 64-output cap before Position Health, so they're only exposed via
-`longPositionHealth`/`shortPositionHealth`'s own value (both the pane curve and the data window). A
-"Debug: log Position Health components" toggle (off by default) logs all five sub-components plus the
-final score/state per bar via `log.info()` instead - this does not count against the same output cap,
-so it's available for debugging without touching the plot budget; read it in TradingView's Pine Logs
-panel. Only a PROTECT-entry alert is added per side — the state this feature actually closes a gap
-on; HOLD/REDUCE/EXIT stay visible via the curve color instead of a dedicated alert, to stay within
-the same output budget.
+Displayed as a state line on the price chart (`plot`, `force_overlay`) - under the candles for
+Long, above them for Short - for the side `healthDisplayModeInput` selects: Auto follows whichever
+side has a TPE-tracked trade open (nothing when neither does), Long/Short shows that side
+unconditionally, Off hides it. The line follows the rolling 20-bar low/high (so it stays near
+horizontal) and changes colour with the state: gray HOLD, yellow PROTECT, orange REDUCE, dark
+orange EXIT; green/red are reserved for direction. The score of both sides is in the data window.
+When a tracked trade's state drops out of PROTECT/HOLD, one orange `Health <state>` label marks it
+(bounded history, 30 per side).
 
-Further additions address transitions and early weakness across a wide chart, not just the
-curve color at a single bar:
+**What the bands are.** HOLD/PROTECT/REDUCE/EXIT are a state indicator: the band edges follow how
+often the score takes these values on earlier chart logs, not how positions performed afterwards,
+so they carry no exit instruction. Testing them against "hold until invalidation/T2" is open.
+Sub-components are not plotted individually (output cap); a "Debug: log Position Health components"
+toggle logs them via `log.info()`. Only a PROTECT-entry alert exists per side.
 
-- **Position Health downgrade markers** — a small `●` text glyph (`label.style_none`, no
-  background bubble - `label.style_circle` renders a fixed-size disc regardless of `size=`, too
-  large on a busy chart), offset half an ATR from the wick so it doesn't sit on the candle, drawn
-  on the price chart (`force_overlay`). Only marks downgrades that started from PROTECT or HOLD -
-  a side that spends most of its time in REDUCE/EXIT (e.g. Short during a sustained uptrend)
-  constantly flickers across that boundary, and marking every one of those is noise rather than a
-  real "this was fine, now it's not" event. Colored by the side it concerns - green for long, red
-  for short, this file's existing convention (Permission/Position Health curves) rather than a flat
-  warning color - with brightness scaling by severity: a mild HOLD→PROTECT slip is faint, a drop
-  into EXIT is much more visible. The hover `tooltip` is deliberately a single short action clause
-  ("Short position weak - consider a smaller position") - earlier versions spelling out old/new
-  state names plus scores plus a comparison to the other side ("was PROTECT (cooling, protect
-  gains), now REDUCE (weakening, cut size), score 47.4 - for comparison Long is EXIT...") were
-  still too dense to read at a glance. Bounded rolling history (30 per side, oldest deleted
-  first), same pattern as the pivot-history arrays elsewhere in this file.
-- **Position Health upgrade markers** — the mirror of the downgrade markers: a hollow `○` (vs.
-  the downgrade markers' filled `●`) marking a rise INTO PROTECT or HOLD, same side-color and
-  position convention. Deliberately the same PROTECT/HOLD-only filter as downgrades, applied
-  symmetrically - a plain EXIT→REDUCE tick is the most obvious first example to want marked, but
-  that's exactly the boundary where chronic flickering happens (see downgrade markers above), so
-  it's deliberately excluded here too.
-- **Divergence warning markers** — a filled `◆` glyph (same minimal style as the downgrade
-  markers, distinct shape so the two aren't confused; full opacity - not scaled by
-  regular-vs-hidden strength like an earlier version, and not the outline-only `◇`, which read as
-  barely visible at `size.tiny`) reusing this file's existing divergence detection
-  (`regularBearDiv`/`hiddenBearDiv`/`regularBullDiv`/`hiddenBullDiv`, already computed above for
-  Permission's Exhaustion) rather than adding new detection logic. Gated to
-  `newPivotHigh`/`newPivotLow` - the divergence booleans themselves stay true for every bar between
-  one pivot confirmation and the next, not just the bar the divergence was actually confirmed on;
-  without this gate, a single real divergence event produced a dense cluster of markers instead of
-  one. Bearish divergence (price makes a new high, momentum doesn't confirm) is a classic leading
-  warning for an existing Long - the rally may be losing steam before price itself turns; bullish
-  divergence is the mirror warning for an existing Short. Deliberately **purely visual** - it does
-  not feed the Position Health score, so the thresholds already calibrated against real backtested
-  Pine Logs don't need re-tuning for it.
+**Divergence markers** (`showDivergenceMarkersInput`, off by default): an orange `◆` at the
+confirmed pivot where regular/hidden divergence is found - above the high for bearish, below the
+low for bullish. They arrive late and feed nothing else.
 
 ## Reviewed and not changed
 

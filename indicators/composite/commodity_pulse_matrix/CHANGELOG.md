@@ -6,7 +6,7 @@
 - **Score (v4):** Volatility (low ATR% = +1, high ATR% = −1) no longer enters the signed directional total; it stays visible in the matrix and the Heat Score. In the signal-optimized score its 5 % move to Trend (10 % → 15 %)
 
 ### Fixed
-- **HTF requests (v4):** the previous-bar indicator set indexes its primitive fields with `[1]` instead of the UDT reference
+- **HTF requests (v4):** the previous-bar indicator set takes the history of the whole object (`s[1]`) instead of indexing its fields, which Pine v6 rejects (CE10290)
 - **Pine v6 (v4):** MFI, VWAP, volume SMA/StdDev, the VFI SMA and the OBV slope now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped; only the result stays gated by real volume
 
 ## v3.7.0 / v4.5.0 — 2026-11-17

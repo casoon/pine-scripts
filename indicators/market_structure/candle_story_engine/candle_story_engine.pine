@@ -1,9 +1,9 @@
 //@version=6
 // ============================================================================
 // Candle Story Engine [WavesUnchained]
-// Version: 1.10.2
+// Version: 1.11.0
 // Author: WavesUnchained
-// Build: 2026-10-12
+// Build: 2026-11-18
 // ============================================================================
 // Interprets candle behaviour as a weighted multi-candle sequence (pressure,
 // quality, dominance, persistence, deceleration, exhaustion) instead of
@@ -61,7 +61,10 @@ minimumSignalChange = input.float(
      tooltip = "Directional evidence must improve by at least this amount before a fresh BUY/SELL signal can fire.")
 signalExitBuffer = input.float(
      15.0, "Signal Exit Buffer", minval = 0.0, maxval = 40.0, step = 1.0, group = groupGeneral,
-     tooltip = "Once in control, evidence must drop this many points below Signal Threshold (or lose to the opposite side) before a fresh signal can fire again. Prevents a single weak candle from re-triggering the same trend leg.")
+     tooltip = "Once a side has been in control or shown exhaustion, its evidence must drop this many points below Signal Threshold (or the opposite side must take control) before that side can signal again. Prevents a weak candle or fading exhaustion from re-triggering the same trend leg.")
+maxSignalExtension = input.float(
+     2.0, "Max Signal Extension (ATR)", minval = 0.5, maxval = 10.0, step = 0.25, group = groupGeneral,
+     tooltip = "No fresh BUY/SELL while the close is already more than this many ATR beyond the Trend EMA in the signal direction. A side that reaches its threshold this far from the EMA stays locked like after exhaustion, so a leg that was already stretched does not get a late signal near its extreme.")
 confirmOnClose = input.bool(
      true, "Confirm Signals on Bar Close", group = groupGeneral,
      tooltip = "Prevents live-bar signals and alerts from appearing intrabar and disappearing before the candle closes.")
@@ -87,7 +90,8 @@ breakoutResolutionBars = input.int(
 // 03 · TREND CONTEXT
 // ============================================================================
 groupTrend = "03 · Trend Context"
-useTrendContext = input.bool(true, "Use Trend Context", group = groupTrend)
+useTrendContext = input.bool(true, "Use Trend Context", group = groupTrend,
+     tooltip = "Adds trend evidence to BUY/SELL and requires a counter-trend for reversal patterns. The Exhaustion Engine always reads the EMA trend, independent of this switch.")
 trendMaLength = input.int(34, "Trend EMA Length", minval = 5, maxval = 300, group = groupTrend)
 trendSlopeLength = input.int(5, "EMA Slope Lookback", minval = 1, maxval = 30, group = groupTrend)
 trendWeight = input.float(20.0, "Trend Context Weight", minval = 0.0, maxval = 40.0, step = 1.0, group = groupTrend)
@@ -272,9 +276,7 @@ trendSlopeRaw = atr > 0 and not na(trendMa[trendSlopeLength])
 trendSlopeScore = f_clamp(trendSlopeRaw * 35.0, -100.0, 100.0)
 priceTrendDistance = atr > 0 ? (close - trendMa) / atr : 0.0
 priceTrendScore = f_clamp(priceTrendDistance * 35.0, -100.0, 100.0)
-trendScore = useTrendContext
-     ? f_clamp(trendSlopeScore * 0.55 + priceTrendScore * 0.45, -100.0, 100.0)
-     : 0.0
+trendScore = f_clamp(trendSlopeScore * 0.55 + priceTrendScore * 0.45, -100.0, 100.0)
 bullTrend = trendScore > exhaustionTrendMin
 bearTrend = trendScore < -exhaustionTrendMin
 
@@ -452,7 +454,7 @@ if confirmedBar
     // The attempt was calculated from the preceding completed zone. Do not
     // add its expansion candle to that zone before freezing the box, or the
     // rendered boundary no longer matches the boundary used for the signal.
-    else if compressionActive and not (bullBreakoutAttempt or bearBreakoutAttempt)
+    else if compressionActive and not compressionZoneConsumed and not (bullBreakoutAttempt or bearBreakoutAttempt)
         compressionZoneHigh := math.max(nz(compressionZoneHigh, high), high)
         compressionZoneLow := math.min(nz(compressionZoneLow, low), low)
         compressionZoneBars += 1
@@ -460,7 +462,7 @@ if confirmedBar
             box.set_top(compressionZoneBox, compressionZoneHigh)
             box.set_bottom(compressionZoneBox, compressionZoneLow)
             box.set_right(compressionZoneBox, bar_index)
-    else if compressionEnded and not na(compressionZoneBox)
+    else if compressionEnded and not compressionZoneConsumed and not na(compressionZoneBox)
         box.set_right(compressionZoneBox, bar_index - 1)
 
     if bullBreakoutAttempt or bearBreakoutAttempt
@@ -527,7 +529,7 @@ if confirmedBar and breakoutDirection != 0 and bar_index > breakoutStartBar
                 outcomeTooltip := breakoutDirection == 1
                      ? "Bull trap\nA bullish breakout closed back through the zone boundary.\nDirectional implication: bearish reversal."
                      : "Bear trap\nA bearish breakout closed back through the zone boundary.\nDirectional implication: bullish reversal."
-            if breakoutUnresolved and not showUnresolvedBreakouts
+            if breakoutUnresolved and not breakoutAccepted and not breakoutFailed and not showUnresolvedBreakouts
                 label.delete(breakoutLabel)
                 breakoutLabel := na
             else
@@ -738,21 +740,42 @@ bearExhausted = bearExhaustion >= exhaustionThreshold
 // the state transition and suppress a later valid signal.
 bullScoreImproving = bullEvidence - bullEvidence[1] >= minimumSignalChange
 bearScoreImproving = bearEvidence - bearEvidence[1] >= minimumSignalChange
-bullEntryCandidate = bullEvidence >= signalThreshold and bullEvidence > bearEvidence and not bullExhausted and bullScoreImproving
-bearEntryCandidate = bearEvidence >= signalThreshold and bearEvidence > bullEvidence and not bearExhausted and bearScoreImproving
+bullOverextended = priceTrendDistance > maxSignalExtension
+bearOverextended = priceTrendDistance < -maxSignalExtension
+bullEntryCandidate = bullEvidence >= signalThreshold and bullEvidence > bearEvidence and not bullExhausted and not bullOverextended and bullScoreImproving
+bearEntryCandidate = bearEvidence >= signalThreshold and bearEvidence > bullEvidence and not bearExhausted and not bearOverextended and bearScoreImproving
 
+// One signal per directional leg: once a side has been in control, shown
+// exhaustion or reached its threshold already stretched from the EMA, it stays locked until its evidence has cooled below the exit
+// level or the opposite side has taken control. A single counter-candle or a
+// fading exhaustion reading therefore cannot re-fire the same leg near its top.
 var bool bullArmed = false
 var bool bearArmed = false
+var bool bullLocked = false
+var bool bearLocked = false
 if confirmedBar
-    if not bullArmed and bullEntryCandidate
-        bullArmed := true
-    else if bullEvidence < signalThreshold - signalExitBuffer or bullEvidence <= bearEvidence or bullExhausted
-        bullArmed := false
+    bullReleased = bullEvidence < signalThreshold - signalExitBuffer or bearArmed
+    bearReleased = bearEvidence < signalThreshold - signalExitBuffer or bullArmed
 
-    if not bearArmed and bearEntryCandidate
+    if bullLocked and bullReleased
+        bullLocked := false
+    if not bullArmed and not bullLocked and bullEntryCandidate
+        bullArmed := true
+    else if bullArmed and (bullEvidence < signalThreshold - signalExitBuffer or bullEvidence <= bearEvidence or bullExhausted)
+        bullArmed := false
+        bullLocked := true
+    if bullExhausted or (bullOverextended and bullEvidence >= signalThreshold)
+        bullLocked := true
+
+    if bearLocked and bearReleased
+        bearLocked := false
+    if not bearArmed and not bearLocked and bearEntryCandidate
         bearArmed := true
-    else if bearEvidence < signalThreshold - signalExitBuffer or bearEvidence <= bullEvidence or bearExhausted
+    else if bearArmed and (bearEvidence < signalThreshold - signalExitBuffer or bearEvidence <= bullEvidence or bearExhausted)
         bearArmed := false
+        bearLocked := true
+    if bearExhausted or (bearOverextended and bearEvidence >= signalThreshold)
+        bearLocked := true
 
 bullSignalCondition = bullArmed
 bearSignalCondition = bearArmed
@@ -815,25 +838,9 @@ bearDirectionalFailure = bullFailure
 // ============================================================================
 plot(showTrendMa ? trendMa : na, "Trend EMA", color = color.new(color.gray, 40), linewidth = 1)
 
-plotshape(showBuySell and newBullSignal, title = "Bullish Candle Story", style = shape.triangleup,
-     location = location.belowbar, color = color.lime, size = size.small)
-plotshape(showBuySell and newBearSignal, title = "Bearish Candle Story", style = shape.triangledown,
-     location = location.abovebar, color = color.red, size = size.small)
 
-plotshape(showExhaustion and confirmedBar and bullExhausted and not bullExhausted[1], title = "Bull Trend Exhaustion",
-     style = shape.diamond, location = location.abovebar, color = color.orange, size = size.tiny)
-plotshape(showExhaustion and confirmedBar and bearExhausted and not bearExhausted[1], title = "Bear Trend Exhaustion",
-     style = shape.diamond, location = location.belowbar, color = color.aqua, size = size.tiny)
 
-plotshape(showFollowThrough and bullFollowThrough, title = "Bull Follow Through", style = shape.circle,
-     location = location.belowbar, color = color.green, size = size.tiny)
-plotshape(showFollowThrough and bearFollowThrough, title = "Bear Follow Through", style = shape.circle,
-     location = location.abovebar, color = color.maroon, size = size.tiny)
 
-plotshape(showFailures and bullFailure, title = "Bull Signal Failure", style = shape.xcross,
-     location = location.abovebar, color = color.red, size = size.small)
-plotshape(showFailures and bearFailure, title = "Bear Signal Failure", style = shape.xcross,
-     location = location.belowbar, color = color.lime, size = size.small)
 
 var array<label> patternLabels = array.new<label>()
 var array<int> patternDirections = array.new<int>()
@@ -873,7 +880,8 @@ if confirmedBar and array.size(patternLabels) > 0
                          : "No validation or invalidation occurred within the selected window."
                     label.set_text(patternLabel, patternText + patternOutcome)
                     label.set_color(patternLabel, patternColor)
-                    label.set_tooltip(patternLabel, patternTooltip + "\nStatus: " + patternStatus + ".\n" + patternOutcomeText)
+                    label.set_tooltip(patternLabel, patternTooltip + "\nStatus: " + patternStatus + ".\n" + patternOutcomeText +
+                         "\nResolved " + str.tostring(patternAge) + " bar(s) after the pattern candle — not known at the pattern candle itself.")
                     array.set(patternResolved, patternIndex, true)
 
 if showPatterns and confirmedBar and patternLabelCode != 0
@@ -909,19 +917,95 @@ if showPatterns and confirmedBar and patternLabelCode != 0
 
 // Only distinctive roles receive chart markers. Frequent neutral roles remain
 // available through Candle Role in the Data Window to keep the chart readable.
-plotshape(showCandleRoles and bullMarubozu, title = "Bullish Marubozu", style = shape.square,
-     location = location.belowbar, color = color.new(color.green, 10), size = size.tiny)
-plotshape(showCandleRoles and bearMarubozu, title = "Bearish Marubozu", style = shape.square,
-     location = location.abovebar, color = color.new(color.red, 10), size = size.tiny)
-plotshape(showCandleRoles and dragonflyDoji, title = "Dragonfly Doji", style = shape.diamond,
-     location = location.belowbar, color = color.new(color.aqua, 10), size = size.tiny)
-plotshape(showCandleRoles and gravestoneDoji, title = "Gravestone Doji", style = shape.diamond,
-     location = location.abovebar, color = color.new(color.orange, 10), size = size.tiny)
 
-plotshape(showLiquiditySweep and bullLiquiditySweep, title = "Bullish Liquidity Sweep", style = shape.triangleup,
-     location = location.belowbar, color = color.new(color.blue, 15), size = size.tiny)
-plotshape(showLiquiditySweep and bearLiquiditySweep, title = "Bearish Liquidity Sweep", style = shape.triangledown,
-     location = location.abovebar, color = color.new(color.purple, 15), size = size.tiny)
+
+// ============================================================================
+// MARKER HOVER TOOLTIPS
+// ============================================================================
+// plotshape() cannot carry a tooltip, so these markers are text-glyph labels
+// that carry what triggered them. Label shapes render larger than plotshape
+// markers; a glyph keeps the marker small. On the live bar the labels follow
+// Pine's rollback like plotshape did. The 250 most recent markers are kept.
+f_num(float value) =>
+    str.tostring(value, "#.#")
+
+f_pct(float value) =>
+    str.tostring(value * 100.0, "#") + "%"
+
+bullEvidenceTip = "Evidence: bull " + f_num(bullEvidence) + " vs bear " + f_num(bearEvidence) +
+     " (threshold " + f_num(signalThreshold) + ", change " + f_num(bullEvidence - bullEvidence[1]) + ")" +
+     "\nCurrent candle: pressure " + f_num(candlePressure) + ", quality " + f_num(bullQuality) +
+     "\nSequence (" + str.tostring(sequenceLength) + " bars): pressure " + f_num(sequencePressure) +
+     ", dominance " + f_num(bullDominance) + ", rising closes " + f_num(closePersistenceBull) + "%" +
+     "\nTrend context +" + f_num(bullTrendEvidence) + ", pattern +" + f_num(bullPatternEvidence) +
+     "\nClose " + f_num(priceTrendDistance) + " ATR from Trend EMA (limit " + f_num(maxSignalExtension) + ")"
+bearEvidenceTip = "Evidence: bear " + f_num(bearEvidence) + " vs bull " + f_num(bullEvidence) +
+     " (threshold " + f_num(signalThreshold) + ", change " + f_num(bearEvidence - bearEvidence[1]) + ")" +
+     "\nCurrent candle: pressure " + f_num(candlePressure) + ", quality " + f_num(bearQuality) +
+     "\nSequence (" + str.tostring(sequenceLength) + " bars): pressure " + f_num(sequencePressure) +
+     ", dominance " + f_num(bearDominance) + ", falling closes " + f_num(closePersistenceBear) + "%" +
+     "\nTrend context +" + f_num(bearTrendEvidence) + ", pattern +" + f_num(bearPatternEvidence) +
+     "\nClose " + f_num(priceTrendDistance) + " ATR from Trend EMA (limit -" + f_num(maxSignalExtension) + ")"
+bullExhaustionTip = "Opposing upper wick " + f_pct(upperWickPct) + ", body contraction " + f_num(bullContractionScore) +
+     ", deceleration " + f_num(bullDecelerationScore) + ", trend strength " + f_num(trendScore) +
+     "\nExhaustion " + f_num(bullExhaustion) + " ≥ " + f_num(exhaustionThreshold)
+bearExhaustionTip = "Opposing lower wick " + f_pct(lowerWickPct) + ", body contraction " + f_num(bearContractionScore) +
+     ", deceleration " + f_num(bearDecelerationScore) + ", trend strength " + f_num(trendScore) +
+     "\nExhaustion " + f_num(bearExhaustion) + " ≥ " + f_num(exhaustionThreshold)
+candleShapeTip = "Body " + f_pct(bodyPct) + ", upper wick " + f_pct(upperWickPct) + ", lower wick " + f_pct(lowerWickPct) +
+     ", close at " + f_pct(closePosition) + " of range"
+
+var array<label> markerHoverLabels = array.new<label>()
+f_markerLabel(bool below, string glyph, color markerColor, string markerSize, string tip) =>
+    array.push(markerHoverLabels, label.new(bar_index, na, glyph, yloc = below ? yloc.belowbar : yloc.abovebar,
+         style = label.style_none, textcolor = markerColor, size = markerSize, tooltip = tip))
+
+if showBuySell and newBullSignal
+    f_markerLabel(true, "▲", color.lime, size.normal,
+         "BUY — buyers took control of the candle story.\n" + bullEvidenceTip)
+if showBuySell and newBearSignal
+    f_markerLabel(false, "▼", color.red, size.normal,
+         "SELL — sellers took control of the candle story.\n" + bearEvidenceTip)
+if showExhaustion and confirmedBar and bullExhausted and not bullExhausted[1]
+    f_markerLabel(false, "◆", color.orange, size.small,
+         "Bull trend exhaustion — the uptrend is losing force (no SELL by itself).\n" + bullExhaustionTip)
+if showExhaustion and confirmedBar and bearExhausted and not bearExhausted[1]
+    f_markerLabel(true, "◆", color.aqua, size.small,
+         "Bear trend exhaustion — the downtrend is losing force (no BUY by itself).\n" + bearExhaustionTip)
+if showFollowThrough and bullFollowThrough
+    f_markerLabel(true, "●", color.green, size.small,
+         "Bull follow-through — this candle broke the BUY candle's high and closed higher in the upper part of its range.\n" + candleShapeTip)
+if showFollowThrough and bearFollowThrough
+    f_markerLabel(false, "●", color.maroon, size.small,
+         "Bear follow-through — this candle broke the SELL candle's low and closed lower in the lower part of its range.\n" + candleShapeTip)
+if showFailures and bullFailure
+    f_markerLabel(false, "✕", color.red, size.normal,
+         "BUY failed — this candle closed below the BUY candle's low (" + str.tostring(low[1], format.mintick) + ").")
+if showFailures and bearFailure
+    f_markerLabel(true, "✕", color.lime, size.normal,
+         "SELL failed — this candle closed above the SELL candle's high (" + str.tostring(high[1], format.mintick) + ").")
+if showCandleRoles and bullMarubozu
+    f_markerLabel(true, "■", color.new(color.green, 10), size.small,
+         "Bullish marubozu — almost all body, hardly any wick.\n" + candleShapeTip)
+if showCandleRoles and bearMarubozu
+    f_markerLabel(false, "■", color.new(color.red, 10), size.small,
+         "Bearish marubozu — almost all body, hardly any wick.\n" + candleShapeTip)
+if showCandleRoles and dragonflyDoji
+    f_markerLabel(true, "◆", color.new(color.aqua, 10), size.small,
+         "Dragonfly doji — tiny body at the top, long lower wick: lower prices were rejected.\n" + candleShapeTip)
+if showCandleRoles and gravestoneDoji
+    f_markerLabel(false, "◆", color.new(color.orange, 10), size.small,
+         "Gravestone doji — tiny body at the bottom, long upper wick: higher prices were rejected.\n" + candleShapeTip)
+if showLiquiditySweep and bullLiquiditySweep
+    f_markerLabel(true, "▲", color.new(color.blue, 15), size.small,
+         "Bullish liquidity sweep — the wick broke the " + str.tostring(sweepLookback) + "-bar low (" +
+         str.tostring(sweepPriorLow, format.mintick) + ") and the close recovered back above it.\n" + candleShapeTip)
+if showLiquiditySweep and bearLiquiditySweep
+    f_markerLabel(false, "▼", color.new(color.purple, 15), size.small,
+         "Bearish liquidity sweep — the wick broke the " + str.tostring(sweepLookback) + "-bar high (" +
+         str.tostring(sweepPriorHigh, format.mintick) + ") and the close fell back below it.\n" + candleShapeTip)
+while array.size(markerHoverLabels) > 250
+    label.delete(array.shift(markerHoverLabels))
 
 barStateColor = bullBreakoutAccepted ? color.new(color.lime, 5)
      : bearBreakoutAccepted ? color.new(color.red, 5)

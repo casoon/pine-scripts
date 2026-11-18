@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+## v1.16 — 2026-11-18
+- **Detection:** a candidate is no longer treated as still open if any close between its window end and today already left the boundaries (broken out and re-entered)
+- **Detection:** new input `Zwischenzeitlich ausgebrochene Patterns verwerfen` (default on) switches that history check off
+- **Gates:** containment is now a hard gate with the new input `Min. Containment-Quote` (default 0.85, 0 = off); the WATCH blocker label names it
+- **Display:** breakouts/breakdowns now also plot a persistent triangle marker, so they stay visible when resolved patterns are not kept
+- **Display:** `Aufgelöste Patterns behalten` is now on by default
+
 ## v1.15 — 2026-10-02
 - The swing-path component (20 points) is no longer part of the score: every wedge that passes the `pathOk` gate earned the same 20 points, so it only inflated the score. `pathOk` stays a hard gate; the debug table still shows the component and labels it `(Gate)`
 - The remaining components (80 points) are scaled to 0-100, so the score range and `Mindestqualität` keep their meaning. Because the constant 20 points are gone, a valid wedge now needs more real quality to clear the same `Mindestqualität` (and `Kandidat-Mindestscore (Watch)`)

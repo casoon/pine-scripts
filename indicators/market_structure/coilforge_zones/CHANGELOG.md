@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.4.0 — 2026-11-18
+- Fixed: Minimum Zone Bars now counts the bars the zone condition actually held. Before, the age was measured from the back-dated box start, so even a one-bar zone passed the minimum and armed a breakout watch
+- Fixed: the bar that ends a zone no longer rewrites the zone's read and touch counts — a breakout bar could shift the read toward its own direction and so pass `Avoid Breakouts Against Box Read`
+- Score: missing volume and disabled modules no longer grant their full points; the score is normalized over the measurable modules (scale stays 0–80). On instruments without real volume (CFDs, tick volume) scores are lower than before, so fewer zones qualify at the same preset
+- Impulse-In Context now measures the move into the base (before the range window) instead of drift inside it, frozen when the zone starts — scores and continuation reads change
+- ATR Compression and ADX Chop give 40% of their points right at their threshold (rising to 100% at zero) instead of 0% — scores are higher on all instruments
+- A running zone holds while at least one structure condition (range compression or touch structure) still holds; score and full structure only decide whether a zone starts. Before, a single score dip ended the zone
+- Breakout markers and alerts evaluate on confirmed bars only — no marker appears and vanishes on the open bar. The "Alerts only on bar close" toggle is removed
+- Breakout markers no longer carry "BO↑/BO↓" text; hovering a marker shows direction, zone range, read and close. Breakout Up/Down appear in the Data Window
+- A dotted line inside each zone box marks the bar the zone was detected on; the part of the box left of it is drawn back over the range window
+
 ## v1.3.1 — 2026-10-12
 - Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 

@@ -9,7 +9,8 @@ Detects trendlines through pivot points using a Directional or Combinatorial pai
 - **Composite quality score** — touches, span, extreme-anchor bonus, recency, fit tightness and violation penalty combined into a single score
 - **Violation & relevance filters** — candidates with too many close/wick violations between anchors, or too far from current price, are dropped
 - **Greedy non-overlap** — top-scoring lines are selected first; each pivot contributes to one line at most
-- **Retest highlighting** — lines within a configurable ATR distance of price are emphasized, with optional distance label
+- **Role flip** — a near-horizontal line broken after its last touch is kept as a level on its new side (colour and label switch, dashed) until price breaks back through it; a broken sloped trendline is dropped
+- **Retest highlighting** — lines within a configurable ATR distance of price are emphasized; the retest distance is added to the line's end label
 - **Touch-count labels** — small label at the right end of each line shows the number of pivots it connects
 - **Optional convex hull** — Andrew's monotone-chain envelope (strictest descending / ascending boundary), drawn dotted in a separate color
 
@@ -30,7 +31,7 @@ For each pair `(i, j)` of pivots:
    ```
 
 4. Re-evaluate inliers on the refined line — final touch count and residual sum
-5. Filter: drop candidates with too many violations between anchors (unless anchored at an extreme), too far from current price, or outside the Sloped/Near-horizontal display mode
+5. Filter: drop candidates with too many violations between anchors, sloped lines broken after their last touch, near-horizontal lines that flipped role and then failed on their new side as well, too far from current price, or outside the Sloped/Near-horizontal display mode
 6. Score the candidate:
 
    ```
@@ -70,7 +71,7 @@ Wrong-way turn for the upper hull = cross product ≥ 0 (the second-to-last poin
 | Input | Default | Description |
 |-------|---------|-------------|
 | Left Bars / Right Bars | 5 / 5 | Pivot confirmation window |
-| Line Fit | Outer | OLS or Outer (OLS shifted to outermost inlier) |
+| Line Fit | Outer | OLS or Outer (OLS shifted to outermost inlier) — Combinatorial only |
 | Detection Method | Directional | Directional or Combinatorial pair scan |
 | Min Touches | 3 | Minimum pivots a line must connect |
 | Tolerance (× ATR) | 1.0 | Vertical distance threshold for "on the line" |
@@ -78,6 +79,7 @@ Wrong-way turn for the upper hull = cross product ≥ 0 (the second-to-last poin
 | Max Lines per Direction | 3 | Cap on drawn resistance and support lines |
 | Min Line Span (bars) | 15 | Minimum distance between oldest and newest touch |
 | Max Violation % | 20 | Max share of bars crossing the line between anchors |
+| Break confirmation (closes) | 2 | Consecutive closes beyond the line after the last touch that flip a near-horizontal line's role or drop a sloped line; the same count back through drops a flipped line (0 = ignore breaks) |
 | Bars past last touch | 30 | Projection length beyond the newest touch |
 | Show | Both | Sloped / Near-horizontal / Both |
 | Max current distance (× ATR) | 5.0 | Relevance filter vs. current price |
