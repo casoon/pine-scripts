@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Pine v6:** the MFI midline crosses now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped
+
 ## v1.5.0 — 2026-11-17
 - **Breaking:** Signal Quality removed — the "Show Signal Quality Labels" input and the 0-100 label per cross (zone depth + context + stall points) are gone. The cross from the zone, the midline cross and the strong/faded rendering stay; Signal Quality never gated a signal, so signal density does not change
 - **Breaking:** the faded "Bull/Bear Extreme (absorbed)" marker is split by its reason — "(stall)" when price did not follow the oscillator's move, "(counter)" when the cross runs against the trend context line (stall wins when both apply). Style settings saved for the old marker must be re-set

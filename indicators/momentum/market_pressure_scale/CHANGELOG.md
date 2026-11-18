@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Pine v6:** the Setup Pressure crosses behind coil entry, failed coil and naked impulse now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped
+
 ## v2.6.0 — 2026-11-17
 - **Breaking:** the Bias "Type" and Smoothing "Type" selections and the JMA Phase / Power inputs are removed. Bias keeps its original core HMA, the output smoothing its original core EMA (Plan 38)
 

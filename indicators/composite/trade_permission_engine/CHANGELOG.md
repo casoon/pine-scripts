@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Position Health:** sixth component Regime/Sideways Risk — net move vs. path length over `Regime efficiency lookback (bars)`, weighted by `Regime/Sideways-Risk weight` (default 10), the same for long and short. The HOLD/PROTECT thresholds were set on the six-component blend
+
+### Fixed
+- **Pine v6:** the pivot-window high/low and the micro-structure break crosses now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped
+
 ## v1.6.0 — 2026-11-17
 - **Position Health counts trend efficiency once:** the Regime/Sideways-Risk component (a Kaufman efficiency ratio) is removed; Live Quality already measures path-vs-net efficiency. The inputs "Regime/Sideways-Risk weight" and "Regime efficiency lookback" are gone. Health now averages five components, so its level shifts slightly and the HOLD/PROTECT/REDUCE/EXIT thresholds, set for the six-part blend, are not recalibrated
 - **Dead code removed:** the divergence decay values that no longer fed Permission

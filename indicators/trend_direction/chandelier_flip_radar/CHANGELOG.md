@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Pine v6:** the EMA of absolute close changes in the performance denominator now runs on every bar instead of only when the preceding condition in the same expression passed, so its value on historical bars is no longer skipped
+
 ## v1.6.4 — 2026-11-17
 - Fix: a confirmed flip against the current direction is no longer swallowed when the opposite trigger is crossed on the same bar (strong trends could block the short/long flip entirely) — also in the HTF reference stop
 - Fix: the HTF reference stop and direction now use the last closed higher-timeframe bar, so they no longer repaint during an open HTF bar

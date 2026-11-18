@@ -10,6 +10,10 @@
 - `wavetrend` v1.4.0: the Persist depth block scales the OB/OS threshold sign-safe; with Adaptive (Percentile) zones a threshold on the "wrong" side of zero no longer inverts the block. Fixed zones are unchanged
 
 - `wavetrend` v1.4.0→1.5.0 (2026-11-17): pivot divergence is no longer part of the dashboard Bias — the bias now sums oscillator side, momentum, cross and regime (range ±4 instead of ±6). Bucket thresholds are unchanged and all reachable; Strong Bull/Bear needs at least three of the four. The Divergence row, divergence lines and markers stay as display. No signal or alert change
+
+### Fixed
+- **Pine v6 (`wavetrend`):** the WT crosses, the ATR in the volatility gate, the overlay price/oscillator ranges, the swing high/low for the stop and the TP/SL hit crosses now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped
+
 ## Volume check — 2026-10-12
 - `wavetrend` v1.3.3→1.3.4: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets
 - `wavetrend_v3` v3.2.5-experimental→3.2.6-experimental: Volume check fixed: only `tick` volume is rejected; `n/a` counts when the feed actually delivers volume. Most non-crypto feeds report `n/a`, so the old `base`/`quote` check treated futures and stocks with real volume (e.g. EUREX:FDAX1!) as volume-less — volume-based parts are active there again, which can change scores, gates and signals on those markets

@@ -35,7 +35,14 @@ that a `volume` series exists:
 | `base`               | volume in base currency or contracts  | yes                  |
 | `quote`              | volume in quote currency (crypto)     | yes, different unit  |
 | `tick`               | number of price updates               | no                   |
-| `n/a`                | no volume                             | no                   |
+| `n/a`                | type not reported                     | yes, if the feed delivers volume |
+
+Many futures and stock feeds report `n/a` while delivering real trade volume, so only `tick` or
+a series that is empty from the start counts as no volume:
+
+```pine
+bool volumeIsReal = (ta.cum(nz(volume)) > 0 and syminfo.volumetype != "tick") and not na(volume)
+```
 
 The repository deliberately keeps no table of which provider reports which volume type for
 which symbol. That is a property of the feed and it changes; the script asks the symbol at
@@ -47,8 +54,9 @@ average makes a volume condition permanently true or permanently false without a
 ## When there is no trade volume
 
 - A volume component degrades to neutral instead of voting.
-- Weighted scores renormalise the remaining weights, so the total does not sink on feeds
-  without trade volume.
+- Its weight is dropped. It is neither moved onto a price component (that would count RSI or a
+  similar sensor twice) nor stretched back to 100 % by dividing by the smaller weight sum, so
+  scores have a lower maximum on such feeds while the thresholds stay the same.
 - The chart shows it: a dashboard row or a label states that the volume part is inactive.
 - Scripts that make no sense without real volume — volume profiles, cumulative delta, Klinger —
   are marked `Exchange-only` and switch off visibly.
@@ -86,7 +94,7 @@ added to every script; not all of them carry it yet.
   - `CFD-safe` — runs anywhere, needs nothing beyond class A.
   - `CFD-degraded` — runs anywhere; the volume or open-interest part switches off visibly.
   - `Reference-required` — needs a reference market; not valid on a CFD alone.
-  - `Exchange-only` — needs real trade volume (`base` or `quote`). On `tick` or `n/a` the
+  - `Exchange-only` — needs real trade volume. On `tick` or an empty volume series the
     script switches off visibly instead of degrading.
 
 The verdict describes the data requirement, not an instrument class. Whether a given symbol

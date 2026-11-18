@@ -2,7 +2,7 @@
 
 Role-separated overextension / reversal-risk context. Three distinct role scores — **Stretch** (location), **Exhaustion** (momentum), **Reaction** (trigger) — are combined into a single 0–100 score, scaled by a volatility multiplier, and framed by a regime classifier. The regime never blocks a signal: it shifts the threshold and re-labels the signal as **Continuation Risk**, **Trend Exhaustion**, or **Range Fade**. This is a context / risk tool, not a blind buy/sell generator — it answers "don't keep chasing here", not "reverse now".
 
-It generalizes the [commodity_heat_reversal](../commodity_heat_reversal/) concept (discrete 0–7 points, commodity-tuned) into a continuous, market-adaptive, role-attributable score.
+It generalizes the archived [commodity_heat_reversal](../../../archive/indicators/commodity_heat_reversal/) concept (discrete 0–7 points, commodity-tuned) into a continuous, market-adaptive, role-attributable score.
 
 ## Roles
 

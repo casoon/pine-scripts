@@ -1,6 +1,6 @@
 # MTF Structure Bias
 
-Classifies market structure across four timeframes using pure price geometry — no oscillators, no momentum indicators. For each timeframe, it compares the current highest high and lowest low against the same values `N` bars ago: both rising = bullish structure (+1), both falling = bearish structure (−1), otherwise mixed (0). A weighted sum of all four TF states produces a confluence score from −100 to +100, with higher timeframes weighted more. The result is structural alignment, not oscillator alignment — a different layer of confluence than `mtf_stochrsi_pair_score`.
+Classifies market structure across four timeframes using pure price geometry — no oscillators, no momentum indicators. For each timeframe, it compares the current highest high and lowest low against the same values `N` bars ago: both rising = bullish structure (+1), both falling = bearish structure (−1), otherwise mixed (0). A weighted sum of all four TF states produces a confluence score from −100 to +100, with higher timeframes weighted more. The result is structural alignment, not oscillator alignment — a different layer of confluence than `mtf_wavetrend_confluence`.
 
 ## Features
 

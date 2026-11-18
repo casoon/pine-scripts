@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Grade:** each cross gets an MTF confluence grade 0–4 — Depth (2 = deep extreme, 1 = shallow zone cross with exhaustion) + Wave aligned (1) + Tide aligned (1). `Min Grade (0–4)` (default 2) lets a deep reversal pass against lagging higher TFs, while a shallow zone cross needs Wave or Tide alignment
+- **Alerts:** `TWR Long High Grade (aligned)` and `TWR Short High Grade (aligned)`
+
+### Changed
+- **Display:** aligned signals (grade ≥ 3, or ≥ 2 when Wave = chart TF) are drawn bold, lower-grade reversals faint; labels, tooltip, table and log show the grade. Plot titles were renamed (`MTF Long Signal` → `MTF Long Signal (High Grade)`, `Long` → `Long (aligned)` and the short equivalents), so saved style settings for these plots fall back to defaults
+- **Alerts:** the `alert()` message carries the grade
+
+### Fixed
+- **Ripple exit:** uses the globally computed zone state instead of a second highest/lowest call inside the condition
+
 ## v0.9.0 — 2026-11-17
 - **Breaking:** "WT Smoothing" and the JMA Phase / Power inputs are removed; WT1 always uses the original EMA. HMA, SuperSmoother and JMA Approx changed signal density, not quality (Plan 38)
 

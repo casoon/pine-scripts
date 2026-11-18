@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Rules:** `Min Fibonacci fit (0-100)` (default 55) — counts that pass the hard rules but fit the Fibonacci guidelines poorly are rejected instead of drawn
+
+### Changed
+- **Count selection:** rule-valid counts are ranked by Fibonacci guideline fit plus a small bonus for more complete structures; the runner-up becomes the alternate count
+
 ## v1.3.0 — 2026-11-17
 Rebuilt as a display of the current wave count: no score, no "setup" calls. **Existing alerts must be recreated** — titles and messages changed.
 - New event "Close beyond W1 end" fires on a break observed after the W1-W2 count appears, not on the count bar when the pivot lag already placed the close beyond W1

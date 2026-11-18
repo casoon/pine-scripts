@@ -20,10 +20,15 @@
 | Stop | ATR × 1.5 from the fill, frozen ATR of the signal bar |
 | Exit | Break-even at 1R, trailing stop from 2R (replaces the fixed target), structural exit from 2–3R; `Fixed` mode = ATR target + stop + time limit |
 | Filters | Session, date range, cooldown, losing-streak limit, max drawdown — all off by default |
+| WT smoothing | One kernel on every timeframe: `Smoothing Type` EMA (default, classic WaveTrend) or T3. Replaces the fixed per-TF smoothers of v4.x (15M RMA, 1H HMA, 4H JMA, 1D SMA) |
 
 The per-timeframe levels, target multiples and structural-exit thresholds are carried over
 from v4.93 unchanged. They were also set on the NatGas window and are part of what a first
 run has to test, not a calibrated result.
+
+The per-timeframe levels were set with the old per-TF smoothers. With one EMA kernel, `wt1`
+reaches the levels with a different depth and timing on 15M/1H/4H/1D, so the levels are even
+less of a calibrated value than before — a first run should check them per timeframe.
 
 ### Removed in v5.0
 
@@ -35,6 +40,7 @@ run has to test, not a calibrated result.
 | OS/OB depth cap on 1D (±48) | Derived from in-sample setup classification |
 | StochRSI gate, ATR rank, BB expansion, chop, pivot proximity, liquidity sweep filters | Default off since v4.2x; the `test92` stack that used them was close to selection-neutral |
 | Separate OS and OB inputs per TF | Replaced by one symmetric level per TF (defaults were already mirrored) |
+| Per-TF smoother switch (RMA/HMA/JMA/SMA) and JMA phase/power | Chosen per timeframe on the same NatGas window; replaced by one kernel for all TFs |
 
 None of these gates was ever checked outside the window it was tuned on (Plan 34, Phase 2 never
 ran). With no new test data coming, the decision rule from Plan 34 — "OOS contradicts or is

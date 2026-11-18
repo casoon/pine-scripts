@@ -30,8 +30,11 @@ and whether it reads data that actually carries a signal there.
   exhaustion — instead of voting on everything at once. Composite indicators combine roles
   explicitly and show which part drives the reading.
 - **Degrade instead of guessing.** Where a script uses volume, it checks whether the feed
-  delivers real trade volume. If not, the volume part switches off visibly and the remaining
-  weights are renormalised.
+  delivers real trade volume. If not, the volume part switches off visibly; its weight is
+  dropped, not moved onto a price component.
+- **One vote per information family.** RSI, StochRSI, CCI and WaveTrend read the same price
+  series, so a score takes one sensor per family (momentum, trend, structure, volatility,
+  volume) instead of counting the same move four times.
 - **Confirmed alerts.** The repository convention is that alerts fire on the closed bar, not on
   a bar that is still forming.
 

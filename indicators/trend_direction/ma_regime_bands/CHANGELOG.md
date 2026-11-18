@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Pine v6:** the RMA of the AMA step now runs on every bar instead of only when the preceding condition in the same expression passed, so its value on historical bars is no longer skipped
+
 ## v1.1.0 — 2026-11-17
 - **Breaking:** "MA Type" offers DEMA (default), EMA and SMA; TEMA and JMA are removed. Saved chart settings that used a removed option must be re-selected
 

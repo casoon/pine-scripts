@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Pine v6:** the MIDAS reclaim crosses and the band-reaction crosses now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped
+
 ## v2.8.0 — 2026-11-17
 - Reclaim Quality Score (0–4) removed: reclaim labels read `R` instead of `R n/4`; the tooltip shows the raw readouts (close location in the bar range, volume vs. average, structure break, TBF phase). Input `Reclaim: minimum close-location ratio` removed; the dashboard row `Reclaim Q` is now `Last reclaim` (direction, active/invalidated)
 - New reclaim invalidation event: after a bullish reclaim, a close back below the inner lower band ends it (bearish: close back above the inner upper band). Small `✗` marker and two new alerts, "MIDAS bullish reclaim invalidated" / "MIDAS bearish reclaim invalidated"

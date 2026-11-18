@@ -32,6 +32,8 @@
 - `vein_pullback` v0.3.2→0.3.3 — the pullback extreme is frozen as a stop line when an end signal fires; a later close beyond it marks the signal invalidated (✕) with new "Signal Invalidated" alerts
 - `vein_execution` v0.1.8→0.1.9 — the entry stop uses the sweep level only when the sweep is fresh (within "Sweep: Max Bars to Reclaim"); otherwise the last micro swing low/high. Before, a sweep from long ago could set the stop
 - `vein_execution` v0.1.8→0.1.9 — Bull/Bear Trigger alerts fire once when the TRIGGER state starts instead of on every bar it lasts
+- `vein_pullback` — **Pine v6:** the volume SMA now runs on every bar instead of only when the preceding condition in the same expression passed, so its value on historical bars is no longer skipped; only the result stays gated by real volume
+- `vein_reversal_score` — **Pine v6:** MFI and the volume SMA now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped; only the result stays gated by real volume
 
 ## Volume check — 2026-10-12
 - `vein_spread_context` v0.1.3→0.1.4: the futures root is now matched exactly instead of as a substring — two-letter roots such as "PL" or "HO" no longer map unrelated symbols (e.g. a "PLTR" root to Platinum, "HOOD" to Heating Oil)

@@ -34,9 +34,9 @@ one signal engine and should not sit behind a suite namespace.
 
 ## Design decision: explicit symbols, not auto-mapping
 
-[`vein_spread_context.pine`](../../trend_direction/vein/vein_spread_context.pine) already builds
+The archived [`vein_spread_context.pine`](../../../archive/indicators/vein/vein_spread_context.pine) built
 a front/next spread, but maps the chart symbol to a futures pair automatically via
-`str.contains()`. On an unmapped symbol that auto-mapping silently does nothing. This module uses
+`str.contains()`. On an unmapped symbol that auto-mapping silently did nothing. This module uses
 two explicit `input.symbol()` fields (Front, Next) instead — the user states the pair directly,
 and an unconfigured or misconfigured pair (empty, or Front == Next) is shown as a visible
 "NOT CONFIGURED" status rather than a silent blank table.

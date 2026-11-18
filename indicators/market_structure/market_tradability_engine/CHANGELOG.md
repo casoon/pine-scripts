@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Structure (v2):** trend quality blends baseline-cross rarity, efficiency, ADX, slope and directional consistency again (each ranked against its own history); direction blends slope, baseline displacement, DI balance, directional consistency, range pressure and bar acceptance. The Structure Threshold was set on this multi-axis blend
+- **Energy (v2):** the efficiency rank is an Energy input again (30 %), next to volatility expansion, momentum acceleration and candle commitment
+
 ## Smoothing choice reduced (v2) — 2026-11-17
 - `market_tradability_engine_v2` v2.6.0→2.7.0 — **Breaking:** "Baseline Type" offers EMA (default) and T3 (slower, fewer crosses, misses more turns); SMA, RMA, WMA, SuperSmoother, KAMA, JMA Approx and the JMA Phase / Power inputs are removed. Saved chart settings that used a removed option must be re-selected. `MTE2 CONFIG` logs modelVersion 2.7.0
 

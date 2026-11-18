@@ -218,7 +218,7 @@ Frage ist gegenstandslos. Stufe 2 ist deshalb nicht nur bequemer, sondern belast
 ### 4.3 Mapping
 
 Nur für das Kontext-Modul aus §4.1 relevant. Prior Art:
-[`vein_spread_context.pine`](indicators/trend_direction/vein/vein_spread_context.pine) —
+[`vein_spread_context.pine`](archive/indicators/vein/vein_spread_context.pine) (archiviert) —
 mappt bereits CFD → Front/Next-Future, allerdings automatisch per `str.contains`. Das ist die
 brüchige Variante: auf einem unbekannten Symbol greift keine Regel und das Modul liefert
 stillschweigend nichts. Besser ein explizites `input.symbol()` mit sinnvollem Default und

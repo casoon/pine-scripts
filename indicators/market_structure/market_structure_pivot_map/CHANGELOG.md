@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Pine v6:** the crosses behind the "Cross Above/Below CPR" alerts now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped
+
 ## v1.0.4 — 2026-11-17
 - Fix: ADR and daily ATR projections used the still-forming daily bar (lookahead), so historical bars saw the full day's range. They now use the last completed day
 - CPR-cross alert messages no longer say LONG/SHORT — the tool reports location, not trade direction

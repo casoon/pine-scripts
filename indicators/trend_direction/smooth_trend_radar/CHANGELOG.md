@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Pine v6:** the StochRSI and WT crosses, the ATR in the volatility gate, the volume SMA, the swing high/low for the stop and the TP/SL hit crosses now run on every bar instead of only when the preceding condition in the same expression passed, so their values on historical bars are no longer skipped
+
 ## v3.5.5 — 2026-11-17
 - Fix: the trend signal (▲/▼) now fires on the first bar of a trend where ADX is above the threshold, not only on the flip bar — a flip below the threshold no longer leaves the whole trend without a signal
 - Fix: a trend change now ends the running setup — its SL/TP lines are removed and no TP/SL alerts or rejection re-entries follow from a setup whose trend has turned
