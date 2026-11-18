@@ -216,7 +216,7 @@ If both setup sources are left on their default (`close`), they count as not con
 | Beh \| Tmp | Behaviour and tempo role on/off (signal direction) |
 | Interpretation | Plain-language explanation of current state |
 | Signal | BULL ENTRY active / BEAR ENTRY active / — |
-| 4H Zone | Distance to nearest relevant 4H zone in ATR |
+| 4H Zone | Distance to the 4H swing level in ATR — the swing low when the bias is up, the swing high when it is down; green within "Zone Proximity (ATR)" |
 
 ### Alerts
 
@@ -231,13 +231,12 @@ The QUIET/WATCH/SETUP/TRIGGER status is display only and has no alerts.
 
 ## Display Modes
 
-Vein Reversal Score has three modes (Input "Display Mode"):
+Vein Reversal Score has two modes (Input "Display Mode"):
 
 | Mode | What it shows |
 |------|--------------|
 | Light | Compact score table |
 | Debug | Extended score table with all component rows |
-| Research | Same as Debug |
 
 Vein Execution has Light and Debug modes (Debug shows the micro SWP / BOS labels). Vein Pullback has no display modes.
 
