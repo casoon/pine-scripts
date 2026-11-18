@@ -57,18 +57,15 @@ and the transformation rules.
 | Strategy | Based on | SL type | Status |
 |----------|----------|---------|--------|
 | [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising |
-| [`market_average_relationship_engine_strategy.pine`](strategies/market_average_relationship_engine/market_average_relationship_engine_strategy.pine) | Market–Average Relationship Engine | Trailing (MA ∓ ATR×) | Not ready — not yet backtested |
 | [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising |
 | [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (Long Only) |
 | [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Not ready — v5.0 not yet backtested |
 | [`reversal_engine_score_strategy.pine`](strategies/reversal_engine_score/reversal_engine_score_strategy.pine) | Reversal Engine Score | Structural + R-multiple TP | Not ready |
-| [`commodity_pulse_matrix_v4_strategy.pine`](strategies/commodity_pulse_matrix/commodity_pulse_matrix_v4_strategy.pine) | Commodity Pulse Matrix v4 | Directional fixed TP | Not ready — not yet backtested |
 | [`kestrel_opportunity_lens_strategy.pine`](strategies/kestrel_opportunity_lens/kestrel_opportunity_lens_strategy.pine) | Kestrel Opportunity Lens | Time exit, no stop (evaluation) | Not ready — NatGas 4h tested, 4 setup models |
-| [`similar_market_states_strategy.pine`](strategies/similar_market_states/similar_market_states_strategy.pine) | — (research, standalone) | Fixed + time exit | Not ready |
-| [`overextension_reversion_strategy.pine`](strategies/overextension_reversion/overextension_reversion_strategy.pine) | — (research, standalone) | Swing/fixed SL + TP + time exit | Not ready |
 
 Backtest results and parameter notes live in `strategies/<name>/<name>_strategy_assessment.md`
 — that is the only place figures belong. Schema: [`strategies/ASSESSMENT_SCHEMA.md`](strategies/ASSESSMENT_SCHEMA.md).
+Archived indicators and strategies with reasons and recovery notes: [`archive/README.md`](archive/README.md).
 
 ---
 
