@@ -106,13 +106,21 @@ Checkliste gegen das Rollen-Modell (`indicator-design`):
 - [ ] Macht das Modul **eine** Hauptaufgabe — oder ist es eine eierlegende Wollmilchsau, bei der
       man nicht mehr sagen kann *warum* ein Signal feuert? (Memory `feedback_one_thing_done_well`)
 - [ ] Hat jeder Sensor genau **eine** Rolle, oder erfüllt einer eine fremde (RSI als Trend,
-      Pivot als Trigger, Volumen-Spike als Long/Short)?
-- [ ] Gibt es eine harte **AND-Kette**, die gute Setups killt — statt Evidenz-Scoring?
+      Pivot als Trigger, Volumen-Spike als Long/Short, richtungslose Volatilität mit Vorzeichen in einem gerichteten Score)?
+- [ ] **Eine Stimme je Informationsfamilie:** Zählen mehrere korrelierte Sensoren derselben Familie
+      (z. B. RSI + StochRSI + WT + CCI) mehrfach im selben Score?
+- [ ] **Keine Renormalisierung fehlender Evidenz:** Wird fehlendes Volumen (`!volumeIsReal`) auf
+      Preis-Sensoren umgebucht oder auf 100 % hochgestreckt?
+- [ ] Gibt es eine harte **AND-Kette**, die gute Setups killt — oder umgekehrt ein unkalibriertes
+      **Ad-hoc-Grade-Gate** (`minGrade`, `minQuality`, „Probability %"), das valide Trigger blockiert?
 - [ ] Vetoen zu **viele** Sensoren? Darf ein einzelner schwacher Wert ein Setup töten?
 - [ ] Ist die **Gewichtung** auf Rollen-Ebene (nicht je Indikator) und TF-/Markt-/Regime-abhängig?
 - [ ] Sind **Regime** (Trend vs. Reversal) getrennt, oder laufen beide Modelle mehrdeutig parallel?
 - [ ] Speist ein **Pivot** den Signalpfad (Trigger/Grade/Dedup)? → Defekt, auf Control-Overlay
-      zurückbauen.
+      zurückbauen (Ausnahme: struktureller Bruch eines bereits früher bestätigten Swing-Levels).
+- [ ] **Beim Vereinfachen / Kürzen geprüft:** Hängen feste Schwellenwerte im Code an einer
+      Mehrachsen-Kalibrierung (wie TPE Position Health oder MTE v2), die durch das Streichen einer
+      Achse dekalibriert würden?
 - [ ] Gibt es **Debug-Ausgaben**, die „warum (k)ein Signal" beantworten?
 - [ ] Beantwortet er die **sechs Fragen** (Wo / Richtung / frisch-erschöpft / Timing / Sicherheit /
       Warum kein Signal)?

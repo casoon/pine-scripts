@@ -64,30 +64,33 @@ Für jede Datenquelle in einem Skript in dieser Reihenfolge:
 
 ## 3. Die Laufzeit-Prüfung
 
-Volumen-Validität kommt aus `syminfo.volumetype`, nicht aus `syminfo.type` und erst recht
-nicht aus der bloßen Existenz einer `volume`-Serie:
+Volumen-Validität wird zur Laufzeit über `syminfo.volumetype` **und** das tatsächliche Vorhandensein einer nicht-leeren `volume`-Serie geprüft (viele Futures- und Aktien-Feeds liefern in TradingView `syminfo.volumetype == "n/a"`, obwohl echte Börsenumsätze im `volume`-Feld stehen; ausgeschlossen werden daher `"tick"` sowie komplett leere/Null-Serien):
 
 | Wert | Bedeutung | Handelsvolumen? |
 |---|---|---|
 | `"base"` | Menge in Basiseinheit/Kontrakten | ja |
 | `"quote"` | Menge in Quote-Währung | ja, andere Einheit — nicht mischen |
+| `"n/a"` | vom Feed nicht deklariert (bei vielen Futures/Aktien trotzdem echtes Volumen, falls `ta.cum(nz(volume)) > 0`) | **ja, falls `ta.cum(nz(volume)) > 0`** |
 | `"tick"` | Anzahl Preis-Updates | **nein** |
-| `"n/a"` | keins | **nein** |
 
 ```pine
-bool volumeIsReal = (syminfo.volumetype == "base" or syminfo.volumetype == "quote")
-                    and not na(volume)
+bool volumeIsReal = (ta.cum(nz(volume)) > 0 and syminfo.volumetype != "tick") and not na(volume)
 ```
 
 `syminfo.type` ist als Enum nicht stabil garantiert — nur zur Beschriftung, nie als alleinige
 Rechenweg-Bedingung, und immer mit defensivem Default-Zweig.
 
-### Die `nz(volume)`-Falle
+### Die `nz(volume)`- und Kurzschluss-Falle
 
-`nz(volume)` ist **kein** Guard. Es macht fehlendes Volumen zu `0`, und `0 > sma(vol)` ist
-dann dauerhaft `false` → das Gate blockiert still alles. Umgekehrt wird `range / nz(volume)`
-zur Division durch Null. Im Repo ist das das häufigste Muster. Ein Guard prüft Validität und
-schaltet das Feature ab; er ersetzt keinen Wert.
+1. `nz(volume)` allein ist **kein** Guard. Es macht fehlendes Volumen zu `0`, und `0 > sma(vol)` ist
+   dann dauerhaft `false` → das Gate blockiert still alles. Umgekehrt wird `range / nz(volume)`
+   zur Division durch Null, und `math.max(nz(volume), 1.0)` in einem MFI macht aus fehlendem Volumen
+   still einen reinen Preis-RSI unter falschem Namen ("volume-backed").
+2. **Zustandsbehaftete `ta.*`-Volumenfunktionen (`ta.mfi`, `ta.vwap`, `ta.sma(volume, ...)`, `ta.stdev(volume, ...)`) nie direkt hinter `volumeIsReal ? ... : na` schreiben:** Wegen der Pine-v6-Kurzschlussauswertung muss der `ta.*`-Aufruf immer vorab bedingungslos in eine Hilfsvariable geschrieben und erst das Ergebnis gegated werden:
+   ```pine
+   float _mfiCalc = ta.mfi(hlc3, mfiLen)
+   float mfiVal   = volumeIsReal ? _mfiCalc : na
+   ```
 
 ## 4. Data Contract im Header
 
@@ -108,15 +111,19 @@ Feldbedeutungen in `DATA_VALIDITY.md` §6.
 
 ## 5. Umsetzungsmuster
 
-**Degradation (Feature neutral, nicht 0):**
+**Degradation (Feature neutral, nicht 0 — und KEINE Renormalisierung fehlender Evidenz):**
 
 ```pine
-float volScore = volumeIsReal ? f_volScore() : na       // nicht 0.0
-bool  volGate  = volumeIsReal ? volume > volMa : true   // pass-through, nicht false
+float _volSma  = ta.sma(volume, volLen)
+bool  volGate  = not useVolFilter or not volumeIsReal or volume > _volSma   // pass-through, nicht false
 ```
 
-Bei gewichteten Scores das **Gewicht renormalisieren**, nicht nur den Beitrag nullen —
-sonst sinkt der Gesamtscore auf CFDs systematisch und alle Schwellen verschieben sich.
+**Verbot der Renormalisierung (Lektion aus Plan 41/44):** Wenn in einem gewichteten oder
+additiven Score die Volumen-Komponente wegen `!volumeIsReal` entfällt, darf ihr Gewicht **nicht**
+auf andere Komponenten (z. B. RSI) umgebucht und die verbleibende Summe **nicht** auf 100 %
+hochgestreckt werden. Fehlende Evidenz ist weniger Evidenz — würde man sie auf Preis-Oszillatoren
+umbuchen, zählt man dieselbe Preis-Familie doppelt und täuscht auf volumenlosen Feeds dieselbe
+Score-Sicherheit vor wie mit Börsenvolumen.
 
 **Sichtbarkeit:** Ein abgeschaltetes Feature muss im UI erkennbar sein — Dashboard-Zeile
 ("Volumen: tick — inaktiv") oder einmaliges Label auf `barstate.islast`. Stille Degradation
@@ -136,11 +143,11 @@ Vertrauensrangfolge (`DATA_VALIDITY.md` §4.2):
 | 1 | Chart-Preis | hoch |
 | 2 | Referenzmarkt auf **Daily**, nur Nicht-Preis-Daten (OI, Volumen, Front/Next-Spread) | brauchbar |
 | 3 | Referenzmarkt intraday | schwach |
-| 4 | aus CFD-Volumen abgeleitetes | keins |
+| 4 | aus Tick-Volumen abgeleitetes | keins |
 
 Stufe 2 umgeht die Settlement-/Back-Adjustment-Frage komplett, weil nie Preise zweier Feeds
 verglichen werden. Wenn doch requestet wird: `request.security()` unbedingt auf Top-Level,
-`lookahead=barmerge.lookahead_off`, `na`-Zweig neutral (nicht 0), Symbolzuordnung als
+für bestätigte historische Werte `expr[1]` mit `lookahead=barmerge.lookahead_on`, `na`-Zweig neutral (nicht 0), Symbolzuordnung als
 expliziter Input mit sichtbarem „nicht konfiguriert"-Zustand — nicht per `str.contains`
 erraten.
 
@@ -149,9 +156,9 @@ erraten.
 | Entscheidung | Wann | Umsetzung |
 |---|---|---|
 | **OK** | nur Klasse A | Data Contract ergänzen, sonst nichts |
-| **Kennzeichnen** | Volumen/OI ist Beiwerk | Guard + neutrale Degradation + UI-Sichtbarkeit + `CFD-degraded` + README-Hinweis |
-| **Überarbeiten** | Quelle ist tragend (Score-Komponente, Gate, Signalbedingung) | Komponente ausbauen, Gewichte renormalisieren. **Kein** Referenzmarkt-Input hier |
-| **Umwidmen** | nur mit echtem Volumen/OI sinnvoll (Volume Profile, CVD, Klinger, VWAP) | `Exchange-only`, Vermerk in README + CATALOG, im CFD-Kontext nicht verwenden |
+| **Kennzeichnen** | Volumen/OI ist Beiwerk | Guard + neutrale Degradation (ohne Renormalisierung) + UI-Sichtbarkeit + `CFD-degraded` + README-Hinweis |
+| **Überarbeiten** | Quelle ist tragend (Score-Komponente, Gate, Signalbedingung) | Komponente sauber degradieren (Beitrag entfällt ohne Umbuchung auf Preis-Sensoren) oder ausbauen. **Kein** Referenzmarkt-Input hier |
+| **Umwidmen** | nur mit echtem Volumen/OI sinnvoll (Volume Profile, CVD, Klinger, VWAP) | `Exchange-only`, Vermerk in README + CATALOG, ohne echtes Volumen klar deaktivieren |
 
 ## 7. Benennungsregel für Orderflow-Nahes
 
@@ -192,7 +199,7 @@ Diese Fragen gehören in jedes Review — auch in eines, bei dem gar kein Volume
 2. Pro Stelle: Klasse bestimmen, Matrix konsultieren, tragend-vs-Beiwerk testen.
 3. Prüfen, ob bereits ein echter Guard existiert (`volumetype`) oder nur `nz()`/`na()`.
 4. Prüfen, ob eine Degradation still passiert (kein UI-Hinweis) — eigener Fund.
-5. Prüfen, ob Score-Gewichte bei Degradation renormalisiert werden.
+5. Prüfen, dass fehlende Evidenz **nicht** auf andere Faktoren renormalisiert oder umgebucht wird.
 6. Entscheidung nach §6 vorschlagen, mit Begründung aus §2 Schritt 4.
 7. Ausgabe als **Fundliste** mit Datei:Zeile — nicht als Gesamturteil. Steht
    `ReportFindings` zur Verfügung, darüber ausgeben.

@@ -38,7 +38,7 @@ Diese zwei Punkte sind gesetzt; der Rest dieses Skills setzt sie um.
 | `alert()` runtime | nur Ausnahme | Reicher dynamischer Kontext nötig **oder** eine konsolidierte „Any alert() call"-Regel für Webhooks | als *stille* zweite Kopie eines Events neben einer `alertcondition()` |
 
 **Keine *stille* Doppel-Definition.** Wer beide Mechanismen für dasselbe Event hat, ohne es zu
-kennzeichnen, riskiert Doppel-Feuern (beobachtet in `regime_detector`).
+kennzeichnen, riskiert Doppel-Feuern.
 
 **Legitime Ausnahme — das dokumentierte Either/Or** (Referenz: `mtf_wavetrend_confluence`,
 `oscillator_divergence_zones`): granulare named `alertcondition()` (User wählt *eine*) **und
@@ -49,6 +49,10 @@ ein Code-Kommentar unmissverständlich sagt: *entweder* die named Alerts *oder* 
 
 `alertcondition()` **muss im globalen Scope** stehen. Gating erfolgt durch `and`-Verknüpfung
 des Boolean, **nicht** durch ein umschließendes `if` (das ist ein Compile-Fehler).
+**Pine-v6-Kurzschluss beachten:** In `alertcondition(alertOk and crossUp, ...)` darf `crossUp`
+kein direkter `ta.crossover(...)`-Aufruf sein! Weil `and` in Pine v6 kurzschließt, würde
+`ta.crossover` auf unbestätigten Bars übersprungen. Immer vorher als eigene `bool`-Serie
+berechnen (`bool crossUp = ta.crossover(...)`) und in `alertcondition` nur die Variable übergeben.
 
 ## 2. Repaint-Regel — der wichtigste Korrektheitspunkt
 
@@ -97,7 +101,7 @@ keine Art doppelt erfinden.
 | **Quality/Confluence** | Quality | `XYZ High-Quality Setup` | optionale Güte-Meldung |
 | **Invalidation/Warning** | Invalidation | `XYZ Bull Weakness` | Reversal-Risiko / Trap |
 
-Watch und Entry **immer als zwei Alerts** (siehe `jma_struct`, `cpm_v4`) — der Trader entscheidet
+Watch und Entry **immer als zwei Alerts** (siehe `mtf_wavetrend_confluence`, `commodity_pulse_matrix_v4`) — der Trader entscheidet
 selbst über Vorlauf. Sie in einen Alert zu pressen macht das Timing unattributierbar (§7).
 
 ## 4. Message-Standard (leicht)

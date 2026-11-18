@@ -30,6 +30,22 @@ Dieser Skill trägt das Wissen, das im Generator steckte.
 - **Break-Even als *zweiter* `strategy.exit()`-Aufruf erzeugt ein Exit-Race.** Zwei Exits auf
   dieselbe Position konkurrieren; welcher zuerst greift, ist nicht deterministisch. Break-Even
   gehört als `math.max`/`math.min` in **denselben** Stop-Level (Muster unten).
+- **Ungeschützte 1. Bar nach Entry vermeiden (`strategy.exit` schon auf der Signal-Bar einreihen):**
+  Wenn `strategy.entry("Long", strategy.long)` auf der Signal-Bar aufgerufen wird, ist
+  `strategy.position_size` auf dieser Bar noch `0` (die Order füllt erst zum Open der nächsten Bar).
+  Steht `strategy.exit("Long Exit", "Long", ...)` **nur** hinter `if strategy.position_size > 0`,
+  hat die gesamte erste Bar nach dem Fill **keinen aktiven Stop/TP** im Broker-Emulator!
+  **Pflicht:** `strategy.exit(...)` sowohl direkt im `if (<long-Signal>)`-Entry-Block einreihen
+  als auch in `if strategy.position_size > 0` laufend aktualisieren.
+- **Keine `ta.*`-Aufrufe in `if`-Blöcken:** `ta.atr(...)`, `ta.ema(...)` usw. für Volatilitäts-Exit,
+  Break-Even oder Pivot-Stops **immer außerhalb** von `if enableVolExit` / `if enableBE` / `if (<long>)`
+  auf oberster Ebene berechnen.
+- **Tabellen-Bedingung in Strategien:** Alle Tabellen (`chartTypeWarn`, `cmTbl`, `rbTbl`, Info-Panels)
+  mit `if (barstate.islastconfirmedhistory or barstate.islast)` gaten statt nur `if barstate.islast`,
+  damit sie im historischen Backtest auch ohne laufenden Echtzeit-Tick gerendert werden.
+- **Keine künstliche 500-Bar-Abschaltung (`last_bar_index - 500`):** In Strategien muss
+  `shouldCalculate = true` über die gesamte Kurshistorie gelten, sonst handelt der Backtest nur
+  die letzten 500 Bars.
 - **Ohne `barstate.isconfirmed`-Gate repaintet jede Strategie im Livebetrieb.** Der
   `confirmClose`-Input gehört in jede Strategie, Default `true`.
 - **Nicht-Standard-Charttypen verfälschen den Backtest.** Heikin Ashi, Renko, Kagi, Line Break,
@@ -65,13 +81,17 @@ aus dem `indicator()`-Call mitnehmen — `max_bars_back` **nicht**.
 strategy("<Titel> [WavesUnchained] — Strategy", overlay=<true|false>,
      <übernommene extras>,
      default_qty_type=strategy.percent_of_equity, default_qty_value=10,
-     commission_type=strategy.commission.percent, commission_value=0.02,
-     slippage=1, max_bars_back=500)
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, max_bars_back=500)
 ```
 
-`commission_value=0.02` (0,02 %) ist der Repo-Default — realistisch für CFD/Futures. Für
-Krypto mit Maker/Taker-Gebühren höher setzen. Die Overnight-/Roll-Komponente bei CFDs ist
-darin **nicht** enthalten; sie ist eine bekannte, nicht eingepreiste Verzerrung.
+`commission_value=0` und `slippage=0` im `strategy()`-Header sind Absicht: Die realen Kosten
+(Spread in Preispunkten einmal je Trade + Finanzierungssatz Long/Short je gehaltener Kalendernacht
+inkl. Wochenend-Faktor ×3 + Stressfaktor ×1,5) werden im separaten **Cost Model (CFD)**-Block am
+Dateiende pro geschlossenem Trade abgerechnet und ausgewiesen. zusätzlich enthält jede Strategie
+den **Random Baseline**-Schattentest (fester Ausstieg nach N Bars, Signal vs. Zufall mit
+gleicher Auslöserate `rbEligibleBars` und getrennten Seeds `rbSeed` / `rbSeed + 1000` für Long
+und Short, unabhängig von `strategy.position_size == 0`). Referenz: `strategies/smooth_trend_radar/smooth_trend_radar_strategy.pine`.
 
 ## Charttyp-Guard
 
@@ -81,12 +101,12 @@ Direkt nach dem `strategy()`-Call:
 // Synthetische Bar-Preise (Heikin Ashi, Renko …): Orders füllen zu Marktpreisen,
 // der Backtest gilt dort nicht. Kurzer Hinweis unten rechts statt auf der Kerze.
 var table chartTypeWarn = table.new(position.bottom_right, 1, 1)
-if barstate.islast and not chart.is_standard
+if (barstate.islastconfirmedhistory or barstate.islast) and not chart.is_standard
     table.cell(chartTypeWarn, 0, 0, "<Kurzname> · backtest invalid on this chart type",
          bgcolor = color.new(color.red, 10), text_color = color.white, text_size = size.small)
 ```
 
-Wortlaut nicht abwandeln — alle acht Strategien tragen exakt diesen Block.
+Wortlaut nicht abwandeln — alle aktiven Strategien tragen exakt diesen Block.
 
 ## Standard-Input-Block
 
@@ -185,9 +205,9 @@ volExitRatio  = input.float(1.6, "  Volatility Spike Ratio",   minval=1.2, maxva
 Execution:
 
 ```pine
+_atrCur  = ta.atr(atrLen)
+_atrBase = ta.ema(_atrCur, 50)
 if enableVolExit and strategy.position_size != 0
-    _atrCur  = ta.atr(atrLen)
-    _atrBase = ta.ema(_atrCur, 50)
     _spike   = not na(_atrBase) and _atrCur >= _atrBase * volExitRatio
     if _spike and strategy.position_size > 0
         strategy.close("Long",  comment="Vol Exit (ATR×" + str.tostring(volExitRatio, '#.#') + ")")
@@ -199,9 +219,9 @@ if enableVolExit and strategy.position_size != 0
 _finalLongStop  = _beLong  ? math.max(<sl_long>,  strategy.position_avg_price) : <sl_long>
 _finalShortStop = _beShort ? math.min(<sl_short>, strategy.position_avg_price) : <sl_short>
 
-if strategy.position_size > 0
+if ((<long-Ausdruck>) and _canLong and _canEntry) or strategy.position_size > 0
     strategy.exit("Long Exit", "Long", stop=_finalLongStop)
-if strategy.position_size < 0
+if ((<short-Ausdruck>) and _canShort and _canEntry) or strategy.position_size < 0
     strategy.exit("Short Exit", "Short", stop=_finalShortStop)
 ```
 
@@ -218,16 +238,16 @@ var float _trailShort = na
 if strategy.position_size > 0
     _trailLong := na(_trailLong[1]) ? <sl_long> : math.max(_trailLong[1], <sl_long>)
 else
-    _trailLong := na
+    _trailLong := (<long-Ausdruck>) and _canLong and _canEntry ? <sl_long> : na
 
 if strategy.position_size < 0
     _trailShort := na(_trailShort[1]) ? <sl_short> : math.min(_trailShort[1], <sl_short>)
 else
-    _trailShort := na
+    _trailShort := (<short-Ausdruck>) and _canShort and _canEntry ? <sl_short> : na
 
+_atrCur  = ta.atr(atrLen)
+_atrBase = ta.ema(_atrCur, 50)
 if enableVolExit and strategy.position_size != 0
-    _atrCur    = ta.atr(atrLen)
-    _atrBase   = ta.ema(_atrCur, 50)
     _spike     = not na(_atrBase) and _atrCur >= _atrBase * volExitRatio
     _vRange    = high - low
     _vClosePos = _vRange > 0 ? (close - low) / _vRange : 0.5
@@ -237,7 +257,7 @@ if enableVolExit and strategy.position_size != 0
         strategy.close("Short", comment="Vol Exit (ATR×" + str.tostring(volExitRatio, '#.#') + ", bull close)")
 ```
 
-Danach Break-Even + Exits wie bei `trailing`, aber gegen `_trailLong` / `_trailShort`.
+Danach Break-Even + Exits wie bei `trailing` (inkl. Einreihen auf der Signal-Bar), gegen `_trailLong` / `_trailShort`.
 
 ### 3. `fixed` — ein Stop-Level, kein TP
 
@@ -247,9 +267,9 @@ Danach Break-Even + Exits wie bei `trailing`, aber gegen `_trailLong` / `_trailS
 _finalLongStop  = _beLong  ? math.max(<sl>, strategy.position_avg_price) : <sl>
 _finalShortStop = _beShort ? math.min(<sl>, strategy.position_avg_price) : <sl>
 
-if strategy.position_size > 0
+if ((<long-Ausdruck>) and _canLong and _canEntry) or strategy.position_size > 0
     strategy.exit("Long Exit", "Long", stop=_finalLongStop)
-if strategy.position_size < 0
+if ((<short-Ausdruck>) and _canShort and _canEntry) or strategy.position_size < 0
     strategy.exit("Short Exit", "Short", stop=_finalShortStop)
 ```
 
@@ -264,7 +284,8 @@ exitLvlInput  = input.string("<default>", "Exit at TP",
 ```
 
 Das TP wird **beim Entry eingefroren** (`var float _exitTP`), damit ein später wandernder
-TP-Level die offene Position nicht verschiebt:
+TP-Level die offene Position nicht verschiebt, und `strategy.exit` wird direkt im Entry-Block
+sowie während `strategy.position_size != 0` gesetzt:
 
 ```pine
 var float _exitTP = na
@@ -277,12 +298,14 @@ if _doLong
                exitLvlInput == "TP2" ? <tp2> :
                exitLvlInput == "TP3" ? <tp3> : na
     strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=<sl>, limit=_exitTP)
 
 if _doShort
     _exitTP := exitLvlInput == "TP1" ? <tp1> :
                exitLvlInput == "TP2" ? <tp2> :
                exitLvlInput == "TP3" ? <tp3> : na
     strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=<sl>, limit=_exitTP)
 ```
 
 Exits wie `fixed`, zusätzlich `limit=_exitTP`.
@@ -325,20 +348,21 @@ tpRRInput  = input.float(2.0, "TP R:R Ratio",      minval=0.5, step=0.5, group=g
 ```pine
 var float _sl = na
 var float _tp = na
+float _pivAtr = ta.atr(14)
 
 if (<long>) and _canLong and _canEntry
-    _atr    = ta.atr(14)
-    _sl    := <pivot_low> - _atr * slBufInput
+    _sl    := <pivot_low> - _pivAtr * slBufInput
     _slDist = math.max(close - _sl, syminfo.mintick)
     _tp    := close + _slDist * tpRRInput
     strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=_sl, limit=_tp)
 
 if (<short>) and _canShort and _canEntry
-    _atr    = ta.atr(14)
-    _sl    := <pivot_high> + _atr * slBufInput
+    _sl    := <pivot_high> + _pivAtr * slBufInput
     _slDist = math.max(_sl - close, syminfo.mintick)
     _tp    := close - _slDist * tpRRInput
     strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=_sl, limit=_tp)
 ```
 
 `math.max(..., syminfo.mintick)` verhindert eine Division-durch-Null-artige Entartung, wenn

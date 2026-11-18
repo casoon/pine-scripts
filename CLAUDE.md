@@ -2,7 +2,7 @@
 
 ## Indicator directory structure
 
-Each indicator (or suite of related indicators) lives in its own subdirectory under a category folder inside `indicators/`. The `indicators/composite/commodity_pulse_matrix/` directory is the reference for how an indicator directory should be structured.
+Each indicator (or suite of related indicators) lives in its own subdirectory under a category folder inside `indicators/`. The `indicators/composite/commodity_pulse_matrix/` directory (`commodity_pulse_matrix_v4.pine`) is the reference for how an indicator directory should be structured.
 
 Every indicator directory contains `README.md`, `CHANGELOG.md`, `DESCRIPTION_TV.bbcode` (if published), optional `screenshots/`, and the `.pine` file(s). Format rules live in `.claude/rules/` (`indicator-docs.md`, `pine-script-header.md`, `dashboard-table-style.md`) and load when matching files are read.
 
@@ -12,8 +12,9 @@ Before any indicator uses `volume`, VWAP, Volume Profile, Open Interest, term st
 cross-symbol `request.security()`, check [`DATA_VALIDITY.md`](DATA_VALIDITY.md) — the matrix of
 which data class carries a real signal on which instrument type. Skill: `instrument-data-validity`.
 
-Core rule: volume validity comes from `syminfo.volumetype` (`base`/`quote` = real, `tick`/`n/a` =
-not), never from the existence of a `volume` series. `nz(volume)` is not a guard.
+Core rule: volume validity is checked at runtime via
+`bool volumeIsReal = (ta.cum(nz(volume)) > 0 and syminfo.volumetype != "tick") and not na(volume)`
+(many futures and equities report `syminfo.volumetype == "n/a"` even when delivering real trade volume; only `"tick"` or an all-zero/na series is excluded). `nz(volume)` alone is not a guard.
 
 Every `.pine` file carries a Data Contract block in its header — format in `.claude/rules/pine-script-header.md`.
 

@@ -88,14 +88,21 @@ Ein schlechter RSI-Wert ist **kein** Veto. Wichtig (Repo-Memory
 `feedback_er_gates_blocking_reversals`): ein Veto darf den *eigentlichen Reversal-Trigger*
 nicht blockieren — Over-Filtering ist hier das wiederkehrende Versagensmuster.
 
-## 4. Scoring & Gewichtung auf Rollen-Ebene
+## 4. Scoring & Gewichtung auf Rollen-Ebene — Eine Stimme je Informationsfamilie
 
 Erst *innerhalb* der Rolle bewerten, dann die Rollen-Scores zusammenführen — nicht Indikatoren
 direkt mischen.
 
+**Verbindliche Kestrel-Regel (Plan 41/44): Eine Stimme je Informationsfamilie.**
+- Drei gleichzeitig überverkaufte Momentum-Oszillatoren (z. B. RSI + StochRSI + WaveTrend + CCI) sind **nicht** vier unabhängige Belege, sondern vier Transformationen derselben Preisreihe. Jede Informationsfamilie (Momentum, Trend/Effizienz, Struktur/Lage, Volatilität, Volumen) erhält in einem Score **genau einen Sensor** — es sei denn, ein Mehrachsen-Index ist empirisch auf einer großen Stichprobe (wie MTE v2 oder TPE Position Health) mit festen Quantil-Ankern kalibriert.
+- **Keine Renormalisierung fehlender Evidenz:** Fehlt auf einem Instrument echtes Volumen (`!volumeIsReal`), fällt der Volumen-Beitrag weg — er darf **niemals** auf einen Preis-Sensor (wie RSI) umgebucht oder durch Division durch die kleinere Gewichtssumme auf 100 % hochgestreckt werden.
+- **Keine richtungslosen Größen mit Vorzeichen in gerichteten Scores:** Ein richtungsloser Volatilitäts- oder Kompressions-Score (z. B. niedrige Vola = `+1`, hohe Vola = `-1`) darf nie mit Vorzeichen in einen gerichteten Long/Short-Summenscore (`totalScore`) eingehen, sonst erzeugt ruhiges Marktwetter systematisch Long-Bias und hohe Volatilität Short-Bias.
+- **Keine unkalibrierten Ad-hoc-Grades als Signal-Blocker:** Heuristische Punktetabellen („Signal Quality 0–100", „Confidence %", „Probability %", „Tier A/B") dürfen weder als Wahrscheinlichkeit beschriftet werden noch als `minGrade`/`minQuality`-Gate einen validen Trigger still unterdrücken. Ausnahme: ein struktureller MTF-Konfluenz-Grad über klar getrennte Zeithorizonte (wie in `mtf_wavetrend_confluence`) oder eine interne Kandidaten-Rangfolge bei Muster-Scannern (wie der interne Fib-Fit in `elliott_wave_radar`).
+- **Vorsicht beim Vereinfachen (keine blinde Amputation):** Wenn ein Score bereinigt wird, immer prüfen, ob nachgelagerte Schwellenwerte (z. B. `HOLD ≥ 68 / PROTECT ≥ 54` in TPE Position Health) auf die ursprüngliche Komponentenanzahl kalibriert wurden oder ob der Indikator ohne die Komponente seine namensgebende Kernfunktion verliert (z. B. MTF-Konfluenz ohne MTF-Abstufung).
+
 ```text
-schlecht:  Score = RSI + CCI + WT + MFI + Trend        (beliebig, unattributierbar)
-besser:    LocationScore, MomentumScore, TrendScore, TriggerScore, QualityScore
+schlecht:  Score = RSI + CCI + WT + StochRSI            (4× dieselbe Familie = Mehrfachzählung)
+besser:    LocationScore, MomentumScore, TrendScore, TriggerScore, QualityScore (je 1 Sensor)
            Final = wLoc·Loc + wMom·Mom + wTrend·Trend + wTrig·Trig + wQual·Qual
 ```
 
