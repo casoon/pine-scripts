@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.0 — 2026-11-18
+- Changed: right-edge rendering is visible by default. Each rail now runs from just past the last candle to its label, and the label (`label.style_label_left`) grows away from price instead of back toward it, so it can no longer cover candles. "Label offset · bars" default 200 → 30 — the previous default put every rail and label off-screen until the chart was scrolled right
+- Added: labels sit in four columns, left to right — Session (sessions, opening ranges, VWAP) · Periods (day, week, month, year) · Structure (pivots, Fibonacci, S/R) · Other (round numbers, trend curves, manual) — spaced by "Label column spacing · bars" (default 110). Labels in the same column closer than "Minimum label spacing · ATR" are pushed apart vertically, with a leader line from the true price — every level keeps its own label, none is hidden. Every level is drawn the same way in every column: a short rail at its true price and a leader to the label, both the same fixed length and width
+- Changed: "Minimum label spacing · ATR" default 3.0 → 1.0. It now sets the distance labels are pushed apart to, instead of hiding the lower-priority level
+- Changed: Asia, London, and New York sessions are now defined in their own local time (Asia/Tokyo 09:00–17:00, Europe/London 08:00–17:00, America/New_York 09:30–16:00) and follow daylight saving time; previously fixed UTC hours drifted by one hour across the DST switch. New York now ends at the 16:00 cash close. "Session timezone" is renamed "Custom session timezone" and applies only to Custom 1/2
+- Changed: default preset is now "Everything" (was "Clean")
+- Fixed: VWAP levels are only shown when the symbol delivers real trade volume; on tick-volume or volume-less feeds (many CFDs) they are hidden instead of showing a meaningless or missing value. Data Contract block added to the script header
+- Fixed: the "Everything" preset tooltip claimed every module; Manual levels and Opening ranges stay Custom-only
+
 ## v1.7.2 — 2026-10-02
 - Changed: S/R cluster touch counts only ever grew, so a zone price had already closed through kept its full pre-break count. A close beyond a cluster center by more than the cluster tolerance (above a resistance, below a support) now resets its touch count to zero; ×N counts pivots since the last break, and a broken zone drops out until it re-qualifies on new pivots. Tooltip updated
 

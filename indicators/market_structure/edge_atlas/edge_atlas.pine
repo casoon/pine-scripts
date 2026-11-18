@@ -1,21 +1,21 @@
 //@version=6
 // ============================================================================
 // Edge Atlas [WavesUnchained]
-// Version: 1.7.2
+// Version: 1.8.0
 // Author: WavesUnchained
-// Build: 2026-10-02
+// Build: 2026-11-18
 // ============================================================================
 // Right-edge price-level atlas.
 //
 // Core idea:
 //   • Calculation modules produce normalized price levels.
 //   • A shared registry filters and renders them.
-//   • Each level renders as a label a fixed bar count past the last real
-//     candle — pointer facing right, price/zone detail in the hover tooltip
-//     only — with a short, fixed-length rail picking up just past the label.
-//     The rail does not reach the chart's true right edge; keeping the
-//     current price area clear of labels matters more than the rail
-//     visually touching the price scale.
+//   • Each level renders as a short rail starting just past the last real
+//     candle and ending at a label a fixed bar count further right — pointer
+//     facing left toward price, body growing away from price, price/zone
+//     detail in the hover tooltip only. Candles are never covered. Labels
+//     sit in four columns (Session · Periods · Structure · Other); labels
+//     too close in a column are pushed apart, with a leader line to price.
 //   • Nothing about the label/rail's position depends on the current
 //     viewport (no chart.right_visible_bar_time/left_visible_bar_time reads,
 //     no xloc.bar_time) — panning or zooming the chart moves them exactly
@@ -41,15 +41,23 @@
 //   ✓ Daily, weekly, and monthly opening ranges
 //   ✓ Granular sub-level switches and explanatory tooltips
 //   ✓ Distance, priority, count, and side filters
-//   ✓ Minimum label spacing scaled to the instrument's own ATR, so crowded
-//     levels don't collapse into a solid overlapping block, and which levels
-//     are shown stays stable while scrolling or zooming the chart
+//   ✓ Four label columns (Session · Periods · Structure · Other); crowded
+//     labels are pushed apart with a leader line to their price, spacing
+//     scaled to the instrument's own ATR so the layout stays stable
 //   ✓ Line width and opacity scale with priority, so the most significant
 //     levels stand out from the rest at a glance
 //   ✓ Optional source zones in the chart
 //   ✓ Trend Curves — up to three JMA-style/EMA/SMA moving averages with
 //     Responsive/Balanced/Structural/Custom presets, plotted as familiar,
 //     always-on chart lines (separate from the right-edge level registry)
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — VWAP levels are hidden
+//                         without it
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
 //
 // Important TradingView limitation:
 // Pine drawings can bind to chart time and price, but not to arbitrary screen
@@ -76,34 +84,32 @@
 // forms are fixed, viewport-independent offsets, but bar_index is simpler
 // and needs no per-bar duration bookkeeping.
 //
-// Labels use label.style_label_right — the pointer sits at that anchor,
-// facing right, and the box extends back toward price from there. That
-// growth direction is inherently riskier than growing away from price (an
-// earlier version deliberately avoided it after repeated overlap bugs), so
-// two things keep it safe here: the label body is short (code/name only, no
-// price — full detail is in the hover tooltip), and the offset defaults
-// generously (180 bars, capped at 300). If labels ever start touching
-// candles again on an extremely zoomed-out chart, increase "Label offset ·
-// bars" first.
+// Labels use label.style_label_left at the end of each rail — the pointer
+// sits at the anchor facing price, the box extends away from price. The
+// label body can therefore never grow into the candles, so the offset can
+// stay small (default 30 bars). Earlier versions
+// (v1.1.6–v1.7.2) used style_label_right with the rail behind the label,
+// which needed a 180–400 bar offset to keep the label off the candles and
+// put the whole display off-screen by default.
 //
-// Two independent bugs produced the same visual symptom — a vertical
-// multi-colored bar through the label stack — while this was being tuned,
-// and both are relevant if it ever reappears:
-//   1. Every level's rail shared the exact same starting x-coordinate
-//      (computed once outside the per-level loop). Several differently-
-//      colored horizontal lines beginning at the identical pixel column,
-//      stacked closely in price, read as a vertical bar regardless of
-//      segment length — fixed by staggering each rail's start by render
-//      rank, so no two levels can ever share an origin.
-//   2. Pine only allows drawings a bounded number of bars into the future
-//      (roughly 500). A percentage of a wide 15m/1h visible history could
-//      exceed that, silently clamping every level to the same maximum
-//      allowed point regardless of the stagger above — fixed by capping
-//      every rail endpoint well under that ceiling.
-// The rail no longer uses extend.right to reach the true edge (dropped on
-// request), which incidentally removes most of the exposure to bug #2 for
-// the rail itself — but the label's own anchor is still a raw future
-// bar_index, so the cap remains necessary regardless.
+// Every level is drawn identically in every column: a fixed-length rail at
+// its true price, then a fixed-length leader (same width) to its label. All
+// rails in a column share the same start and end — the rank stagger that
+// earlier versions used against the "vertical multi-colored bar" effect is
+// gone for a uniform look; if stacked rails ever read as a bar again, that
+// stagger (start offset by render rank) is the known fix.
+//
+// Labels sit in four fixed columns, left to right: Session (sessions,
+// opening ranges, VWAP) · Periods (day, week, month, year) · Structure
+// (pivots, Fibonacci, S/R) · Other (round numbers, trend curves, manual).
+// Four columns fit at a readable width under Pine's bounded future-drawing
+// distance (roughly 500 bars); one column per category (up to 13) did not
+// and overlapped on zoomed-out charts. Inside a column, a level closer in
+// price than "Minimum label spacing · ATR" to another label is
+// pushed apart vertically, with a short leader line from its true price —
+// no level is hidden or merged. Rails are short and stay inside their own
+// column, so no rail runs through a label. Column spacing shrinks if needed
+// so every endpoint stays within 480 bars of the last bar.
 // ============================================================================
 
 indicator(
@@ -136,10 +142,10 @@ string G_OR       = "13 — Opening ranges"
 string G_TREND    = "14 — Trend Curves"
 
 string TT_EDGE =
-     "How many bars past the last real candle the label sits — higher values keep the current price area clearer of labels.\n" +
-     "A fixed bar count rather than a percentage of the visible time range on purpose: a percentage-based offset changes every time the visible range changes (any scroll or zoom), which made the label freeze mid-drag and then jump to a new position on the next recalculation instead of following the pan smoothly. A fixed bar count stays at the same calendar time regardless of scroll position, so it pans with the chart like a normal drawing.\n" +
-     "On a chart showing a lot of history (many bars in view), a fixed bar count is a smaller fraction of the visible width, so it can still end up looking tight against the last candle — increase it if that happens; there is no single value that looks the same at every zoom level.\n" +
-     "Limited to 400 bars here, well clear of Pine's bounded future-drawing distance (roughly 500 bars) — the rails for the highest-priority rendered levels are separately clamped even closer to that limit, so raising \"Maximum rendered levels\" a lot at the same time as this can't push anything past it."
+     "How many bars past the last real candle the label sits; each level's line runs from just past the last candle to its label.\n" +
+     "The label grows away from price, so a small value never covers candles. Labels sit in four columns left to right — Session · Periods · Structure · Other — spaced by \"Label column spacing · bars\". To see all labels without scrolling, widen the chart's right margin in the chart settings.\n" +
+     "A fixed bar count rather than a percentage of the visible range on purpose: it stays put while scrolling or zooming instead of jumping on the next recalculation.\n" +
+     "Limited to 400 bars, under Pine's bounded future-drawing distance (roughly 500 bars)."
 
 string TT_DISTANCE =
      "Only levels within this ATR distance from the current close are eligible.\n" +
@@ -163,14 +169,14 @@ string TT_JMA =
 // ============================================================================
 
 string presetInput = input.string(
-     "Clean",
+     "Everything",
      "Preset",
      options = ["Clean", "Intraday", "Structure", "Everything", "Custom"],
      tooltip =
          "Clean: period references + nearest S/R.\n" +
          "Intraday: adds session ranges, daily pivots, and Session VWAP.\n" +
          "Structure: adds swing Fibonacci and S/R.\n" +
-         "Everything: activates every calculation module.\n" +
+         "Everything: activates every calculation module except Manual levels and Opening ranges (Custom-only).\n" +
          "Custom: uses only the individual module switches below.",
      group = G_GENERAL
 )
@@ -202,20 +208,25 @@ int minPriorityInput = input.int(
 // ============================================================================
 
 int labelOffsetBarsInput = input.int(
-     200, "Label offset · bars",
+     30, "Label offset · bars",
      minval = 5, maxval = 400, step = 5,
      tooltip = TT_EDGE,
      group = G_RENDER
 )
 float minLabelSpacingAtrInput = input.float(
-     3.0, "Minimum label spacing · ATR",
+     1.0, "Minimum label spacing · ATR",
      minval = 0.0, maxval = 20.0, step = 0.1,
      tooltip =
-         "Levels closer than this ATR distance to an already-selected, higher-priority level are skipped.\n" +
+         "Minimum vertical distance between labels in the same column. Labels closer than this are pushed apart; a label moved off its true price gets a short leader line to it. No level is hidden or merged.\n" +
          "Tied to the instrument's own volatility rather than the current scroll position, so which levels are shown stays stable while panning the chart — an earlier percentage-of-visible-range version changed the level selection as you scrolled, since the visible price range itself changed.\n" +
-         "ATR is an imperfect proxy for the label's actual pixel height: a low-volatility instrument/timeframe combination can still overlap even at a fairly high multiple. If labels still overlap with several modules enabled at once, increase this first; \"Maximum rendered levels\" and \"Maximum distance from price · ATR\" (both in Right-edge rendering) are the other two levers if a preset simply has too many modules active for the available vertical space.\n" +
-         "Without this, nearby levels stack into overlapping label boxes that read as a solid colored block.\n" +
-         "Set to 0 to disable and show every eligible level regardless of crowding.",
+         "ATR is an imperfect proxy for the label's actual pixel height, which depends on the chart's vertical zoom: if labels still touch, increase this; if they spread too far from their prices, decrease it.\n" +
+         "Set to 0 to disable and draw every label exactly at its price regardless of crowding.",
+     group = G_RENDER
+)
+int labelColumnStepInput = input.int(
+     110, "Label column spacing · bars",
+     minval = 5, maxval = 150, step = 5,
+     tooltip = "Horizontal distance between the four label columns (Session · Periods · Structure · Other). A bar count, so its width on screen depends on zoom: increase it if labels in neighboring columns touch on a zoomed-in chart, or with \"Full name\" labels. Shrinks automatically if all columns would not fit within Pine's ~500-bar future-drawing limit.",
      group = G_RENDER
 )
 string labelContentInput = input.string(
@@ -415,27 +426,28 @@ bool sessionsModuleInput = input.bool(
      group = G_SESSIONS, active = presetInput == "Custom"
 )
 string sessionTimezoneInput = input.string(
-     "Etc/UTC", "Session timezone",
+     "Etc/UTC", "Custom session timezone",
      tooltip =
-         "Use an IANA timezone, e.g. America/New_York, Europe/London, Asia/Tokyo, or Etc/UTC.\n" +
+         "Timezone for Custom 1/2 hours. Use an IANA timezone, e.g. America/New_York, Europe/London, Asia/Tokyo, or Etc/UTC — a city timezone follows daylight saving time, Etc/UTC does not.\n" +
+         "Asia, London, and New York always use their own local time (Asia/Tokyo, Europe/London, America/New_York), so they follow daylight saving time automatically.\n" +
          "Session relevance depends on the instrument and exchange.",
      group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput
 )
 
 bool asiaEnableInput = input.bool(false, "Asia", inline = "asia0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput)
-string asiaSessionInput = input.session("0000-0800", "", inline = "asia0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
+string asiaSessionInput = input.session("0900-1700", "", inline = "asia0", tooltip = "Tokyo local time (Asia/Tokyo).", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
 bool asiaHighInput = input.bool(true, "ASH", inline = "asia1", tooltip = "ASH — Asia Session High.\nOften used as a breakout reference for the following London/NY session (e.g. \"London breaks the Asia range\").", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
 bool asiaLowInput = input.bool(true, "ASL", inline = "asia1", tooltip = "ASL — Asia Session Low.\nOften used as a breakout reference for the following London/NY session (e.g. \"London breaks the Asia range\").", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
 bool asiaMidInput = input.bool(false, "ASM", inline = "asia1", tooltip = "ASM — Asia Session Midpoint.\nFair-value reference within the Asia range.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and asiaEnableInput)
 
 bool londonEnableInput = input.bool(false, "London", inline = "lon0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput)
-string londonSessionInput = input.session("0700-1600", "", inline = "lon0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
+string londonSessionInput = input.session("0800-1700", "", inline = "lon0", tooltip = "London local time (Europe/London), follows daylight saving time.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
 bool londonHighInput = input.bool(true, "LDH", inline = "lon1", tooltip = "LDH — London Session High.\nOften used as a breakout/liquidity reference for the New York session that follows.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
 bool londonLowInput = input.bool(true, "LDL", inline = "lon1", tooltip = "LDL — London Session Low.\nOften used as a breakout/liquidity reference for the New York session that follows.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
 bool londonMidInput = input.bool(false, "LDM", inline = "lon1", tooltip = "LDM — London Session Midpoint.\nFair-value reference within the London range.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and londonEnableInput)
 
 bool nyEnableInput = input.bool(false, "New York", inline = "ny0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput)
-string nySessionInput = input.session("1330-2100", "", inline = "ny0", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
+string nySessionInput = input.session("0930-1600", "", inline = "ny0", tooltip = "New York local time (America/New_York), follows daylight saving time.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
 bool nyHighInput = input.bool(true, "NYH", inline = "ny1", tooltip = "NYH — New York Session High.\nOften the most liquid session's range extreme — a common intraday reversal/breakout reference into the close.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
 bool nyLowInput = input.bool(true, "NYL", inline = "ny1", tooltip = "NYL — New York Session Low.\nOften the most liquid session's range extreme — a common intraday reversal/breakout reference into the close.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
 bool nyMidInput = input.bool(false, "NYM", inline = "ny1", tooltip = "NYM — New York Session Midpoint.\nFair-value reference within the New York range.", group = G_SESSIONS, active = presetInput == "Custom" and sessionsModuleInput and nyEnableInput)
@@ -607,7 +619,7 @@ int roundLevelsEachSideInput = input.int(
 
 bool vwapModuleInput = input.bool(
      false, "Enable VWAP",
-     tooltip = "Volume-weighted average price, anchored per period. Only takes effect on the Custom preset — Intraday/Everything decide the session line themselves.",
+     tooltip = "Volume-weighted average price, anchored per period. Needs real trade volume: on symbols with tick volume or no volume (many CFDs) the VWAP levels are hidden.\nOnly takes effect on the Custom preset — Intraday/Everything decide the session line themselves.",
      group = G_VWAP, active = presetInput == "Custom"
 )
 bool vwapSessionInput = input.bool(
@@ -864,6 +876,32 @@ f_labelSize() =>
     labelSizeInput == "Tiny" ? size.tiny :
      labelSizeInput == "Normal" ? size.normal : size.small
 
+// Left-to-right label columns: each category belongs to one of four fixed
+// column groups — Session (sessions, opening ranges, VWAP), Periods (day,
+// week, month, year), Structure (pivots, Fibonacci, S/R), Other (round
+// numbers, trend curves, manual levels).
+int COLUMN_COUNT = 4
+f_columnGroup(string category) =>
+    switch category
+        "SESSION" => 0
+        "OR"      => 0
+        "VWAP"    => 0
+        "DAY"     => 1
+        "WEEK"    => 1
+        "MONTH"   => 1
+        "YEAR"    => 1
+        "PIVOT"   => 2
+        "FIB"     => 2
+        "S/R"     => 2
+        => 3
+
+f_tooltip(Level level) =>
+    level.code + " — " + level.fullName + "\n" +
+         "Price: " + str.tostring(level.price, format.mintick) +
+         (level.isZone ? "\nZone: " + str.tostring(level.lower, format.mintick) +
+             " – " + str.tostring(level.upper, format.mintick) +
+             "\nTouches: " + str.tostring(level.touches) : "")
+
 f_text(Level level) =>
     string base = labelContentInput == "Full name" ? level.fullName : level.code
     string withTouches = level.isZone and level.touches > 0 ? base + "  ×" + str.tostring(level.touches) : base
@@ -968,7 +1006,7 @@ bool vwapNewMonth = timeframe.change("M")
 // Session tracking
 // ============================================================================
 
-bool inAsia = not na(time(timeframe.period, asiaSessionInput, sessionTimezoneInput))
+bool inAsia = not na(time(timeframe.period, asiaSessionInput, "Asia/Tokyo"))
 bool asiaStart = inAsia and not inAsia[1]
 bool asiaEnd = not inAsia and inAsia[1]
 var float asiaDevHigh = na
@@ -985,7 +1023,7 @@ if asiaEnd
     asiaDoneHigh := asiaDevHigh
     asiaDoneLow := asiaDevLow
 
-bool inLondon = not na(time(timeframe.period, londonSessionInput, sessionTimezoneInput))
+bool inLondon = not na(time(timeframe.period, londonSessionInput, "Europe/London"))
 bool londonStart = inLondon and not inLondon[1]
 bool londonEnd = not inLondon and inLondon[1]
 var float londonDevHigh = na
@@ -1002,7 +1040,7 @@ if londonEnd
     londonDoneHigh := londonDevHigh
     londonDoneLow := londonDevLow
 
-bool inNY = not na(time(timeframe.period, nySessionInput, sessionTimezoneInput))
+bool inNY = not na(time(timeframe.period, nySessionInput, "America/New_York"))
 bool nyStart = inNY and not inNY[1]
 bool nyEnd = not inNY and inNY[1]
 var float nyDevHigh = na
@@ -1554,10 +1592,12 @@ if useRound
             f_addLevel(levelPrice, na, na, code, "Round Number", "ROUND", isMajor ? 5 : 3,
                  roundColor, false, 0, allowed)
 
-// VWAP
-bool vwapSessionActive = useVWAP and (presetCustom ? vwapSessionInput : true)
-bool vwapWeeklyActive = useVWAP and presetCustom and vwapWeeklyInput
-bool vwapMonthlyActive = useVWAP and presetCustom and vwapMonthlyInput
+// VWAP — only on real trade volume; tick volume or a feed without volume
+// carries no volume weighting, so the levels are hidden there.
+bool volumeIsReal = (ta.cum(nz(volume)) > 0 and syminfo.volumetype != "tick") and not na(volume)
+bool vwapSessionActive = volumeIsReal and useVWAP and (presetCustom ? vwapSessionInput : true)
+bool vwapWeeklyActive = volumeIsReal and useVWAP and presetCustom and vwapWeeklyInput
+bool vwapMonthlyActive = volumeIsReal and useVWAP and presetCustom and vwapMonthlyInput
 
 f_addLevel(sessionVwapValue, na, na, "VWAP", "Session VWAP", "VWAP", 7, vwapColor, false, 0, vwapSessionActive)
 f_addLevel(weeklyVwapValue, na, na, "WVWAP", "Weekly VWAP", "VWAP", 6, vwapColor, false, 0, vwapWeeklyActive)
@@ -1683,36 +1723,13 @@ if barstate.islast
     f_clearDrawings()
 
     if masterEnableInput
-        // Label anchor is always a simple forward offset from the last real bar —
-        // a fixed bar count, not a percentage of the visible bar range. That
-        // earlier version recomputed a different offset on every scroll/zoom, and
-        // since Pine only redraws when the script recalculates (not continuously
-        // during a drag), the label would freeze mid-pan and then jump to the new
-        // position once a recalculation happened, instead of panning smoothly like
-        // a normal drawing. A fixed bar count keeps the label at the same position
-        // regardless of scroll, so redraws land exactly where the label already
-        // was — nothing to jump. bar_index itself only moves when a new bar closes,
-        // not on chart navigation, so the anchor is fully stable — the same
-        // principle Fib Reaction Memory uses for its projected Fib lines
-        // (`bar_index + rightProjection`, xloc.bar_index).
-        //
-        // The rail no longer tries to reach the chart's true right edge (dropped on
-        // request — keeping the current price area uncluttered matters more than
-        // the rail visually touching the price scale). It's a fixed-length segment
-        // starting just past the label, extend.none instead of extend.right.
+        // Label anchor is a fixed forward offset from the last real bar — a bar
+        // count, not a percentage of the visible range, so it never moves on
+        // scroll/zoom (see header). The label sits at the end of its rail with
+        // style_label_left, so its body grows away from price and can never
+        // cover candles.
         int labelAnchorBar = bar_index + labelOffsetBarsInput
-        // Visual gap between the label and where the rail picks up.
-        int labelToRailGap = int(math.max(labelOffsetBarsInput * 0.03, 2))
-        int railStartBar = labelAnchorBar + labelToRailGap
-        int railSeedEnd = railStartBar + int(math.max(labelOffsetBarsInput * 0.5, 5))
-        // Hard ceiling on how far into the future ANY rail endpoint can land, well
-        // under Pine's bounded future-drawing distance (roughly 500 bars). Without
-        // this, a large "Label offset · bars" combined with a high "Maximum
-        // rendered levels" (which pushes each rank further out via the stagger
-        // below) could push the highest-ranked rails past that limit and get
-        // silently clamped — recreating the shared-coordinate vertical-bar bug
-        // this script has already hit twice, just via inputs instead of zoom.
-        int futureLimitBar = bar_index + 480
+        int railGap = 3
 
         // Build candidate distances and sort by priority first, then distance.
         array<float> sortKeys = array.new_float()
@@ -1737,33 +1754,71 @@ if barstate.islast
 
         array<int> order = array.sort_indices(sortKeys)
 
-        // Greedily accept candidates in priority/distance order, skipping any level
-        // that sits too close (relative to ATR) to an already-accepted level so the
-        // right-edge stack does not collapse into overlapping label boxes.
+        // Selection: the highest-priority/nearest candidates, up to the cap. Every
+        // level keeps its own label.
         array<float> acceptedPrices = array.new_float()
         array<int> acceptedIndices = array.new_int()
+        array<int> acceptedColumns = array.new_int()
         if array.size(order) > 0
-            for rank = 0 to array.size(order) - 1
-                int candidatePos = array.get(order, rank)
-                int levelIndex = array.get(candidateIndices, candidatePos)
+            for rank = 0 to math.min(array.size(order), maxLevelsInput) - 1
+                int levelIndex = array.get(candidateIndices, array.get(order, rank))
                 Level candidate = array.get(levels, levelIndex)
-                bool tooClose = false
-                if minLabelSpacing > 0 and array.size(acceptedPrices) > 0
-                    for j = 0 to array.size(acceptedPrices) - 1
-                        if math.abs(array.get(acceptedPrices, j) - candidate.price) < minLabelSpacing
-                            tooClose := true
-                if not tooClose
-                    array.push(acceptedPrices, candidate.price)
-                    array.push(acceptedIndices, levelIndex)
-                if array.size(acceptedIndices) >= maxLevelsInput
-                    break
+                array.push(acceptedPrices, candidate.price)
+                array.push(acceptedIndices, levelIndex)
+                array.push(acceptedColumns, f_columnGroup(candidate.category))
 
         int renderCount = array.size(acceptedIndices)
+
+        // Label placement: inside each column, labels closer than the ATR spacing
+        // are pushed apart vertically — pairwise, symmetrically, so a cluster
+        // spreads around its own center — and a final top-down pass guarantees
+        // the minimum distance. A label that had to move gets a short leader line
+        // from its true price, so nothing is hidden or merged.
+        array<float> labelPrices = array.copy(acceptedPrices)
+        if minLabelSpacing > 0 and renderCount > 1
+            for column = 0 to COLUMN_COUNT - 1
+                array<int> members = array.new_int()
+                array<float> memberPrices = array.new_float()
+                for i = 0 to renderCount - 1
+                    if array.get(acceptedColumns, i) == column
+                        array.push(members, i)
+                        array.push(memberPrices, array.get(acceptedPrices, i))
+                int memberCount = array.size(members)
+                if memberCount > 1
+                    array<int> byPrice = array.sort_indices(memberPrices, order.descending)
+                    array<float> ys = array.new_float()
+                    for k = 0 to memberCount - 1
+                        array.push(ys, array.get(memberPrices, array.get(byPrice, k)))
+                    for iteration = 1 to 20
+                        for k = 1 to memberCount - 1
+                            float gapNow = array.get(ys, k - 1) - array.get(ys, k)
+                            if gapNow < minLabelSpacing
+                                float shift = (minLabelSpacing - gapNow) / 2
+                                array.set(ys, k - 1, array.get(ys, k - 1) + shift)
+                                array.set(ys, k, array.get(ys, k) - shift)
+                    for k = 1 to memberCount - 1
+                        array.set(ys, k, math.min(array.get(ys, k), array.get(ys, k - 1) - minLabelSpacing))
+                    for k = 0 to memberCount - 1
+                        array.set(labelPrices, array.get(members, array.get(byPrice, k)), array.get(ys, k))
+
+        // Column spacing shrinks only if all columns would not otherwise fit under
+        // Pine's ~500-bar future-drawing limit.
+        int columnStep = math.max(math.min(labelColumnStepInput, int((480 - labelOffsetBarsInput) / (COLUMN_COUNT - 1))), 1)
+        // Every level is drawn the same way in every column: a horizontal rail of
+        // fixed length at the true price, then a leader of fixed length to the
+        // label (flat if the label sits at its price, diagonal if it was pushed
+        // apart). In the first column the rail starts just past the last candle;
+        // the length is capped so a rail never reaches back into the labels of
+        // the column to its left.
+        int leaderLength = math.max(int(columnStep * 0.12), 2)
+        int railLength = math.max(math.min(labelOffsetBarsInput - railGap - leaderLength, int(columnStep * 0.4)), 2)
 
         if renderCount > 0
             for rank = 0 to renderCount - 1
                 int levelIndex = array.get(acceptedIndices, rank)
                 Level level = array.get(levels, levelIndex)
+                int levelColumn = array.get(acceptedColumns, rank)
+                float labelPrice = array.get(labelPrices, rank)
 
                 // Higher-priority levels render bolder and more opaque — the same
                 // "visual weight tracks significance" principle Fib Reaction Memory
@@ -1774,22 +1829,15 @@ if barstate.islast
 
                 color railColor = color.new(level.levelColor, tierLineTransparency)
                 color labelColor = color.new(level.levelColor, tierLabelTransparency)
-                string labelText = f_text(level)
 
-                // Every rail is staggered by rank so no two levels ever share the exact
-                // same starting bar. Without this, several differently-colored
-                // horizontal lines all beginning at the identical column, stacked
-                // closely in price, read as a vertical multi-colored bar at that column
-                // regardless of how long each segment then runs — tuning the segment
-                // length alone (tried repeatedly) only ever reduces the odds at whatever
-                // zoom level happens to get tested, it doesn't remove the shared origin.
-                int levelRailStart = math.min(railStartBar + rank, futureLimitBar - 1)
-                int levelRailEnd = math.min(railSeedEnd + rank, futureLimitBar)
+                int levelLabelBar = labelAnchorBar + levelColumn * columnStep
+                int railEndBar = levelLabelBar - leaderLength
+                int levelRailStart = railEndBar - railLength
 
                 line rail = line.new(
                      levelRailStart,
                      level.price,
-                     levelRailEnd,
+                     railEndBar,
                      level.price,
                      xloc = xloc.bar_index,
                      extend = extend.none,
@@ -1798,22 +1846,29 @@ if barstate.islast
                 )
                 array.push(renderedLines, rail)
 
-                label tag = label.new(
-                     labelAnchorBar,
+                line leader = line.new(
+                     railEndBar,
                      level.price,
-                     labelText,
+                     levelLabelBar,
+                     labelPrice,
+                     xloc = xloc.bar_index,
+                     extend = extend.none,
+                     color = railColor,
+                     width = tierWidth
+                )
+                array.push(renderedLines, leader)
+
+                label tag = label.new(
+                     levelLabelBar,
+                     labelPrice,
+                     f_text(level),
                      xloc = xloc.bar_index,
                      yloc = yloc.price,
-                     style = label.style_label_right,
+                     style = label.style_label_left,
                      color = labelColor,
                      textcolor = color.white,
                      size = f_labelSize(),
-                     tooltip =
-                         level.code + " — " + level.fullName + "\n" +
-                         "Price: " + str.tostring(level.price, format.mintick) +
-                         (level.isZone ? "\nZone: " + str.tostring(level.lower, format.mintick) +
-                             " – " + str.tostring(level.upper, format.mintick) +
-                             "\nTouches: " + str.tostring(level.touches) : "")
+                     tooltip = f_tooltip(level)
                 )
                 array.push(renderedLabels, tag)
 
