@@ -114,15 +114,16 @@ Weitere typische Mismatch-Muster:
 
 Frage: **Ist die Datei- und Doku-Struktur dieses Indikator-Verzeichnisses vollständig und
 formal korrekt** — unabhängig davon, ob Code oder Trading-Logik stimmen. Die exakte
-Spezifikation steht in `CLAUDE.md` (Repo-Root); dort nachlesen statt aus dem Gedächtnis zu
-urteilen — Details wie Separator-Länge, erlaubte BBCode-Tags oder Farbwerte ändern sich dort,
+Spezifikation steht in `CLAUDE.md` (Repo-Root) und den dort genannten Dateien unter
+`.claude/rules/` (`indicator-docs.md`, `pine-script-header.md`, `dashboard-table-style.md`);
+dort nachlesen statt aus dem Gedächtnis zu urteilen — Details wie Separator-Länge, erlaubte BBCode-Tags oder Farbwerte ändern sich dort,
 nicht hier.
 
 ### 4.1 Verzeichnis & Pflichtdateien
 - [ ] Liegt der Indikator unter `indicators/<category>/<name>/` mit einer der neun erlaubten Kategorien?
 - [ ] `README.md` vorhanden, Struktur: Title → TradingView-Link (falls publiziert) → Beschreibung → `## Features` → weitere Abschnitte
 - [ ] `CHANGELOG.md` vorhanden, Format `## vX.Y.Z — YYYY-MM-DD` mit Bullet-Liste
-- [ ] `DESCRIPTION_TV.bbcode` vorhanden, wenn das Skript zur TV-Publikation gedacht ist; nur erlaubte BBCode-Tags (CLAUDE.md-Tabelle), Disclaimer-Absatz am Ende
+- [ ] `DESCRIPTION_TV.bbcode` vorhanden, wenn das Skript zur TV-Publikation gedacht ist; nur erlaubte BBCode-Tags (Tabelle in `.claude/rules/indicator-docs.md`), Disclaimer-Absatz am Ende
 - [ ] `screenshots/` (optional) folgt Namenskonvention `<indicatorname>_<context>_<optional-version>.png`
 
 ### 4.2 `.pine`-Header
@@ -141,7 +142,7 @@ nicht hier.
 - [ ] Bei Alerts: Kürzel in `indicators/ALERT_KUERZEL.md` registriert (Detail: `indicator-alerts`)
 
 ### 4.4 Dashboard-Tabellen-Stil (falls der Indikator ein Dashboard zeichnet)
-- [ ] `table.new(...)` mit den vorgeschriebenen Farbkonstanten (CLAUDE.md „Dashboard table style"), kein Dark-Theme-Hintergrund
+- [ ] `table.new(...)` mit den vorgeschriebenen Farbkonstanten (`.claude/rules/dashboard-table-style.md`), kein Dark-Theme-Hintergrund
 - [ ] Header-/Daten-/Status-/Separatorzeilen nutzen die vorgeschriebene `text_color`/`bgcolor`/`text_size`-Kombination — Referenz bei Zweifel: `indicators/trend_direction/vein/vein_reversal_score.pine`
 - [ ] Kein `size.tiny` für persistente Dashboard-/Tabellentexte
 

@@ -155,14 +155,13 @@ Kein Emoji ist auch ok — aber nicht mischen (mal mit, mal ohne) innerhalb eine
 - Mindestens das `alertsOnBarClose`-Toggle aus §2.
 - Optional ein `Enable Alerts`-Master-Toggle, wenn der Indikator viele Alerts hat — dann **alle**
   alertconditions konsistent damit gaten (`alertOk and enableAlerts and …`), nicht nur einige.
-- **Anti-Pattern:** im selben File manche Alerts gegated, andere nicht (beobachtet in
-  `regime_detector`). Entweder alle oder keiner.
+- **Anti-Pattern:** im selben File manche Alerts gegated, andere nicht. Entweder alle oder keiner.
 
 ## 6. Braucht der Indikator überhaupt Alerts?
 
 - **Ja**, wenn er einen Signaltyp aus §3 produziert (Trigger/Exit/Watch/Regime/Warning).
-- **Nein** für reine Visual-/Mapping-Overlays ohne Event (z. B. `vwap_cross_visuals`,
-  `zigzag_fibo_pullback_map`) — Alerts ohne klares Event sind Lärm.
+- **Nein** für reine Visual-/Mapping-Overlays ohne Event (z. B. `zigzag_core`,
+  `fib_reaction_memory`, `support_resistance_zones`) — Alerts ohne klares Event sind Lärm.
 - Wenn ein Indikator benannte Signale hat (`longSignal`, `crossUp`, …) aber **keinen** Alert,
   ist das eine Lücke — Alert ergänzen oder bewusst begründen, warum nicht.
 

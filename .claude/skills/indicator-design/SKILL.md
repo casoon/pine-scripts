@@ -53,7 +53,7 @@ Indikator unprüfbar — du erwartest dann die falsche Aussage vom falschen Modu
 
 `Signal = A AND B AND C AND D` killt gute Setups. Genau dieses Muster hat in diesem Repo
 94 % der WT-Crosses geblockt, ohne besser zu selektieren als der Marktdurchschnitt
-(`.claude/CLAUDE.md`, test92).
+(test92, NatGas).
 
 Stattdessen: **jeder Sensor liefert Evidenz, am Ende wird bewertet — nicht blockiert.**
 
@@ -176,7 +176,7 @@ Rollen-Modell (§1):
 moduliert, wie stark eine Erschöpfungsaussage aus Stufe 2 sein muss, um zu einem Signal zu
 werden (Schwellenverschiebung), nicht ob Stufe 2 überhaupt rechnet. Erschöpfungssignale
 **ohne** vorgeschaltete Regime-Einordnung sind genau das wiederkehrende Fehlsignal-Muster im
-starken Trend (`.claude/CLAUDE.md`: Gates blockten 94 % ohne besser zu selektieren — die
+starken Trend (test92: Gates blockten 94 % ohne besser zu selektieren — die
 Ursache war dort *hartes* Blocken statt Regime-abhängiges Schwellen-Staffeln).
 
 Das Regime-Veto darf den eigentlichen Reversal-Trigger nie vollständig abwürgen (§3, Memory
@@ -229,8 +229,8 @@ Jeder Indikator braucht Debug-Ausgaben — nicht nur Signal ja/nein, sondern:
 Welche Rolle war stark/schwach?* Ohne Debug ist keine systematische Verbesserung möglich.
 
 In diesem Repo: `log.info(...)`-Events mit Rollen-Scores + blockendem Gate (Muster wie
-`WT4 BLOCKED reason=<gate>` in `strategies/wavetrend_v4_strategy.pine`), auswertbar über
-`scripts/analyze_gates.py` und die Dashboard-Tabelle (Stil siehe `CLAUDE.md`).
+`WT4 BLOCKED reason=<gate>` in `strategies/wavetrend/wavetrend_v4_strategy.pine`), auswertbar über
+`scripts/analyze_gates.py` und die Dashboard-Tabelle (Stil siehe `.claude/rules/dashboard-table-style.md`).
 
 ## Mindestanforderung — die sechs Fragen
 

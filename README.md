@@ -1,6 +1,6 @@
 # Pine Scripts by WavesUnchained
 
-**Pine Version:** v6 &nbsp;·&nbsp; **License:** [MIT](LICENSE) &nbsp;·&nbsp; **Author:** [WavesUnchained](https://www.tradingview.com/u/WavesUnchained/)
+**Pine Version:** v6 &nbsp;·&nbsp; **License:** [MIT](LICENSE) &nbsp;·&nbsp; **Author:** [WavesUnchained](https://www.tradingview.com/u/WavesUnchained/) &nbsp;·&nbsp; **Docs:** [casoon.github.io/pine-scripts](https://casoon.github.io/pine-scripts/)
 
 > A collection of custom TradingView indicators built around composable analysis — market structure, trend, momentum, and confluence scoring.
 
@@ -48,7 +48,8 @@ Full indicator index, grouped by focus, with one-line descriptions and links to 
 
 Every strategy under `strategies/` is **standalone and hand-maintained**. Each wraps one
 indicator's signal logic in a `strategy()` call and adds a trade direction filter,
-confirmed-bar gate, cooldown, optional break-even stop and a non-standard-chart-type guard.
+confirmed-bar gate, cooldown, optional break-even stop, a non-standard-chart-type guard, a CFD cost
+model (spread, financing, stress factor) and a random-entry baseline for comparison.
 
 Building or updating one is a guided task rather than a script — the Claude Code skill
 `strategy-from-indicator` (`.claude/skills/`) carries the input groups, the exit patterns
@@ -56,9 +57,9 @@ and the transformation rules.
 
 | Strategy | Based on | SL type | Status |
 |----------|----------|---------|--------|
-| [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Promising |
-| [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Promising |
-| [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Promising (Long Only) |
+| [`chandelier_flip_radar_strategy.pine`](strategies/chandelier_flip_radar/chandelier_flip_radar_strategy.pine) | Chandelier Flip Radar | Trailing | Not ready — measured before the v1.6 ratchet fix |
+| [`oscillator_divergence_zones_strategy.pine`](strategies/oscillator_divergence_zones/oscillator_divergence_zones_strategy.pine) | Oscillator Divergence Zones | Pivot ATR | Not ready |
+| [`smooth_trend_radar_strategy.pine`](strategies/smooth_trend_radar/smooth_trend_radar_strategy.pine) | Smooth Trend Radar | Fixed TP | Not ready — measured only in the window it was tuned on |
 | [`wavetrend_v4_strategy.pine`](strategies/wavetrend/wavetrend_v4_strategy.pine) | WaveTrend v4 | Trailing | Not ready — v5.0 not yet backtested |
 | [`reversal_engine_score_strategy.pine`](strategies/reversal_engine_score/reversal_engine_score_strategy.pine) | Reversal Engine Score | Structural + R-multiple TP | Not ready |
 | [`kestrel_opportunity_lens_strategy.pine`](strategies/kestrel_opportunity_lens/kestrel_opportunity_lens_strategy.pine) | Kestrel Opportunity Lens | Time exit, no stop (evaluation) | Not ready — NatGas 4h tested, 4 setup models |
