@@ -3,24 +3,36 @@
 // Elliott Wave Radar [WavesUnchained]
 // Version: 1.3.0
 // Author: WavesUnchained
-// Build: 2026-11-17
+// Build: 2026-11-20
 // ============================================================================
 // Rule-validated Elliott Wave counting on ZigZag pivots. Labels impulses
 // (1-5) and corrections (A-B-C) only when the hard EW rules hold, shows the
 // raw Fibonacci ratios of the count, draws ratio projections for the
-// developing wave and checks sub-wave structure on a finer pivot degree.
+// developing wave and counts sub-wave legs on a finer pivot degree.
 // Shows "no valid count" instead of forcing a count onto the chart. A display
 // of the current structure — alerts describe count events, not trades.
 //
 // Features:
 //   ✓ ZigZag pivot engine with ATR noise filter (two degrees)
-//   ✓ Hard rules: W2 < 100% of W1, W3 never shortest, W4/W1 overlap ban
+//   ✓ Counts pick wave points from all stored pivots — waves may contain smaller swings
+//   ✓ Hard rules: W2 < 100% of W1, W3 never shortest, W4/W1 overlap ban, W5 limit only where W3 would become the shortest; zigzag B < 90% of A, flat B ≥ 90%, C beyond A
+//   ✓ Sub-structure check on the finer degree: impulse 5-3-5-3-5, zigzag 5-3-5, flat 3-3-5 — only a clear 3-swing (or 5-wave) result rejects
+//   ✓ Diagonals by position: leading only as W1 / A, ending only as W5 / C, never W3
+//   ✓ W1-W4 and A-B-C from the same 1-2 / A-B run in parallel until a rule rules one out
+//   ✓ Provisional fallbacks when nothing ordinary fits: diagonals (all pivots, wedge + overlap) and W-X-Y (all pivots)
+//   ✓ Every possible W1 / A origin is tested; a minor origin costs fit points
+//   ✓ Counts whose sub-structure is not confirmed are marked "unconfirmed"
+//   ✓ Fib ratios, W2 zone, one extension and the degree of internal swings are guidelines — they shape the fit, they do not reject
 //   ✓ Raw wave ratios (W2/W1, W3/W1, W4/W3, W5/W1, B/A, C/A) in the dashboard
 //   ✓ Honest "no valid count" state — never forces a count
 //   ✓ Corrections: zigzag A-B-C and flat (regular/expanded) detection
-//   ✓ Partial counts: W1-W2, W1-W4 and post-impulse A-B with Fib ratio projections
+//   ✓ Partial counts: 1-2 / A-B (open until the next waves decide), W1-W4 and post-impulse A-B with projections
+//   ✓ Post-impulse A-B with A not a clear five: W1-W2 of a leading diagonal as running alt count
+//   ✓ Running count: an active count is continued pivot by pivot (1-2 → 1-4 → 1-5 → A-B → A-B-C) and replaced only when it breaks
 //   ✓ Post-impulse retracement levels (38.2 / 50 / 61.8 %)
-//   ✓ Sub-wave labels (i)-(iv) / (a)-(b) from the finer pivot degree
+//   ✓ Sub-wave labels (i)-(iv) / (a)-(b) from the finer pivot degree (leg count, not a sub-count)
+//   ✓ Last completed impulse stays on the chart while the next structure develops
+//   ✓ Diagnostics: rule-valid interpretations and how many fall below the Fib fit
 //   ✓ Invalidation level drawn and monitored while a count is active
 //   ✓ Alternate count shown in the dashboard
 //   ✓ Alerts: count labeled (impulse/ABC/flat/partial), close beyond W1 end, count invalidated
@@ -41,14 +53,18 @@ indicator("Elliott Wave Radar [WavesUnchained]", shorttitle="EW Radar", overlay=
 // ─────────────────────────────────────────────────────────────────────────────
 grpZZ = "ZigZag Engine"
 pivLen      = input.int(8,   "Pivot Length (primary degree)",  minval=3,  group=grpZZ, tooltip="Bars left/right for a confirmed primary pivot. Larger = bigger waves.")
-subLen      = input.int(3,   "Pivot Length (sub degree)",      minval=2,  group=grpZZ, tooltip="Finer pivot degree used to verify internal sub-wave structure.")
+subLen      = input.int(3,   "Pivot Length (sub degree)",      minval=2,  group=grpZZ, tooltip="Finer pivot degree used to count the internal legs of W1 and W3.")
 minSwingATR = input.float(0.5, "Min Swing Size (ATR ×)", step=0.1, minval=0.0, group=grpZZ, tooltip="A new primary pivot must be at least this many ATR away from the previous one. Filters noise swings.")
-maxPiv      = input.int(60,  "Max pivots stored", minval=12, maxval=200, group=grpZZ)
+maxPiv      = input.int(200, "Max pivots stored", minval=12, maxval=300, group=grpZZ, tooltip="Primary pivots kept for counting. More pivots reach further back for wave starts; the sub degree keeps five times as many.")
+evalBars    = input.int(5000, "Count on last N bars", minval=500, step=500, group=grpZZ, tooltip="Counts are searched only on the last N bars of the chart. Older history is not needed for the current count; the limit keeps the all-pivot search within TradingView's run-time limit.")
 showZZ      = input.bool(true, "Draw ZigZag (primary)", group=grpZZ)
 
 grpRules = "Wave Validation"
-minScore  = input.int(55, "Min Fibonacci fit (0-100)", minval=0, maxval=100, group=grpRules, tooltip="Counts that satisfy the hard rules but have poor Fibonacci guidelines below this threshold are rejected instead of forced onto the chart.")
-allowDiag = input.bool(false, "Allow W4 into W1 territory (diagonal)", group=grpRules, tooltip="Leading/ending diagonals allow W4 to overlap W1. Off = strict impulse rules.")
+minScore  = input.int(55, "Min Fibonacci fit (0-100)", minval=0, maxval=100, group=grpRules, tooltip="Plausibility filter for a fresh count: rule-valid counts whose ratios (W2 zone, B/A, C/A, W3/W1 …) fit the Fibonacci guidelines below this value are not shown. Separate from the hard rules; a running count is not filtered.")
+legMin    = input.float(0.08, "Min sub-wave swing (× wave)", minval=0.01, maxval=0.5, step=0.01, group=grpRules, tooltip="Sub-structure check on the finer pivot degree: swings inside a wave smaller than this fraction of the wave are ignored. The remaining swings are tested for a rule-valid 5-wave impulse. Only clear results reject: exactly three swings rule out a motive wave (or zigzag A / C), a 5-wave fit rules out a B wave or a flat A.")
+allowDiag = input.bool(true, "Detect diagonal fallback", group=grpRules, tooltip="Only when no ordinary count is found: check the last six pivots for a five-swing overlapping diagonal with wedge geometry. Never relaxes the overlap rule of a normal impulse.")
+detectWXY = input.bool(true, "Detect W-X-Y fallback", group=grpRules, tooltip="Only when no ordinary count is found: search the stored pivots for W-X-Y where W, X and Y are each a zigzag or flat.")
+complexMinScore = input.int(55, "Fallback plausibility threshold", minval=0, maxval=100, group=grpRules, tooltip="Minimum fit for a diagonal or W-X-Y fallback, separate from the main Fib threshold. Fallback counts are shown as provisional.")
 
 grpDisp = "Display"
 showProj = input.bool(true, "Show Fib target projections", group=grpDisp)
@@ -67,10 +83,12 @@ zzC      = input.color(color.new(color.gray, 55), "ZigZag color", group=grpDisp)
 var float[] pPrc = array.new_float()
 var int[]   pBar = array.new_int()
 var int[]   pTyp = array.new_int()
+var int[]   pTim = array.new_int()   // bar time of each pivot — for drawing with xloc.bar_time
 
 var float[] sPrc = array.new_float()
 var int[]   sBar = array.new_int()
 var int[]   sTyp = array.new_int()
+var int[]   sTim = array.new_int()
 
 atrV = ta.atr(14)
 
@@ -81,8 +99,9 @@ f_extreme(int refBar, float price, int barIdx, int typ) =>
     float best = price
     int bestBar = barIdx
     int span = math.min(bar_index - refBar, 900)
-    if span > 0
-        for i = 0 to span - 1
+    int first = bar_index - barIdx
+    if span > first
+        for i = first to span - 1
             if typ == 1 and high[i] > best
                 best := high[i]
                 bestBar := bar_index - i
@@ -95,7 +114,7 @@ f_extreme(int refBar, float price, int barIdx, int typ) =>
 // extreme since the previous pivot (not just the confirmed ta.pivot* value).
 // Same-type pivots replace the stored one when more extreme. Alternating
 // pivots must clear the min swing filter.
-f_push(float[] aP, int[] aB, int[] aT, int barIdx, float price, int typ, float minSw) =>
+f_push(float[] aP, int[] aB, int[] aT, int[] aTm, int barIdx, float price, int typ, float minSw, int cap) =>
     bool changed = false
     int n = array.size(aT)
     if n > 0 and array.get(aT, n - 1) == typ
@@ -107,6 +126,7 @@ f_push(float[] aP, int[] aB, int[] aT, int barIdx, float price, int typ, float m
         if more
             array.set(aP, n - 1, best)
             array.set(aB, n - 1, bestBar)
+            array.set(aTm, n - 1, time[bar_index - bestBar])
             changed := true
     else
         float bestP = price
@@ -122,11 +142,13 @@ f_push(float[] aP, int[] aB, int[] aT, int barIdx, float price, int typ, float m
             array.push(aP, bestP)
             array.push(aB, bestB)
             array.push(aT, typ)
+            array.push(aTm, time[bar_index - bestB])
             changed := true
-    while array.size(aT) > maxPiv
+    while array.size(aT) > cap
         array.shift(aP)
         array.shift(aB)
         array.shift(aT)
+        array.shift(aTm)
     changed
 
 ph = ta.pivothigh(high, pivLen, pivLen)
@@ -135,18 +157,18 @@ float minSwAbs = minSwingATR * atrV
 
 bool newPiv = false
 if not na(ph)
-    if f_push(pPrc, pBar, pTyp, bar_index - pivLen, ph, 1, minSwAbs)
+    if f_push(pPrc, pBar, pTyp, pTim, bar_index - pivLen, ph, 1, minSwAbs, maxPiv)
         newPiv := true
 if not na(pl)
-    if f_push(pPrc, pBar, pTyp, bar_index - pivLen, pl, -1, minSwAbs)
+    if f_push(pPrc, pBar, pTyp, pTim, bar_index - pivLen, pl, -1, minSwAbs, maxPiv)
         newPiv := true
 
 sph = ta.pivothigh(high, subLen, subLen)
 spl = ta.pivotlow(low, subLen, subLen)
 if not na(sph)
-    f_push(sPrc, sBar, sTyp, bar_index - subLen, sph, 1, 0.0)
+    f_push(sPrc, sBar, sTyp, sTim, bar_index - subLen, sph, 1, 0.0, 5 * maxPiv)
 if not na(spl)
-    f_push(sPrc, sBar, sTyp, bar_index - subLen, spl, -1, 0.0)
+    f_push(sPrc, sBar, sTyp, sTim, bar_index - subLen, spl, -1, 0.0, 5 * maxPiv)
 
 // Accessors counted backwards from the most recent pivot (back = 0)
 f_p(int back) =>
@@ -155,6 +177,131 @@ f_b(int back) =>
     array.get(pBar, array.size(pBar) - 1 - back)
 f_t(int back) =>
     array.get(pTyp, array.size(pTyp) - 1 - back)
+f_tm(int back) =>
+    array.get(pTim, array.size(pTim) - 1 - back)
+
+// a beyond b in direction dir (+1: higher, -1: lower)
+f_beyond(float a, float b, int dir) =>
+    dir == 1 ? a > b : a < b
+
+// back index of the most extreme pivot of type `typ` strictly between back
+// indices `older` and `newer` (older > newer); -1 when there is none
+f_ext_between(int older, int newer, int typ) =>
+    int best = -1
+    if older - newer >= 2
+        for k = newer + 1 to older - 1
+            if f_t(k) == typ
+                if best < 0 or f_beyond(f_p(k), f_p(best), typ)
+                    best := k
+    best
+
+// a wave end at pivot i1 is valid only when no pivot of its type between it
+// and the next wave point i2 trades beyond it
+f_end_ok(int i1, int i2, int dir) =>
+    int hi = f_ext_between(i1, i2, dir)
+    hi < 0 or not f_beyond(f_p(hi), f_p(i1), dir)
+
+// back index of the stored pivot at bar `bar`; -1 when it is no longer stored
+f_idx(int bar) =>
+    int res = -1
+    int n = array.size(pBar)
+    if n > 0
+        for k = 0 to n - 1
+            if f_b(k) <= bar
+                if f_b(k) == bar
+                    res := k
+                break
+    res
+
+// Largest counter-swing inside the wave from pivot `older` to pivot `newer`
+// (back indices) in direction dir, measured on the stored pivots
+f_max_counter(int older, int newer, int dir) =>
+    float ext = f_p(older)
+    float mx = 0.0
+    if older - newer >= 2
+        for j = 1 to older - newer - 1
+            int k = older - j
+            float pk = f_p(k)
+            if f_t(k) == dir
+                if f_beyond(pk, ext, dir)
+                    ext := pk
+            else
+                mx := math.max(mx, math.abs(ext - pk))
+    mx
+
+// Degree guideline: swings inside a wave are of lower degree, so a counter-
+// swing inside it should stay smaller than `limit` (the corrective waves of
+// the count's own degree). Returns a Fib fit penalty: 0 when it does, 20-40
+// when a counter-swing inside the wave is larger.
+f_deg_pen(int older, int newer, int dir, float limit) =>
+    float mc = f_max_counter(older, newer, dir)
+    mc < limit or limit <= 0 ? 0.0 : math.min(40.0, 20.0 + 20.0 * (mc / limit - 1.0))
+
+// Possible origins of a wave ending at pivot `endBack` in direction `dir`:
+// walking back, each opposite pivot more extreme than all later ones, until
+// a pivot at or beyond the wave end (the wave cannot start before it). At
+// most eight, most recent first: the nearest one plus those with the largest
+// move into the origin relative to the wave (a minor dip inside the wave is
+// a weak origin, see f_origin_pen) — the complete count decides between them.
+f_origins(int endBack, int dir) =>
+    int[] cand = array.new_int()
+    float[] mvIn = array.new_float()
+    int n = array.size(pTyp)
+    if endBack + 1 <= n - 1
+        float pEnd = f_p(endBack)
+        array.push(cand, endBack + 1)
+        float ext = f_p(endBack + 1)
+        bool stopped = false
+        int k = endBack + 2
+        while k <= n - 1
+            float pk = f_p(k)
+            if f_t(k) == dir
+                if not f_beyond(pEnd, pk, dir)
+                    stopped := true
+                    break
+                if f_beyond(pk, ext, dir)
+                    ext := pk
+            else if f_beyond(pk, f_p(array.get(cand, array.size(cand) - 1)), -dir)
+                float pc = f_p(array.get(cand, array.size(cand) - 1))
+                array.push(mvIn, math.abs(ext - pc) / math.max(math.abs(pEnd - pc), syminfo.mintick))
+                array.push(cand, k)
+                ext := pk
+            k += 1
+        float pl = f_p(array.get(cand, array.size(cand) - 1))
+        // a pivot beyond the wave end before the oldest origin is a full move into it
+        array.push(mvIn, stopped ? 1.0e9 : math.abs(ext - pl) / math.max(math.abs(pEnd - pl), syminfo.mintick))
+    int[] res = array.new_int()
+    int m = array.size(cand)
+    if m <= 8
+        res := cand
+    else
+        // threshold: the 7th largest move-in among all but the nearest origin
+        float[] srt = array.copy(array.slice(mvIn, 1, m))
+        array.sort(srt, order.descending)
+        float th = array.get(srt, 6)
+        array.push(res, array.get(cand, 0))
+        for j = 1 to m - 1
+            if array.size(res) < 8 and array.get(mvIn, j) >= th
+                array.push(res, array.get(cand, j))
+    res
+
+// Origin guideline: a wave starts after a move against it, so the move into
+// its origin (back to the previous pivot beyond the origin) should be at
+// least 38.2% of the wave. A smaller one marks a minor dip inside an older
+// move and costs up to 20 fit points.
+f_origin_pen(int k, int dir, float w) =>
+    float p0 = f_p(k)
+    float ext = p0
+    int n = array.size(pTyp)
+    if k + 1 <= n - 1
+        for j = k + 1 to n - 1
+            float pj = f_p(j)
+            if f_t(j) == -dir and f_beyond(pj, p0, -dir)
+                break
+            if f_t(j) == dir and f_beyond(pj, ext, dir)
+                ext := pj
+    float r = w > 0 ? math.abs(ext - p0) / w : 0.0
+    r >= 0.382 ? 0.0 : (0.382 - r) / 0.382 * 20.0
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fibonacci guideline fit + ratio formatting
@@ -166,200 +313,653 @@ f_score(float x, float ideal, float width) =>
 f_r(float x) =>
     str.tostring(x, "0.00")
 
+// guideline zone fit: 100 inside [lo, hi], falling to 0 at `w` outside it
+f_zone(float x, float lo, float hi, float w) =>
+    float d = x < lo ? lo - x : x > hi ? x - hi : 0.0
+    math.max(0.0, 1.0 - d / w) * 100.0
+
+// W3/W1 fit: an extended W3 anywhere in 1.618-4.236 × W1 is a full fit
+f_s3(float rr3) =>
+    rr3 >= 1.618 and rr3 <= 4.236 ? 100.0 : math.max(f_score(rr3, 1.618, 0.80), f_score(rr3, 4.236, 1.50))
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Count evaluation — each returns [valid, fibFit, raw ratio text]
-// All windows END at the most recent confirmed pivot.
+// Count evaluation — each returns [valid, fibFit, raw ratio text, point back
+// indices]. Every count ENDS at the most recent confirmed pivot and picks its
+// wave points from all stored pivots, each point being the extreme of its
+// segment — so a wave may contain smaller swings of its own.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Complete impulse: 6 pivots P0..P5, direction = type of P5 (+1 up impulse)
+// Fib fit of a complete impulse P0..P5 in direction dir (+1 up)
+f_imp_fit(int dir, float p0, float p1, float p2, float p3, float p4, float p5) =>
+    bool valid = false
+    float sc = 0.0
+    string ratios = "—"
+    float w1 = math.abs(p1 - p0)
+    float w2 = math.abs(p2 - p1)
+    float w3 = math.abs(p3 - p2)
+    float w4 = math.abs(p4 - p3)
+    float w5 = math.abs(p5 - p4)
+    // hard rules
+    bool r1 = f_beyond(p2, p0, dir)                                  // W2 never beyond W1 start
+    bool r2 = not (w3 < w1 and w3 < w5)                              // W3 never the shortest
+    bool r3 = f_beyond(p4, p1, dir)                                  // W4 outside W1 territory (diagonals: separate fallback)
+    bool rP = f_beyond(p3, p1, dir) and f_beyond(p5, p3, dir)        // progress: W3 beyond W1 end, W5 beyond W3 end
+    if r1 and r2 and r3 and rP and w1 > 0 and w3 > 0
+        valid := true
+        float rr2 = w2 / w1
+        float rr3 = w3 / w1
+        float rr4 = w4 / w3
+        float rr5 = w5 / w1
+        float s2 = math.max(f_score(rr2, 0.618, 0.35), f_score(rr2, 0.50, 0.30))
+        float s3 = f_s3(rr3)
+        float s4 = f_score(rr4, 0.382, 0.25)
+        // W5 relates to W1 (1.0 / 0.618) or, after an extended W3, is
+        // 0.618 × the distance from the W1 start to the W3 end
+        float rr5x = w5 / math.abs(p3 - p0)
+        float s5 = math.max(math.max(f_score(rr5, 1.00, 0.50), f_score(rr5, 0.618, 0.35)), f_score(rr5x, 0.618, 0.25))
+        // guideline of alternation: deep W2 with shallow W4 or vice versa
+        float alt = math.abs(rr2 - rr4) >= 0.15 ? 100.0 : 50.0
+        sc := s2 * 0.25 + s3 * 0.30 + s4 * 0.20 + s5 * 0.15 + alt * 0.10
+        // guideline of one extension: after an extended W3, W5 is rarely longer than W3
+        if w3 >= 1.618 * w1 and w5 > w3
+            sc -= 30.0
+        ratios := "W2/W1 " + f_r(rr2) + " · W3/W1 " + f_r(rr3) + " · W4/W3 " + f_r(rr4) + " · W5/W1 " + f_r(rr5)
+    [valid, sc, ratios]
+
+// Diagonal rules on six points (dir = direction of the diagonal): W2 short
+// of the W1 start, progress beyond W1 / W3, W4 overlapping W1 territory but
+// short of the W2 end, W3 not the shortest, contracting (W3 < W1, W4 < W2,
+// W5 < W3) or expanding (all reversed). [valid, contracting]
+f_diag_shape(int dir, float p0, float p1, float p2, float p3, float p4, float p5) =>
+    float w1 = math.abs(p1 - p0)
+    float w2 = math.abs(p2 - p1)
+    float w3 = math.abs(p3 - p2)
+    float w4 = math.abs(p4 - p3)
+    float w5 = math.abs(p5 - p4)
+    bool basics = f_beyond(p1, p0, dir) and f_beyond(p2, p0, dir) and f_beyond(p3, p1, dir) and f_beyond(p4, p2, dir) and not f_beyond(p4, p1, dir) and f_beyond(p5, p3, dir)
+    bool thirdOK = not (w3 < w1 and w3 < w5)
+    bool contracted = w3 < w1 and w4 < w2 and w5 < w3
+    bool expanded = w3 > w1 and w4 > w2 and w5 > w3
+    [basics and thirdOK and (contracted or expanded), contracted]
+
+// W3 is never corrective and never a diagonal (sub result 3 or 6)
+f_w3_ok(int r) =>
+    r != 3 and r != 6
+
+// Sub-structure of the wave from (bStart, pStart) to (bEnd, pEnd) on the
+// finer pivot degree. Sub pivots inside the wave are reduced to alternating
+// swings of at least legMin × the wave, then searched for a 5-wave impulse
+// that passes the same hard rules as a primary impulse.
+// 5 = five waves fit, 3 = three swings in A-B-C shape (corrective),
+// 2 = other swings without a 5-wave fit (unclear — the sub degree may not resolve
+// all sub-waves), 1 = a single leg, 0 = no sub pivots back to the wave start,
+// 6 = no 5-wave fit but a diagonal (overlapping W4, wedge proportions).
+// Only 3 rules a motive wave out; 5 and 6 rule out a 3-wave B, flat A or
+// diagonal W2 / W4. A diagonal may lead (W1 / A) or end (W5 / C) a structure,
+// never form W3.
+f_sub_waves(int bStart, int bEnd, float pStart, float pEnd) =>
+    int res = 0
+    int n = array.size(sBar)
+    if n > 0 and pEnd != pStart and array.get(sBar, 0) <= bStart
+        int dir = pEnd > pStart ? 1 : -1
+        float minSz = legMin * math.abs(pEnd - pStart)
+        float[] sq = array.from(pStart)
+        int[] st = array.from(-dir)
+        int k0 = n
+        for k = n - 1 to 0
+            if array.get(sBar, k) <= bStart
+                break
+            k0 := k
+        if k0 < n
+            for k = k0 to n - 1
+                if array.get(sBar, k) >= bEnd
+                    break
+                float sp = array.get(sPrc, k)
+                int typ = array.get(sTyp, k)
+                int mm = array.size(sq)
+                float lastP = array.get(sq, mm - 1)
+                if typ == array.get(st, mm - 1)
+                    if mm > 1 and f_beyond(sp, lastP, typ)
+                        array.set(sq, mm - 1, sp)
+                else if math.abs(sp - lastP) >= minSz
+                    array.push(sq, sp)
+                    array.push(st, typ)
+        if array.get(st, array.size(sq) - 1) == dir
+            array.set(sq, array.size(sq) - 1, pEnd)
+        else
+            array.push(sq, pEnd)
+            array.push(st, dir)
+        int m = array.size(sq)
+        res := m <= 2 ? 1 : 2
+        if m == 4
+            // three swings count as corrective only with an A-B-C shape: B 0.236-1.382 of A, C beyond A
+            float wA = math.abs(array.get(sq, 1) - pStart)
+            float wB = math.abs(array.get(sq, 2) - array.get(sq, 1))
+            if wA > 0 and wB / wA >= 0.236 and wB / wA <= 1.382 and f_beyond(pEnd, array.get(sq, 1), dir)
+                res := 3
+        // points alternate: even index = start-type swing, odd = wave-direction swing
+        if m >= 6
+            for i1 = 1 to m - 5 by 2
+                int i3 = i1 + 2
+                for k = i1 + 2 to m - 3 by 2
+                    if f_beyond(array.get(sq, k), array.get(sq, i3), dir)
+                        i3 := k
+                if f_beyond(array.get(sq, i3), array.get(sq, i1), dir)
+                    int i2 = i1 + 1
+                    for k = i1 + 1 to i3 - 1 by 2
+                        if f_beyond(array.get(sq, k), array.get(sq, i2), -dir)
+                            i2 := k
+                    int i4 = i3 + 1
+                    for k = i3 + 1 to m - 2 by 2
+                        if f_beyond(array.get(sq, k), array.get(sq, i4), -dir)
+                            i4 := k
+                    [v5, s5, r5] = f_imp_fit(dir, pStart, array.get(sq, i1), array.get(sq, i2), array.get(sq, i3), array.get(sq, i4), pEnd)
+                    if v5
+                        res := 5
+                        break
+                    [vd, cd] = f_diag_shape(dir, pStart, array.get(sq, i1), array.get(sq, i2), array.get(sq, i3), array.get(sq, i4), pEnd)
+                    if vd
+                        res := 6
+    res
+
+// sub-structure of the wave between pivot back indices older → newer
+f_subw(int older, int newer) =>
+    f_sub_waves(f_b(older), f_b(newer), f_p(older), f_p(newer))
+
+// Complete impulse ending at the last pivot (P5). For every candidate W1 end
+// P1: P3 = extreme after P1, P2 = extreme between P1 and P3, P4 = extreme
+// after P3, P0 = each possible origin of W1. W1, W3 and W5 must not be corrective on the
+// finer degree. Best Fib fit wins.
 f_eval_impulse() =>
     bool valid = false
     float sc = 0.0
     string ratios = "—"
-    if array.size(pTyp) >= 6
+    int[] idx = array.new_int()
+    int n = array.size(pTyp)
+    if n >= 6
         int dir = f_t(0)
-        float p0 = f_p(5)
-        float p1 = f_p(4)
-        float p2 = f_p(3)
-        float p3 = f_p(2)
-        float p4 = f_p(1)
-        float p5 = f_p(0)
-        float w1 = math.abs(p1 - p0)
-        float w2 = math.abs(p2 - p1)
-        float w3 = math.abs(p3 - p2)
-        float w4 = math.abs(p4 - p3)
-        float w5 = math.abs(p5 - p4)
-        // hard rules
-        bool r1 = dir == 1 ? p2 > p0 : p2 < p0                      // W2 never beyond W1 start
-        bool r2 = not (w3 < w1 and w3 < w5)                          // W3 never the shortest
-        bool r3 = allowDiag or (dir == 1 ? p4 > p1 : p4 < p1)        // W4 outside W1 territory
-        bool rP = dir == 1 ? p3 > p1 and p5 > p3 : p3 < p1 and p5 < p3 // progress: W3 beyond W1 end, W5 beyond W3 end
-        if r1 and r2 and r3 and rP and w1 > 0 and w3 > 0
+        for i1 = 4 to n - 2
+            // a pivot beyond P5 would sit inside every older candidate's W1-W4
+            if f_t(i1) == dir and not f_beyond(f_p(0), f_p(i1), dir)
+                break
+            if f_t(i1) == dir
+                int i3 = f_ext_between(i1, 0, dir)
+                if i3 >= 0 and f_beyond(f_p(i3), f_p(i1), dir)
+                    int i2 = f_ext_between(i1, i3, -dir)
+                    int i4 = f_ext_between(i3, 0, -dir)
+                    if i2 >= 0 and i4 >= 0 and f_end_ok(i1, i2, dir)
+                        for i0 in f_origins(i1, dir)
+                            [v, s, r] = f_imp_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3), f_p(i4), f_p(0))
+                            if v
+                                float wCorr = math.max(math.abs(f_p(i2) - f_p(i1)), math.abs(f_p(i4) - f_p(i3)))
+                                float sp = s - f_deg_pen(i0, i1, dir, wCorr) - f_deg_pen(i2, i3, dir, wCorr) - f_deg_pen(i4, 0, dir, wCorr) - f_origin_pen(i0, dir, math.abs(f_p(i1) - f_p(i0)))
+                                if (not valid or sp > sc) and f_subw(i0, i1) != 3 and f_w3_ok(f_subw(i2, i3)) and f_subw(i4, 0) != 3
+                                    valid := true
+                                    sc := sp
+                                    ratios := r
+                                    idx := array.from(i0, i1, i2, i3, i4, 0)
+    [valid, sc, ratios, idx]
+
+// Fit of a zigzag P0,A,B,C — dir = direction of A and C. Rules: B retraces
+// less than 90% of A (90% or more is a flat), C travels beyond the A end.
+// B and C ratios are guidelines and only shape the fit.
+f_abc_fit(int dir, float p0, float pA, float pB, float pC) =>
+    bool valid = false
+    float sc = 0.0
+    string ratios = "—"
+    float wA = math.abs(pA - p0)
+    if wA > 0
+        float rB = math.abs(pB - pA) / wA
+        float rC = math.abs(pC - pB) / wA
+        if rB < 0.90 and f_beyond(pC, pA, dir)
             valid := true
-            float rr2 = w2 / w1
-            float rr3 = w3 / w1
-            float rr4 = w4 / w3
-            float rr5 = w5 / w1
-            float s2 = math.max(f_score(rr2, 0.618, 0.35), f_score(rr2, 0.50, 0.30))
-            float s3 = math.max(f_score(rr3, 1.618, 0.80), f_score(rr3, 2.618, 1.00))
-            float s4 = f_score(rr4, 0.382, 0.25)
-            float s5 = math.max(f_score(rr5, 1.00, 0.50), f_score(rr5, 0.618, 0.35))
-            // guideline of alternation: deep W2 with shallow W4 or vice versa
-            float alt = math.abs(rr2 - rr4) >= 0.15 ? 100.0 : 50.0
-            sc := s2 * 0.25 + s3 * 0.30 + s4 * 0.20 + s5 * 0.15 + alt * 0.10
-            ratios := "W2/W1 " + f_r(rr2) + " · W3/W1 " + f_r(rr3) + " · W4/W3 " + f_r(rr4) + " · W5/W1 " + f_r(rr5)
+            float sB = f_zone(rB, 0.382, 0.786, 0.20) * 0.7 + math.max(f_score(rB, 0.618, 0.30), f_score(rB, 0.50, 0.25)) * 0.3
+            float sC = f_zone(rC, 0.618, 1.618, 0.40) * 0.7 + math.max(f_score(rC, 1.00, 0.45), f_score(rC, 1.618, 0.60)) * 0.3
+            sc := sB * 0.5 + sC * 0.5
+            ratios := "B/A " + f_r(rB) + " · C/A " + f_r(rC)
     [valid, sc, ratios]
 
-// Complete zigzag correction: 4 pivots P0,A,B,C — direction = type of C
-f_eval_abc() =>
+// Fit of a flat P0,A,B,C. Rules: B retraces at least 90% of A, C travels
+// beyond the A end. Regular (B ≈ 1.0) and expanded (B ≈ 1.05-1.38) flats
+// fit best.
+f_flat_fit(int dir, float p0, float pA, float pB, float pC) =>
     bool valid = false
     float sc = 0.0
     string ratios = "—"
-    if array.size(pTyp) >= 4
-        int dir = f_t(0)                                             // -1: downward correction
-        float p0 = f_p(3)
-        float pA = f_p(2)
-        float pB = f_p(1)
-        float pC = f_p(0)
-        float wA = math.abs(pA - p0)
-        float wB = math.abs(pB - pA)
-        float wC = math.abs(pC - pB)
-        if wA > 0
-            float rB = wB / wA
-            float rC = wC / wA
-            bool bOk = rB >= 0.236 and rB <= 0.886                   // B retrace inside zigzag norms
-            bool cOk = dir == 1 ? pC > pA : pC < pA                  // C travels beyond A end
-            bool cLen = rC >= 0.5 and rC <= 2.0
-            if bOk and cOk and cLen
-                valid := true
-                float sB = math.max(f_score(rB, 0.618, 0.30), f_score(rB, 0.50, 0.25))
-                float sC = math.max(f_score(rC, 1.00, 0.45), f_score(rC, 1.618, 0.60))
-                sc := sB * 0.45 + sC * 0.55
-                ratios := "B/A " + f_r(rB) + " · C/A " + f_r(rC)
+    float wA = math.abs(pA - p0)
+    if wA > 0
+        float rB = math.abs(pB - pA) / wA
+        float rC = math.abs(pC - pB) / wA
+        if rB >= 0.90 and f_beyond(pC, pA, dir)
+            valid := true
+            float sB = f_zone(rB, 0.90, 1.382, 0.20) * 0.7 + math.max(f_score(rB, 1.00, 0.18), f_score(rB, 1.236, 0.22)) * 0.3
+            float sC = f_zone(rC, 1.00, 1.618, 0.40) * 0.7 + math.max(f_score(rC, 1.00, 0.35), f_score(rC, 1.618, 0.50)) * 0.3
+            sc := sB * 0.5 + sC * 0.5
+            ratios := "B/A " + f_r(rB) + " · C/A " + f_r(rC)
     [valid, sc, ratios]
 
-// Complete flat correction: 4 pivots P0,A,B,C — B retraces ≥ 90% of A
-// (regular flat ≈ 1.0, expanded flat ≈ 1.05-1.38), C travels beyond A end.
-// Disjoint from the zigzag eval, which caps B at 0.886.
-f_eval_flat() =>
+// Complete correction (zigzag or flat) ending at the last pivot (C). For
+// every candidate A end: B = extreme against the correction after A, C must
+// be the extreme after B, P0 = each possible origin of A. Sub-structure on the finer degree:
+// zigzag 5-3-5, flat 3-3-5. Best Fib fit wins.
+f_eval_corr(bool isFlat) =>
     bool valid = false
     float sc = 0.0
     string ratios = "—"
-    if array.size(pTyp) >= 4
-        int dir = f_t(0)                                             // direction of C
-        float p0 = f_p(3)
-        float pA = f_p(2)
-        float pB = f_p(1)
-        float pC = f_p(0)
-        float wA = math.abs(pA - p0)
-        float wB = math.abs(pB - pA)
-        float wC = math.abs(pC - pB)
-        if wA > 0
-            float rB = wB / wA
-            float rC = wC / wA
-            bool bOk = rB >= 0.90 and rB <= 1.38
-            bool cOk = dir == 1 ? pC > pA : pC < pA
-            bool cLen = rC >= 0.8 and rC <= 1.8
-            if bOk and cOk and cLen
-                valid := true
-                float sB = math.max(f_score(rB, 1.00, 0.18), f_score(rB, 1.236, 0.22))
-                float sC = math.max(f_score(rC, 1.00, 0.35), f_score(rC, 1.618, 0.50))
-                sc := sB * 0.50 + sC * 0.50
-                ratios := "B/A " + f_r(rB) + " · C/A " + f_r(rC)
-    [valid, sc, ratios]
+    int[] idx = array.new_int()
+    int n = array.size(pTyp)
+    if n >= 4
+        int dir = f_t(0)                                             // direction of C (and A)
+        for iA = 2 to n - 2
+            // an older pivot beyond C would sit inside every older candidate
+            if f_t(iA) == dir and not f_beyond(f_p(0), f_p(iA), dir)
+                break
+            if f_t(iA) == dir
+                int iB = f_ext_between(iA, 0, -dir)
+                int cX = iB >= 0 ? f_ext_between(iB, 0, dir) : -1
+                bool cExt = cX < 0 or not f_beyond(f_p(cX), f_p(0), dir)
+                if iB >= 0 and cExt and f_end_ok(iA, iB, dir)
+                    for i0 in f_origins(iA, dir)
+                        [vZ, sZ, rZ] = f_abc_fit(dir, f_p(i0), f_p(iA), f_p(iB), f_p(0))
+                        [vF, sF, rF] = f_flat_fit(dir, f_p(i0), f_p(iA), f_p(iB), f_p(0))
+                        bool v = isFlat ? vF : vZ
+                        float s = isFlat ? sF : sZ
+                        string r = isFlat ? rF : rZ
+                        if v
+                            float wB = math.abs(f_p(iB) - f_p(iA))
+                            float sp = s - f_deg_pen(i0, iA, dir, wB) - f_deg_pen(iB, 0, dir, wB) - f_origin_pen(i0, dir, math.abs(f_p(iA) - f_p(i0)))
+                            // zigzag 5-3-5, flat 3-3-5: C not corrective, B not 5 waves, zigzag A not 3, flat A not 5
+                            if (not valid or sp > sc) and f_subw(iB, 0) != 3 and f_subw(iA, iB) < 5 and (isFlat ? f_subw(i0, iA) < 5 : f_subw(i0, iA) != 3)
+                                valid := true
+                                sc := sp
+                                ratios := r
+                                idx := array.from(i0, iA, iB, 0)
+    [valid, sc, ratios, idx]
 
 // Memory of the last completed impulse — context for the post-impulse A-B count
 var int   impDir      = 0
 var int   impEndBar   = na
 var float impEndPrice = na
+var float[] impP = array.new_float()                                 // its 6 points, chronological
+var int[]   impT = array.new_int()                                   // bar times — drawn with xloc.bar_time, no bar-offset limit
 
-// Partial correction after a completed impulse: the pivot at the impulse end
-// is followed by A and B. Direction = against the impulse.
+// Partial correction after a completed impulse: A = extreme against the
+// impulse after its end, B = the last pivot, which must be the extreme after
+// A and stay inside the impulse extreme. A and B may contain smaller swings.
 f_eval_devc() =>
     bool valid = false
     float sc = 0.0
     string ratios = "—"
-    if impDir != 0 and not na(impEndBar) and array.size(pTyp) >= 3
-        if f_b(2) == impEndBar and f_t(2) == impDir
-            float pA = f_p(1)
-            float pB = f_p(0)
-            float wA = math.abs(pA - f_p(2))
-            float wB = math.abs(pB - pA)
-            if wA > 0
-                float rB = wB / wA
-                // B stays below the impulse extreme — otherwise the trend resumed
-                bool bInside = impDir == 1 ? pB < impEndPrice : pB > impEndPrice
-                if bInside and rB >= 0.236 and rB <= 0.886
-                    valid := true
-                    sc := math.max(f_score(rB, 0.618, 0.30), f_score(rB, 0.50, 0.25))
-                    ratios := "B/A " + f_r(rB)
-    [valid, sc, ratios]
+    int[] idx = array.new_int()
+    int n = array.size(pTyp)
+    if impDir != 0 and not na(impEndBar) and n >= 3 and f_t(0) == impDir
+        int kImp = -1
+        for k = 2 to n - 1
+            if f_b(k) == impEndBar
+                kImp := k
+                break
+        if kImp >= 2
+            int iA = f_ext_between(kImp, 0, -impDir)
+            int bX = iA >= 0 ? f_ext_between(iA, 0, impDir) : -1
+            bool bExt = bX < 0 or not f_beyond(f_p(bX), f_p(0), impDir)
+            if iA >= 0 and bExt
+                float pA = f_p(iA)
+                float pB = f_p(0)
+                float wA = math.abs(pA - f_p(kImp))
+                if wA > 0
+                    float rB = math.abs(pB - pA) / wA
+                    // B stays below the impulse extreme — otherwise the trend resumed
+                    bool bInside = f_beyond(impEndPrice, pB, impDir)
+                    if bInside and f_subw(iA, 0) < 5                  // B is a 3-wave move
+                        valid := true
+                        float sZ = f_zone(rB, 0.382, 0.786, 0.20) * 0.7 + math.max(f_score(rB, 0.618, 0.30), f_score(rB, 0.50, 0.25)) * 0.3
+                        sc := math.max(sZ, f_zone(rB, 0.90, 1.0, 0.10)) - f_deg_pen(kImp, iA, -impDir, math.abs(pB - pA))
+                        ratios := "B/A " + f_r(rB)
+                        idx := array.from(kImp, iA, 0)
+    [valid, sc, ratios, idx]
 
-// Partial impulse: W1-W2 confirmed (3 pivots). Direction = type of P1.
+// Partial impulse W1-W2 ending at the last pivot (P2). For every candidate
+// W1 end P1 with no later pivot beyond P1 or beyond P2, and each origin P0.
+// Rule: W2 stays short of the W1 start; a 38.2-78.6% retracement fits best.
+// Labeled 1-2 / A-B — the next waves decide.
 f_eval_dev2() =>
     bool valid = false
     float sc = 0.0
     string ratios = "—"
-    if array.size(pTyp) >= 3
-        int dir = f_t(1)                                             // P1 is the W1 extreme
-        float p0 = f_p(2)
-        float p1 = f_p(1)
-        float p2 = f_p(0)
-        float w1 = math.abs(p1 - p0)
-        float w2 = math.abs(p2 - p1)
-        if w1 > 0
+    int[] idx = array.new_int()
+    int n = array.size(pTyp)
+    if n >= 3
+        int dir = -f_t(0)
+        for i1 = 1 to n - 2
+            if f_t(i1) == dir and f_end_ok(i1, 0, dir)
+                int lo = f_ext_between(i1, 0, -dir)
+                if lo < 0 or not f_beyond(f_p(lo), f_p(0), -dir)
+                    for i0 in f_origins(i1, dir)
+                        float p0 = f_p(i0)
+                        float p1 = f_p(i1)
+                        float p2 = f_p(0)
+                        float w1 = math.abs(p1 - p0)
+                        float rr2 = w1 > 0 ? math.abs(p2 - p1) / w1 : 0.0
+                        // a W1 that ends at the last impulse end would relabel W5 as a new W1;
+                        // starting at the impulse end is the natural origin of the next wave
+                        bool atImpEnd = impDir != 0 and f_b(i1) == impEndBar
+                        if not atImpEnd and f_beyond(p2, p0, dir)
+                            float s = f_zone(rr2, 0.382, 0.786, 0.15) * 0.7 + math.max(f_score(rr2, 0.618, 0.30), f_score(rr2, 0.50, 0.25)) * 0.3 - f_deg_pen(i0, i1, dir, math.abs(p2 - p1)) - f_origin_pen(i0, dir, w1)
+                            if not valid or s > sc
+                                valid := true
+                                sc := s
+                                ratios := "W2/W1 = B/A " + f_r(rr2)
+                                idx := array.from(i0, i1, 0)
+    [valid, sc, ratios, idx]
+
+// Fib fit of W1-W4 P0..P4 in direction dir
+f_d4_fit(int dir, float p0, float p1, float p2, float p3, float p4) =>
+    bool valid = false
+    float sc = 0.0
+    string ratios = "—"
+    float w1 = math.abs(p1 - p0)
+    float w2 = math.abs(p2 - p1)
+    float w3 = math.abs(p3 - p2)
+    float w4 = math.abs(p4 - p3)
+    if w1 > 0 and w3 > 0
+        bool r1 = f_beyond(p2, p0, dir)
+        bool r3 = f_beyond(p4, p1, dir)
+        bool rP = f_beyond(p3, p1, dir)
+        if r1 and r3 and rP
+            valid := true
             float rr2 = w2 / w1
-            bool r1 = dir == 1 ? p2 > p0 : p2 < p0
-            if r1 and rr2 >= 0.236 and rr2 < 1.0
-                valid := true
-                sc := math.max(f_score(rr2, 0.618, 0.30), f_score(rr2, 0.50, 0.25))
-                ratios := "W2/W1 " + f_r(rr2)
+            float rr3 = w3 / w1
+            float rr4 = w4 / w3
+            float s2 = math.max(f_score(rr2, 0.618, 0.35), f_score(rr2, 0.50, 0.30))
+            float s3 = f_s3(rr3)
+            float s4 = f_score(rr4, 0.382, 0.25)
+            sc := s2 * 0.30 + s3 * 0.45 + s4 * 0.25
+            ratios := "W2/W1 " + f_r(rr2) + " · W3/W1 " + f_r(rr3) + " · W4/W3 " + f_r(rr4)
     [valid, sc, ratios]
 
-// Partial impulse: W1-W4 confirmed (5 pivots). Direction = type of P3.
+// Partial impulse W1-W4 ending at the last pivot (P4), searched like the
+// complete impulse. P4 must be the extreme after P3; W1 and W3 must not be
+// corrective on the finer degree.
 f_eval_dev4() =>
     bool valid = false
     float sc = 0.0
     string ratios = "—"
-    if array.size(pTyp) >= 5
-        int dir = f_t(1)                                             // P3 type == P1 type == dir
-        float p0 = f_p(4)
-        float p1 = f_p(3)
-        float p2 = f_p(2)
-        float p3 = f_p(1)
-        float p4 = f_p(0)
-        float w1 = math.abs(p1 - p0)
-        float w2 = math.abs(p2 - p1)
-        float w3 = math.abs(p3 - p2)
-        float w4 = math.abs(p4 - p3)
-        if w1 > 0 and w3 > 0
-            bool r1 = dir == 1 ? p2 > p0 : p2 < p0
-            bool r3 = allowDiag or (dir == 1 ? p4 > p1 : p4 < p1)
-            bool rP = dir == 1 ? p3 > p1 : p3 < p1
-            bool w3ok = w3 / w1 >= 0.8                               // W3 plausibly not the shortest
-            if r1 and r3 and rP and w3ok
-                valid := true
-                float rr2 = w2 / w1
-                float rr3 = w3 / w1
-                float rr4 = w4 / w3
-                float s2 = math.max(f_score(rr2, 0.618, 0.35), f_score(rr2, 0.50, 0.30))
-                float s3 = math.max(f_score(rr3, 1.618, 0.80), f_score(rr3, 2.618, 1.00))
-                float s4 = f_score(rr4, 0.382, 0.25)
-                sc := s2 * 0.30 + s3 * 0.45 + s4 * 0.25
-                ratios := "W2/W1 " + f_r(rr2) + " · W3/W1 " + f_r(rr3) + " · W4/W3 " + f_r(rr4)
-    [valid, sc, ratios]
+    int[] idx = array.new_int()
+    int n = array.size(pTyp)
+    if n >= 5
+        int dir = -f_t(0)
+        for i1 = 3 to n - 2
+            if f_t(i1) == dir
+                int i3 = f_ext_between(i1, 0, dir)
+                if i3 >= 0 and f_beyond(f_p(i3), f_p(i1), dir)
+                    int i2 = f_ext_between(i1, i3, -dir)
+                    int lo = f_ext_between(i3, 0, -dir)
+                    bool p4Ext = lo < 0 or not f_beyond(f_p(lo), f_p(0), -dir)
+                    if i2 >= 0 and p4Ext and f_end_ok(i1, i2, dir)
+                        for i0 in f_origins(i1, dir)
+                            [v, s, r] = f_d4_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3), f_p(0))
+                            if v
+                                float wCorr = math.max(math.abs(f_p(i2) - f_p(i1)), math.abs(f_p(0) - f_p(i3)))
+                                float sp = s - f_deg_pen(i0, i1, dir, wCorr) - f_deg_pen(i2, i3, dir, wCorr) - f_origin_pen(i0, dir, math.abs(f_p(i1) - f_p(i0)))
+                                if (not valid or sp > sc) and f_subw(i0, i1) != 3 and f_w3_ok(f_subw(i2, i3))
+                                    valid := true
+                                    sc := sp
+                                    ratios := r
+                                    idx := array.from(i0, i1, i2, i3, 0)
+    [valid, sc, ratios, idx]
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Count selection — prefer more complete structures via a small rank bonus,
-// require Fib fit ≥ minScore, and record the runner-up as the alternate count.
+// OPTIONAL FALLBACKS — never promoted ahead of an ordinary valid count.
+// Caveat: labeling leading vs ending requires parent-wave context; absent that,
+// the structure is shown as a DIAG candidate, not a confirmed wave position.
 // ─────────────────────────────────────────────────────────────────────────────
-var string cType   = "NONE"      // NONE | IMP | ABC | FLAT | DEVC | DEV4 | DEV2
+
+// A completed diagonal uses five same-degree swings P0..P5.
+// Unlike a normal impulse, P4 overlaps P1 but must not pass P2.
+// Contracting: W3<W1, W4<W2, W5<W3; expanding: reversed.
+// Time-aware trendline gaps must contract or expand accordingly.
+// Fit of a diagonal on pivots i0..i5 (back indices) in direction dir:
+// [valid, fit, ratios, kind]
+f_diag_fit(int dir, int i0, int i1, int i2, int i3, int i4, int i5) =>
+    bool valid = false
+    float sc = 0.0
+    string ratios = "—"
+    string kind = "DIAG"
+    float p0 = f_p(i0)
+    float p1 = f_p(i1)
+    float p2 = f_p(i2)
+    float p3 = f_p(i3)
+    float p4 = f_p(i4)
+    float p5 = f_p(i5)
+    float w1 = math.abs(p1 - p0)
+    float w2 = math.abs(p2 - p1)
+    float w3 = math.abs(p3 - p2)
+    float w4 = math.abs(p4 - p3)
+    float w5 = math.abs(p5 - p4)
+    [shapeOK, contracted] = f_diag_shape(dir, p0, p1, p2, p3, p4, p5)
+    int b1 = f_b(i1)
+    int b2 = f_b(i2)
+    int b3 = f_b(i3)
+    int b4 = f_b(i4)
+    bool timeOK = b1 < b2 and b2 < b3 and b3 < b4
+    if shapeOK and timeOK
+        float slope13 = (p3 - p1) / (b3 - b1)
+        float line2 = p1 + slope13 * (b2 - b1)
+        float line4 = p1 + slope13 * (b4 - b1)
+        float gap2 = dir * (line2 - p2)
+        float gap4 = dir * (line4 - p4)
+        bool wedge = gap2 > 0 and gap4 > 0 and (contracted ? gap4 < gap2 : gap4 > gap2)
+        if wedge
+            int sw1 = f_subw(i0, i1)
+            int sw2 = f_subw(i1, i2)
+            int sw3 = f_subw(i2, i3)
+            int sw4 = f_subw(i3, i4)
+            int sw5 = f_subw(i4, i5)
+            // Waves 2 and 4 are corrective; a confirmed five would contradict.
+            // Leading: zigzag or five action waves. Ending: action waves are threes.
+            bool subdivisions = sw2 < 5 and sw4 < 5
+            bool mixed = (sw1 == 5 or sw3 == 5 or sw5 == 5) and (sw1 == 3 or sw3 == 3 or sw5 == 3)
+            if subdivisions and not mixed
+                valid := true
+                int fives = (sw1 == 5 ? 1 : 0) + (sw3 == 5 ? 1 : 0) + (sw5 == 5 ? 1 : 0)
+                int threes = (sw1 == 3 ? 1 : 0) + (sw3 == 3 ? 1 : 0) + (sw5 == 3 ? 1 : 0)
+                // Position decides where it is known: a diagonal starting at the last
+                // impulse end opens the next move (W1 / A) — leading. Otherwise the
+                // sub-structure guesses: fives only fit a leading, threes an ending one.
+                bool atStart = not na(impEndBar) and f_b(i0) == impEndBar
+                kind := atStart or fives >= 2 ? "LD" : threes >= 2 ? "ED" : "DIAG"
+                float ratio4 = w4 / math.max(w2, syminfo.mintick)
+                float ratio5 = w5 / math.max(w3, syminfo.mintick)
+                float wedgeFit = contracted ? f_zone(ratio4, 0.45, 0.95, 0.55) : f_zone(ratio4, 1.05, 1.70, 0.75)
+                // half wedge proportions, half sub-structure evidence (unknown sub-waves earn little)
+                float subFit = 30.0 + (fives >= 2 or threes >= 2 ? 40.0 : 0.0) + (sw2 == 3 ? 15.0 : 0.0) + (sw4 == 3 ? 15.0 : 0.0)
+                sc := 0.5 * wedgeFit + 0.5 * subFit - f_origin_pen(i0, dir, w1)
+                ratios := (contracted ? "Contracting" : "Expanding") + " diagonal · W4/W2 " + f_r(ratio4) + " · W5/W3 " + f_r(ratio5) + " · position unconfirmed"
+    [valid, sc, ratios, kind]
+
+// Diagonal ending at the last pivot, searched like the impulse over all
+// stored pivots: P3 = extreme after P1, P2 / P4 = extremes around it, every
+// possible origin for P0. Best fit wins.
+f_eval_diagonal() =>
+    bool valid = false
+    float sc = 0.0
+    string ratios = "—"
+    string kind = "DIAG"
+    int[] idx = array.new_int()
+    int n = array.size(pTyp)
+    if allowDiag and n >= 6
+        int dir = f_t(0)
+        for i1 = 4 to n - 2
+            if f_t(i1) == dir and not f_beyond(f_p(0), f_p(i1), dir)
+                break
+            if f_t(i1) == dir
+                int i3 = f_ext_between(i1, 0, dir)
+                if i3 >= 0 and f_beyond(f_p(i3), f_p(i1), dir)
+                    int i2 = f_ext_between(i1, i3, -dir)
+                    int i4 = f_ext_between(i3, 0, -dir)
+                    if i2 >= 0 and i4 >= 0 and f_end_ok(i1, i2, dir)
+                        for i0 in f_origins(i1, dir)
+                            [dv, ds, dr, dk] = f_diag_fit(dir, i0, i1, i2, i3, i4, 0)
+                            if dv and (not valid or ds > sc)
+                                valid := true
+                                sc := ds
+                                ratios := dr
+                                kind := dk
+                                idx := array.from(i0, i1, i2, i3, i4, 0)
+    [valid, sc, ratios, idx, kind]
+
+// One A-B-C component used as W, X or Y of a double correction: a zigzag or
+// flat with the sub-structure checks of those patterns; unknown sub-waves
+// lower the fit. [valid, fit, name]
+f_wxy_component(int i0, int i1, int i2, int i3) =>
+    int dir = f_t(i3)
+    bool valid = false
+    float sc = 0.0
+    string nm = ""
+    [vz, sz, rz] = f_abc_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3))
+    [vf, sf, rf] = f_flat_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3))
+    if vz or vf
+        int subA = f_subw(i0, i1)
+        int subB = f_subw(i1, i2)
+        int subC = f_subw(i2, i3)
+        bool zig = vz and subA != 3 and subB < 5 and subC != 3
+        bool flat = vf and subA < 5 and subB < 5 and subC != 3
+        if zig or flat
+            valid := true
+            nm := zig ? "ZZ" : "Flat"
+            sc := math.max(0.0, (zig ? sz : sf) - (subA < 3 ? 6.0 : 0.0) - (subB < 3 ? 6.0 : 0.0) - (subC < 3 ? 6.0 : 0.0))
+    [valid, sc, nm]
+
+// Best zigzag / flat from pivot s (start) to pivot e (C end) in direction
+// dir: A any pivot of that direction in between, B the extreme after A, and
+// s / e the extremes of the component. One pass from e back to s; the
+// sub-structure is checked only for a candidate that would beat the best fit.
+// [valid, fit, name, A index, B index]
+f_corr_range(int s, int e, int dir) =>
+    bool valid = false
+    float sc = 0.0
+    string nm = ""
+    int bA = -1
+    int bB = -1
+    if s - e >= 3
+        // oldest -dir pivot inside the component beyond its start: A must end at or before it
+        int loLim = e
+        for k = e + 1 to s - 1
+            if f_t(k) == -dir and f_beyond(f_p(k), f_p(s), -dir)
+                loLim := k
+        // dir extreme of the pivots from k to s - 1 (index k - e): A must be beyond all before it
+        float[] sufExt = array.new_float(s - e + 1, na)
+        for k = s - 1 to e + 1
+            float prev = array.get(sufExt, k + 1 - e)
+            float pk = f_t(k) == dir ? f_p(k) : na
+            array.set(sufExt, k - e, na(pk) ? prev : na(prev) or f_beyond(pk, prev, dir) ? pk : prev)
+        int iB = -1                  // -dir extreme strictly between iA and e
+        float runDir = na            // dir extreme strictly between iA and e
+        float hiAtB = na             // dir extreme strictly between iB and e
+        float dirSinceB = na         // dir extreme strictly between iB and iA
+        for iA = e + 1 to s - 1
+            if iA >= e + 2
+                int kk = iA - 1
+                float pk = f_p(kk)
+                if f_t(kk) == -dir
+                    if iB < 0 or f_beyond(pk, f_p(iB), -dir)
+                        iB := kk
+                        hiAtB := runDir
+                        dirSinceB := na
+                else
+                    if na(runDir) or f_beyond(pk, runDir, dir)
+                        runDir := pk
+                    if iB >= 0 and (na(dirSinceB) or f_beyond(pk, dirSinceB, dir))
+                        dirSinceB := pk
+            if f_t(iA) == dir and iA >= e + 2 and iA >= loLim and iB >= 0
+                float pA = f_p(iA)
+                float before = array.get(sufExt, iA + 1 - e)
+                bool endOk = (na(dirSinceB) or not f_beyond(dirSinceB, pA, dir)) and (na(before) or not f_beyond(before, pA, dir))
+                bool hiOk = na(hiAtB) or not f_beyond(hiAtB, f_p(e), dir)
+                if endOk and hiOk
+                    [vz, sz, rz] = f_abc_fit(dir, f_p(s), pA, f_p(iB), f_p(e))
+                    [vf, sf, rf] = f_flat_fit(dir, f_p(s), pA, f_p(iB), f_p(e))
+                    float raw = math.max(vz ? sz : 0.0, vf ? sf : 0.0)
+                    if (vz or vf) and (not valid or raw > sc)
+                        [ok, cs, cn] = f_wxy_component(s, iA, iB, e)
+                        if ok and (not valid or cs > sc)
+                            valid := true
+                            sc := cs
+                            nm := cn
+                            bA := iA
+                            bB := iB
+    [valid, sc, nm, bA, bB]
+
+// W-X-Y ending at the last pivot: Y = best A-B-C from each possible Y start,
+// X = A-B-C from each possible W end, W = A-B-C from each possible W start
+// (origins as for an ordinary wave, over all stored pivots). X stays short
+// of the W start and is smaller than W.
+f_eval_wxy() =>
+    bool valid = false
+    float sc = 0.0
+    string ratios = "—"
+    int[] idx = array.new_int()
+    int n = array.size(pTyp)
+    if detectWXY and n >= 10
+        int dir = f_t(0)
+        for xc in f_origins(0, dir)
+            if xc >= 3
+                [yOK, ySc, yName, yA, yB] = f_corr_range(xc, 0, dir)
+                if yOK
+                    for wc in f_origins(xc, -dir)
+                        [xOK, xSc, xName, xA, xB] = f_corr_range(wc, xc, -dir)
+                        // W fit is at most 100: skip when the combination cannot beat the best
+                        if xOK and (not valid or (100.0 + xSc + ySc) / 3.0 > sc)
+                            for w0 in f_origins(wc, dir)
+                                if f_beyond(f_p(xc), f_p(w0), dir)
+                                    float wLen = math.abs(f_p(wc) - f_p(w0))
+                                    float xRatio = math.abs(f_p(xc) - f_p(wc)) / math.max(wLen, syminfo.mintick)
+                                    if xRatio < 1.0
+                                        [wOK, wSc, wName, wA, wB] = f_corr_range(w0, wc, dir)
+                                        if wOK
+                                            float s = (wSc + xSc + ySc) / 3.0 - (f_beyond(f_p(0), f_p(wc), dir) ? 0.0 : 8.0) - f_origin_pen(w0, dir, wLen)
+                                            if not valid or s > sc
+                                                valid := true
+                                                sc := s
+                                                ratios := "W " + wName + " · X " + xName + " · Y " + yName + " · X/W " + f_r(xRatio)
+                                                idx := array.from(w0, wA, wB, wc, xA, xB, xc, yA, yB, 0)
+    [valid, sc, ratios, idx]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Count selection — an active count is continued pivot by pivot (1-2 →
+// 1-4 → 1-5 → A-B → A-B-C) and only replaced when it breaks. Without one,
+// a fresh search ranks by Fib fit (≥ minScore) plus a small bonus for more
+// complete structures; the best other interpretation is the alternate count.
+// ─────────────────────────────────────────────────────────────────────────────
+var string cType   = "NONE"      // NONE | IMP | ABC | FLAT | DEVC | DEV4 | AMB | LD12 | LD | ED | DIAG | WXY
 var string cRatios = "—"
 var int    cDir    = 0           // +1 bullish structure, -1 bearish
 var float  invLvl  = na          // invalidation level for partial counts
+var float  capLvl  = na          // W1-W4: farthest W5 end the rules allow (na = no limit)
 var string altText = "—"         // runner-up interpretation for the dashboard
+var int    diagValid = 0          // rule-valid interpretations at the last pivot
+var int    diagLow   = 0          // of those, below the Fib fit threshold
+var string trackTxt  = "new"      // new | continued | kept — how the active count was set at the last pivot
 var float[] cP = array.new_float()   // chosen count points, chronological
+// running alternate count: the other reading (W1-W4 or A-B-C) of the same
+// 1-2 / A-B, continued alongside until a rule rules it out
+var string aType   = "NONE"
+var string aRatios = "—"
+var int    aDir    = 0
+var float  aInv    = na
+var float[] aP = array.new_float()
+var int[]   aB = array.new_int()
+var int[]   aT = array.new_int()
 var int[]   cB = array.new_int()
+var int[]   cT = array.new_int()     // bar times of the count points — drawn with xloc.bar_time
+var bool    cConfirmed = false        // sub-structure of the count's waves confirmed on the finer degree
+
+// W5 limit of a W1-W4 count: when W3 is shorter than W1, W5 may not be
+// longer than W3 (W3 never the shortest); otherwise no limit (na)
+f_w5_cap(int dir, float p0, float p1, float p2, float p3, float p4) =>
+    float w1 = math.abs(p1 - p0)
+    float w3 = math.abs(p3 - p2)
+    w3 < w1 ? p4 + dir * w3 : na
 
 f_type_name(string t) =>
     switch t
@@ -368,7 +968,12 @@ f_type_name(string t) =>
         "FLAT" => "Flat A-B-C"
         "DEVC" => "A-B after impulse"
         "DEV4" => "W1-W4"
-        "DEV2" => "W1-W2"
+        "AMB"  => "1-2 / A-B"
+        "LD12" => "W1-W2 (leading diagonal?)"
+        "LD"   => "Leading diagonal?"
+        "ED"   => "Ending diagonal?"
+        "DIAG" => "Diagonal (L/E)?"
+        "WXY"  => "W-X-Y"
         => "—"
 
 f_bonus(string t) =>
@@ -380,19 +985,158 @@ f_bonus(string t) =>
         "FLAT" => 4.0
         => 0.0
 
-f_snap(int nPts) =>
+// count points from pivot back indices, chronological
+f_snap(int[] idx) =>
     array.clear(cP)
     array.clear(cB)
-    for i = 0 to nPts - 1
-        array.push(cP, f_p(nPts - 1 - i))
-        array.push(cB, f_b(nPts - 1 - i))
+    array.clear(cT)
+    for k in idx
+        array.push(cP, f_p(k))
+        array.push(cB, f_b(k))
+        array.push(cT, f_tm(k))
 
-[vImp,  sImp,  rImp]  = f_eval_impulse()
-[vAbc,  sAbc,  rAbc]  = f_eval_abc()
-[vFlat, sFlat, rFlat] = f_eval_flat()
-[vDC,   sDC,   rDC]   = f_eval_devc()
-[vD4,   sD4,   rD4]   = f_eval_dev4()
-[vD2,   sD2,   rD2]   = f_eval_dev2()
+// Continue an active 1-2 / A-B count at a new pivot. Returns the next type,
+// point back indices and ratios, plus a second reading for the alternate
+// count. W2 / B extends while price stays inside the W1 / A end. After a move
+// beyond it, the next pullback decides: W1-W4 (out of W1 territory, W1 and
+// W3 not corrective) and A-B-C (valid zigzag or flat with its sub-structure)
+// are both kept when both hold — the better fit is the main count.
+// "KEEP" = wave in progress, "" = the structure broke.
+f_cont_w12(int dir) =>
+    string nt = ""
+    int[] idx = array.new_int()
+    string rt = "—"
+    string at = ""
+    int[] aidx = array.new_int()
+    string art = "—"
+    int i0 = f_idx(array.get(cB, 0))
+    int i1 = f_idx(array.get(cB, 1))
+    if i0 >= 0 and i1 >= 0
+        float w1 = math.abs(f_p(i1) - f_p(i0))
+        int i3 = f_ext_between(i1, -1, dir)
+        if i3 < 0 or not f_beyond(f_p(i3), f_p(i1), dir)
+            // no move beyond the W1 / A end yet: W2 / B is still forming
+            int i2 = f_ext_between(i1, -1, -dir)
+            if i2 >= 0 and w1 > 0
+                nt := "AMB"
+                idx := array.from(i0, i1, i2)
+                rt := "W2/W1 = B/A " + f_r(math.abs(f_p(i2) - f_p(i1)) / w1)
+        else
+            int i2 = f_ext_between(i1, i3, -dir)
+            int i4 = f_ext_between(i3, -1, -dir)
+            // a pullback after W3 / C beyond the W2 / B end breaks the structure
+            if i2 >= 0 and (i4 < 0 or not f_beyond(f_p(i4), f_p(i2), -dir))
+                if i4 < 0
+                    nt := "KEEP"                                     // W3 / C still running
+                else
+                    int sub1 = f_subw(i0, i1)
+                    int subB = f_subw(i1, i2)
+                    int sub3 = f_subw(i2, i3)
+                    [v4, s4, r4] = f_d4_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3), f_p(i4))
+                    [vZ, sZ, rZ] = f_abc_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3))
+                    [vF, sF, rF] = f_flat_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3))
+                    bool imp = v4 and sub1 != 3 and f_w3_ok(sub3)
+                    bool zz = vZ and sub1 != 3 and sub3 != 3 and subB < 5
+                    bool fl = vF and sub3 != 3 and sub1 < 5 and subB < 5
+                    string ct = zz ? "ABC" : fl ? "FLAT" : ""
+                    float cs = zz ? sZ : sF
+                    string cr = zz ? rZ : rF
+                    if imp and (ct == "" or s4 + f_bonus("DEV4") >= cs + f_bonus(ct))
+                        nt := "DEV4"
+                        idx := array.from(i0, i1, i2, i3, i4)
+                        rt := r4
+                        if ct != ""
+                            at := ct
+                            aidx := array.from(i0, i1, i2, i3)
+                            art := cr
+                    else if ct != ""
+                        nt := ct
+                        idx := array.from(i0, i1, i2, i3)
+                        rt := cr
+                        if imp
+                            at := "DEV4"
+                            aidx := array.from(i0, i1, i2, i3, i4)
+                            art := r4
+                    else
+                        // keep only while the pullback can still be (ii) inside a running W3;
+                        // a corrective W1 / A rules out both readings — the count is dropped
+                        nt := sub1 != 3 ? "KEEP" : ""
+    [nt, idx, rt, at, aidx, art]
+
+// Continue an active W1-W4 count: W4 extends while price stays below the W3
+// end; the first pivot beyond it ends W5 and completes the impulse when the
+// hard rules hold, W5 is not corrective and the fit reaches the minimum.
+// "" = the count broke.
+f_cont_w14(int[] bars, int dir) =>
+    string nt = ""
+    int[] idx = array.new_int()
+    string rt = "—"
+    int i0 = f_idx(array.get(bars, 0))
+    int i1 = f_idx(array.get(bars, 1))
+    int i2 = f_idx(array.get(bars, 2))
+    int i3 = f_idx(array.get(bars, 3))
+    if i0 >= 0 and i1 >= 0 and i2 >= 0 and i3 >= 0
+        int i5 = f_ext_between(i3, -1, dir)
+        if i5 < 0 or not f_beyond(f_p(i5), f_p(i3), dir)
+            int i4 = f_ext_between(i3, -1, -dir)
+            if i4 >= 0
+                [v4, s4, r4] = f_d4_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3), f_p(i4))
+                if v4
+                    nt := "DEV4"
+                    idx := array.from(i0, i1, i2, i3, i4)
+                    rt := r4
+        else
+            int i4 = f_ext_between(i3, i5, -dir)
+            if i4 >= 0
+                [v, s, r] = f_imp_fit(dir, f_p(i0), f_p(i1), f_p(i2), f_p(i3), f_p(i4), f_p(i5))
+                // completing the impulse also needs the plausibility minimum
+                if v and s >= minScore and f_subw(i4, i5) != 3
+                    nt := "IMP"
+                    idx := array.from(i0, i1, i2, i3, i4, i5)
+                    rt := r
+    [nt, idx, rt]
+
+// A complete impulse stays the active count until its correction is counted,
+// unless a pullback retraces beyond the impulse start
+f_imp_holds(int dir) =>
+    int i5 = f_idx(array.get(cB, 5))
+    bool ok = i5 >= 0
+    if ok
+        int lo = f_ext_between(i5, -1, -dir)
+        if lo >= 0 and f_beyond(f_p(lo), array.get(cP, 0), -dir)
+            ok := false
+    ok
+
+// An A-B after the impulse stays until C runs beyond the A end — then a valid
+// A-B-C must follow, otherwise the count is dropped
+f_devc_holds(int dir) =>
+    int iA = f_idx(array.get(cB, 1))
+    bool ok = iA >= 0
+    if ok
+        int x = f_ext_between(iA, -1, dir)
+        if x >= 0 and f_beyond(f_p(x), f_p(iA), dir)
+            ok := false
+    ok
+
+// pivot back indices of stored bars; empty when one is no longer stored
+f_bars_idx(int[] bars) =>
+    int[] idx = array.new_int()
+    bool ok = true
+    for b in bars
+        int k = f_idx(b)
+        if k < 0
+            ok := false
+        array.push(idx, k)
+    ok ? idx : array.new_int()
+
+f_snap_alt(int[] idx) =>
+    array.clear(aP)
+    array.clear(aB)
+    array.clear(aT)
+    for k in idx
+        array.push(aP, f_p(k))
+        array.push(aB, f_b(k))
+        array.push(aT, f_tm(k))
 
 bool countChanged = false
 string prevType = cType
@@ -400,7 +1144,14 @@ int prevStart = -1
 if array.size(cB) > 0
     prevStart := array.get(cB, 0)
 
-if newPiv
+bool evalOn = bar_index >= last_bar_index - evalBars
+if newPiv and evalOn
+    [vImp,  sImp,  rImp,  xImp]  = f_eval_impulse()
+    [vAbc,  sAbc,  rAbc,  xAbc]  = f_eval_corr(false)
+    [vFlat, sFlat, rFlat, xFlat] = f_eval_corr(true)
+    [vDC,   sDC,   rDC,   xDC]   = f_eval_devc()
+    [vD4,   sD4,   rD4,   xD4]   = f_eval_dev4()
+    [vD2,   sD2,   rD2,   xD2]   = f_eval_dev2()
     string[] candT = array.new_string()
     float[]  candS = array.new_float()
     string[] candR = array.new_string()
@@ -425,12 +1176,14 @@ if newPiv
         array.push(candS, sD4)
         array.push(candR, rD4)
     if vD2 and sD2 >= minScore
-        array.push(candT, "DEV2")
+        array.push(candT, "AMB")
         array.push(candS, sD2)
         array.push(candR, rD2)
 
     // sort descending by (fibFit + completeness bonus)
     int nCand = array.size(candT)
+    diagValid := (vImp ? 1 : 0) + (vAbc ? 1 : 0) + (vFlat ? 1 : 0) + (vDC ? 1 : 0) + (vD4 ? 1 : 0) + (vD2 ? 1 : 0)
+    diagLow := diagValid - nCand
     if nCand >= 2
         for i = 0 to nCand - 2
             for j = i + 1 to nCand - 1
@@ -447,62 +1200,264 @@ if newPiv
                     array.set(candS, j, tmpS)
                     array.set(candR, j, tmpR)
 
-    cType := "NONE"
-    cRatios := "—"
-    altText := "—"
-    if nCand > 0
-        cType := array.get(candT, 0)
-        cRatios := array.get(candR, 0)
-    if nCand > 1
-        altText := f_type_name(array.get(candT, 1))
-    countChanged := true
+    // 1) continue the active count — it has priority over a fresh local pattern
+    string selT = ""
+    string selR = "—"
+    int[] selIdx = array.new_int()
+    bool keep = false
+    string newAltT = ""
+    string newAltR = "—"
+    int[] newAltIdx = array.new_int()
+    if cType != "NONE" and cType != "ABC" and cType != "FLAT" and cType != "LD" and cType != "ED" and cType != "DIAG" and cType != "WXY" and array.size(cB) > 0
+        if cType == "AMB"
+            [t12, x12, r12, ta12, xa12, ra12] = f_cont_w12(cDir)
+            keep := t12 == "KEEP"
+            if t12 != "KEEP" and t12 != ""
+                selT := t12
+                selIdx := x12
+                selR := r12
+            if ta12 != ""
+                newAltT := ta12
+                newAltIdx := xa12
+                newAltR := ra12
+        else if cType == "DEV4"
+            [t14, x14, r14] = f_cont_w14(cB, cDir)
+            if t14 != ""
+                selT := t14
+                selIdx := x14
+                selR := r14
+        else if cType == "IMP" or cType == "DEVC"
+            // after the impulse: A-B, then A-B-C anchored at the impulse end
+            bool corrAnch = not na(impEndBar) and vAbc and f_b(array.get(xAbc, 0)) == impEndBar
+            bool flatAnch = not na(impEndBar) and vFlat and f_b(array.get(xFlat, 0)) == impEndBar
+            if vDC
+                selT := "DEVC"
+                selIdx := xDC
+                selR := rDC
+            else if corrAnch
+                selT := "ABC"
+                selIdx := xAbc
+                selR := rAbc
+            else if flatAnch
+                selT := "FLAT"
+                selIdx := xFlat
+                selR := rFlat
+            else
+                keep := cType == "DEVC" ? f_devc_holds(cDir) : f_imp_holds(cDir)
 
-    if cType == "IMP"
-        f_snap(6)
-        cDir := f_t(0)
-        invLvl := na
-        impDir := cDir                                               // remember for the post-impulse A-B count
-        impEndBar := f_b(0)
-        impEndPrice := f_p(0)
-    else if cType == "ABC" or cType == "FLAT"
-        f_snap(4)
-        cDir := f_t(0)
-        invLvl := na
-    else if cType == "DEVC"
-        f_snap(3)
-        cDir := -impDir                                              // correction runs against the impulse
-        invLvl := impEndPrice                                        // trend resumption breaks the count
-    else if cType == "DEV4"
-        f_snap(5)
-        cDir := f_t(1)
-        invLvl := array.get(cP, 1)                                   // W5 must not break W1 end (P1)
-    else if cType == "DEV2"
-        f_snap(3)
-        cDir := f_t(1)
-        invLvl := array.get(cP, 0)                                   // W2 must not break W1 start (P0)
+    // continue the running alternate count
+    if newAltT == "" and aType != "NONE"
+        if aType == "DEV4"
+            [ta, xa, ra] = f_cont_w14(aB, aDir)
+            if ta != ""
+                newAltT := ta
+                newAltIdx := xa
+                newAltR := ra
+        else
+            int[] xb = f_bars_idx(aB)
+            if array.size(xb) > 0
+                newAltT := aType
+                newAltIdx := xb
+                newAltR := aRatios
+    // main count broke or its correction is complete: the alternate takes over
+    bool promoted = false
+    if not keep and selT == "" and newAltT != ""
+        selT := newAltT
+        selIdx := newAltIdx
+        selR := newAltR
+        newAltT := ""
+        promoted := true
+    trackTxt := promoted ? "taken from alt" : keep ? "kept" : selT != "" ? "continued" : "new"
+
+    // 2) no continuation: fresh search result
+    if not keep and selT == "" and nCand > 0
+        selT := array.get(candT, 0)
+        selR := array.get(candR, 0)
+        if selT == "IMP"
+            selIdx := xImp
+        else if selT == "ABC"
+            selIdx := xAbc
+        else if selT == "FLAT"
+            selIdx := xFlat
+        else if selT == "DEVC"
+            selIdx := xDC
+        else if selT == "DEV4"
+            selIdx := xD4
+        else
+            selIdx := xD2
+
+    // 3) only when nothing ordinary fits: rarer patterns as provisional fallbacks
+    bool diagAccepted = false
+    bool wxyAccepted = false
+    string tDiag = "DIAG"
+    if not keep and selT == "" and nCand == 0
+        [vDiag, sDiag, rDiag, xDiag, dType] = f_eval_diagonal()
+        [vWxy, sWxy, rWxy, xWxy] = f_eval_wxy()
+        diagAccepted := vDiag and sDiag >= complexMinScore
+        wxyAccepted := vWxy and sWxy >= complexMinScore
+        tDiag := dType
+        if diagAccepted and (not wxyAccepted or sDiag >= sWxy)
+            selT := tDiag
+            selR := rDiag
+            selIdx := xDiag
+        else if wxyAccepted
+            selT := "WXY"
+            selR := rWxy
+            selIdx := xWxy
+
+    // keep the alternate only as the other reading of the same 1-2 / A-B
+    string mainT = keep ? cType : selT
+    int mainStart = -1
+    if keep and array.size(cB) > 0
+        mainStart := array.get(cB, 0)
+    if not keep and array.size(selIdx) > 0
+        mainStart := f_b(array.get(selIdx, 0))
+    // A-B after impulse: when A is not a clear five, the same two waves can be
+    // W1-W2 of a leading diagonal (a new trend) — rebuilt from the main points
+    if mainT == "DEVC"
+        int[] mi = keep ? f_bars_idx(cB) : selIdx
+        if array.size(mi) == 3 and f_subw(array.get(mi, 0), array.get(mi, 1)) != 5
+            float w1 = math.abs(f_p(array.get(mi, 1)) - f_p(array.get(mi, 0)))
+            newAltT := "LD12"
+            newAltIdx := mi
+            newAltR := "W2/W1 " + f_r(w1 > 0 ? math.abs(f_p(array.get(mi, 2)) - f_p(array.get(mi, 1))) / w1 : 0.0)
+    bool pairOk = (mainT == "DEV4" and (newAltT == "ABC" or newAltT == "FLAT")) or ((mainT == "ABC" or mainT == "FLAT") and newAltT == "DEV4") or (mainT == "DEVC" and newAltT == "LD12")
+    if pairOk and array.size(newAltIdx) > 0 and f_b(array.get(newAltIdx, 0)) == mainStart
+        f_snap_alt(newAltIdx)
+        aType := newAltT
+        aRatios := newAltR
+        aDir := array.get(aP, 1) > array.get(aP, 0) ? 1 : -1
+        aInv := na
+        if aType == "DEV4"
+            aInv := array.get(aP, 1)
+        else if aType == "LD12"
+            aInv := array.get(aP, 0)                                 // W2 must not break the W1 start
     else
-        array.clear(cP)
-        array.clear(cB)
-        cDir := 0
-        invLvl := na
+        aType := "NONE"
+        aInv := na
+        array.clear(aP)
+        array.clear(aB)
+        array.clear(aT)
+
+    // alternate: the running alternate, else the best fresh interpretation of another type
+    altText := "—"
+    if aType != "NONE"
+        altText := f_type_name(aType) + " (running)"
+    else if nCand > 0
+        for i = 0 to nCand - 1
+            if array.get(candT, i) != mainT
+                altText := f_type_name(array.get(candT, i))
+                break
+    if altText == "—"
+        if diagAccepted and mainT != tDiag
+            altText := f_type_name(tDiag)
+        else if wxyAccepted and mainT != "WXY"
+            altText := "W-X-Y candidate"
+
+    if not keep
+        countChanged := true
+        if selT == "" or array.size(selIdx) < 3
+            cType := "NONE"
+            cRatios := "—"
+            array.clear(cP)
+            array.clear(cB)
+            array.clear(cT)
+            cDir := 0
+            invLvl := na
+            capLvl := na
+        else
+            cType := selT
+            cRatios := selR
+            f_snap(selIdx)
+            cDir := array.get(cP, 1) > array.get(cP, 0) ? 1 : -1
+            invLvl := na
+            capLvl := na
+            if cType == "DEVC"
+                invLvl := impEndPrice                                // trend resumption breaks the count
+            else if cType == "DEV4"
+                invLvl := array.get(cP, 1)                           // W4 / W5 must not break the W1 end
+                capLvl := f_w5_cap(cDir, array.get(cP, 0), array.get(cP, 1), array.get(cP, 2), array.get(cP, 3), array.get(cP, 4))
+            else if cType == "AMB" or cType == "LD12"
+                invLvl := array.get(cP, 0)                           // W2 / B must not break the W1 / A start
+            if cType == "IMP"
+                impDir := cDir                                       // remember for the post-impulse A-B count
+                impEndBar := array.get(cB, 5)
+                impEndPrice := array.get(cP, 5)
+                impP := array.copy(cP)
+                array.clear(impT)
+                for k in selIdx
+                    array.push(impT, f_tm(k))
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Invalidation watch for partial counts
 // ─────────────────────────────────────────────────────────────────────────────
 bool invalHit = false
-if (cType == "DEV2" or cType == "DEV4" or cType == "DEVC") and not na(invLvl)
+if (cType == "AMB" or cType == "DEV4" or cType == "DEVC" or cType == "LD12") and not na(invLvl)
     if cDir == 1 and low < invLvl
         invalHit := true
     if cDir == -1 and high > invLvl
         invalHit := true
+// Price beyond the W5 end of the last impulse: drop it from memory (no faded
+// redraw, no A-B context). When it is the active count, W5 is extending —
+// the count returns to W1-W4 and the next pivot sets the new W5 end.
+if impDir != 0 and not na(impEndPrice)
+    if impDir == 1 ? high > impEndPrice : low < impEndPrice
+        impDir := 0
+        impEndBar := na
+        impEndPrice := na
+        array.clear(impP)
+        array.clear(impT)
+        countChanged := true
+        if cType == "IMP" and array.size(cP) == 6
+            array.pop(cP)
+            array.pop(cB)
+            array.pop(cT)
+            cType := "DEV4"
+            cRatios := "W5 extending"
+            invLvl := array.get(cP, 1)
+            capLvl := f_w5_cap(cDir, array.get(cP, 0), array.get(cP, 1), array.get(cP, 2), array.get(cP, 3), array.get(cP, 4))
+// W5 of a W1-W4 count running beyond its limit breaks the count
+if cType == "DEV4" and not na(capLvl)
+    if cDir == 1 ? high > capLvl : low < capLvl
+        invalHit := true
+// the running alternate W1-W4 breaks when W4 enters W1 territory, W1-W2 when W2 breaks the W1 start
+if (aType == "DEV4" or aType == "LD12") and not na(aInv)
+    if aDir == 1 ? low < aInv : high > aInv
+        aType := "NONE"
+        aInv := na
+        array.clear(aP)
+        array.clear(aB)
+        array.clear(aT)
+        altText := "—"
 if invalHit
-    cType := "NONE"
-    cRatios := "—"
-    cDir := 0
-    invLvl := na
+    if aType != "NONE"
+        // the running alternate count takes over
+        cType := aType
+        cRatios := aRatios
+        cDir := aDir
+        cP := array.copy(aP)
+        cB := array.copy(aB)
+        cT := array.copy(aT)
+        invLvl := aInv
+        capLvl := na
+        if cType == "DEV4"
+            capLvl := f_w5_cap(cDir, array.get(cP, 0), array.get(cP, 1), array.get(cP, 2), array.get(cP, 3), array.get(cP, 4))
+        trackTxt := "taken from alt"
+        aType := "NONE"
+        aInv := na
+        array.clear(aP)
+        array.clear(aB)
+        array.clear(aT)
+    else
+        cType := "NONE"
+        cRatios := "—"
+        cDir := 0
+        invLvl := na
+        capLvl := na
+        array.clear(cP)
+        array.clear(cB)
+        array.clear(cT)
     altText := "—"
-    array.clear(cP)
-    array.clear(cB)
     countChanged := true
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -514,6 +1469,8 @@ var label[] wLbl   = array.new_label()
 var line[]  prLin  = array.new_line()
 var label[] prLbl  = array.new_label()
 var label[] subLbl = array.new_label()
+var line[]  impLin = array.new_line()
+var label[] impLbl = array.new_label()
 var string  subTxt = "—"
 
 f_wipe_lines(line[] arr) =>
@@ -551,10 +1508,10 @@ f_sub_draw(int b1, int b2) =>
                 else
                     txt := k == 1 ? "a" : "b"
                 bool isHigh = array.get(sTyp, i) == 1
-                label.new(sb, array.get(sPrc, i), txt,
+                array.push(subLbl, label.new(array.get(sTim, i), array.get(sPrc, i), txt, xloc=xloc.bar_time,
                      style=isHigh ? label.style_label_down : label.style_label_up,
                      color=color.new(color.gray, 80), textcolor=color.new(color.gray, 30),
-                     size=size.tiny)
+                     size=size.tiny))
     cnt
 
 // projection helper: one horizontal target line + label from the count end
@@ -565,14 +1522,43 @@ f_proj(int fromBar, float lvl, string txt) =>
          style=label.style_label_left, color=color.new(projC, 85),
          textcolor=projC, size=size.small))
 
+// sub-structure of count wave i (points i-1 → i)
+f_csub_n(int i) =>
+    f_sub_waves(array.get(cB, i - 1), array.get(cB, i), array.get(cP, i - 1), array.get(cP, i))
+
+// ... as dashboard text
+f_csub(int i) =>
+    int r = f_csub_n(i)
+    // a diagonal can only lead (W1 / A) or end (W5 / C) a structure
+    string dg = i == 1 ? "LD" : (i == 5 or cType == "ABC" or cType == "FLAT") ? "ED" : "diagonal"
+    r == 0 ? "?" : r == 2 ? "unclear" : r == 6 ? dg : str.tostring(r)
+
+// the count's waves show the sub-structure their type requires: motive waves
+// and zigzag A / C five waves, flat A three and C five, A / W1 of a partial
+// count five or three
+f_confirmed(string t) =>
+    bool ok = true
+    if t == "IMP"
+        ok := f_csub_n(1) >= 5 and f_csub_n(3) == 5 and f_csub_n(5) >= 5
+    else if t == "DEV4"
+        ok := f_csub_n(1) >= 5 and f_csub_n(3) == 5
+    else if t == "ABC"
+        ok := f_csub_n(1) >= 5 and f_csub_n(3) >= 5
+    else if t == "FLAT"
+        ok := f_csub_n(1) == 3 and f_csub_n(3) >= 5
+    else if t == "DEVC" or t == "AMB"
+        int r1 = f_csub_n(1)
+        ok := r1 >= 5 or r1 == 3
+    ok
+
 // redraw context zigzag on every new pivot
 if newPiv and showZZ
     f_wipe_lines(zzLin)
     int n = array.size(pBar)
     if n >= 2
         for i = 1 to n - 1
-            array.push(zzLin, line.new(array.get(pBar, i - 1), array.get(pPrc, i - 1),
-                 array.get(pBar, i), array.get(pPrc, i), color=zzC, width=1))
+            array.push(zzLin, line.new(array.get(pTim, i - 1), array.get(pPrc, i - 1),
+                 array.get(pTim, i), array.get(pPrc, i), xloc=xloc.bar_time, color=zzC, width=1))
 
 // redraw count whenever it changes
 if countChanged
@@ -581,44 +1567,83 @@ if countChanged
     f_wipe_lines(prLin)
     f_wipe_labels(prLbl)
     f_wipe_labels(subLbl)
+    f_wipe_lines(impLin)
+    f_wipe_labels(impLbl)
     subTxt := "—"
 
+    // last completed impulse, faded, while a newer structure is the active count
+    if cType != "IMP" and array.size(impP) == 6
+        color ic = color.new(impDir == 1 ? bullC : bearC, 55)
+        for i = 1 to 5
+            array.push(impLin, line.new(array.get(impT, i - 1), array.get(impP, i - 1),
+                 array.get(impT, i), array.get(impP, i), xloc=xloc.bar_time, color=ic, width=2))
+            bool isHigh = array.get(impP, i) > array.get(impP, i - 1)
+            array.push(impLbl, label.new(array.get(impT, i), array.get(impP, i), str.tostring(i), xloc=xloc.bar_time,
+                 style=isHigh ? label.style_label_down : label.style_label_up,
+                 color=ic, textcolor=color.white, size=size.small))
+
     int nPts = array.size(cP)
+    cConfirmed := cType != "NONE" and nPts >= 3 and f_confirmed(cType)
     if cType != "NONE" and nPts >= 3
         color cc = cDir == 1 ? bullC : bearC
         // count outline
         for i = 1 to nPts - 1
-            array.push(wLin, line.new(array.get(cB, i - 1), array.get(cP, i - 1),
-                 array.get(cB, i), array.get(cP, i), color=cc, width=2))
+            array.push(wLin, line.new(array.get(cT, i - 1), array.get(cP, i - 1),
+                 array.get(cT, i), array.get(cP, i), xloc=xloc.bar_time, color=cc, width=2))
         // wave labels at P1..Pn
         for i = 1 to nPts - 1
             string txt = ""
             if cType == "ABC" or cType == "FLAT" or cType == "DEVC"
                 txt := i == 1 ? "A" : i == 2 ? "B" : "C"
+            else if cType == "AMB"
+                txt := i == 1 ? "1/A" : "2/B"
+            else if cType == "WXY"
+                txt := i == 3 ? "W" : i == 6 ? "X" : i == 9 ? "Y" : ""
+            else if cType == "LD" or cType == "ED" or cType == "DIAG" or cType == "LD12"
+                txt := "(" + str.tostring(i) + ")"
             else
                 txt := str.tostring(i)
             // a point is a high pivot when the leg into it rises
             bool isHigh = array.get(cP, i) > array.get(cP, i - 1)
-            array.push(wLbl, label.new(array.get(cB, i), array.get(cP, i), txt,
-                 style=isHigh ? label.style_label_down : label.style_label_up,
-                 color=color.new(cc, 20), textcolor=color.white, size=size.normal))
-        // sub-wave structure of motive waves (impulse counts only)
+            if txt != ""
+                array.push(wLbl, label.new(array.get(cT, i), array.get(cP, i), txt, xloc=xloc.bar_time,
+                     style=isHigh ? label.style_label_down : label.style_label_up,
+                     color=color.new(cc, 20), textcolor=color.white, size=size.normal))
+        // sub-structure on the finer degree: 5 = five waves fit, 3 = corrective,
+        // 1 = single leg, ? = no sub pivots that far back
         if cType == "IMP" or cType == "DEV4"
-            int subW1 = f_sub_draw(array.get(cB, 0), array.get(cB, 1))
-            int subW3 = f_sub_draw(array.get(cB, 2), array.get(cB, 3))
-            string s1 = subW1 == 4 ? "5✓" : str.tostring(subW1 + 1)
-            string s3 = subW3 == 4 ? "5✓" : str.tostring(subW3 + 1)
-            subTxt := "W1: " + s1 + " legs · W3: " + s3 + " legs"
+            f_sub_draw(array.get(cB, 0), array.get(cB, 1))
+            f_sub_draw(array.get(cB, 2), array.get(cB, 3))
+            subTxt := "W1 " + f_csub(1) + " · W3 " + f_csub(3) + (cType == "IMP" ? " · W5 " + f_csub(5) : "")
+        else if cType == "ABC" or cType == "FLAT"
+            subTxt := "A " + f_csub(1) + " · C " + f_csub(3)
+        else if cType == "DEVC"
+            subTxt := "A " + f_csub(1)
+        else if cType == "AMB"
+            subTxt := "W1/A " + f_csub(1)
+        else if cType == "LD12"
+            subTxt := "W1 " + f_csub(1) + " (position unconfirmed)"
+        else if cType == "LD" or cType == "ED" or cType == "DIAG"
+            subTxt := "W1 " + f_csub(1) + " · W3 " + f_csub(3) + " · W5 " + f_csub(5) + " (position unconfirmed)"
+        else if cType == "WXY"
+            subTxt := "W, X, Y each a zigzag or flat"
 
         // projections + invalidation
         if showProj
-            int lastB = array.get(cB, nPts - 1)
+            // projection lines start at most 4000 bars back (bar-index drawing limit)
+            int lastB = math.max(array.get(cB, nPts - 1), bar_index - 4000)
             float dirF = cDir == 1 ? 1.0 : -1.0
-            if cType == "DEV2"
+            if cType == "AMB"
                 float w1 = math.abs(array.get(cP, 1) - array.get(cP, 0))
+                float w1End = array.get(cP, 1)
+                int w1EndB = math.max(array.get(cB, 1), bar_index - 4000)
+                f_proj(w1EndB, w1End - dirF * w1 * 0.382, "W2/B 38.2%")
+                f_proj(w1EndB, w1End - dirF * w1 * 0.5,   "W2/B 50%")
+                f_proj(w1EndB, w1End - dirF * w1 * 0.618, "W2/B 61.8%")
+                f_proj(w1EndB, w1End - dirF * w1 * 0.786, "W2/B 78.6%")
                 float base = array.get(cP, 2)
-                f_proj(lastB, base + dirF * w1 * 1.0,   "W3 ×1.0")
-                f_proj(lastB, base + dirF * w1 * 1.618, "W3 ×1.618")
+                f_proj(lastB, base + dirF * w1 * 1.0,   "W3/C ×1.0")
+                f_proj(lastB, base + dirF * w1 * 1.618, "W3/C ×1.618")
                 f_proj(lastB, base + dirF * w1 * 2.618, "W3 ×2.618")
             if cType == "DEV4"
                 float w1 = math.abs(array.get(cP, 1) - array.get(cP, 0))
@@ -638,6 +1663,12 @@ if countChanged
                 f_proj(lastB, top - dirF * rng * 0.382, "Retr 38.2%")
                 f_proj(lastB, top - dirF * rng * 0.5,   "Retr 50%")
                 f_proj(lastB, top - dirF * rng * 0.618, "Retr 61.8%")
+            if not na(capLvl)
+                array.push(prLin, line.new(lastB, capLvl, bar_index + 5, capLvl,
+                     extend=extend.right, color=bearC, style=line.style_dashed, width=1))
+                array.push(prLbl, label.new(bar_index + 5, capLvl, "W5 max",
+                     style=label.style_label_left, color=color.new(bearC, 85),
+                     textcolor=bearC, size=size.small))
             if not na(invLvl)
                 array.push(prLin, line.new(lastB, invLvl, bar_index + 5, invLvl,
                      extend=extend.right, color=bearC, style=line.style_dashed, width=1))
@@ -653,7 +1684,7 @@ color hd = color.new(color.gray, 90)
 
 var table t = table.new(
      dashPos == "Top Right" ? position.top_right : dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left,
-     2, 7,
+     2, 8,
      bgcolor=color.new(color.white, 5),
      border_color=color.new(color.gray, 60),
      border_width=1,
@@ -667,8 +1698,12 @@ if showDash and barstate.islast
     if cType != "NONE"
         string arrow = cDir == 1 ? " ▲" : " ▼"
         bool complete = cType == "IMP" or cType == "ABC" or cType == "FLAT"
-        statTxt := f_type_name(cType) + arrow + (complete ? " complete" : " counted")
-        statCol := complete ? (cDir == 1 ? bullC : bearC) : #ff6f00
+        bool rare = cType == "LD" or cType == "ED" or cType == "DIAG" or cType == "WXY" or cType == "LD12"
+        statTxt := f_type_name(cType) + arrow + (rare ? " provisional" : not cConfirmed ? " unconfirmed" : complete ? " complete" : " counted")
+        // 1-2 / A-B kept while price has moved beyond the W1 / A end: W3 / C is under way
+        if cType == "AMB" and array.size(cP) >= 2 and (trackTxt == "kept" or f_beyond(close, array.get(cP, 1), cDir))
+            statTxt += " · W3/C developing"
+        statCol := complete and cConfirmed and not rare ? (cDir == 1 ? bullC : bearC) : #ff6f00
         statTcol := color.white
 
     table.cell(t, 0, 0, "EW RADAR", text_color=tc, bgcolor=hd, text_size=size.small)
@@ -678,13 +1713,15 @@ if showDash and barstate.islast
     table.cell(t, 0, 2, "Ratios", text_color=tc, text_size=size.small)
     table.cell(t, 1, 2, cRatios, text_color=tc, text_size=size.small)
     table.cell(t, 0, 3, "Invalidation", text_color=tc, text_size=size.small)
-    table.cell(t, 1, 3, na(invLvl) ? "—" : str.tostring(invLvl, format.mintick), text_color=na(invLvl) ? tc : bearC, text_size=size.small)
+    table.cell(t, 1, 3, (na(invLvl) ? "—" : str.tostring(invLvl, format.mintick)) + (na(capLvl) ? "" : " · W5 max " + str.tostring(capLvl, format.mintick)), text_color=na(invLvl) ? tc : bearC, text_size=size.small)
     table.cell(t, 0, 4, "Sub-structure", text_color=tc, text_size=size.small)
     table.cell(t, 1, 4, subTxt, text_color=tc, text_size=size.small)
     table.cell(t, 0, 5, "Alt count", text_color=tc, text_size=size.small)
     table.cell(t, 1, 5, altText, text_color=tc, text_size=size.small)
     table.cell(t, 0, 6, "Pivots", text_color=tc, text_size=size.small)
     table.cell(t, 1, 6, str.tostring(array.size(pTyp)) + " stored", text_color=tc, text_size=size.small)
+    table.cell(t, 0, 7, "Checks", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 7, (trackTxt == "new" ? "" : "count " + trackTxt + " · ") + str.tostring(diagValid) + " rule-valid · " + str.tostring(diagLow) + " below fit", text_color=tc, text_size=size.small)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Alerts
@@ -698,7 +1735,7 @@ bool evImp  = newCount and cType == "IMP"
 bool evAbc  = newCount and cType == "ABC"
 bool evFlat = newCount and cType == "FLAT"
 bool evAB   = newCount and cType == "DEVC"
-bool evW12  = newCount and cType == "DEV2"
+bool evW12  = newCount and cType == "AMB"
 bool evW14  = newCount and cType == "DEV4"
 
 // Close beyond the W1 end while a W1-W2 count is active — once per count, only
@@ -706,7 +1743,7 @@ bool evW14  = newCount and cType == "DEV4"
 // beyond W1 already on the bar the count appears).
 var bool w1Passed = false
 bool evW1End = false
-if cType == "DEV2" and array.size(cP) >= 2
+if cType == "AMB" and array.size(cP) >= 2
     float w1End = array.get(cP, 1)
     bool beyondW1 = (cDir == 1 and close > w1End) or (cDir == -1 and close < w1End)
     if newCount
@@ -721,7 +1758,7 @@ alertcondition(alertOk and evImp,    "EW: Impulse count complete",   "EWR · IMP
 alertcondition(alertOk and evAbc,    "EW: Zigzag count complete",    "EWR · ZIGZAG A-B-C COUNT COMPLETE · {{ticker}} {{interval}}")
 alertcondition(alertOk and evFlat,   "EW: Flat count complete",      "EWR · FLAT A-B-C COUNT COMPLETE · {{ticker}} {{interval}}")
 alertcondition(alertOk and evAB,     "EW: A-B count active",         "EWR · A-B AFTER IMPULSE COUNT ACTIVE · {{ticker}} {{interval}}")
-alertcondition(alertOk and evW12,    "EW: W1-W2 count active",       "EWR · W1-W2 COUNT ACTIVE · {{ticker}} {{interval}}")
+alertcondition(alertOk and evW12,    "EW: W1-W2 count active",       "EWR · 1-2 OR A-B COUNT ACTIVE · {{ticker}} {{interval}}")
 alertcondition(alertOk and evW14,    "EW: W1-W4 count active",       "EWR · W1-W4 COUNT ACTIVE · {{ticker}} {{interval}}")
 alertcondition(alertOk and evW1End,  "EW: Close beyond W1 end",      "EWR · CLOSE BEYOND WAVE-1 END · {{ticker}} {{interval}}")
 alertcondition(alertOk and invalHit, "EW: Count invalidated",        "EWR · COUNT INVALIDATED · {{ticker}} {{interval}}")
