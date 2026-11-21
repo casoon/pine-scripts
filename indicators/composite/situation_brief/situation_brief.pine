@@ -1,0 +1,400 @@
+//@version=6
+// ============================================================================
+// Situation Brief [WavesUnchained]
+// Version: 0.1.0
+// Author: WavesUnchained
+// Build: 2026-11-19
+// ============================================================================
+// Describes the current chart situation in plain words: trend structure, the
+// state of the last breakout, how stretched price is, and the four levels that
+// decide what happens next. A reading, not a signal: no score, no entries.
+//
+// Features:
+//   ✓ Trend from confirmed swing breaks; changes only on a close beyond the
+//     protected swing or beyond the counter swing formed after the extreme
+//   ✓ Depth of the last pullback as a share of the prior leg
+//   ✓ Breakout state: fresh, holding, retesting, back in the retest zone, failed
+//   ✓ Breakout bar: close location in its range, volume against its average
+//   ✓ Stretch: RSI, distance to Bollinger band and to two EMAs in ATR
+//   ✓ Level ladder: trend extreme, broken level, failure level, protected swing
+//   ✓ Lines, retest zone and table; long and short fully mirrored
+//   ✓ Alerts for break, trend change and failed breakout
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol
+//   Volume:    OPTIONAL   real trade volume only — breakout volume shows n/a
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-degraded
+//
+// ============================================================================
+
+indicator("Situation Brief [WavesUnchained]", shorttitle="SitBrief", overlay=true, max_bars_back=1000, max_lines_count=50, max_labels_count=50, max_boxes_count=10)
+
+// ── Inputs ────────────────────────────────────────────────────────────────
+string gStruct = "Structure"
+int pivLeft = input.int(5, "Swing pivot: bars left", minval=1, maxval=50, group=gStruct, tooltip="A swing high/low must be the extreme of this many bars to its left.")
+int pivRight = input.int(2, "Swing pivot: bars right", minval=1, maxval=20, group=gStruct, tooltip="Bars after a swing before it counts. Fewer bars confirm swings earlier; more bars keep only larger swings.")
+float retestAtr = input.float(0.5, "Retest zone depth (ATR)", minval=0.1, maxval=3.0, step=0.1, group=gStruct, tooltip="How far behind the broken level a pullback may close before the breakout counts as failed. Measured with the ATR of the breakout bar and frozen there.")
+int maxScan = input.int(500, "Maximum scan length (bars)", minval=50, maxval=990, group=gStruct, tooltip="How far back the protected swing is searched after a break.")
+
+string gStretch = "Stretch"
+int rsiLen = input.int(14, "RSI length", minval=2, group=gStretch)
+float rsiHigh = input.float(70, "RSI overbought", minval=50, maxval=100, group=gStretch)
+float rsiLow = input.float(30, "RSI oversold", minval=0, maxval=50, group=gStretch)
+int emaFastLen = input.int(9, "Fast EMA", minval=1, group=gStretch)
+int emaSlowLen = input.int(21, "Slow EMA", minval=2, group=gStretch)
+int bbLen = input.int(20, "Bollinger length", minval=2, group=gStretch)
+float bbMult = input.float(2.0, "Bollinger width (stdev)", minval=0.5, step=0.1, group=gStretch)
+int atrLen = input.int(14, "ATR length", minval=1, group=gStretch, tooltip="All distances are expressed in this ATR.")
+int volLen = input.int(20, "Volume average length", minval=2, group=gStretch, tooltip="Only used when the symbol delivers real trade volume.")
+
+string gDisp = "Display"
+bool showLevels = input.bool(true, "Show level lines and retest zone", group=gDisp)
+bool showEvents = input.bool(true, "Show break / trend change / failure markers", group=gDisp)
+bool showTable = input.bool(true, "Show table", group=gDisp)
+string tablePos = input.string("Top right", "Table position", options=["Top right", "Bottom right", "Top left", "Bottom left"], group=gDisp)
+int lineExt = input.int(8, "Extend lines right (bars)", minval=1, maxval=50, group=gDisp)
+
+// ── Colors ────────────────────────────────────────────────────────────────
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+color cBull = #00c853
+color cBear = #d50000
+color cWarn = #ff6f00
+color cExtreme = color.new(color.gray, 30)
+color cBroken = #2962ff
+color cFail = #ff6f00
+color cProtect = #b71c1c
+
+// ── Series (computed unconditionally) ─────────────────────────────────────
+float atr = ta.atr(atrLen)
+float rsi = ta.rsi(close, rsiLen)
+float emaFast = ta.ema(close, emaFastLen)
+float emaSlow = ta.ema(close, emaSlowLen)
+[bbMid, bbUp, bbLo] = ta.bb(close, bbLen, bbMult)
+float volAvg = ta.sma(volume, volLen)
+float cumVol = ta.cum(nz(volume))
+bool volumeIsReal = (cumVol > 0 and syminfo.volumetype != "tick") and not na(volume)
+float ph = ta.pivothigh(high, pivLeft, pivRight)
+float pl = ta.pivotlow(low, pivLeft, pivRight)
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+lowestSince(int fromBar) =>
+    int n = math.min(bar_index - fromBar, maxScan)
+    float v = low
+    int b = bar_index
+    for i = 0 to n
+        if low[i] < v
+            v := low[i]
+            b := bar_index - i
+    [v, b]
+
+highestSince(int fromBar) =>
+    int n = math.min(bar_index - fromBar, maxScan)
+    float v = high
+    int b = bar_index
+    for i = 0 to n
+        if high[i] > v
+            v := high[i]
+            b := bar_index - i
+    [v, b]
+
+fPx(float x) =>
+    na(x) ? "–" : str.tostring(x, format.mintick)
+
+fAtr(float x) =>
+    na(x) ? "–" : (x >= 0 ? "+" : "") + str.tostring(x, "0.00") + " ATR"
+
+// ── Swing pivots ──────────────────────────────────────────────────────────
+int pivBar = bar_index - pivRight
+var float lastPivHigh = na
+var int lastPivHighBar = na
+var float lastPivLow = na
+var int lastPivLowBar = na
+if not na(ph)
+    lastPivHigh := ph
+    lastPivHighBar := pivBar
+if not na(pl)
+    lastPivLow := pl
+    lastPivLowBar := pivBar
+
+// ── Structure state ───────────────────────────────────────────────────────
+var int dir = 0                 // 1 up, -1 down, 0 not established
+var float brokenLevel = na      // swing that was broken last
+var int breakBar = na
+var float failLevel = na        // beyond the retest zone
+var float protectedLvl = na     // pullback extreme the last break started from
+var int protectedBar = na
+var float legStart = na         // start of the current leg, for the pullback share
+var float trendExtreme = na     // highest high (up) / lowest low (down) since the break
+var int extremeBar = na
+var float runPiv = na           // strongest confirmed swing in trend direction since the break
+var int runPivBar = na
+var float ctrPiv = na           // strongest confirmed counter swing after the trend extreme
+var int ctrPivBar = na
+var float retracePct = na       // last pullback as % of the prior leg
+var int legs = 0                // breaks in a row in the current direction
+var bool failed = false
+var float breakVolRatio = na
+var float breakCloseLoc = na    // 0 = bar low, 1 = bar high
+
+if dir == 1
+    if not na(ph) and pivBar >= breakBar and (na(runPiv) or ph > runPiv)
+        runPiv := ph
+        runPivBar := pivBar
+    if not na(pl) and pivBar > extremeBar and (na(ctrPiv) or pl < ctrPiv)
+        ctrPiv := pl
+        ctrPivBar := pivBar
+if dir == -1
+    if not na(pl) and pivBar >= breakBar and (na(runPiv) or pl < runPiv)
+        runPiv := pl
+        runPivBar := pivBar
+    if not na(ph) and pivBar > extremeBar and (na(ctrPiv) or ph > ctrPiv)
+        ctrPiv := ph
+        ctrPivBar := pivBar
+
+// Trend change: close beyond the protected swing, or beyond the counter swing
+// formed after the extreme (higher low + higher high, or the mirror).
+bool ctrUp = dir == -1 and not na(ctrPiv) and close > ctrPiv
+bool ctrDown = dir == 1 and not na(ctrPiv) and close < ctrPiv
+bool flipUpNow = dir == -1 and (ctrUp or close > protectedLvl)
+bool flipDownNow = dir == 1 and (ctrDown or close < protectedLvl)
+// Continuation: close beyond the strongest swing since the break, if it is the extreme.
+bool bosUpNow = dir == 1 and not flipDownNow and not na(runPiv) and close > runPiv and runPiv >= trendExtreme
+bool bosDownNow = dir == -1 and not flipUpNow and not na(runPiv) and close < runPiv and runPiv <= trendExtreme
+// First structure on the chart.
+bool initUpNow = dir == 0 and not na(lastPivHigh) and close > lastPivHigh
+bool initDownNow = dir == 0 and not initUpNow and not na(lastPivLow) and close < lastPivLow
+bool bullEvent = flipUpNow or bosUpNow or initUpNow
+bool bearEvent = flipDownNow or bosDownNow or initDownNow
+
+bool evBosUp = false
+bool evBosDown = false
+bool evFlipUp = false
+bool evFlipDown = false
+bool evFail = false
+
+float barRange = high - low
+float closeLocNow = barRange > 0 ? (close - low) / barRange : na
+float volRatioNow = volumeIsReal and volAvg > 0 ? volume / volAvg : na
+
+if bullEvent
+    float level = flipUpNow ? (ctrUp ? ctrPiv : protectedLvl) : bosUpNow ? runPiv : lastPivHigh
+    int fromBar = flipUpNow ? (ctrUp ? ctrPivBar : protectedBar) : bosUpNow ? runPivBar : lastPivHighBar
+    [pLow, pBar] = lowestSince(fromBar)
+    retracePct := bosUpNow and level > legStart ? (level - pLow) / (level - legStart) * 100 : na
+    legs := bosUpNow ? legs + 1 : 1
+    dir := 1
+    brokenLevel := level
+    breakBar := bar_index
+    failLevel := level - retestAtr * atr
+    protectedLvl := pLow
+    protectedBar := pBar
+    legStart := pLow
+    trendExtreme := high
+    extremeBar := bar_index
+    runPiv := na
+    ctrPiv := na
+    failed := false
+    breakVolRatio := volRatioNow
+    breakCloseLoc := closeLocNow
+    evBosUp := bosUpNow
+    evFlipUp := flipUpNow
+else if bearEvent
+    float level = flipDownNow ? (ctrDown ? ctrPiv : protectedLvl) : bosDownNow ? runPiv : lastPivLow
+    int fromBar = flipDownNow ? (ctrDown ? ctrPivBar : protectedBar) : bosDownNow ? runPivBar : lastPivLowBar
+    [pHigh, pBar] = highestSince(fromBar)
+    retracePct := bosDownNow and level < legStart ? (pHigh - level) / (legStart - level) * 100 : na
+    legs := bosDownNow ? legs + 1 : 1
+    dir := -1
+    brokenLevel := level
+    breakBar := bar_index
+    failLevel := level + retestAtr * atr
+    protectedLvl := pHigh
+    protectedBar := pBar
+    legStart := pHigh
+    trendExtreme := low
+    extremeBar := bar_index
+    runPiv := na
+    ctrPiv := na
+    failed := false
+    breakVolRatio := volRatioNow
+    breakCloseLoc := closeLocNow
+    evBosDown := bosDownNow
+    evFlipDown := flipDownNow
+
+bool brokeThisBar = bullEvent or bearEvent
+
+if dir == 1 and not brokeThisBar
+    if high > trendExtreme
+        trendExtreme := high
+        extremeBar := bar_index
+        ctrPiv := na
+    if not failed and close < failLevel
+        failed := true
+        evFail := true
+if dir == -1 and not brokeThisBar
+    if low < trendExtreme
+        trendExtreme := low
+        extremeBar := bar_index
+        ctrPiv := na
+    if not failed and close > failLevel
+        failed := true
+        evFail := true
+
+// The level whose break ends the trend: the counter swing after the extreme
+// if one has formed, otherwise the protected swing.
+float invalidLvl = dir == 0 ? na : not na(ctrPiv) ? ctrPiv : protectedLvl
+int invalidBar = dir == 0 ? na : not na(ctrPiv) ? ctrPivBar : protectedBar
+
+// ── Readings ──────────────────────────────────────────────────────────────
+string breakoutState = "–"
+if dir != 0
+    bool up = dir == 1
+    bool touched = up ? low <= brokenLevel : high >= brokenLevel
+    bool behind = up ? close < brokenLevel : close > brokenLevel
+    if failed
+        breakoutState := up ? "Failed — closed below the retest zone" : "Failed — closed above the retest zone"
+    else if brokeThisBar
+        breakoutState := "Breakout on this bar"
+    else if behind
+        breakoutState := "Back inside the retest zone"
+    else if touched
+        breakoutState := "Retesting the broken level"
+    else
+        breakoutState := "Holding beyond the broken level"
+
+float bandRef = dir == -1 ? bbLo : bbUp
+float distBand = atr > 0 ? (close - bandRef) / atr : na
+float distFast = atr > 0 ? (close - emaFast) / atr : na
+float distSlow = atr > 0 ? (close - emaSlow) / atr : na
+fDistToClose(float lvl) =>
+    na(lvl) or not (atr > 0) ? "" : " (" + fAtr((lvl - close) / atr) + ")"
+
+// ── Level lines and retest zone ───────────────────────────────────────────
+var line lnExtreme = na
+var line lnBroken = na
+var line lnFail = na
+var line lnProtect = na
+var label lbExtreme = na
+var label lbBroken = na
+var label lbFail = na
+var label lbProtect = na
+var box bxRetest = na
+
+drawLevel(line ln, label lb, int x1, float y, color c, string txt, int lw) =>
+    line l = ln
+    label t = lb
+    int x2 = bar_index + lineExt
+    if na(l)
+        l := line.new(x1, y, x2, y, color=c, width=lw)
+        t := label.new(x2, y, txt, style=label.style_label_left, color=color.new(color.white, 100), textcolor=c, size=size.small)
+    else
+        line.set_xy1(l, x1, y)
+        line.set_xy2(l, x2, y)
+        label.set_xy(t, x2, y)
+        label.set_text(t, txt)
+    [l, t]
+
+if barstate.islast and showLevels and dir != 0
+    bool up = dir == 1
+    [l1, t1] = drawLevel(lnExtreme, lbExtreme, extremeBar, trendExtreme, cExtreme, (up ? "Trend high " : "Trend low ") + fPx(trendExtreme), 1)
+    [l2, t2] = drawLevel(lnBroken, lbBroken, breakBar, brokenLevel, cBroken, "Broken level " + fPx(brokenLevel), 2)
+    [l3, t3] = drawLevel(lnFail, lbFail, breakBar, failLevel, cFail, "Failure " + fPx(failLevel), 1)
+    [l4, t4] = drawLevel(lnProtect, lbProtect, invalidBar, invalidLvl, cProtect, (up ? "Protected low " : "Protected high ") + fPx(invalidLvl), 2)
+    lnExtreme := l1
+    lbExtreme := t1
+    lnBroken := l2
+    lbBroken := t2
+    lnFail := l3
+    lbFail := t3
+    lnProtect := l4
+    lbProtect := t4
+    line.set_style(lnFail, line.style_dashed)
+    float zTop = math.max(brokenLevel, failLevel)
+    float zBot = math.min(brokenLevel, failLevel)
+    if na(bxRetest)
+        bxRetest := box.new(breakBar, zTop, bar_index + lineExt, zBot, border_color=color.new(cBroken, 100), bgcolor=color.new(cBroken, 88))
+    else
+        box.set_lefttop(bxRetest, breakBar, zTop)
+        box.set_rightbottom(bxRetest, bar_index + lineExt, zBot)
+
+// ── Event markers ─────────────────────────────────────────────────────────
+plotshape(showEvents and evBosUp, "Break up", shape.triangleup, location.belowbar, cBull, size=size.small, text="BOS")
+plotshape(showEvents and evBosDown, "Break down", shape.triangledown, location.abovebar, cBear, size=size.small, text="BOS")
+plotshape(showEvents and evFlipUp, "Trend change up", shape.labelup, location.belowbar, cBull, size=size.small, text="Trend ↑", textcolor=color.white)
+plotshape(showEvents and evFlipDown, "Trend change down", shape.labeldown, location.abovebar, cBear, size=size.small, text="Trend ↓", textcolor=color.white)
+plotshape(showEvents and evFail and dir == 1, "Breakout failed (up)", shape.xcross, location.belowbar, cWarn, size=size.small, text="Fail")
+plotshape(showEvents and evFail and dir == -1, "Breakdown failed (down)", shape.xcross, location.abovebar, cWarn, size=size.small, text="Fail")
+
+// ── Alerts ────────────────────────────────────────────────────────────────
+alertcondition(evBosUp or evBosDown, "Structure break", "Situation Brief: close beyond the last swing in trend direction on {{ticker}} {{interval}}")
+alertcondition(evFlipUp or evFlipDown, "Trend change", "Situation Brief: protected swing broken, trend changed on {{ticker}} {{interval}}")
+alertcondition(evFail, "Breakout failed", "Situation Brief: close beyond the retest zone, breakout failed on {{ticker}} {{interval}}")
+
+// ── Table ─────────────────────────────────────────────────────────────────
+fRow(table t, int r, string a, string b, color bc, string c) =>
+    table.cell(t, 0, r, a, text_color=tc, text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, r, b, text_color=bc, text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 2, r, c, text_color=tc, text_size=size.small, text_halign=text.align_left)
+
+fSep(table t, int r) =>
+    for c = 0 to 2
+        table.cell(t, c, r, "", bgcolor=color.new(color.gray, 80), text_size=size.small)
+
+string posStr = tablePos
+var table tb = table.new(posStr == "Top right" ? position.top_right : posStr == "Bottom right" ? position.bottom_right : posStr == "Top left" ? position.top_left : position.bottom_left, 3, 20, bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
+
+if barstate.islast and showTable
+    bool up = dir == 1
+    string sideHi = up ? "below" : "above"
+    color dirCol = dir == 1 ? cBull : dir == -1 ? cBear : tc
+    int r = 0
+    table.cell(tb, 0, r, "Situation Brief", text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(tb, 1, r, syminfo.ticker + " · " + timeframe.period, text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(tb, 2, r, "Meaning", text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    r += 1
+    fRow(tb, r, "Trend", dir == 1 ? "Up" : dir == -1 ? "Down" : "Not established", dirCol, dir == 1 ? "higher highs and higher lows" : dir == -1 ? "lower highs and lower lows" : "no swing broken yet")
+    r += 1
+    fRow(tb, r, "Breaks in a row", dir == 0 ? "–" : str.tostring(legs), tc, legs > 1 ? "trend has continued" : dir != 0 ? "first break in this direction" : "")
+    r += 1
+    fRow(tb, r, "Last pullback", na(retracePct) ? "–" : str.tostring(retracePct, "0") + " % of prior leg", tc, na(retracePct) ? "" : retracePct < 50 ? "shallow — absorbed quickly" : "deep — trend under pressure")
+    r += 1
+    fSep(tb, r)
+    r += 1
+    fRow(tb, r, "Breakout", breakoutState, failed ? cWarn : tc, dir == 0 ? "" : str.tostring(bar_index - breakBar) + " bars since the break")
+    r += 1
+    string volTxt = na(breakVolRatio) ? "volume n/a" : "volume " + str.tostring(breakVolRatio, "0.0") + "× average"
+    string locTxt = na(breakCloseLoc) ? "" : "close at " + str.tostring(breakCloseLoc * 100, "0") + " % of bar range"
+    fRow(tb, r, "Breakout bar", dir == 0 ? "–" : locTxt, tc, dir == 0 ? "" : volTxt)
+    r += 1
+    fSep(tb, r)
+    r += 1
+    fRow(tb, r, "RSI " + str.tostring(rsiLen), str.tostring(rsi, "0.0"), rsi >= rsiHigh or rsi <= rsiLow ? cWarn : tc, rsi >= rsiHigh ? "overbought" : rsi <= rsiLow ? "oversold" : "not extreme")
+    r += 1
+    fRow(tb, r, dir == -1 ? "To lower band" : "To upper band", fAtr(distBand), tc, dir == -1 ? (distBand < 0 ? "outside the band" : "inside the band") : (distBand > 0 ? "outside the band" : "inside the band"))
+    r += 1
+    fRow(tb, r, "From EMA " + str.tostring(emaFastLen), fAtr(distFast), tc, "short-term stretch")
+    r += 1
+    fRow(tb, r, "From EMA " + str.tostring(emaSlowLen), fAtr(distSlow), tc, "swing stretch")
+    r += 1
+    int sinceExt = dir == 0 ? na : bar_index - extremeBar
+    fRow(tb, r, up ? "Last new high" : "Last new low", dir == 0 ? "–" : str.tostring(sinceExt) + " bars ago", sinceExt > 0 ? cWarn : tc, dir == 0 ? "" : sinceExt == 0 ? "extending on this bar" : "no new extreme since")
+    r += 1
+    fSep(tb, r)
+    r += 1
+    table.cell(tb, 0, r, "Level", text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(tb, 1, r, "Price (from close)", text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    table.cell(tb, 2, r, "If price gets there", text_color=tc, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+    r += 1
+    if dir != 0
+        fRow(tb, r, up ? "Trend high" : "Trend low", fPx(trendExtreme) + fDistToClose(trendExtreme), cExtreme, "beyond it: move continues")
+        r += 1
+        fRow(tb, r, "Broken level", fPx(brokenLevel) + fDistToClose(brokenLevel), cBroken, up ? "pullback to here: normal retest" : "bounce to here: normal retest")
+        r += 1
+        fRow(tb, r, "Failure level", fPx(failLevel) + fDistToClose(failLevel), cFail, "close " + sideHi + ": breakout failed")
+        r += 1
+        fRow(tb, r, up ? "Protected low" : "Protected high", fPx(invalidLvl) + fDistToClose(invalidLvl), cProtect, up ? "close below: uptrend over" : "close above: downtrend over")
+    else
+        fRow(tb, r, "–", "no levels yet", tc, "")
