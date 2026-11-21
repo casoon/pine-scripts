@@ -1,0 +1,215 @@
+//@version=6
+// ============================================================================
+// Kestrel FVG Zones [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2026-11-21
+// ============================================================================
+// Fair value gaps followed as zones until a later bar trades back into them,
+// and what price does at that return: a rejection that closes back beyond the
+// zone within a short window, a break that closes through the far side, or
+// neither. Zones and fills follow fvg_fill in kestrel-chartkit; the reaction
+// rule is the same for both directions.
+//
+// Features:
+//   ✓ Bullish and bearish gaps in one list, newest open zones kept
+//   ✓ Fill on the first later bar that trades back into the zone
+//   ✓ Reaction tracking: rejection, break through the far side, or expiry
+//   ✓ Mirror-symmetric rules for both directions
+//   ✓ Engine counts and reaction events in the data window for chart-data export
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol, high/low/close
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
+//
+// ============================================================================
+// KESTREL PARITY SPECIFICATION
+// Engine Reference: kestrel-chartkit (crates.io / github.com/casoon/kestrel-chartkit)
+// Rust Module:      crate::indicator::smart_money_structure::FvgFillEngine
+//                   (catalog: fvg_fill; zones from liquidity_fvg::LiquidityFvgEngine)
+// Parity:           open / created / filled / open_bullish / open_bearish as fvg_fill;
+//                   the reaction rule is not part of the engine (kestrel-lab J42)
+// Empirical Notes:  kestrel-lab sheet 720 — wait for the reaction instead of a blind
+//                   limit in the zone; the reaction sorts out fills, it is no entry
+//                   rule on its own
+// ============================================================================
+
+indicator("Kestrel FVG Zones [WavesUnchained]", shorttitle="KFVG", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+string gEngine = "Zones"
+int maxZones = input.int(20, "Open zones kept", minval=1, maxval=1000, group=gEngine, tooltip="Only the newest this many open zones (both directions together) are followed. An older open zone drops out of the list and stops being tracked.")
+int reactionWindow = input.int(3, "Reaction window (bars after the fill)", minval=1, maxval=50, group=gEngine, tooltip="Bars after the fill bar in which a rejection may still come. The fill bar itself can already be the rejection. A close through the far side ends the window early as a break.")
+
+string gView = "Display"
+bool showOpen = input.bool(true, "Show open zones", group=gView)
+bool showFilled = input.bool(true, "Keep filled zones on the chart", group=gView, tooltip="Filled zones stay as a muted box from formation to the fill bar.")
+int maxFilledBoxes = input.int(100, "Filled zones on the chart", minval=0, maxval=400, group=gView)
+bool showRejections = input.bool(true, "Mark rejections", group=gView, tooltip="Bullish zone: a bar that trades into it and closes above its upper edge. Bearish zone: a bar that trades into it and closes below its lower edge. A marker describes the reaction at the zone; it is not an order.")
+bool showBreaks = input.bool(true, "Mark breaks", group=gView, tooltip="Bullish zone: a close below its lower edge after the fill. Bearish zone: a close above its upper edge.")
+color bullColor = input.color(#00c853, "Bullish", group=gView)
+color bearColor = input.color(#d50000, "Bearish", group=gView)
+color filledColor = input.color(color.new(color.gray, 0), "Filled", group=gView)
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+// Open zones, oldest first
+var array<bool> zBull = array.new<bool>()
+var array<float> zTop = array.new<float>()
+var array<float> zBot = array.new<float>()
+var array<int> zFormed = array.new<int>()
+var array<box> zBox = array.new<box>()
+// Filled zones waiting for their reaction, oldest first
+var array<bool> pBull = array.new<bool>()
+var array<float> pTop = array.new<float>()
+var array<float> pBot = array.new<float>()
+var array<int> pFill = array.new<int>()
+// Filled boxes kept on the chart
+var array<box> filledBoxes = array.new<box>()
+
+int confirmedLong = 0
+int confirmedShort = 0
+int brokenLong = 0
+int brokenShort = 0
+int expiredLong = 0
+int expiredShort = 0
+
+// ---------------------------------------------------------------------------
+// 1. Reactions of zones filled on earlier bars
+// ---------------------------------------------------------------------------
+if pBull.size() > 0
+    for i = pBull.size() - 1 to 0
+        bool bull = pBull.get(i)
+        float top = pTop.get(i)
+        float bot = pBot.get(i)
+        int outcome = 0  // 1 rejection, -1 break, 2 expired, 0 still waiting
+        if bull ? close < bot : close > top
+            outcome := -1
+        else if bull ? (low <= top and close > top) : (high >= bot and close < bot)
+            outcome := 1
+        else if bar_index - pFill.get(i) >= reactionWindow
+            outcome := 2
+        if outcome != 0
+            if outcome == 1
+                confirmedLong += bull ? 1 : 0
+                confirmedShort += bull ? 0 : 1
+            else if outcome == -1
+                brokenLong += bull ? 1 : 0
+                brokenShort += bull ? 0 : 1
+            else
+                expiredLong += bull ? 1 : 0
+                expiredShort += bull ? 0 : 1
+            pBull.remove(i)
+            pTop.remove(i)
+            pBot.remove(i)
+            pFill.remove(i)
+
+// ---------------------------------------------------------------------------
+// 2. Fills: the first later bar that trades back into an open zone
+// ---------------------------------------------------------------------------
+int filled = 0
+if zBull.size() > 0
+    for i = zBull.size() - 1 to 0
+        bool bull = zBull.get(i)
+        float top = zTop.get(i)
+        float bot = zBot.get(i)
+        bool touched = zFormed.get(i) < bar_index and (bull ? low <= top : high >= bot)
+        if touched
+            filled += 1
+            // The fill bar itself may already reject or break.
+            if bull ? close < bot : close > top
+                brokenLong += bull ? 1 : 0
+                brokenShort += bull ? 0 : 1
+            else if bull ? close > top : close < bot
+                confirmedLong += bull ? 1 : 0
+                confirmedShort += bull ? 0 : 1
+            else
+                pBull.push(bull)
+                pTop.push(top)
+                pBot.push(bot)
+                pFill.push(bar_index)
+            box bx = zBox.get(i)
+            if not na(bx)
+                if showFilled and maxFilledBoxes > 0
+                    box.set_extend(bx, extend.none)
+                    box.set_right(bx, bar_index)
+                    box.set_bgcolor(bx, color.new(filledColor, 88))
+                    box.set_border_color(bx, color.new(filledColor, 60))
+                    filledBoxes.push(bx)
+                    if filledBoxes.size() > maxFilledBoxes
+                        box.delete(filledBoxes.shift())
+                else
+                    box.delete(bx)
+            zBull.remove(i)
+            zTop.remove(i)
+            zBot.remove(i)
+            zFormed.remove(i)
+            zBox.remove(i)
+
+// ---------------------------------------------------------------------------
+// 3. New gap on this bar (between bar t-2 and bar t)
+// ---------------------------------------------------------------------------
+int created = 0
+if bar_index >= 2
+    if low > high[2]
+        created := 1
+    else if high < low[2]
+        created := -1
+if created != 0
+    bool bull = created == 1
+    float top = bull ? low : low[2]
+    float bot = bull ? high[2] : high
+    box bx = na
+    if showOpen
+        color c = bull ? bullColor : bearColor
+        bx := box.new(bar_index - 2, top, bar_index, bot, border_color=color.new(c, 50), bgcolor=color.new(c, 85), extend=extend.right)
+    zBull.push(bull)
+    zTop.push(top)
+    zBot.push(bot)
+    zFormed.push(bar_index)
+    zBox.push(bx)
+    // Only the newest open zones are followed.
+    if zBull.size() > maxZones
+        box old = zBox.shift()
+        if not na(old)
+            box.delete(old)
+        zBull.shift()
+        zTop.shift()
+        zBot.shift()
+        zFormed.shift()
+
+int openZones = zBull.size()
+int openBullish = 0
+if openZones > 0
+    for i = 0 to openZones - 1
+        openBullish += zBull.get(i) ? 1 : 0
+int openBearish = openZones - openBullish
+
+// ---------------------------------------------------------------------------
+// Markers and data window
+// ---------------------------------------------------------------------------
+plotshape(showRejections and confirmedLong > 0, "Bullish rejection", shape.triangleup, location.belowbar, bullColor, size=size.small)
+plotshape(showRejections and confirmedShort > 0, "Bearish rejection", shape.triangledown, location.abovebar, bearColor, size=size.small)
+plotshape(showBreaks and brokenLong > 0, "Bullish zone broken", shape.xcross, location.belowbar, color.new(bearColor, 30), size=size.small)
+plotshape(showBreaks and brokenShort > 0, "Bearish zone broken", shape.xcross, location.abovebar, color.new(bullColor, 30), size=size.small)
+
+plot(openZones, "value (open zones)", display=display.data_window)
+plot(created, "created", display=display.data_window)
+plot(filled, "filled", display=display.data_window)
+plot(openBullish, "open_bullish", display=display.data_window)
+plot(openBearish, "open_bearish", display=display.data_window)
+plot(confirmedLong, "rejection_bullish", display=display.data_window)
+plot(confirmedShort, "rejection_bearish", display=display.data_window)
+plot(brokenLong, "break_bullish", display=display.data_window)
+plot(brokenShort, "break_bearish", display=display.data_window)
+plot(expiredLong, "expired_bullish", display=display.data_window)
+plot(expiredShort, "expired_bearish", display=display.data_window)
+
+alertcondition(confirmedLong > 0, "FVG: bullish rejection", "{{ticker}} {{interval}}: bullish FVG rejected (close back above the zone)")
+alertcondition(confirmedShort > 0, "FVG: bearish rejection", "{{ticker}} {{interval}}: bearish FVG rejected (close back below the zone)")

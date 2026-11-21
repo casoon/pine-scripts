@@ -1,0 +1,283 @@
+//@version=6
+// ============================================================================
+// Kestrel Swing Structure [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2026-11-21
+// ============================================================================
+// Statistical swing structure: strictly alternating swing pivots, the legs
+// between them measured in ATRs, and from them the median correction over the
+// median impulse, the trend quality of the newest corrections and the current
+// retracement. Highs and lows are treated alike, so a price series reflected
+// about a level gives the same readings. Same rules and defaults as
+// kestrel_swing_structure in kestrel-chartkit.
+//
+// Features:
+//   ✓ Strictly alternating pivots; a same-kind pivot extends the swing
+//   ✓ Outside bars ordered by the alternation, never a fixed high-then-low
+//   ✓ Trend from higher highs and lows, lower highs and lows, else the newest leg
+//   ✓ Trend quality (strengthening / stable / weakening) from the newest corrections
+//   ✓ Retracement, remaining potential, required stop and reward-to-risk in ATRs
+//   ✓ Zigzag of the confirmed pivots, dashboard and every reading in the data window
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol, high/low/close (open only for outside bars)
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
+//
+// ============================================================================
+// KESTREL PARITY SPECIFICATION
+// Engine Reference: kestrel-chartkit (crates.io / github.com/casoon/kestrel-chartkit)
+// Rust Module:      crate::indicator::swing_structure::SwingStructureIndicator
+//                   (catalog: kestrel_swing_structure, alias swing_structure;
+//                   mirror-exact state of commit e7d117a)
+// Parity:           value = correction_impulse_ratio; extras as in the engine;
+//                   Wilder ATR, strict pivots, tie tolerance 1e-11 as in the engine
+// Empirical Notes:  kestrel-lab sheets 718 & 720 — a description of the swing
+//                   structure, not a direction signal
+// ============================================================================
+
+indicator("Kestrel Swing Structure [WavesUnchained]", shorttitle="KSS", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+string gEngine = "Swing structure"
+int pivotLeft = input.int(5, "Pivot bars left", minval=1, maxval=1000, group=gEngine, tooltip="A pivot high (low) needs a high strictly above (low strictly below) every one of this many bars before it.")
+int pivotRight = input.int(5, "Pivot bars right", minval=1, maxval=1000, group=gEngine, tooltip="The same on the right side. A pivot is known only this many bars after its own bar: this is the confirmation delay of every reading.")
+int maxSwings = input.int(50, "Legs for the medians", minval=4, maxval=1000, group=gEngine, tooltip="Newest swing legs the medians are taken over. At least two impulse and two correction legs are needed before any reading appears.")
+int atrLength = input.int(14, "ATR length", minval=1, maxval=10000, group=gEngine, tooltip="Wilder ATR length. All legs and the retracement are expressed in ATRs of the current bar, so readings stay comparable across instruments and price levels.")
+
+string gView = "Display"
+bool showZigzag = input.bool(true, "Show zigzag of the pivots", group=gView, tooltip="Lines between the confirmed alternating pivots. The newest line moves while the swing is extended by a more extreme pivot of the same kind.")
+bool showTable = input.bool(true, "Show dashboard", group=gView)
+string tablePos = input.string("Top right", "Dashboard position", options=["Top right", "Bottom right", "Top left", "Bottom left"], group=gView)
+bool showZoneMarks = input.bool(false, "Mark bars in the correction zone", group=gView, tooltip="Small dot on bars whose retracement from the last pivot reaches 0.8 × the median correction. It describes how far the current move has come back; it is not an order.")
+color upColor = input.color(#00c853, "Up leg", group=gView)
+color downColor = input.color(#d50000, "Down leg", group=gView)
+
+// ---------------------------------------------------------------------------
+// Wilder ATR; pivots are only looked for on bars that have one
+// ---------------------------------------------------------------------------
+float atrRaw = ta.atr(atrLength)
+float atr = na(atrRaw) ? 0.0 : atrRaw
+
+// ---------------------------------------------------------------------------
+// Pivot store: strictly alternating (high, low, high, ...)
+// ---------------------------------------------------------------------------
+var array<int> pIdx = array.new<int>()
+var array<float> pPrice = array.new<float>()
+var array<bool> pHigh = array.new<bool>()
+var array<line> zigzag = array.new<line>()
+
+// A pivot of the same kind as the newest one continues that swing: the more extreme of the two
+// stays (higher high, lower low; on equal prices the existing one).
+pushPivot(int idx, float price, bool isHigh) =>
+    int n = pHigh.size()
+    if n > 0 and pHigh.get(n - 1) == isHigh
+        bool moreExtreme = isHigh ? price > pPrice.get(n - 1) : price < pPrice.get(n - 1)
+        if moreExtreme
+            pIdx.set(n - 1, idx)
+            pPrice.set(n - 1, price)
+            if showZigzag and n > 1 and zigzag.size() > 0
+                line ln = zigzag.get(zigzag.size() - 1)
+                line.set_xy2(ln, idx, price)
+    else
+        if showZigzag and n > 0
+            line ln = line.new(pIdx.get(n - 1), pPrice.get(n - 1), idx, price, xloc.bar_index, color=isHigh ? upColor : downColor, width=2)
+            zigzag.push(ln)
+            if zigzag.size() > 450
+                line.delete(zigzag.shift())
+        pIdx.push(idx)
+        pPrice.push(price)
+        pHigh.push(isHigh)
+        if pHigh.size() > maxSwings * 2 + 4
+            pIdx.shift()
+            pPrice.shift()
+            pHigh.shift()
+    true
+
+median(array<float> values) =>
+    float result = 0.0
+    int n = values.size()
+    if n > 0
+        array<float> sorted = values.copy()
+        sorted.sort(order.ascending)
+        int mid = n / 2
+        result := n % 2 == 0 ? (sorted.get(mid - 1) + sorted.get(mid)) / 2.0 : sorted.get(mid)
+    result
+
+// ---------------------------------------------------------------------------
+// Pivot detection on the candidate `pivotRight` bars back (strict on both sides)
+// ---------------------------------------------------------------------------
+if atr > 0 and bar_index >= pivotLeft + pivotRight
+    float cHigh = high[pivotRight]
+    float cLow = low[pivotRight]
+    bool isHigh = true
+    bool isLow = true
+    for k = 0 to pivotLeft + pivotRight
+        if k != pivotRight
+            if not (cHigh > high[k])
+                isHigh := false
+            if not (cLow < low[k])
+                isLow := false
+    int cIdx = bar_index - pivotRight
+    if isHigh and isLow
+        // An outside bar is both: the one that completes the alternation goes first. With no
+        // pivot before it the bar's own direction decides; a bar that closed at its open gives none.
+        int firstKind = 0
+        if pHigh.size() > 0
+            firstKind := pHigh.get(pHigh.size() - 1) ? -1 : 1
+        else
+            firstKind := close[pivotRight] < open[pivotRight] ? 1 : close[pivotRight] > open[pivotRight] ? -1 : 0
+        if firstKind == 1
+            pushPivot(cIdx, cHigh, true)
+            pushPivot(cIdx, cLow, false)
+        else if firstKind == -1
+            pushPivot(cIdx, cLow, false)
+            pushPivot(cIdx, cHigh, true)
+    else if isHigh
+        pushPivot(cIdx, cHigh, true)
+    else if isLow
+        pushPivot(cIdx, cLow, false)
+
+// ---------------------------------------------------------------------------
+// Readings (parity: SwingStructureEngine::update)
+// ---------------------------------------------------------------------------
+float ratio = na
+float medImpulse = na
+float medCorrection = na
+float retracement = na
+float entryZone = na
+float remaining = na
+float requiredStop = na
+float crv = na
+float velocity = na
+float quality = na
+float recent1 = na
+float recent2 = na
+float recent3 = na
+int trendBasis = 0
+
+int nPiv = pHigh.size()
+if atr > 0 and nPiv >= 4
+    // Highs and lows over all kept pivots
+    float hLast = na
+    float hPrev = na
+    float lLast = na
+    float lPrev = na
+    int nHighs = 0
+    int nLows = 0
+    for i = 0 to nPiv - 1
+        if pHigh.get(i)
+            hPrev := hLast
+            hLast := pPrice.get(i)
+            nHighs += 1
+        else
+            lPrev := lLast
+            lLast := pPrice.get(i)
+            nLows += 1
+    bool enough = nHighs >= 2 and nLows >= 2
+    bool bullish = enough and hLast > hPrev and lLast > lPrev
+    bool bearish = enough and hLast < hPrev and lLast < lPrev
+    // Neither structure: the trend is the direction of the newest leg (it ends in a high when up).
+    bool trendUp = bullish or (not bearish and pHigh.get(nPiv - 1))
+
+    array<float> impulses = array.new<float>()
+    array<float> corrections = array.new<float>()
+    float lastVelocity = 0.0
+    int firstLeg = math.max(1, nPiv - maxSwings)
+    for j = firstLeg to nPiv - 1
+        float size = math.abs(pPrice.get(j) - pPrice.get(j - 1)) / atr
+        bool legUp = pHigh.get(j)
+        int span = math.max(pIdx.get(j) - pIdx.get(j - 1), 1)
+        if legUp == trendUp
+            impulses.push(size)
+            lastVelocity := size / span
+        else
+            corrections.push(size)
+
+    if impulses.size() >= 2 and corrections.size() >= 2
+        trendBasis := trendUp ? 1 : -1
+        medImpulse := median(impulses)
+        medCorrection := median(corrections)
+        ratio := medImpulse > 0 ? medCorrection / medImpulse : 0.0
+        int nc = corrections.size()
+        recent1 := corrections.get(nc - 1)
+        recent2 := corrections.get(nc - 2)
+        recent3 := nc >= 3 ? corrections.get(nc - 3) : na
+        float newest = recent1
+        float oldest = nc >= 3 ? recent3 : recent2
+        // Equal legs of a tick-grid series differ by rounding noise on a reflected series.
+        float noise = 1e-11 * math.max(newest, oldest)
+        quality := newest < oldest - noise ? 1.0 : newest > oldest + noise ? -1.0 : 0.0
+        retracement := math.abs(close - pPrice.get(nPiv - 1)) / atr
+        entryZone := retracement >= medCorrection * 0.8 * (1.0 - 1e-11) ? 1.0 : 0.0
+        remaining := math.max(medImpulse - retracement, 0.0)
+        requiredStop := math.max(medCorrection, 0.1)
+        crv := remaining / requiredStop
+        velocity := lastVelocity
+
+// ---------------------------------------------------------------------------
+// Data window (engine field names)
+// ---------------------------------------------------------------------------
+plot(ratio, "value (correction_impulse_ratio)", display=display.data_window)
+plot(quality, "trend_quality", display=display.data_window)
+plot(medImpulse, "median_impulse_atr", display=display.data_window)
+plot(medCorrection, "median_correction_atr", display=display.data_window)
+plot(retracement, "current_retracement_atr", display=display.data_window)
+plot(entryZone, "entry_zone_reached", display=display.data_window)
+plot(remaining, "remaining_potential_atr", display=display.data_window)
+plot(requiredStop, "required_stop_atr", display=display.data_window)
+plot(crv, "potential_crv", display=display.data_window)
+plot(velocity, "last_impulse_velocity_atr", display=display.data_window)
+plot(recent1, "recent_correction_atr_1", display=display.data_window)
+plot(recent2, "recent_correction_atr_2", display=display.data_window)
+plot(recent3, "recent_correction_atr_3", display=display.data_window)
+
+plotshape(showZoneMarks and entryZone == 1.0, "Correction zone reached", shape.circle, location.belowbar, color.new(color.gray, 30), size=size.small)
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+color tc = color.new(color.gray, 20)
+color hd = color.new(color.gray, 90)
+string pos = switch tablePos
+    "Top right" => position.top_right
+    "Bottom right" => position.bottom_right
+    "Top left" => position.top_left
+    => position.bottom_left
+var table t = table.new(pos, 2, 11, bgcolor=color.new(color.white, 5), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.new(color.gray, 40), frame_width=1)
+
+fmt(float v) =>
+    na(v) ? "–" : str.tostring(v, "#.##")
+
+if showTable and barstate.islast
+    table.cell(t, 0, 0, "Kestrel Swing Structure", text_color=tc, bgcolor=hd, text_size=size.small)
+    table.cell(t, 1, 0, "", text_color=tc, bgcolor=hd, text_size=size.small)
+    string basisText = trendBasis == 1 ? "Up" : trendBasis == -1 ? "Down" : "–"
+    color basisColor = trendBasis == 1 ? #00c853 : trendBasis == -1 ? #d50000 : tc
+    string qualityText = na(quality) ? "–" : quality > 0 ? "Strengthening" : quality < 0 ? "Weakening" : "Stable"
+    color qualityBg = na(quality) or quality == 0 ? color.new(color.gray, 80) : quality > 0 ? #00c853 : #ff6f00
+    table.cell(t, 0, 1, "Trend basis", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 1, basisText, text_color=basisColor, text_size=size.small)
+    table.cell(t, 0, 2, "Trend quality", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 2, qualityText, text_color=na(quality) or quality == 0 ? tc : color.white, bgcolor=qualityBg, text_size=size.small)
+    table.cell(t, 0, 3, "Correction / impulse", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 3, fmt(ratio), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 4, "Median impulse (ATR)", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 4, fmt(medImpulse), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 5, "Median correction (ATR)", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 5, fmt(medCorrection), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 6, "Retracement (ATR)", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 6, fmt(retracement), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 7, "Correction zone", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 7, na(entryZone) ? "–" : entryZone == 1.0 ? "Reached" : "Not reached", text_color=entryZone == 1.0 ? color.white : tc, bgcolor=entryZone == 1.0 ? #ffd600 : color.new(color.gray, 80), text_size=size.small)
+    table.cell(t, 0, 8, "Remaining potential (ATR)", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 8, fmt(remaining), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 9, "Required stop (ATR) / CRV", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 9, fmt(requiredStop) + " / " + fmt(crv), text_color=tc, text_size=size.small)
+    table.cell(t, 0, 10, "Impulse velocity (ATR/bar)", text_color=tc, text_size=size.small)
+    table.cell(t, 1, 10, fmt(velocity), text_color=tc, text_size=size.small)

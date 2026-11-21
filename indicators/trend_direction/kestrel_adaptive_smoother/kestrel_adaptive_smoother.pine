@@ -1,0 +1,163 @@
+//@version=6
+// ============================================================================
+// Kestrel Adaptive Smoother [WavesUnchained]
+// Version: 1.0.0
+// Author: WavesUnchained
+// Build: 2026-11-21
+// ============================================================================
+// A cascade of three exponential stages whose common gain follows how directed
+// and how unusual the recent movement is: the line nearly rests while closes go
+// back and forth and follows when they move one way by more than the market
+// usually does. Same formula and defaults as kestrel_adaptive_smoother in
+// kestrel-chartkit.
+//
+// Features:
+//   ✓ Three-stage exponential cascade with one adaptive gain per bar
+//   ✓ Gain from the geometric mean of a standard score and an efficiency ratio
+//   ✓ Phase control: 0 cannot overshoot, 2 follows a straight trend without lag
+//   ✓ Optional hysteresis band (line ± ATR multiple) with a colour state
+//   ✓ Line, band and state in the data window for chart-data export
+//
+// Data Contract:
+//   Price:     REQUIRED   chart symbol, close (band uses high/low/close)
+//   Volume:    NO
+//   OI:        NO
+//   Reference: NO
+//   Verdict:   CFD-safe
+//
+// ============================================================================
+// KESTREL PARITY SPECIFICATION
+// Engine Reference: kestrel-chartkit (crates.io / github.com/casoon/kestrel-chartkit)
+// Rust Module:      crate::indicator::kas::Kas  (catalog: kestrel_adaptive_smoother, alias kas)
+// Parity:           line = Kas::update(close), same defaults (period 20, phase 0.5,
+//                   adapt 0.5); first value is the first close
+// Empirical Notes:  kestrel-lab sheets 717 & 720 — a description of the price
+//                   path, not a stand-alone crossover entry; the band is a
+//                   Schmitt trigger (enter at the hull, release at the line)
+// ============================================================================
+
+indicator("Kestrel Adaptive Smoother [WavesUnchained]", shorttitle="KAS", overlay=true)
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+string gLine = "Smoother"
+float src = input.source(close, "Source", group=gLine, tooltip="The series that is smoothed. The engine definition uses the close; another source leaves the formula unchanged but no longer matches the engine values.")
+int period = input.int(20, "Period", minval=1, maxval=10000, group=gLine, tooltip="Length. At phase 0 without adaptation the line lags a straight trend as much as an exponential average of this period. Period 1 passes the source through.")
+float phase = input.float(0.5, "Phase", minval=0.0, maxval=2.0, step=0.1, group=gLine, tooltip="Lead of the line. 0 cannot overshoot at all; 2 follows a straight trend without lag and overshoots a step by about a quarter of it. Higher phase moves the line closer to price and lets it cross price more often.")
+float adapt = input.float(0.5, "Adaptation", minval=0.0, maxval=2.0, step=0.1, group=gLine, tooltip="Strength of the adaptation. 0 is a fixed three-stage exponential filter; higher values rest more in back-and-forth movement and jump more on a directed move.")
+
+string gBand = "Hysteresis band"
+bool showBand = input.bool(false, "Show hysteresis band", group=gBand, tooltip="A line close to price crosses it often in back-and-forth movement. The band turns that into a state with memory: up starts with a close above line + width × ATR and ends only when a close reaches the line again; down is the mirror image.")
+float bandWidth = input.float(0.5, "Band width (ATR multiples)", minval=0.0, step=0.1, group=gBand, tooltip="Distance of the band edges from the line in ATRs. The state is entered at the edge and released at the line itself, so a narrower band reacts sooner and flips more often.")
+int atrLength = input.int(20, "ATR length", minval=1, group=gBand, tooltip="Wilder ATR length the band width is measured in.")
+bool colorLine = input.bool(true, "Colour the line by band state", group=gBand, tooltip="Green while the state is up, red while it is down, grey in between. Only applies while the band is shown.")
+bool showMarks = input.bool(false, "Mark state changes", group=gBand, tooltip="Small marker on the bar that enters the up or down state. A marker describes where price stands relative to the line; it is not an order.")
+
+string gStyle = "Style"
+color upColor = input.color(#00c853, "Up", group=gStyle)
+color downColor = input.color(#d50000, "Down", group=gStyle)
+color flatColor = input.color(color.new(color.gray, 0), "Neutral / line", group=gStyle)
+
+// ---------------------------------------------------------------------------
+// Kestrel Adaptive Smoother (parity: kestrel-chartkit Kas::update)
+//   n = (period + 1) / 2, k0 = 2 / (n + 1), a = 2 / (max(n, 2) + 1), b = 2 / (max(4n, 20) + 1)
+//   v  = v + a (d - v)          smoothed change
+//   q  = q + a (d² - q)         its mean square over the same window
+//   Q  = Q + b (d² - Q)         long-run mean square
+//   z² = v² / (c sqrt(Q_prev q)),  c = a / (2 - a)
+//   S  = k0² / (1 - k0) · (z²)^adapt,  k = (sqrt(S² + 4S) - S) / 2
+//   s1, s2, s3 exponential stages with gain k;  KAS = s2 + phase (s2 - s3)
+// ---------------------------------------------------------------------------
+kas(float x, int len, float ph, float ad) =>
+    float n = (len + 1) / 2.0
+    float k0 = 2.0 / (n + 1.0)
+    float a = 2.0 / (math.max(n, 2.0) + 1.0)
+    float b = 2.0 / (math.max(4.0 * n, 20.0) + 1.0)
+    var float last = na
+    var float velocity = 0.0
+    var float shortSq = na
+    var float longSq = na
+    var float s1 = na
+    var float s2 = na
+    var float s3 = na
+    float out = na
+    if not na(x)
+        if na(last)
+            s1 := x
+            s2 := x
+            s3 := x
+            out := x
+        else
+            float d = x - last
+            velocity += a * (d - velocity)
+            float shortNow = na(shortSq) ? d * d : shortSq + a * (d * d - shortSq)
+            float longBefore = na(longSq) ? d * d : longSq
+            shortSq := shortNow
+            longSq := na(longSq) ? d * d : longSq + b * (d * d - longSq)
+            float moved = velocity * velocity
+            float scale = a / (2.0 - a) * math.sqrt(longBefore * shortNow)
+            // Gain of one stage. A move out of a flat series (scale 0, moved > 0) has an
+            // unbounded score: it passes through unless the adaptation is off.
+            float k = na
+            if k0 >= 1.0
+                k := 1.0
+            else if scale > 0.0
+                float s = k0 * k0 / (1.0 - k0) * (ad == 0.0 ? 1.0 : math.pow(moved / scale, ad))
+                k := s > 1e150 ? 1.0 : (math.sqrt(s * s + 4.0 * s) - s) / 2.0
+            else if moved > 0.0
+                k := ad > 0.0 ? 1.0 : k0
+            else
+                k := k0
+            s1 += k * (x - s1)
+            s2 += k * (s1 - s2)
+            s3 += k * (s2 - s3)
+            out := s2 + ph * (s2 - s3)
+        last := x
+    out
+
+float line = kas(src, period, phase, adapt)
+
+// ---------------------------------------------------------------------------
+// Hysteresis band (Schmitt trigger): enter at line ± width·ATR, release at the line
+// ---------------------------------------------------------------------------
+float atr = ta.atr(atrLength)
+float upper = line + bandWidth * atr
+float lower = line - bandWidth * atr
+
+var int state = 0
+int prevState = state
+if na(line) or na(atr) or atr <= 0
+    state := 0
+else if state == 1
+    state := close <= line ? 0 : 1
+else if state == -1
+    state := close >= line ? 0 : -1
+// Released this bar or neutral before: a new state starts only beyond the edge.
+if state == 0
+    if close > upper
+        state := 1
+    else if close < lower
+        state := -1
+
+bool enterUp = state == 1 and prevState != 1
+bool enterDown = state == -1 and prevState != -1
+
+// ---------------------------------------------------------------------------
+// Plots
+// ---------------------------------------------------------------------------
+color lineColor = showBand and colorLine ? (state == 1 ? upColor : state == -1 ? downColor : flatColor) : flatColor
+plot(line, "KAS", color=lineColor, linewidth=2)
+pUpper = plot(showBand ? upper : na, "Band upper", color=color.new(upColor, 60), linewidth=1)
+pLower = plot(showBand ? lower : na, "Band lower", color=color.new(downColor, 60), linewidth=1)
+fill(pUpper, pLower, color=showBand ? color.new(flatColor, 94) : na, title="Band fill")
+
+plotshape(showBand and showMarks and enterUp, "Up state starts", shape.triangleup, location.belowbar, upColor, size=size.small)
+plotshape(showBand and showMarks and enterDown, "Down state starts", shape.triangledown, location.abovebar, downColor, size=size.small)
+
+plot(line, "kas_value", display=display.data_window)
+plot(atr, "band_atr", display=display.data_window)
+plot(state, "band_state", display=display.data_window)
+
+alertcondition(enterUp, "KAS band: up state starts", "{{ticker}} {{interval}}: close above KAS + band width x ATR")
+alertcondition(enterDown, "KAS band: down state starts", "{{ticker}} {{interval}}: close below KAS - band width x ATR")
